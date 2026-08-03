@@ -9,6 +9,10 @@ rust-version.workspace = true
 name = "familiar-daemon"
 path = "src/main.rs"
 
+[[bin]]
+name = "familiar"
+path = "src/bin/familiar.rs"
+
 [features]
 default = ["tray"]
 tray = ["dep:familiar-tray"]
