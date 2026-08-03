@@ -120,3 +120,68 @@ fn complete_is_a_human_only_manual_override() {
         .starts_with("backlog recovery: MANUAL OVERRIDE PRD-12 "));
     assert!(accepted.stderr.is_empty());
 }
+
+#[test]
+fn stale_persisted_identity_fails_without_reconciling_or_writing_an_event() {
+    let (repo, database) = claimed_repo();
+    let db = Database::open(&database).unwrap();
+    db.conn()
+        .execute(
+            "UPDATE backlog_prds SET content_hash='stale-hash', last_seen_at='original'",
+            [],
+        )
+        .unwrap();
+    drop(db);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_familiar"))
+        .args([
+            "backlog",
+            "release",
+            "docs/prds/PRD-012.md",
+            "--actor",
+            "ops:alice",
+            "--reason",
+            "retry",
+        ])
+        .current_dir(repo.path())
+        .env("FAMILIAR_DATABASE__PATH", &database)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected in_progress"));
+
+    let db = Database::open(&database).unwrap();
+    let row: (String, String, String, i64) = db
+        .conn()
+        .query_row(
+            "SELECT content_hash,last_seen_at,status,\
+             (SELECT count(*) FROM backlog_status_events) FROM backlog_prds",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "stale-hash".into(),
+            "original".into(),
+            "in_progress".into(),
+            1
+        )
+    );
+}
+
+#[test]
+fn complete_help_labels_and_explains_the_manual_override() {
+    let output = Command::new(env!("CARGO_BIN_EXE_familiar"))
+        .args(["backlog", "complete", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("MANUAL OVERRIDE"));
+    assert!(stdout.contains("PRD-011's normal completion-evidence predicate"));
+    assert!(stdout.contains("Mandatory explicit human authority"));
+    assert!(stdout.contains("Mandatory non-empty audit reason"));
+}

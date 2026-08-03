@@ -913,6 +913,58 @@ mod tests {
     }
 
     #[test]
+    fn recovery_rejects_wrong_status_and_corrupt_claim_lineage_without_writes() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let claim_actor = "system:familiar-run:00001785772020811891-0000057947-000001";
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        let wrong_status = storage
+            .recover(
+                &repo(),
+                &prd(),
+                BacklogRecoveryAction::Release,
+                "ops:alice",
+                "retry",
+            )
+            .unwrap_err();
+        assert!(matches!(wrong_status, BacklogStoreError::Conflict { .. }));
+        storage
+            .claim_run(&repo(), &[prd()], &prd(), claim_actor)
+            .unwrap();
+        storage
+            .connection
+            .execute(
+                "UPDATE backlog_status_events SET old_status='completed'",
+                [],
+            )
+            .unwrap();
+        let corrupt = storage
+            .recover(
+                &repo(),
+                &prd(),
+                BacklogRecoveryAction::Release,
+                "ops:alice",
+                "retry",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            corrupt,
+            BacklogStoreError::RecoveryAuditCorrupt(_)
+        ));
+        let state: (String, i64, i64) = storage
+            .connection
+            .query_row(
+                "SELECT status,(SELECT count(*) FROM backlog_status_events),\
+                 (SELECT count(*) FROM backlog_recovery_events) FROM backlog_prds",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("in_progress".into(), 1, 0));
+    }
+
+    #[test]
     fn completion_evidence_validation_fails_closed_on_normalized_row_corruption() {
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();

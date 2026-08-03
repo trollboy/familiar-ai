@@ -56,13 +56,13 @@ enum BacklogCommand {
         #[arg(long)]
         reason: String,
     },
-    /// MANUAL OVERRIDE: complete one claimed PRD without normal review evidence.
+    /// MANUAL OVERRIDE: bypass PRD-011's normal completion-evidence predicate.
     Complete {
         prd_path: PathBuf,
-        /// Explicit human authority in the form human:<identity>.
+        /// Mandatory explicit human authority in the form human:<identity>.
         #[arg(long)]
         actor: String,
-        /// Non-empty audit reason for bypassing the normal completion predicate.
+        /// Mandatory non-empty audit reason for the manual override.
         #[arg(long)]
         reason: String,
     },
@@ -245,11 +245,7 @@ fn recover_backlog(
     validate_recovery_attribution(action, actor, reason).map_err(|e| e.to_string())?;
     let target =
         resolve_run_prd(repository, discovered, supplied_path).map_err(|e| e.to_string())?;
-    let mut store = SqliteBacklogRepository::new(db.conn_mut());
-    store
-        .reconcile_and_snapshot(repository, discovered)
-        .map_err(|e| e.to_string())?;
-    let result = store
+    let result = SqliteBacklogRepository::new(db.conn_mut())
         .recover(repository, &target, action, actor, reason)
         .map_err(|e| e.to_string())?;
     let actor = actor.trim();
