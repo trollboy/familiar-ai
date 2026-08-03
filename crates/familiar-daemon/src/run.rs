@@ -13,15 +13,20 @@ use familiar_context::{
     ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
     ContextRequest, ExecutionContext,
 };
-use familiar_core::{AppPaths, Config, ExecutionPrice};
+use familiar_core::{
+    admit_run_prd, resolve_run_prd, validate_graph, AppPaths, BacklogDiscovery, BacklogStatusStore,
+    Config, ExecutionPrice, FilesystemBacklogDiscovery,
+};
 use familiar_review::{
     AgentAssignment, AgentObservation, AgentRole, BlockingPolicy, BoundedDocument,
     CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, GitEvidenceCollector,
-    ReviewCoordinator, ReviewPackageBudget, ReviewTask, StructuredReviewAdapter, VerificationCheck,
-    VerificationPlan, WorkflowLimits,
+    ReviewCoordinator, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewPackageBudget,
+    ReviewStopReason, ReviewTask, StructuredReviewAdapter, VerificationCheck, VerificationPlan,
+    WorkflowLimits,
 };
 use familiar_storage::{
     Database, ExecutionFinalization, ExecutionHistoryRepository, ExecutionStart, ReviewRepository,
+    SqliteBacklogRepository,
 };
 
 const EXECUTION_CONSTRAINTS: &str = r#"- Implement the supplied PRD exactly as written and do not broaden its scope.
@@ -48,6 +53,10 @@ pub enum RunError {
         execution_id: String,
         detail: String,
     },
+    Workflow {
+        result: Option<Box<ExecutionResult>>,
+        detail: String,
+    },
 }
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -62,12 +71,31 @@ impl fmt::Display for RunError {
                 execution_id,
                 detail,
             } => write!(f, "history_finalize_failed for {execution_id}: {detail}"),
+            Self::Workflow { detail, .. } => f.write_str(detail),
         }
     }
 }
 impl std::error::Error for RunError {}
 
-pub fn execute(prd_path: &Path, agent: &dyn CodingAgent) -> Result<ExecutionResult, RunError> {
+impl RunError {
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Workflow {
+                result: Some(result),
+                ..
+            } => result.exit_code.filter(|code| *code != 0),
+            Self::Agent(error) => error.result().exit_code.filter(|code| *code != 0),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RunWorkflowResult {
+    pub implementation: ExecutionResult,
+}
+
+pub fn execute(prd_path: &Path, agent: &dyn CodingAgent) -> Result<RunWorkflowResult, RunError> {
     let paths = AppPaths::new();
     let config = Config::load(Some(&paths.config_dir.join("config.toml")))
         .map_err(|e| RunError::Config(e.to_string()))?;
@@ -79,7 +107,7 @@ pub fn execute_with_config(
     agent: &dyn CodingAgent,
     config: &Config,
     paths: &AppPaths,
-) -> Result<ExecutionResult, RunError> {
+) -> Result<RunWorkflowResult, RunError> {
     let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
     let context = ContextCompiler::new()
         .compile(ContextRequest {
@@ -103,7 +131,7 @@ pub fn execute_with_config(
     };
     let prompt = render_prompt(&context);
     let database_path = config.database.resolve_path(&paths.data_dir);
-    let db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
+    let mut db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
     db.run_migrations()
         .map_err(|e| RunError::Storage(e.to_string()))?;
     ReviewRepository::new(db.conn())
@@ -120,6 +148,39 @@ pub fn execute_with_config(
     } else {
         None
     };
+    let discovery = FilesystemBacklogDiscovery;
+    let repository = discovery
+        .resolve(&current)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let discovered = discovery
+        .discover(&repository)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    validate_graph(&discovered).map_err(|e| RunError::Config(e.to_string()))?;
+    let target = resolve_run_prd(&repository, &discovered, prd_path)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let snapshot = SqliteBacklogRepository::new(db.conn_mut())
+        .reconcile_and_snapshot(&repository, &discovered)
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    admit_run_prd(&snapshot, &target).map_err(|e| RunError::Config(e.to_string()))?;
+    let claim_discovered = discovery
+        .discover(&repository)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    validate_graph(&claim_discovered).map_err(|e| RunError::Config(e.to_string()))?;
+    let claim_target = resolve_run_prd(&repository, &claim_discovered, prd_path)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    if claim_target != target || claim_discovered != discovered {
+        return Err(RunError::Config(
+            "backlog changed during run admission".into(),
+        ));
+    }
+    let actor = format!("system:familiar-run:{id}");
+    SqliteBacklogRepository::new(db.conn_mut())
+        .claim_run(&repository, &discovered, &target, &actor)
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    eprintln!(
+        "backlog: {} {} pending -> in_progress actor={actor}",
+        target.id, target.path
+    );
     let started_at = Utc::now().to_rfc3339();
     let timer = Instant::now();
     let mut unavailable = BTreeMap::new();
@@ -150,7 +211,7 @@ pub fn execute_with_config(
             prd_path: context.prd.path.clone(),
             unavailable_fields: unavailable.clone(),
         })
-        .map_err(|e| RunError::Storage(e.to_string()))?;
+        .map_err(|e| retained(&target, "history_failed", RunError::Storage(e.to_string())))?;
 
     let execution = agent.execute(
         ExecutionRequest {
@@ -179,22 +240,111 @@ pub fn execute_with_config(
         unavailable.insert("agent_version".into(), "version_probe_failed".into());
     }
     let finalization = terminal(&timer, result, outcome, unavailable, config);
-    finalize(&db, &id, &finalization)?;
-    let result = execution.map_err(RunError::Agent)?;
-    if config.review.enabled && result.exit_code == Some(0) {
-        run_review(ReviewRunInput {
-            db: &db,
-            context: &context,
-            execution_id: &id,
-            implementation_result: &result,
-            implementation_finalization: &finalization,
-            agent,
-            config,
-            paths,
-            base_revision: review_baseline.as_deref().expect("enabled review baseline"),
-        })?;
+    finalize(&db, &id, &finalization).map_err(|e| retained(&target, "history_failed", e))?;
+    let result = execution.map_err(|e| retained(&target, agent_reason(&e), RunError::Agent(e)))?;
+    if result.exit_code != Some(0) || result.signal.is_some() {
+        return Err(retained(
+            &target,
+            "implementation_failed",
+            RunError::Workflow {
+                result: Some(Box::new(result.clone())),
+                detail: "implementation agent did not exit successfully".into(),
+            },
+        ));
     }
-    Ok(result)
+    if !config.review.enabled {
+        return Err(retained(
+            &target,
+            "review_disabled",
+            RunError::Workflow {
+                result: Some(Box::new(result)),
+                detail: "review is disabled; backlog completion requires a clean review".into(),
+            },
+        ));
+    }
+    let cycle = run_review(ReviewRunInput {
+        db: &db,
+        context: &context,
+        execution_id: &id,
+        implementation_result: &result,
+        implementation_finalization: &finalization,
+        agent,
+        config,
+        paths,
+        base_revision: review_baseline.as_deref().expect("enabled review baseline"),
+    })
+    .map_err(|e| retained(&target, "review_failed", e))?;
+    if cycle.state != ReviewCycleState::Completed
+        || cycle.disposition != ReviewDisposition::ReadyForHumanApproval
+        || cycle.stop_reasons != [ReviewStopReason::CleanReview]
+    {
+        let reason = review_retained_reason(&cycle);
+        return Err(retained(
+            &target,
+            reason,
+            RunError::Workflow {
+                result: Some(Box::new(result)),
+                detail: "review did not produce a clean terminal result".into(),
+            },
+        ));
+    }
+    let required_checks = config
+        .review
+        .verification
+        .iter()
+        .filter(|c| c.required)
+        .map(|c| c.check_id.clone())
+        .collect::<Vec<_>>();
+    SqliteBacklogRepository::new(db.conn_mut())
+        .complete_run(&repository, &target, &id, &actor, &required_checks)
+        .map_err(|e| {
+            retained(
+                &target,
+                "completion_conflict",
+                RunError::Workflow {
+                    result: Some(Box::new(result.clone())),
+                    detail: e.to_string(),
+                },
+            )
+        })?;
+    eprintln!(
+        "backlog: {} {} in_progress -> completed actor={actor}",
+        target.id, target.path
+    );
+    Ok(RunWorkflowResult {
+        implementation: result,
+    })
+}
+
+fn review_retained_reason(cycle: &ReviewCycle) -> &'static str {
+    if cycle
+        .stop_reasons
+        .contains(&ReviewStopReason::VerificationUnsuccessful)
+    {
+        "verification_failed"
+    } else if cycle.stop_reasons.contains(&ReviewStopReason::Interrupted) {
+        "interrupted"
+    } else {
+        "human_review_required"
+    }
+}
+
+fn retained(
+    target: &familiar_core::DiscoveredPrd,
+    reason: &'static str,
+    error: RunError,
+) -> RunError {
+    eprintln!(
+        "backlog: {} {} remains in_progress reason={reason}",
+        target.id, target.path
+    );
+    error
+}
+fn agent_reason(error: &AgentExecutionError) -> &'static str {
+    match error {
+        AgentExecutionError::Timeout { .. } => "interrupted",
+        _ => "implementation_failed",
+    }
 }
 
 struct ReviewRunInput<'a> {
@@ -209,7 +359,7 @@ struct ReviewRunInput<'a> {
     base_revision: &'a str,
 }
 
-fn run_review(input: ReviewRunInput<'_>) -> Result<(), RunError> {
+fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
     let ReviewRunInput {
         db,
         context,
@@ -396,7 +546,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<(), RunError> {
         cycle.independence.as_ref().map(|value| value.kind),
         cycle.stop_reasons
     );
-    Ok(())
+    Ok(cycle)
 }
 
 fn markdown_section(document: &str, heading: &str) -> Option<String> {
@@ -837,14 +987,14 @@ mod tests {
             },
         };
 
-        let result = execute_with_config(
+        let error = execute_with_config(
             &repository.join("docs/prds/PRD-004.md"),
             &agent,
             &config,
             &paths,
         )
-        .unwrap();
-        assert_eq!(result.exit_code, Some(23));
+        .unwrap_err();
+        assert_eq!(error.exit_code(), Some(23));
         let captured = agent.request.lock().unwrap();
         let (working_directory, prompt) = captured.as_ref().unwrap();
         assert_eq!(working_directory, &repository);
@@ -881,7 +1031,7 @@ mod tests {
         let paths = test_paths(temp.path());
         let agent = successful_fake_agent();
 
-        execute_with_config(&prd, &agent, &config, &paths).unwrap();
+        execute_with_config(&prd, &agent, &config, &paths).unwrap_err();
 
         let captured = agent.request.lock().unwrap();
         assert_eq!(captured.as_ref().unwrap().1.as_bytes(), expected.as_bytes());
@@ -923,7 +1073,7 @@ mod tests {
         let paths = test_paths(temp.path());
         let agent = successful_fake_agent();
 
-        execute_with_config(&prd, &agent, &config, &paths).unwrap();
+        execute_with_config(&prd, &agent, &config, &paths).unwrap_err();
 
         let captured = agent.request.lock().unwrap();
         assert_eq!(captured.as_ref().unwrap().1, expected_prompt);

@@ -36,7 +36,10 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
 
     assert_eq!(output.status.code(), Some(23));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "fake stdout\n");
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "fake stderr\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pending -> in_progress actor=system:familiar-run:"));
+    assert!(stderr.contains("fake stderr\n"));
+    assert!(stderr.contains("remains in_progress reason=implementation_failed"));
     assert_eq!(fs::read_to_string(args).unwrap(), "exec\n--json\n-\n");
 
     let prompt = fs::read_to_string(capture).unwrap();
@@ -112,5 +115,5 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
         .unwrap();
     assert_eq!(line, "visible early\n");
     assert!(started.elapsed().as_millis() < 1_500);
-    assert!(child.wait().unwrap().success());
+    assert!(!child.wait().unwrap().success());
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use familiar_agent::{CodexAgent, ExecutionResult};
+use familiar_agent::CodexAgent;
 use familiar_core::{
     load_manifest, validate_graph, AppPaths, BacklogDiscovery, BacklogManager, BacklogStatusStore,
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery,
@@ -69,8 +69,13 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         },
         Command::Run { prd_path } => match execute(&prd_path, &CodexAgent::new("codex")) {
-            Ok(result) => exit_code(&result),
-            Err(error) => fail(error),
+            Ok(_) => ExitCode::SUCCESS,
+            Err(error) => {
+                let code = error.exit_code();
+                eprintln!("error: {error}");
+                code.and_then(|value| u8::try_from(value).ok())
+                    .map_or(ExitCode::FAILURE, ExitCode::from)
+            }
         },
         Command::History { limit, verbose } => match history(limit, verbose) {
             Ok(()) => ExitCode::SUCCESS,
@@ -260,13 +265,6 @@ fn usage() -> Result<(), String> {
 fn fail(error: impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {error}");
     ExitCode::FAILURE
-}
-fn exit_code(result: &ExecutionResult) -> ExitCode {
-    result
-        .exit_code
-        .and_then(|code| u8::try_from(code).ok())
-        .map(ExitCode::from)
-        .unwrap_or(ExitCode::FAILURE)
 }
 
 #[cfg(test)]

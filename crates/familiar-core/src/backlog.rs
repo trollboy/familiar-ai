@@ -164,6 +164,115 @@ pub enum BacklogError {
     EmptyBacklog,
     #[error("no eligible PRD: {0}")]
     NoEligiblePrd(String),
+    #[error("run path admission failed: {0}")]
+    RunPath(String),
+    #[error("cannot run {path}: backlog status is {status}")]
+    RunStatus {
+        path: RepositoryPath,
+        status: &'static str,
+    },
+    #[error("cannot run {path}: incomplete dependencies [{dependencies}]")]
+    RunDependencies {
+        path: RepositoryPath,
+        dependencies: String,
+    },
+}
+
+/// Resolve a user supplied run path to the exact bytes discovered for one active PRD.
+pub fn resolve_run_prd(
+    repository: &RepositoryIdentity,
+    discovered: &[DiscoveredPrd],
+    supplied: &Path,
+) -> Result<DiscoveredPrd, BacklogError> {
+    let candidate = if supplied.is_absolute() {
+        supplied.to_owned()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| BacklogError::RunPath(format!("cannot resolve current directory: {e}")))?
+            .join(supplied)
+    };
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|e| BacklogError::RunPath(format!("{}: {e}", supplied.display())))?;
+    if metadata.file_type().is_symlink() {
+        return Err(BacklogError::RunPath(format!(
+            "{} is symlinked",
+            supplied.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(BacklogError::RunPath(format!(
+            "{} is not a regular file",
+            supplied.display()
+        )));
+    }
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|e| BacklogError::RunPath(format!("{}: {e}", supplied.display())))?;
+    let relative = canonical.strip_prefix(&repository.worktree).map_err(|_| {
+        BacklogError::RunPath(format!("{} is outside the repository", supplied.display()))
+    })?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| BacklogError::RunPath("run path is not UTF-8".into()))?
+        .replace('\\', "/");
+    let prd = discovered
+        .iter()
+        .find(|prd| prd.path.as_str() == relative)
+        .cloned()
+        .ok_or_else(|| {
+            BacklogError::RunPath(format!(
+                "{} is not an active backlog entry",
+                supplied.display()
+            ))
+        })?;
+    let bytes = fs::read(&canonical)
+        .map_err(|e| BacklogError::RunPath(format!("{}: {e}", supplied.display())))?;
+    let hash: String = digest(&SHA256, &bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if hash != prd.content_hash {
+        return Err(BacklogError::RunPath(format!(
+            "{} changed after backlog discovery",
+            supplied.display()
+        )));
+    }
+    Ok(prd)
+}
+
+pub fn admit_run_prd(entries: &[BacklogEntry], target: &DiscoveredPrd) -> Result<(), BacklogError> {
+    let entry = entries
+        .iter()
+        .find(|entry| entry.prd.path == target.path)
+        .ok_or_else(|| BacklogError::RunPath(format!("{} is not active", target.path)))?;
+    if entry.status != BacklogStatus::Pending {
+        return Err(BacklogError::RunStatus {
+            path: target.path.clone(),
+            status: entry.status.as_str(),
+        });
+    }
+    let statuses: BTreeMap<_, _> = entries
+        .iter()
+        .map(|entry| (entry.prd.id.clone(), entry.status))
+        .collect();
+    let incomplete: Vec<_> = target
+        .dependencies
+        .iter()
+        .filter(|id| statuses.get(*id) != Some(&BacklogStatus::Completed))
+        .cloned()
+        .collect();
+    if !incomplete.is_empty() {
+        return Err(BacklogError::RunDependencies {
+            path: target.path.clone(),
+            dependencies: incomplete
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        });
+    }
+    Ok(())
 }
 
 pub trait BacklogDiscovery {
@@ -598,6 +707,49 @@ mod tests {
     }
     fn write(root: &Path, name: &str, body: &str) {
         fs::write(root.join("docs/prds").join(name), body).unwrap();
+    }
+    #[test]
+    fn run_admission_is_exact_and_dependency_aware() {
+        let target = DiscoveredPrd {
+            id: PrdId::new(2),
+            number: 2,
+            path: RepositoryPath::new("docs/prds/PRD-002.md").unwrap(),
+            title: "Two".into(),
+            dependencies: vec![PrdId::new(1)],
+            content_hash: "two".into(),
+        };
+        let dependency = DiscoveredPrd {
+            id: PrdId::new(1),
+            number: 1,
+            path: RepositoryPath::new("docs/prds/PRD-001.md").unwrap(),
+            title: "One".into(),
+            dependencies: vec![],
+            content_hash: "one".into(),
+        };
+        let mut entries = vec![
+            BacklogEntry {
+                prd: dependency,
+                status: BacklogStatus::Pending,
+            },
+            BacklogEntry {
+                prd: target.clone(),
+                status: BacklogStatus::Pending,
+            },
+        ];
+        assert!(matches!(
+            admit_run_prd(&entries, &target),
+            Err(BacklogError::RunDependencies { .. })
+        ));
+        entries[0].status = BacklogStatus::Completed;
+        assert!(admit_run_prd(&entries, &target).is_ok());
+        entries[1].status = BacklogStatus::InProgress;
+        assert!(matches!(
+            admit_run_prd(&entries, &target),
+            Err(BacklogError::RunStatus {
+                status: "in_progress",
+                ..
+            })
+        ));
     }
     #[test]
     fn discovery_parses_and_sorts_dependencies() {

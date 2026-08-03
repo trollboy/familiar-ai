@@ -9,9 +9,10 @@ pub mod status;
 pub mod version;
 
 pub use backlog::{
-    validate_graph, BacklogDiscovery, BacklogEntry, BacklogError, BacklogManager, BacklogStatus,
-    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, FilesystemBacklogDiscovery,
-    IneligibilityReason, NextPrd, PrdId, RepositoryIdentity, RepositoryPath,
+    admit_run_prd, resolve_run_prd, validate_graph, BacklogDiscovery, BacklogEntry, BacklogError,
+    BacklogManager, BacklogStatus, BacklogStatusStore, BacklogStoreError, DiscoveredPrd,
+    FilesystemBacklogDiscovery, IneligibilityReason, NextPrd, PrdId, RepositoryIdentity,
+    RepositoryPath,
 };
 pub use bootstrap::*;
 pub use config::{
