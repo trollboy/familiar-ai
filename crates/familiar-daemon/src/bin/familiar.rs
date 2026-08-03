@@ -1,7 +1,8 @@
 use std::path::PathBuf;
-use std::process::{ExitCode, ExitStatus};
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use familiar_agent::{CodexAgent, ExecutionResult};
 use familiar_core::{AppPaths, Config};
 use familiar_daemon::run::execute;
 use familiar_storage::{Database, ExecutionHistoryRepository};
@@ -31,8 +32,8 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run { prd_path } => match execute(&prd_path, "codex") {
-            Ok(status) => exit_code(status),
+        Command::Run { prd_path } => match execute(&prd_path, &CodexAgent::new("codex")) {
+            Ok(result) => exit_code(&result),
             Err(error) => fail(error),
         },
         Command::History { limit, verbose } => match history(limit, verbose) {
@@ -124,9 +125,9 @@ fn fail(error: impl std::fmt::Display) -> ExitCode {
     eprintln!("error: {error}");
     ExitCode::FAILURE
 }
-fn exit_code(status: ExitStatus) -> ExitCode {
-    status
-        .code()
+fn exit_code(result: &ExecutionResult) -> ExitCode {
+    result
+        .exit_code
         .and_then(|code| u8::try_from(code).ok())
         .map(ExitCode::from)
         .unwrap_or(ExitCode::FAILURE)

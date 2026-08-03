@@ -2,18 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use chrono::Utc;
+use familiar_agent::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
 use familiar_core::{AppPaths, Config, ExecutionPrice};
 use familiar_storage::{
     Database, ExecutionFinalization, ExecutionHistoryRepository, ExecutionStart,
 };
-use serde_json::Value;
 
 const REFERENCE_PREFIXES: [&str; 2] = ["docs/adr/", "docs/contracts/"];
 const EXECUTION_CONSTRAINTS: &str = r#"- Implement the supplied PRD exactly as written and do not broaden its scope.
@@ -40,13 +40,7 @@ pub enum RunError {
     Git(String),
     Config(String),
     Storage(String),
-    Spawn {
-        executable: String,
-        source: io::Error,
-    },
-    Feed(io::Error),
-    Wait(io::Error),
-    Output(io::Error),
+    Agent(AgentExecutionError),
     HistoryFinalize {
         execution_id: String,
         detail: String,
@@ -68,12 +62,7 @@ impl fmt::Display for RunError {
             Self::Git(m) => write!(f, "Git query failed: {m}"),
             Self::Config(m) => write!(f, "configuration failed: {m}"),
             Self::Storage(m) => write!(f, "execution history failed: {m}"),
-            Self::Spawn { executable, source } => {
-                write!(f, "cannot launch Codex executable {executable:?}: {source}")
-            }
-            Self::Feed(e) => write!(f, "cannot feed execution prompt to Codex: {e}"),
-            Self::Wait(e) => write!(f, "cannot wait for Codex: {e}"),
-            Self::Output(e) => write!(f, "cannot read Codex structured output: {e}"),
+            Self::Agent(error) => error.fmt(f),
             Self::HistoryFinalize {
                 execution_id,
                 detail,
@@ -92,19 +81,19 @@ struct Context {
     prd_identity: String,
 }
 
-pub fn execute(prd_path: &Path, codex_executable: &str) -> Result<ExitStatus, RunError> {
+pub fn execute(prd_path: &Path, agent: &dyn CodingAgent) -> Result<ExecutionResult, RunError> {
     let paths = AppPaths::new();
     let config = Config::load(Some(&paths.config_dir.join("config.toml")))
         .map_err(|e| RunError::Config(e.to_string()))?;
-    execute_with_config(prd_path, codex_executable, &config, &paths)
+    execute_with_config(prd_path, agent, &config, &paths)
 }
 
 pub fn execute_with_config(
     prd_path: &Path,
-    codex_executable: &str,
+    agent: &dyn CodingAgent,
     config: &Config,
     paths: &AppPaths,
-) -> Result<ExitStatus, RunError> {
+) -> Result<ExecutionResult, RunError> {
     let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
     let context = resolve_context(&current, prd_path)?;
     let prompt = build_prompt(&context.worktree, &context.prd_path)?;
@@ -145,104 +134,34 @@ pub fn execute_with_config(
         })
         .map_err(|e| RunError::Storage(e.to_string()))?;
 
-    let version = probe_version(codex_executable);
-    if version.is_none() {
+    let execution = agent.execute(
+        ExecutionRequest {
+            working_directory: &context.worktree,
+            prompt: &prompt,
+        },
+        &mut io::stdout(),
+    );
+    let (result, outcome) = match &execution {
+        Ok(result) => (result, outcome(result)),
+        Err(AgentExecutionError::Launch { result, .. }) => (result.as_ref(), "launch_failed"),
+        Err(AgentExecutionError::Input { result, .. }) => (result.as_ref(), "input_failed"),
+        Err(AgentExecutionError::Wait { result, .. }) => (result.as_ref(), "failed"),
+        Err(AgentExecutionError::Output { result, .. }) => (result.as_ref(), outcome(result)),
+    };
+    if result.agent_version.is_none() {
         unavailable.insert("agent_version".into(), "version_probe_failed".into());
     }
-    let mut child = match Command::new(codex_executable)
-        .args(["exec", "--json", "-"])
-        .current_dir(&context.worktree)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(source) => {
-            let finalization = terminal(
-                &timer,
-                version,
-                Metrics::default(),
-                "launch_failed",
-                None,
-                None,
-                unavailable,
-                config,
-            );
-            finalize(&db, &id, &finalization)?;
-            return Err(RunError::Spawn {
-                executable: codex_executable.to_owned(),
-                source,
-            });
-        }
-    };
-    let feed = child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(prompt.as_bytes());
-    let mut metrics = Metrics::default();
-    let output_result = stream_json(
-        child.stdout.take().expect("piped stdout"),
-        &mut io::stdout(),
-        &mut metrics,
-    );
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(error) => {
-            unavailable.insert("exit_code".into(), "no_normal_exit_code".into());
-            let finalization = terminal(
-                &timer,
-                version,
-                metrics,
-                "failed",
-                None,
-                None,
-                unavailable,
-                config,
-            );
-            finalize(&db, &id, &finalization)?;
-            return Err(RunError::Wait(error));
-        }
-    };
-    #[cfg(unix)]
-    let signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal()
-    };
-    #[cfg(not(unix))]
-    let signal: Option<i32> = None;
-    let (outcome, exit_code) = if let Some(code) = status.code() {
-        (if code == 0 { "succeeded" } else { "failed" }, Some(code))
-    } else {
-        ("signaled", None)
-    };
-    if exit_code.is_none() {
-        unavailable.insert("exit_code".into(), "no_normal_exit_code".into());
-    }
-    let final_outcome = if feed.is_err() && status.success() {
-        "input_failed"
-    } else {
-        outcome
-    };
-    let finalization = terminal(
-        &timer,
-        version,
-        metrics,
-        final_outcome,
-        exit_code,
-        signal,
-        unavailable,
-        config,
-    );
+    let finalization = terminal(&timer, result, outcome, unavailable, config);
     finalize(&db, &id, &finalization)?;
-    if let Err(error) = output_result {
-        return Err(RunError::Output(error));
-    }
-    match feed {
-        Ok(()) => Ok(status),
-        Err(_) if !status.success() => Ok(status),
-        Err(error) => Err(RunError::Feed(error)),
+    execution.map_err(RunError::Agent)
+}
+
+fn outcome(result: &ExecutionResult) -> &'static str {
+    match result.exit_code {
+        Some(0) => "succeeded",
+        Some(_) => "failed",
+        None if result.signal.is_some() => "signaled",
+        None => "failed",
     }
 }
 
@@ -255,94 +174,33 @@ fn finalize(db: &Database, id: &str, value: &ExecutionFinalization) -> Result<()
         })
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Metrics {
-    pub model: Option<String>,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub cached_tokens: Option<u64>,
-}
-
-pub fn parse_event(line: &str, metrics: &mut Metrics) -> Option<String> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    match value.get("type").and_then(Value::as_str)? {
-        "turn.started" => None,
-        "turn.completed" => {
-            if let Some(usage) = value.get("usage").and_then(Value::as_object) {
-                metrics.input_tokens = uint(usage.get("input_tokens"));
-                metrics.output_tokens = uint(usage.get("output_tokens"));
-                metrics.cached_tokens = uint(usage.get("cached_input_tokens"));
-            }
-            None
-        }
-        "item.completed" => {
-            let item = value.get("item")?;
-            match item.get("type").and_then(Value::as_str)? {
-                "agent_message" => item.get("text").and_then(Value::as_str).map(str::to_owned),
-                "reasoning" => item.get("text").and_then(Value::as_str).map(str::to_owned),
-                _ => None,
-            }
-        }
-        "error" => value
-            .get("message")
-            .and_then(Value::as_str)
-            .map(|s| format!("error: {s}")),
-        _ => None,
-    }
-}
-fn uint(v: Option<&Value>) -> Option<u64> {
-    v.and_then(Value::as_u64)
-        .filter(|value| *value <= i64::MAX as u64)
-}
-fn stream_json<R: io::Read, W: Write>(
-    reader: R,
-    output: &mut W,
-    metrics: &mut Metrics,
-) -> io::Result<()> {
-    for line in BufReader::new(reader).lines() {
-        let line = line?;
-        if let Some(text) = parse_event(&line, metrics) {
-            writeln!(output, "{text}")?;
-            output.flush()?;
-        } else if serde_json::from_str::<Value>(&line).is_err() {
-            writeln!(output, "{line}")?;
-            output.flush()?;
-        }
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 fn terminal(
     timer: &Instant,
-    version: Option<String>,
-    metrics: Metrics,
+    result: &ExecutionResult,
     outcome: &str,
-    exit_code: Option<i32>,
-    signal: Option<i32>,
     mut missing: BTreeMap<String, String>,
     config: &Config,
 ) -> ExecutionFinalization {
     for field in ["ended_at", "duration_ms", "signal"] {
         missing.remove(field);
     }
-    if version.is_some() {
+    if result.agent_version.is_some() {
         missing.remove("agent_version");
     }
-    if exit_code.is_some() {
+    if result.exit_code.is_some() {
         missing.remove("exit_code");
     } else {
         missing.insert("exit_code".into(), "no_normal_exit_code".into());
     }
-    if metrics.model.is_none() {
+    if result.model.is_none() {
         missing.insert("model".into(), "agent_not_reported".into());
     } else {
         missing.remove("model");
     }
     for (name, value) in [
-        ("input_tokens", metrics.input_tokens),
-        ("output_tokens", metrics.output_tokens),
-        ("cached_tokens", metrics.cached_tokens),
+        ("input_tokens", result.input_tokens),
+        ("output_tokens", result.output_tokens),
+        ("cached_tokens", result.cached_tokens),
     ] {
         if value.is_none() {
             missing.insert(name.into(), "usage_not_reported".into());
@@ -350,14 +208,14 @@ fn terminal(
             missing.remove(name);
         }
     }
-    let total = match (metrics.input_tokens, metrics.output_tokens) {
+    let total = match (result.input_tokens, result.output_tokens) {
         (Some(a), Some(b)) => a.checked_add(b).filter(|value| *value <= i64::MAX as u64),
         _ => None,
     };
     if total.is_none() {
         missing.insert(
             "total_tokens".into(),
-            if metrics.input_tokens.is_some() && metrics.output_tokens.is_some() {
+            if result.input_tokens.is_some() && result.output_tokens.is_some() {
                 "arithmetic_overflow"
             } else {
                 "usage_incomplete"
@@ -367,14 +225,14 @@ fn terminal(
     } else {
         missing.remove("total_tokens");
     }
-    let price = metrics
+    let price = result
         .model
         .as_ref()
         .and_then(|m| config.execution_history.pricing.get(m));
     let (cost, rates, reason) = calculate_cost(
-        metrics.input_tokens,
-        metrics.cached_tokens,
-        metrics.output_tokens,
+        result.input_tokens,
+        result.cached_tokens,
+        result.output_tokens,
         price,
     );
     if cost.is_none() {
@@ -387,19 +245,19 @@ fn terminal(
         duration_ms: u64::try_from(timer.elapsed().as_millis())
             .unwrap_or(i64::MAX as u64)
             .min(i64::MAX as u64),
-        agent_version: version,
-        model: metrics.model,
-        input_tokens: metrics.input_tokens,
-        output_tokens: metrics.output_tokens,
-        cached_tokens: metrics.cached_tokens,
+        agent_version: result.agent_version.clone(),
+        model: result.model.clone(),
+        input_tokens: result.input_tokens,
+        output_tokens: result.output_tokens,
+        cached_tokens: result.cached_tokens,
         total_tokens: total,
         estimated_cost_microusd: cost,
         input_rate: rates.0,
         cached_input_rate: rates.1,
         output_rate: rates.2,
         outcome: outcome.into(),
-        exit_code,
-        signal,
+        exit_code: result.exit_code,
+        signal: result.signal,
         unavailable_fields: missing,
     }
 }
@@ -456,24 +314,6 @@ pub fn calculate_cost(
     (Some(cost), rates, "")
 }
 
-fn probe_version(executable: &str) -> Option<String> {
-    let output = Command::new(executable)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let line = text.lines().next()?.trim();
-    if line.is_empty() || !line.to_ascii_lowercase().contains("codex") {
-        None
-    } else {
-        Some(line.to_owned())
-    }
-}
 fn new_id() -> String {
     format!(
         "{:020}-{:010}-{:06}",
@@ -662,28 +502,88 @@ fn read_utf8(path: &Path) -> Result<String, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn parses_only_typed_terminal_usage() {
-        let mut m = Metrics::default();
-        parse_event(
-            r#"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":4}}"#,
-            &mut m,
-        );
-        assert_eq!(m.input_tokens, Some(10));
-        assert_eq!(m.cached_tokens, Some(3));
-        assert_eq!(m.output_tokens, Some(4));
-        assert_eq!(m.model, None);
+    use std::sync::Mutex;
+
+    struct FakeAgent {
+        request: Mutex<Option<(PathBuf, String)>>,
+        result: ExecutionResult,
     }
-    #[test]
-    fn malformed_and_invalid_values_do_not_fabricate_metrics() {
-        let mut m = Metrics::default();
-        parse_event("not json", &mut m);
-        parse_event(
-            r#"{"type":"turn.completed","usage":{"input_tokens":-1,"output_tokens":1.5}}"#,
-            &mut m,
-        );
-        assert_eq!(m, Metrics::default());
+
+    impl CodingAgent for FakeAgent {
+        fn execute(
+            &self,
+            request: ExecutionRequest<'_>,
+            _output: &mut dyn io::Write,
+        ) -> Result<ExecutionResult, AgentExecutionError> {
+            *self.request.lock().unwrap() = Some((
+                request.working_directory.to_owned(),
+                request.prompt.to_owned(),
+            ));
+            Ok(self.result.clone())
+        }
     }
+
+    #[test]
+    fn orchestration_uses_neutral_agent_and_preserves_history_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let mut config = Config::default();
+        let database_path = temp.path().join("history.db");
+        config.database.path = Some(database_path.clone());
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+            state_dir: temp.path().join("state"),
+            runtime_dir: temp.path().join("runtime"),
+            log_dir: temp.path().join("log"),
+            socket_path: temp.path().join("runtime/socket"),
+            pid_path: temp.path().join("state/pid"),
+        };
+        let agent = FakeAgent {
+            request: Mutex::new(None),
+            result: ExecutionResult {
+                agent_version: Some("test-agent 1".into()),
+                model: Some("priced-model".into()),
+                input_tokens: Some(10),
+                output_tokens: Some(4),
+                cached_tokens: Some(3),
+                exit_code: Some(23),
+                signal: None,
+            },
+        };
+
+        let result = execute_with_config(
+            &repository.join("docs/prds/PRD-004.md"),
+            &agent,
+            &config,
+            &paths,
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, Some(23));
+        let captured = agent.request.lock().unwrap();
+        let (working_directory, prompt) = captured.as_ref().unwrap();
+        assert_eq!(working_directory, &repository);
+        assert_eq!(
+            prompt,
+            &build_prompt(&repository, &repository.join("docs/prds/PRD-004.md")).unwrap()
+        );
+
+        let database = Database::open(&database_path).unwrap();
+        let rows = ExecutionHistoryRepository::new(database.conn())
+            .recent(1)
+            .unwrap();
+        assert_eq!(rows[0].outcome, "failed");
+        assert_eq!(rows[0].exit_code, Some(23));
+        assert_eq!(rows[0].input_tokens, Some(10));
+        assert_eq!(rows[0].total_tokens, Some(14));
+    }
+
     #[test]
     fn cost_uses_cached_rate_and_rounds_half_up() {
         let p = ExecutionPrice {
