@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use familiar_core::CanonicalFileIdentity;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -53,11 +54,9 @@ impl Tool for GetModuleSummaryTool {
 
         // Normalize the prefix to end with '/' so "src" doesn't match "src_other".
         // Empty prefix is allowed and means "match everything in the project".
-        let prefix = if parsed.module_path.is_empty() || parsed.module_path.ends_with('/') {
-            parsed.module_path.clone()
-        } else {
-            format!("{}/", parsed.module_path)
-        };
+        let prefix =
+            CanonicalFileIdentity::module_prefix(std::path::Path::new(&parsed.module_path))
+                .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
 
         let total = ctx
             .storage
@@ -87,7 +86,7 @@ impl Tool for GetModuleSummaryTool {
             .collect();
 
         Ok(json!({
-            "module_path": parsed.module_path,
+            "module_path": prefix.strip_suffix('/').unwrap_or(&prefix),
             "file_count": total,
             "returned_files": returned,
             "truncated": truncated,

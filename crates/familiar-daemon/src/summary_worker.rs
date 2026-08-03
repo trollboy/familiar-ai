@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use familiar_core::config::SummaryConfig;
 use familiar_core::models::NewFileSummary;
+use familiar_core::CanonicalFileIdentity;
 use familiar_storage::{Database, FileSummaryRepository};
 use familiar_summary::SummaryGenerator;
 
@@ -44,6 +45,7 @@ pub const HARDCODED_SKIP_DIRS: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct SummaryRequest {
     pub project_id: i64,
+    pub repo_root: PathBuf,
     pub path: PathBuf,
 }
 
@@ -71,7 +73,7 @@ impl SummaryWorker {
         mut event_rx: mpsc::Receiver<SummaryRequest>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
-        let mut pending: HashMap<(i64, PathBuf), Instant> = HashMap::new();
+        let mut pending: HashMap<(i64, String), (PathBuf, PathBuf, Instant)> = HashMap::new();
         let mut ticker =
             tokio::time::interval(Duration::from_secs(self.config.flush_interval_secs));
         ticker.tick().await; // skip immediate first tick
@@ -88,7 +90,15 @@ impl SummaryWorker {
                 maybe_event = event_rx.recv() => {
                     match maybe_event {
                         Some(req) => {
-                            if pending.len() >= max_pending && !pending.contains_key(&(req.project_id, req.path.clone())) {
+                            let identity = match CanonicalFileIdentity::from_observed(req.project_id, &req.repo_root, &req.path) {
+                                Ok(identity) => identity,
+                                Err(error) => {
+                                    tracing::warn!(project_id = req.project_id, error = %error, "rejected summary path");
+                                    continue;
+                                }
+                            };
+                            let key = (req.project_id, identity.path().to_owned());
+                            if pending.len() >= max_pending && !pending.contains_key(&key) {
                                 tracing::warn!(
                                     pending = pending.len(),
                                     max = max_pending,
@@ -96,7 +106,7 @@ impl SummaryWorker {
                                 );
                                 continue;
                             }
-                            pending.insert((req.project_id, req.path), Instant::now());
+                            pending.insert(key, (req.repo_root, req.path, Instant::now()));
                         }
                         None => {
                             // Channel closed; flush remaining and exit
@@ -116,14 +126,18 @@ impl SummaryWorker {
         self.command_state.lock().unwrap().paused
     }
 
-    fn flush_quiet(&self, pending: &mut HashMap<(i64, PathBuf), Instant>, quiet: Duration) {
+    fn flush_quiet(
+        &self,
+        pending: &mut HashMap<(i64, String), (PathBuf, PathBuf, Instant)>,
+        quiet: Duration,
+    ) {
         if self.is_paused() {
             return;
         }
         let now = Instant::now();
-        let ready: Vec<(i64, PathBuf)> = pending
+        let ready: Vec<(i64, String)> = pending
             .iter()
-            .filter_map(|(k, last_seen)| {
+            .filter_map(|(k, (_, _, last_seen))| {
                 if now.duration_since(*last_seen) >= quiet {
                     Some(k.clone())
                 } else {
@@ -132,22 +146,30 @@ impl SummaryWorker {
             })
             .collect();
         for key in ready {
-            pending.remove(&key);
-            self.process_one(key.0, &key.1);
+            if let Some((root, path, _)) = pending.remove(&key) {
+                self.process_one(key.0, &root, &path);
+            }
         }
     }
 
-    fn flush_all(&self, pending: &mut HashMap<(i64, PathBuf), Instant>) {
+    fn flush_all(&self, pending: &mut HashMap<(i64, String), (PathBuf, PathBuf, Instant)>) {
         if self.is_paused() {
             return;
         }
         let drained: Vec<_> = pending.drain().collect();
-        for ((pid, path), _) in drained {
-            self.process_one(pid, &path);
+        for ((pid, _), (root, path, _)) in drained {
+            self.process_one(pid, &root, &path);
         }
     }
 
-    fn process_one(&self, project_id: i64, path: &Path) {
+    fn process_one(&self, project_id: i64, repo_root: &Path, path: &Path) {
+        let identity = match CanonicalFileIdentity::from_observed(project_id, repo_root, path) {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::warn!(project_id, error = %error, "rejected summary path");
+                return;
+            }
+        };
         let meta = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(_) => return,
@@ -171,8 +193,7 @@ impl SummaryWorker {
         // editor rewrites, etc.)
         {
             let db = self.db.lock().unwrap();
-            let path_str = path.to_string_lossy().to_string();
-            if let Ok(Some(existing)) = db.get_file_summary_by_path(project_id, &path_str) {
+            if let Ok(Some(existing)) = db.get_file_summary_by_path(project_id, identity.path()) {
                 if existing.last_known_mtime == mtime_secs {
                     let age = (chrono::Utc::now() - existing.last_updated_at).num_seconds() as u64;
                     if age < self.config.staleness_threshold_secs {
@@ -191,11 +212,11 @@ impl SummaryWorker {
         };
 
         let gen = SummaryGenerator::new();
-        let generated = gen.generate(path, &content);
+        let generated = gen.generate(Path::new(identity.path()), &content);
 
         let new_summary = NewFileSummary {
             project_id,
-            path: path.to_string_lossy().to_string(),
+            path: identity.path().to_owned(),
             summary: generated.summary_text,
             tags: generated.tags,
             extracted_symbols: generated.extracted_symbols,
@@ -250,6 +271,7 @@ pub fn enqueue_initial_scan(
         }
         let req = SummaryRequest {
             project_id,
+            repo_root: repo_root.to_path_buf(),
             path: path.to_path_buf(),
         };
         if tx.try_send(req).is_err() {
@@ -306,6 +328,7 @@ mod tests {
 
         tx.send(SummaryRequest {
             project_id: pid,
+            repo_root: tmp.path().to_path_buf(),
             path: file_path.clone(),
         })
         .await
@@ -320,11 +343,11 @@ mod tests {
 
         // Verify summary was written
         let db_lock = db.lock().unwrap();
-        let stored = db_lock
-            .get_file_summary_by_path(pid, &file_path.to_string_lossy())
-            .unwrap();
+        let stored = db_lock.get_file_summary_by_path(pid, "foo.rs").unwrap();
         assert!(stored.is_some(), "summary should have been written");
         let stored = stored.unwrap();
+        assert_eq!(stored.path, "foo.rs");
+        assert!(!stored.summary.contains(&tmp.path().display().to_string()));
         assert!(stored.last_known_mtime.is_some());
         assert!(stored.last_known_size.is_some());
     }
@@ -345,6 +368,7 @@ mod tests {
 
         tx.send(SummaryRequest {
             project_id: pid,
+            repo_root: tmp.path().to_path_buf(),
             path: file_path.clone(),
         })
         .await
@@ -356,9 +380,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 
         let db_lock = db.lock().unwrap();
-        let stored = db_lock
-            .get_file_summary_by_path(pid, &file_path.to_string_lossy())
-            .unwrap();
+        let stored = db_lock.get_file_summary_by_path(pid, "paused.rs").unwrap();
         assert!(stored.is_none(), "paused worker should not write summaries");
     }
 
@@ -379,6 +401,7 @@ mod tests {
         for _ in 0..5 {
             tx.send(SummaryRequest {
                 project_id: pid,
+                repo_root: tmp.path().to_path_buf(),
                 path: file_path.clone(),
             })
             .await
@@ -392,9 +415,7 @@ mod tests {
 
         // The single coalesced summary should exist
         let db_lock = db.lock().unwrap();
-        let stored = db_lock
-            .get_file_summary_by_path(pid, &file_path.to_string_lossy())
-            .unwrap();
+        let stored = db_lock.get_file_summary_by_path(pid, "dupe.rs").unwrap();
         assert!(stored.is_some());
     }
 
@@ -416,6 +437,7 @@ mod tests {
 
         tx.send(SummaryRequest {
             project_id: pid,
+            repo_root: tmp.path().to_path_buf(),
             path: file_path.clone(),
         })
         .await
@@ -427,9 +449,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 
         let db_lock = db.lock().unwrap();
-        let stored = db_lock
-            .get_file_summary_by_path(pid, &file_path.to_string_lossy())
-            .unwrap();
+        let stored = db_lock.get_file_summary_by_path(pid, "big.bin").unwrap();
         assert!(stored.is_none(), "oversized file should be skipped");
     }
 
@@ -449,6 +469,7 @@ mod tests {
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             tx.send(SummaryRequest {
                 project_id: pid,
+                repo_root: tmp.path().to_path_buf(),
                 path: file_path.clone(),
             })
             .await
@@ -462,7 +483,7 @@ mod tests {
         let first_updated = {
             let db_lock = db.lock().unwrap();
             db_lock
-                .get_file_summary_by_path(pid, &file_path.to_string_lossy())
+                .get_file_summary_by_path(pid, "stable.rs")
                 .unwrap()
                 .unwrap()
                 .updated_at
@@ -475,6 +496,7 @@ mod tests {
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             tx.send(SummaryRequest {
                 project_id: pid,
+                repo_root: tmp.path().to_path_buf(),
                 path: file_path.clone(),
             })
             .await
@@ -488,7 +510,7 @@ mod tests {
         let second_updated = {
             let db_lock = db.lock().unwrap();
             db_lock
-                .get_file_summary_by_path(pid, &file_path.to_string_lossy())
+                .get_file_summary_by_path(pid, "stable.rs")
                 .unwrap()
                 .unwrap()
                 .updated_at
@@ -548,12 +570,14 @@ mod tests {
 
         tx.send(SummaryRequest {
             project_id: pid,
+            repo_root: tmp.path().to_path_buf(),
             path: p1.clone(),
         })
         .await
         .unwrap();
         tx.send(SummaryRequest {
             project_id: pid,
+            repo_root: tmp.path().to_path_buf(),
             path: p2.clone(),
         })
         .await

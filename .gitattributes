@@ -1,0 +1,28 @@
+# Normalize text files
+* text=auto eol=lf
+
+# Rust
+*.rs text
+
+# Markdown
+*.md text
+
+# TOML
+*.toml text
+
+# YAML
+*.yml text
+*.yaml text
+
+# Shell
+*.sh text
+
+# Binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.db binary
+*.sqlite binary

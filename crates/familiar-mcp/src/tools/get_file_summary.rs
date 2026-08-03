@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use familiar_core::models::NewFileSummary;
+use familiar_core::CanonicalFileIdentity;
 use familiar_summary::SummaryGenerator;
 
 use crate::tool::{Tool, ToolContext, ToolError};
@@ -54,16 +55,23 @@ impl Tool for GetFileSummaryTool {
                 ToolError::InvalidParams(format!("unknown project_id: {}", parsed.project_id))
             })?;
 
+        let identity = CanonicalFileIdentity::from_relative(
+            parsed.project_id,
+            Path::new(&project.repo_root),
+            Path::new(&parsed.path),
+        )
+        .map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+
         // Try cached summary first.
         let cached = ctx
             .storage
-            .get_file_summary(parsed.project_id, &parsed.path)
+            .get_file_summary(parsed.project_id, identity.path())
             .await
             .map_err(|e| ToolError::Internal(e.to_string()))?;
 
         // Resolve disk path for staleness check / lazy regen.
         let max_size = ctx.config.summary.max_file_size_bytes;
-        let resolved = resolve_within_repo(&project.repo_root, &parsed.path)?;
+        let resolved = identity.host_path(Path::new(&project.repo_root));
 
         let on_disk_meta = std::fs::metadata(&resolved).ok();
 
@@ -80,7 +88,7 @@ impl Tool for GetFileSummaryTool {
                 if still_fresh && age_secs < staleness {
                     return Ok(json!({
                         "found": true,
-                        "source": "cached",
+                        "source": if summary.path == identity.path() { "cached" } else { "legacy_cached" },
                         "summary": summary,
                     }));
                 }
@@ -89,7 +97,7 @@ impl Tool for GetFileSummaryTool {
                 // Return cached but mark as stale-source.
                 return Ok(json!({
                     "found": true,
-                    "source": "cached",
+                    "source": if summary.path == identity.path() { "cached" } else { "legacy_cached" },
                     "summary": summary,
                 }));
             }
@@ -126,12 +134,12 @@ impl Tool for GetFileSummaryTool {
             .map_err(|e| ToolError::Internal(format!("failed to read file: {e}")))?;
 
         let gen = SummaryGenerator::new();
-        let generated = gen.generate(Path::new(&parsed.path), &content);
+        let generated = gen.generate(Path::new(identity.path()), &content);
 
         let mtime_secs = system_time_to_secs(meta.modified().ok());
         let new_summary = NewFileSummary {
             project_id: parsed.project_id,
-            path: parsed.path.clone(),
+            path: identity.path().to_owned(),
             summary: generated.summary_text,
             tags: generated.tags,
             extracted_symbols: generated.extracted_symbols,
@@ -151,42 +159,6 @@ impl Tool for GetFileSummaryTool {
             "summary": written,
         }))
     }
-}
-
-/// Resolve a relative path against a repo root, canonicalizing both, and
-/// verify the resolved path stays inside the repo. Returns InvalidParams on
-/// any traversal attempt or canonicalization failure.
-fn resolve_within_repo(repo_root: &str, path: &str) -> Result<PathBuf, ToolError> {
-    let repo_path = PathBuf::from(repo_root);
-    let canonical_repo = repo_path.canonicalize().map_err(|e| {
-        ToolError::InvalidParams(format!(
-            "failed to canonicalize repo_root '{repo_root}': {e}"
-        ))
-    })?;
-
-    let candidate = canonical_repo.join(path);
-    // canonicalize will fail if the file doesn't exist; in that case we
-    // still want to validate the prefix using the lexical join.
-    let canonical_candidate = match candidate.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            // File may not exist — perform lexical containment check.
-            if !candidate.starts_with(&canonical_repo) {
-                return Err(ToolError::InvalidParams(
-                    "path resolves outside repo root".into(),
-                ));
-            }
-            return Ok(candidate);
-        }
-    };
-
-    if !canonical_candidate.starts_with(&canonical_repo) {
-        return Err(ToolError::InvalidParams(
-            "path resolves outside repo root".into(),
-        ));
-    }
-
-    Ok(canonical_candidate)
 }
 
 fn system_time_to_secs(time: Option<SystemTime>) -> Option<i64> {

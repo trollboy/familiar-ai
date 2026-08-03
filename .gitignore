@@ -1,4 +1,136 @@
-/target
+# ============================
+# Rust
+# ============================
+
+/target/
+
+# Keep Cargo.lock for applications.
+# Uncomment the next line only if this becomes a published library.
+# Cargo.lock
+
+# ============================
+# IDEs
+# ============================
+
+.vscode/
+.idea/
+
+*.swp
+*.swo
+*~
+
+# ============================
+# macOS
+# ============================
+
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ============================
+# Linux
+# ============================
+
+.directory
+
+# ============================
+# Logs
+# ============================
+
+*.log
+logs/
+log/
+
+# ============================
+# Runtime
+# ============================
+
+*.pid
+*.sock
+*.lock
+
+# ============================
+# SQLite
+# ============================
+
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Unless you decide to commit a seed/example database.
+# If so, whitelist it explicitly.
+
+# ============================
+# Familiar runtime
+# ============================
+
+data/
+cache/
+state/
+runtime/
+sessions/
+artifacts/
+reports/
+summaries/
+embeddings/
+indexes/
+
+# ============================
+# Local configuration
+# ============================
+
+.env
+.env.*
+!.env.example
+
+config.local.toml
+settings.local.toml
+
+# ============================
+# Temporary
+# ============================
+
+tmp/
+temp/
+*.tmp
+
+# ============================
+# Coverage
+# ============================
+
+coverage/
+htmlcov/
+*.profraw
+*.profdata
+
+# ============================
+# Docker
+# ============================
+
+docker-data/
+
+# ============================
+# Local AI
+# ============================
+
+models/
+gguf/
+hf-cache/
+
+# ============================
+# Generated documentation
+# ============================
+
+site/
+
+# ============================
+# Test artifacts
+# ============================
+
+.junit.xml
+test-results//target
 *.swp
 .env
 *.log

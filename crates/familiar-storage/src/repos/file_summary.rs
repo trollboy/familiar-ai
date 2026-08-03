@@ -1,4 +1,5 @@
 use familiar_core::models::{FileSummary, NewFileSummary};
+use familiar_core::CanonicalFileIdentity;
 use familiar_core::FamiliarError;
 use rusqlite::{params, OptionalExtension};
 
@@ -65,6 +66,9 @@ impl FileSummaryRepository for Database {
         &self,
         summary: &NewFileSummary,
     ) -> familiar_core::Result<FileSummary> {
+        CanonicalFileIdentity::validate_stored(summary.project_id, &summary.path).map_err(|e| {
+            FamiliarError::Database(format!("invalid canonical file identity: {e}"))
+        })?;
         let now = now_rfc3339();
         let tags_json = vec_to_json(&summary.tags)?;
         let symbols_json = vec_to_json(&summary.extracted_symbols)?;
@@ -94,14 +98,53 @@ impl FileSummaryRepository for Database {
         project_id: i64,
         path: &str,
     ) -> familiar_core::Result<Option<FileSummary>> {
+        let identity = CanonicalFileIdentity::validate_stored(project_id, path).map_err(|e| {
+            FamiliarError::Database(format!("invalid canonical file identity: {e}"))
+        })?;
         let mut stmt = self
             .conn()
             .prepare(sql::SELECT_FILE_SUMMARY_BY_PATH)
             .map_err(|e| FamiliarError::Database(e.to_string()))?;
 
-        stmt.query_row(params![project_id, path], row_to_file_summary)
+        let canonical = stmt
+            .query_row(params![project_id, identity.path()], row_to_file_summary)
             .optional()
-            .map_err(|e| FamiliarError::Database(e.to_string()))
+            .map_err(|e| FamiliarError::Database(e.to_string()))?;
+
+        // Compatibility is deliberately exact and bounded: derive the one
+        // legacy absolute key from this project's registered root.
+        let project =
+            crate::repos::project::ProjectRepository::get_project_by_id(self, project_id)?;
+        let legacy_path = project
+            .map(|project| std::path::Path::new(&project.repo_root).join(identity.path()))
+            .and_then(|path| path.to_str().map(str::to_owned));
+        let legacy = if let Some(legacy_path) = legacy_path {
+            let mut legacy_stmt = self
+                .conn()
+                .prepare(sql::SELECT_FILE_SUMMARY_BY_PATH)
+                .map_err(|e| FamiliarError::Database(e.to_string()))?;
+            legacy_stmt
+                .query_row(params![project_id, legacy_path], row_to_file_summary)
+                .optional()
+                .map_err(|e| FamiliarError::Database(e.to_string()))?
+        } else {
+            None
+        };
+
+        if canonical.is_some() && legacy.is_some() {
+            tracing::warn!(
+                project_id,
+                canonical_path = identity.path(),
+                "canonical and legacy file summary records both exist"
+            );
+        } else if canonical.is_none() && legacy.is_some() {
+            tracing::info!(
+                project_id,
+                canonical_path = identity.path(),
+                "using exact legacy file summary fallback"
+            );
+        }
+        Ok(canonical.or(legacy))
     }
 
     fn list_file_summaries_by_project(
@@ -140,6 +183,7 @@ pub fn list_file_summaries_under(
     path_prefix: &str,
     limit: usize,
 ) -> familiar_core::Result<Vec<FileSummary>> {
+    validate_module_prefix(path_prefix)?;
     let mut stmt = db
         .conn()
         .prepare(sql::SELECT_FILE_SUMMARIES_UNDER)
@@ -166,6 +210,7 @@ pub fn count_file_summaries_under(
     project_id: i64,
     path_prefix: &str,
 ) -> familiar_core::Result<usize> {
+    validate_module_prefix(path_prefix)?;
     let mut stmt = db
         .conn()
         .prepare(sql::COUNT_FILE_SUMMARIES_UNDER)
@@ -176,6 +221,18 @@ pub fn count_file_summaries_under(
         .map_err(|e| FamiliarError::Database(e.to_string()))?;
 
     Ok(count as usize)
+}
+
+fn validate_module_prefix(path_prefix: &str) -> familiar_core::Result<()> {
+    let input = path_prefix.strip_suffix('/').unwrap_or(path_prefix);
+    let canonical = CanonicalFileIdentity::module_prefix(std::path::Path::new(input))
+        .map_err(|e| FamiliarError::Database(format!("invalid canonical module identity: {e}")))?;
+    if canonical != path_prefix {
+        return Err(FamiliarError::Database(
+            "module prefix is not canonical".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Search file summaries by keyword (case-insensitive LIKE across summary, symbols, path).
@@ -259,6 +316,71 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.extracted_symbols, vec!["main", "Config"]);
+    }
+
+    #[test]
+    fn persistence_rejects_noncanonical_paths() {
+        let db = test_db();
+        let pid = create_test_project(&db);
+        for path in [
+            "",
+            "/test/project/src/main.rs",
+            "../main.rs",
+            "src/./main.rs",
+            "src//main.rs",
+        ] {
+            let mut summary = sample_summary(pid);
+            summary.path = path.into();
+            assert!(
+                db.create_or_update_file_summary(&summary).is_err(),
+                "accepted {path:?}"
+            );
+        }
+        assert!(db.list_file_summaries_by_project(pid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn canonical_lookup_precedes_exact_legacy_fallback_without_mutation() {
+        let db = test_db();
+        let pid = create_test_project(&db);
+        let mut legacy = sample_summary(pid);
+        legacy.path = "/test/project/src/main.rs".into();
+        let now = now_rfc3339();
+        db.conn()
+            .execute(
+                sql::UPSERT_FILE_SUMMARY,
+                params![
+                    legacy.project_id,
+                    legacy.path,
+                    "legacy",
+                    "[]",
+                    "[]",
+                    Option::<i64>::None,
+                    Option::<i64>::None,
+                    now,
+                ],
+            )
+            .unwrap();
+
+        let fallback = db
+            .get_file_summary_by_path(pid, "src/main.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fallback.path, "/test/project/src/main.rs");
+        assert_eq!(db.list_file_summaries_by_project(pid).unwrap().len(), 1);
+
+        db.create_or_update_file_summary(&sample_summary(pid))
+            .unwrap();
+        let canonical = db
+            .get_file_summary_by_path(pid, "src/main.rs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical.path, "src/main.rs");
+        let rows = db.list_file_summaries_by_project(pid).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .any(|row| row.path == "/test/project/src/main.rs"));
     }
 
     #[test]

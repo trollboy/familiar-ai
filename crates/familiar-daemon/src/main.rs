@@ -523,6 +523,7 @@ async fn handle_watcher_events(
                         let _ = tx
                             .send(SummaryRequest {
                                 project_id: pid,
+                                repo_root: repo.clone(),
                                 path: path.clone(),
                             })
                             .await;
