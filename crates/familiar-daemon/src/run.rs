@@ -9,7 +9,8 @@ use std::time::Instant;
 use chrono::Utc;
 use familiar_agent::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
 use familiar_context::{
-    ContextCompilationError, ContextCompiler, ContextRequest, ExecutionContext,
+    ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
+    ContextRequest, ExecutionContext,
 };
 use familiar_core::{AppPaths, Config, ExecutionPrice};
 use familiar_storage::{
@@ -32,6 +33,7 @@ static EXECUTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub enum RunError {
     CurrentDirectory(io::Error),
     Context(ContextCompilationError),
+    ContextBudget(ContextBudgetError),
     Config(String),
     Storage(String),
     Agent(AgentExecutionError),
@@ -45,6 +47,7 @@ impl fmt::Display for RunError {
         match self {
             Self::CurrentDirectory(e) => write!(f, "cannot resolve current directory: {e}"),
             Self::Context(error) => error.fmt(f),
+            Self::ContextBudget(error) => error.fmt(f),
             Self::Config(m) => write!(f, "configuration failed: {m}"),
             Self::Storage(m) => write!(f, "execution history failed: {m}"),
             Self::Agent(error) => error.fmt(f),
@@ -77,6 +80,20 @@ pub fn execute_with_config(
             prd: prd_path,
         })
         .map_err(RunError::Context)?;
+    let context = match config.execution_context.hard_ceiling_tokens {
+        Some(hard_ceiling_tokens) => {
+            ContextBudgeter::new()
+                .budget(
+                    context,
+                    ContextBudget {
+                        hard_ceiling_tokens,
+                    },
+                )
+                .map_err(RunError::ContextBudget)?
+                .context
+        }
+        None => context,
+    };
     let prompt = render_prompt(&context);
     let database_path = config.database.resolve_path(&paths.data_dir);
     let db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
@@ -508,6 +525,132 @@ mod tests {
         assert_eq!(rows[0].exit_code, Some(23));
         assert_eq!(rows[0].input_tokens, Some(10));
         assert_eq!(rows[0].total_tokens, Some(14));
+    }
+
+    #[test]
+    fn all_fit_budget_preserves_prompt_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let prd = repository.join("docs/prds/PRD-003.md");
+        let expected = build_prompt(&repository, &prd).unwrap();
+        let mut config = Config::default();
+        config.execution_context.hard_ceiling_tokens = Some(u64::MAX);
+        config.database.path = Some(temp.path().join("history.db"));
+        let paths = test_paths(temp.path());
+        let agent = successful_fake_agent();
+
+        execute_with_config(&prd, &agent, &config, &paths).unwrap();
+
+        let captured = agent.request.lock().unwrap();
+        assert_eq!(captured.as_ref().unwrap().1.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn selective_budget_renders_only_selected_whole_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let prd = repository.join("docs/prds/PRD-003.md");
+        let complete = ContextCompiler
+            .compile(ContextRequest {
+                repository: &repository,
+                prd: &prd,
+            })
+            .unwrap();
+        let ceiling = complete.prd.estimated_tokens;
+        let expected = ContextBudgeter
+            .budget(
+                complete,
+                ContextBudget {
+                    hard_ceiling_tokens: ceiling,
+                },
+            )
+            .unwrap();
+        assert!(expected.context.documents.is_empty());
+        assert!(expected.report.decisions.len() > 1);
+        assert!(expected.report.excluded_estimated_tokens > 0);
+        let expected_prompt = render_prompt(&expected.context);
+        let mut config = Config::default();
+        config.execution_context.hard_ceiling_tokens = Some(ceiling);
+        config.database.path = Some(temp.path().join("history.db"));
+        let paths = test_paths(temp.path());
+        let agent = successful_fake_agent();
+
+        execute_with_config(&prd, &agent, &config, &paths).unwrap();
+
+        let captured = agent.request.lock().unwrap();
+        assert_eq!(captured.as_ref().unwrap().1, expected_prompt);
+    }
+
+    #[test]
+    fn prd_over_budget_fails_before_history_and_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let database_path = temp.path().join("history.db");
+        let mut config = Config::default();
+        config.execution_context.hard_ceiling_tokens = Some(0);
+        config.database.path = Some(database_path.clone());
+        let paths = test_paths(temp.path());
+        let agent = successful_fake_agent();
+
+        let error = execute_with_config(
+            &repository.join("docs/prds/PRD-007.md"),
+            &agent,
+            &config,
+            &paths,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunError::ContextBudget(ContextBudgetError::PrdExceedsHardCeiling { .. })
+        ));
+        assert!(agent.request.lock().unwrap().is_none());
+        assert!(!database_path.exists());
+    }
+
+    fn successful_fake_agent() -> FakeAgent {
+        FakeAgent {
+            request: Mutex::new(None),
+            result: ExecutionResult {
+                agent_version: Some("test-agent 1".into()),
+                model: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                exit_code: Some(0),
+                signal: None,
+            },
+        }
+    }
+
+    fn test_paths(root: &Path) -> AppPaths {
+        AppPaths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            state_dir: root.join("state"),
+            runtime_dir: root.join("runtime"),
+            log_dir: root.join("log"),
+            socket_path: root.join("runtime/socket"),
+            pid_path: root.join("state/pid"),
+        }
     }
 
     #[test]

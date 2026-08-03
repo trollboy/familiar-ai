@@ -1,5 +1,13 @@
 //! Deterministic compilation of repository document context for execution.
 
+mod budget;
+
+pub use budget::{
+    BudgetedExecutionContext, ContextBudget, ContextBudgetDecision, ContextBudgetError,
+    ContextBudgetOutcome, ContextBudgetReport, ContextBudgeter, ContextExclusionReason,
+    ContextInclusionReason, ContextPriority,
+};
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;

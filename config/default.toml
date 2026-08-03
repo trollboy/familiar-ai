@@ -21,6 +21,9 @@
 [database]
 # path = ""             # Default: <data_dir>/familiar.db
 
+[execution_context]
+# hard_ceiling_tokens = 12000  # Optional; disabled when absent
+
 [watcher]
 # enabled = true
 # paths = []                                    # Directories to watch (e.g. ["~/Projects"])

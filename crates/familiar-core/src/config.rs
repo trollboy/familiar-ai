@@ -31,6 +31,13 @@ pub struct Config {
     pub inference: InferenceConfig,
     #[serde(default)]
     pub execution_history: ExecutionHistoryConfig,
+    #[serde(default)]
+    pub execution_context: ExecutionContextConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionContextConfig {
+    pub hard_ceiling_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -502,6 +509,9 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static BUDGET_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn defaults_are_sensible() {
@@ -513,6 +523,7 @@ mod tests {
         assert!(config.daemon.pid_file.is_none());
         assert!(config.daemon.socket_path.is_none());
         assert!(config.database.path.is_none());
+        assert_eq!(config.execution_context.hard_ceiling_tokens, None);
     }
 
     #[test]
@@ -538,6 +549,39 @@ format = "json"
         let config = Config::load(Some(tmp.path())).unwrap();
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, LogFormat::Json);
+    }
+
+    #[test]
+    fn execution_context_budget_is_optional_and_accepts_zero() {
+        let _guard = BUDGET_ENV.lock().unwrap();
+        for (source, expected) in [
+            ("", None),
+            ("[execution_context]\n", None),
+            ("[execution_context]\nhard_ceiling_tokens = 0\n", Some(0)),
+            (
+                "[execution_context]\nhard_ceiling_tokens = 12000\n",
+                Some(12000),
+            ),
+        ] {
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(tmp.path(), source).unwrap();
+            let config = Config::load(Some(tmp.path())).unwrap();
+            assert_eq!(config.execution_context.hard_ceiling_tokens, expected);
+        }
+    }
+
+    #[test]
+    fn invalid_execution_context_budget_fails_configuration() {
+        let _guard = BUDGET_ENV.lock().unwrap();
+        for value in ["-1", "18446744073709551616", "\"many\""] {
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(
+                tmp.path(),
+                format!("[execution_context]\nhard_ceiling_tokens = {value}\n"),
+            )
+            .unwrap();
+            assert!(Config::load(Some(tmp.path())).is_err());
+        }
     }
 
     #[test]
@@ -572,6 +616,22 @@ output_microusd_per_million = 300
         std::env::remove_var(env_key);
 
         assert_eq!(config.inference.text.mode, InferenceMode::LocalOnly);
+    }
+
+    #[test]
+    fn execution_context_budget_uses_existing_environment_mapping() {
+        let _guard = BUDGET_ENV.lock().unwrap();
+        let env_key = "FAMILIAR_EXECUTION_CONTEXT__HARD_CEILING_TOKENS";
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "[execution_context]\nhard_ceiling_tokens = 10\n",
+        )
+        .unwrap();
+        std::env::set_var(env_key, "42");
+        let config = Config::load(Some(tmp.path())).unwrap();
+        std::env::remove_var(env_key);
+        assert_eq!(config.execution_context.hard_ceiling_tokens, Some(42));
     }
 
     #[test]
