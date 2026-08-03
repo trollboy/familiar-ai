@@ -3,8 +3,8 @@ use familiar_core::{
     RepositoryIdentity, RepositoryPath,
 };
 use familiar_review::{
-    FindingStatus, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewStopReason, ReviewTask,
-    VerificationStatus,
+    FindingStatus, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewFinding,
+    ReviewStopReason, ReviewTask, VerificationEvidence, VerificationStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
@@ -126,37 +126,8 @@ impl<'a> SqliteBacklogRepository<'a> {
             ));
         }
         validate_completion_cycle(&cycle, execution_id, required_checks)?;
-        let persisted_evidence: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM review_verification_evidence WHERE cycle_id=?1",
-                [&cycle.cycle_id],
-                |r| r.get(0),
-            )
-            .map_err(storage)?;
-        if persisted_evidence
-            != i64::try_from(cycle.verification_history.len())
-                .map_err(|_| BacklogStoreError::Storage("verification evidence overflow".into()))?
-        {
-            return Err(BacklogStoreError::Storage(
-                "persisted verification evidence is incomplete".into(),
-            ));
-        }
-        let persisted_findings: i64 = tx
-            .query_row(
-                "SELECT count(*) FROM review_findings WHERE cycle_id=?1",
-                [&cycle.cycle_id],
-                |r| r.get(0),
-            )
-            .map_err(storage)?;
-        let expected_findings = cycle.review_result.as_ref().map_or(0, |r| r.findings.len());
-        if persisted_findings
-            != i64::try_from(expected_findings)
-                .map_err(|_| BacklogStoreError::Storage("review finding count overflow".into()))?
-        {
-            return Err(BacklogStoreError::Storage(
-                "persisted review findings are incomplete".into(),
-            ));
-        }
+        validate_persisted_evidence(&tx, &cycle)?;
+        validate_persisted_findings(&tx, &cycle)?;
         let now = chrono::Utc::now().to_rfc3339();
         let changed=tx.execute("UPDATE backlog_prds SET status='completed',updated_at=?3 WHERE repository_key=?1 AND prd_path=?2 AND status='in_progress'",params![repository.key,target.path.as_str(),now]).map_err(storage)?;
         if changed != 1 {
@@ -173,6 +144,118 @@ impl<'a> SqliteBacklogRepository<'a> {
             status: BacklogStatus::Completed,
         })
     }
+}
+
+fn validate_persisted_evidence(
+    tx: &Transaction<'_>,
+    cycle: &ReviewCycle,
+) -> Result<(), BacklogStoreError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT check_id,phase,evidence_json FROM review_verification_evidence \
+             WHERE cycle_id=?1 ORDER BY phase,check_id",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map([&cycle.cycle_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    if rows.len() != cycle.verification_history.len() {
+        return Err(BacklogStoreError::Storage(
+            "persisted verification evidence is incomplete".into(),
+        ));
+    }
+    for (index, expected) in cycle.verification_history.iter().enumerate() {
+        let phase = format!("attempt-{index}");
+        let row = rows
+            .iter()
+            .find(|(check_id, persisted_phase, _)| {
+                check_id == &expected.check_id && persisted_phase == &phase
+            })
+            .ok_or_else(|| {
+                BacklogStoreError::Storage("persisted verification evidence is incomplete".into())
+            })?;
+        let persisted: VerificationEvidence = serde_json::from_str(&row.2).map_err(|error| {
+            BacklogStoreError::Storage(format!("invalid persisted verification evidence: {error}"))
+        })?;
+        if &persisted != expected {
+            return Err(BacklogStoreError::Storage(
+                "persisted verification evidence conflicts with terminal cycle".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_persisted_findings(
+    tx: &Transaction<'_>,
+    cycle: &ReviewCycle,
+) -> Result<(), BacklogStoreError> {
+    let expected = cycle
+        .review_result
+        .as_ref()
+        .map_or(&[][..], |result| result.findings.as_slice());
+    let mut statement = tx
+        .prepare(
+            "SELECT finding_id,blocking,status,finding_json FROM review_findings \
+             WHERE cycle_id=?1 ORDER BY finding_id",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map([&cycle.cycle_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    if rows.len() != expected.len() {
+        return Err(BacklogStoreError::Storage(
+            "persisted review findings are incomplete".into(),
+        ));
+    }
+    for finding in expected {
+        let row = rows
+            .iter()
+            .find(|(finding_id, _, _, _)| finding_id == &finding.finding_id)
+            .ok_or_else(|| {
+                BacklogStoreError::Storage("persisted review findings are incomplete".into())
+            })?;
+        let persisted: ReviewFinding = serde_json::from_str(&row.3).map_err(|error| {
+            BacklogStoreError::Storage(format!("invalid persisted review finding: {error}"))
+        })?;
+        if &persisted != finding
+            || row.1 != finding.blocking
+            || row.2
+                != serde_json::to_string(&finding.status)
+                    .map_err(|error| BacklogStoreError::Storage(error.to_string()))?
+                    .trim_matches('"')
+        {
+            return Err(BacklogStoreError::Storage(
+                "persisted review finding conflicts with terminal cycle".into(),
+            ));
+        }
+    }
+    if rows
+        .iter()
+        .any(|(_, blocking, status, _)| *blocking && status == "open")
+    {
+        return Err(BacklogStoreError::Storage(
+            "terminal review has open blocking findings".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_run_actor(actor: &str) -> Result<(), BacklogStoreError> {
@@ -378,6 +461,11 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
 mod tests {
     use super::*;
     use crate::Database;
+    use familiar_review::{
+        AgentAssignment, AgentObservation, AgentRole, ExecutionUsage, IndependenceKind,
+        ReviewerIndependence, VerificationStatus,
+    };
+    use std::collections::BTreeMap;
 
     fn prd() -> DiscoveredPrd {
         DiscoveredPrd {
@@ -393,6 +481,69 @@ mod tests {
         RepositoryIdentity {
             worktree: "/tmp/work".into(),
             key: "/tmp/repo/.git".into(),
+        }
+    }
+
+    fn cycle_with_evidence() -> ReviewCycle {
+        let evidence = VerificationEvidence {
+            check_id: "required".into(),
+            argv: vec!["true".into()],
+            working_directory: ".".into(),
+            environment_identity: BTreeMap::new(),
+            tool_identity: Some("true".into()),
+            tested_identity: "candidate".into(),
+            started_at: "2026-08-03T00:00:00Z".into(),
+            ended_at: "2026-08-03T00:00:01Z".into(),
+            duration_ms: 1,
+            exit_code: Some(0),
+            signal: None,
+            status: VerificationStatus::Passed,
+            required: true,
+            summary: "passed".into(),
+            stdout: None,
+            stderr: None,
+            truncated: false,
+        };
+        let observation = AgentObservation {
+            assignment: AgentAssignment {
+                adapter_id: "fake".into(),
+                agent_id: "fake".into(),
+                provider: Some("fake".into()),
+                requested_model: None,
+                role: AgentRole::Implementation,
+                session_id: None,
+            },
+            agent_version: None,
+            reported_model: None,
+            unavailable_fields: BTreeMap::new(),
+        };
+        ReviewCycle {
+            cycle_id: "cycle".into(),
+            task_id: "task".into(),
+            attempt: 1,
+            state: ReviewCycleState::Completed,
+            implementation: observation,
+            implementation_execution: None,
+            reviewer: None,
+            independence: Some(ReviewerIndependence {
+                kind: IndependenceKind::IndependentProviderOrModel,
+                evidence: vec!["different provider".into()],
+            }),
+            review_request: None,
+            review_result: None,
+            remediation_request: None,
+            remediation_result: None,
+            verification_before_review: vec![evidence.clone()],
+            verification_after_remediation: Vec::new(),
+            verification_history: vec![evidence],
+            aggregate_usage: ExecutionUsage::default(),
+            aggregate_duration_ms: 1,
+            started_at: "2026-08-03T00:00:00Z".into(),
+            ended_at: Some("2026-08-03T00:00:01Z".into()),
+            disposition: ReviewDisposition::ReadyForHumanApproval,
+            stop_reasons: vec![ReviewStopReason::CleanReview],
+            review_attempts: Vec::new(),
+            remediation_attempts: Vec::new(),
         }
     }
     #[test]
@@ -523,5 +674,47 @@ mod tests {
             event,
             ("pending".into(), "in_progress".into(), actor.into())
         );
+    }
+
+    #[test]
+    fn completion_evidence_validation_fails_closed_on_normalized_row_corruption() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let cycle = cycle_with_evidence();
+        db.conn().execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        let tx = db.conn_mut().transaction().unwrap();
+        tx.execute(
+            "INSERT INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json) \
+             VALUES(?1,?2,'attempt-0',?3)",
+            params![
+                cycle.cycle_id,
+                cycle.verification_history[0].check_id,
+                serde_json::to_string(&cycle.verification_history[0]).unwrap()
+            ],
+        )
+        .unwrap();
+        assert!(validate_persisted_evidence(&tx, &cycle).is_ok());
+        tx.execute(
+            "UPDATE review_verification_evidence SET evidence_json='{}' WHERE cycle_id=?1",
+            [&cycle.cycle_id],
+        )
+        .unwrap();
+        assert!(validate_persisted_evidence(&tx, &cycle).is_err());
+    }
+
+    #[test]
+    fn completion_finding_validation_rejects_unrepresented_persisted_findings() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let cycle = cycle_with_evidence();
+        db.conn().execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        let tx = db.conn_mut().transaction().unwrap();
+        tx.execute(
+            "INSERT INTO review_findings(finding_id,cycle_id,category,severity,blocking,status,finding_json) \
+             VALUES('unexpected',?1,'correctness_defect','high',1,'open','{}')",
+            [&cycle.cycle_id],
+        )
+        .unwrap();
+        assert!(validate_persisted_findings(&tx, &cycle).is_err());
     }
 }
