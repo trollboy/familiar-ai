@@ -66,6 +66,49 @@ pub enum BacklogStatus {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklogRecoveryAction {
+    Release,
+    ManualCompleteOverride,
+}
+
+impl BacklogRecoveryAction {
+    pub fn target_status(self) -> BacklogStatus {
+        match self {
+            Self::Release => BacklogStatus::Pending,
+            Self::ManualCompleteOverride => BacklogStatus::Completed,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::ManualCompleteOverride => "manual_complete_override",
+        }
+    }
+}
+
+pub fn validate_recovery_attribution(
+    action: BacklogRecoveryAction,
+    actor: &str,
+    reason: &str,
+) -> Result<(String, String), BacklogStoreError> {
+    let actor = actor.trim();
+    let reason = reason.trim();
+    if actor.is_empty() || actor.len() > 256 || actor.chars().any(char::is_control) {
+        return Err(BacklogStoreError::InvalidRecoveryActor);
+    }
+    if reason.is_empty() || reason.len() > 2048 || reason.chars().any(char::is_control) {
+        return Err(BacklogStoreError::InvalidRecoveryReason);
+    }
+    if action == BacklogRecoveryAction::ManualCompleteOverride
+        && !matches!(actor.strip_prefix("human:"), Some(identity) if !identity.trim().is_empty())
+    {
+        return Err(BacklogStoreError::HumanAuthorityRequired);
+    }
+    Ok((actor.to_owned(), reason.to_owned()))
+}
+
 impl BacklogStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -135,6 +178,14 @@ pub enum BacklogStoreError {
     EmptyActor,
     #[error("backlog entry not found: {0}")]
     NotFound(RepositoryPath),
+    #[error("recovery actor must be non-empty, printable, and at most 256 bytes")]
+    InvalidRecoveryActor,
+    #[error("recovery reason must be non-empty, printable, and at most 2048 bytes")]
+    InvalidRecoveryReason,
+    #[error("manual completion override requires --actor human:<identity>")]
+    HumanAuthorityRequired,
+    #[error("backlog recovery audit lineage is corrupt for {0}")]
+    RecoveryAuditCorrupt(RepositoryPath),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -671,6 +722,34 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    #[test]
+    fn recovery_attribution_requires_reason_and_human_completion_authority() {
+        assert!(validate_recovery_attribution(
+            BacklogRecoveryAction::Release,
+            "ops:queue",
+            "retry with review enabled"
+        )
+        .is_ok());
+        assert!(matches!(
+            validate_recovery_attribution(
+                BacklogRecoveryAction::ManualCompleteOverride,
+                "system:familiar-run:1",
+                "accepted"
+            ),
+            Err(BacklogStoreError::HumanAuthorityRequired)
+        ));
+        assert!(validate_recovery_attribution(
+            BacklogRecoveryAction::ManualCompleteOverride,
+            " human:alice ",
+            " reviewed externally "
+        )
+        .is_ok());
+        assert!(matches!(
+            validate_recovery_attribution(BacklogRecoveryAction::Release, "alice", "  "),
+            Err(BacklogStoreError::InvalidRecoveryReason)
+        ));
+    }
 
     #[derive(Default)]
     struct MemoryStore {

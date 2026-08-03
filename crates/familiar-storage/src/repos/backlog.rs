@@ -1,6 +1,7 @@
 use familiar_core::{
-    BacklogEntry, BacklogStatus, BacklogStatusStore, BacklogStoreError, DiscoveredPrd, PrdId,
-    RepositoryIdentity, RepositoryPath,
+    validate_recovery_attribution, BacklogEntry, BacklogRecoveryAction, BacklogStatus,
+    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, PrdId, RepositoryIdentity,
+    RepositoryPath,
 };
 use familiar_review::{
     FindingStatus, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewFinding,
@@ -15,6 +16,87 @@ pub struct SqliteBacklogRepository<'a> {
 impl<'a> SqliteBacklogRepository<'a> {
     pub fn new(connection: &'a mut Connection) -> Self {
         Self { connection }
+    }
+
+    pub fn recover(
+        &mut self,
+        repository: &RepositoryIdentity,
+        target: &DiscoveredPrd,
+        action: BacklogRecoveryAction,
+        actor: &str,
+        reason: &str,
+    ) -> Result<BacklogEntry, BacklogStoreError> {
+        let (actor, reason) = validate_recovery_attribution(action, actor, reason)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let row: Option<(u64, String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT prd_number,content_hash,status,missing_since FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
+                params![repository.key, target.path.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let (number, hash, status, missing) =
+            row.ok_or_else(|| BacklogStoreError::NotFound(target.path.clone()))?;
+        if status != "in_progress"
+            || number != target.number
+            || hash != target.content_hash
+            || missing.is_some()
+        {
+            return Err(BacklogStoreError::Conflict {
+                path: target.path.clone(),
+                expected: "in_progress",
+                actual: BacklogStatus::parse(&status)
+                    .map(|value| value.as_str())
+                    .unwrap_or("conflict"),
+            });
+        }
+        let latest: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT old_status,new_status,actor FROM backlog_status_events WHERE repository_key=?1 AND prd_path=?2 ORDER BY event_id DESC LIMIT 1",
+                params![repository.key, target.path.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        if !matches!(latest, Some((ref old, ref new, ref claim_actor)) if old == "pending" && new == "in_progress" && validate_run_actor(claim_actor).is_ok())
+        {
+            return Err(BacklogStoreError::RecoveryAuditCorrupt(target.path.clone()));
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let next = action.target_status();
+        let changed = tx
+            .execute(
+                "UPDATE backlog_prds SET status=?3,updated_at=?4 WHERE repository_key=?1 AND prd_path=?2 AND status='in_progress' AND content_hash=?5 AND prd_number=?6 AND missing_since IS NULL",
+                params![repository.key, target.path.as_str(), next.as_str(), now, target.content_hash, target.number],
+            )
+            .map_err(storage)?;
+        if changed != 1 {
+            return Err(BacklogStoreError::Conflict {
+                path: target.path.clone(),
+                expected: "in_progress",
+                actual: "conflict",
+            });
+        }
+        tx.execute(
+            "INSERT INTO backlog_status_events(repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(?1,?2,'in_progress',?3,?4,?5)",
+            params![repository.key, target.path.as_str(), next.as_str(), actor, now],
+        )
+        .map_err(storage)?;
+        let event_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(?1,?2,?3)",
+            params![event_id, action.as_str(), reason],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(BacklogEntry {
+            prd: target.clone(),
+            status: next,
+        })
     }
 
     pub fn claim_run(
@@ -674,6 +756,95 @@ mod tests {
             event,
             ("pending".into(), "in_progress".into(), actor.into())
         );
+    }
+
+    #[test]
+    fn recovery_is_atomic_and_preserves_the_claim_event() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let claim_actor = "system:familiar-run:00001785772020811891-0000057947-000001";
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        storage
+            .claim_run(&repo(), &[prd()], &prd(), claim_actor)
+            .unwrap();
+        let recovered = storage
+            .recover(
+                &repo(),
+                &prd(),
+                BacklogRecoveryAction::Release,
+                "ops:alice",
+                "review was disabled",
+            )
+            .unwrap();
+        assert_eq!(recovered.status, BacklogStatus::Pending);
+        let events: Vec<(String, String, String)> = storage
+            .connection
+            .prepare(
+                "SELECT old_status,new_status,actor FROM backlog_status_events ORDER BY event_id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![
+                ("pending".into(), "in_progress".into(), claim_actor.into()),
+                ("in_progress".into(), "pending".into(), "ops:alice".into())
+            ]
+        );
+        let recovery: (String, String) = storage
+            .connection
+            .query_row(
+                "SELECT action,reason FROM backlog_recovery_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(recovery, ("release".into(), "review was disabled".into()));
+        assert!(storage
+            .recover(
+                &repo(),
+                &prd(),
+                BacklogRecoveryAction::Release,
+                "ops:alice",
+                "repeat",
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn manual_completion_requires_human_authority() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let claim_actor = "system:familiar-run:00001785772020811891-0000057947-000001";
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        storage
+            .claim_run(&repo(), &[prd()], &prd(), claim_actor)
+            .unwrap();
+        assert!(matches!(
+            storage.recover(
+                &repo(),
+                &prd(),
+                BacklogRecoveryAction::ManualCompleteOverride,
+                claim_actor,
+                "looks complete",
+            ),
+            Err(BacklogStoreError::HumanAuthorityRequired)
+        ));
+        let recovered = storage
+            .recover(
+                &repo(),
+                &prd(),
+                BacklogRecoveryAction::ManualCompleteOverride,
+                "human:alice",
+                "accepted outside normal review",
+            )
+            .unwrap();
+        assert_eq!(recovered.status, BacklogStatus::Completed);
     }
 
     #[test]

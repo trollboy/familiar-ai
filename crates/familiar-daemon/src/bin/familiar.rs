@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use familiar_agent::CodexAgent;
 use familiar_core::{
-    load_manifest, validate_graph, AppPaths, BacklogDiscovery, BacklogManager, BacklogStatusStore,
+    load_manifest, resolve_run_prd, validate_graph, validate_recovery_attribution, AppPaths,
+    BacklogDiscovery, BacklogManager, BacklogRecoveryAction, BacklogStatusStore,
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery,
 };
 use familiar_daemon::run::execute;
@@ -46,6 +47,24 @@ enum BacklogCommand {
     Bootstrap {
         #[command(subcommand)]
         command: BootstrapCommand,
+    },
+    /// Return one claimed PRD to pending without altering its claim or worktree history.
+    Release {
+        prd_path: PathBuf,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// MANUAL OVERRIDE: complete one claimed PRD without normal review evidence.
+    Complete {
+        prd_path: PathBuf,
+        /// Explicit human authority in the form human:<identity>.
+        #[arg(long)]
+        actor: String,
+        /// Non-empty audit reason for bypassing the normal completion predicate.
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -184,8 +203,76 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
                 result.rollback_run_id, result.item_count
             );
         }
+        BacklogCommand::Release {
+            prd_path,
+            actor,
+            reason,
+        } => recover_backlog(
+            &mut db,
+            &repository,
+            &discovered,
+            &prd_path,
+            BacklogRecoveryAction::Release,
+            &actor,
+            &reason,
+        )?,
+        BacklogCommand::Complete {
+            prd_path,
+            actor,
+            reason,
+        } => recover_backlog(
+            &mut db,
+            &repository,
+            &discovered,
+            &prd_path,
+            BacklogRecoveryAction::ManualCompleteOverride,
+            &actor,
+            &reason,
+        )?,
     }
     Ok(())
+}
+
+fn recover_backlog(
+    db: &mut Database,
+    repository: &familiar_core::RepositoryIdentity,
+    discovered: &[familiar_core::DiscoveredPrd],
+    supplied_path: &std::path::Path,
+    action: BacklogRecoveryAction,
+    actor: &str,
+    reason: &str,
+) -> Result<(), String> {
+    validate_recovery_attribution(action, actor, reason).map_err(|e| e.to_string())?;
+    let target =
+        resolve_run_prd(repository, discovered, supplied_path).map_err(|e| e.to_string())?;
+    let mut store = SqliteBacklogRepository::new(db.conn_mut());
+    store
+        .reconcile_and_snapshot(repository, discovered)
+        .map_err(|e| e.to_string())?;
+    let result = store
+        .recover(repository, &target, action, actor, reason)
+        .map_err(|e| e.to_string())?;
+    let actor = actor.trim();
+    let reason = reason.trim();
+    let label = if action == BacklogRecoveryAction::ManualCompleteOverride {
+        " MANUAL OVERRIDE"
+    } else {
+        ""
+    };
+    println!(
+        "backlog recovery:{label} {} {} in_progress -> {} action={} actor={} reason={}",
+        result.prd.id,
+        result.prd.path,
+        result.status.as_str(),
+        action.as_str(),
+        escape_output(actor),
+        escape_output(reason)
+    );
+    Ok(())
+}
+
+fn escape_output(value: &str) -> String {
+    format!("{value:?}")
 }
 
 fn database() -> Result<Database, String> {
@@ -288,5 +375,22 @@ mod tests {
             Command::Next
         ));
         assert!(Cli::try_parse_from(["familiar", "next", "PRD-1.md"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from([
+                "familiar",
+                "backlog",
+                "complete",
+                "docs/prds/PRD-012.md",
+                "--actor",
+                "human:alice",
+                "--reason",
+                "manual acceptance"
+            ])
+            .unwrap()
+            .command,
+            Command::Backlog {
+                command: BacklogCommand::Complete { .. }
+            }
+        ));
     }
 }

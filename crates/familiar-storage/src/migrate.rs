@@ -40,6 +40,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         sql: include_str!("../migrations/008_backlog_bootstrap.sql"),
     },
+    Migration {
+        version: 9,
+        sql: include_str!("../migrations/009_backlog_recovery.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_core::Result<usize> {
@@ -124,6 +128,7 @@ mod tests {
         assert!(tables.contains(&"backlog_bootstrap_items".to_string()));
         assert!(tables.contains(&"backlog_bootstrap_rollbacks".to_string()));
         assert!(tables.contains(&"backlog_bootstrap_rollback_items".to_string()));
+        assert!(tables.contains(&"backlog_recovery_events".to_string()));
         let backlog_rows: i64 = db
             .conn()
             .query_row("SELECT count(*) FROM backlog_prds", [], |row| row.get(0))
@@ -149,7 +154,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 8);
+        assert_eq!(first, 9);
         assert_eq!(second, 0);
     }
 
@@ -166,7 +171,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
 
     #[test]
@@ -208,7 +213,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 6);
+        assert_eq!(db.run_migrations().unwrap(), 7);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -264,7 +269,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 2);
+        assert_eq!(db.run_migrations().unwrap(), 3);
         let project: (String, String) = db
             .conn()
             .query_row(
@@ -295,7 +300,7 @@ mod tests {
                 .unwrap();
         }
         db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
-        assert_eq!(db.run_migrations().unwrap(), 1);
+        assert_eq!(db.run_migrations().unwrap(), 2);
         let preserved: String = db
             .conn()
             .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
