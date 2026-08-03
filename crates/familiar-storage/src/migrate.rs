@@ -16,6 +16,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: include_str!("../migrations/002_summaries_decisions.sql"),
     },
+    Migration {
+        version: 3,
+        sql: include_str!("../migrations/003_file_summary_reconciliation.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_core::Result<usize> {
@@ -64,6 +68,8 @@ pub fn run_migrations(conn: &Connection) -> familiar_core::Result<usize> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::params;
+
     fn test_db() -> crate::Database {
         let db = crate::Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
@@ -88,6 +94,10 @@ mod tests {
         assert!(tables.contains(&"decisions".to_string()));
         assert!(tables.contains(&"session_rollups".to_string()));
         assert!(tables.contains(&"schema_migrations".to_string()));
+        assert!(tables.contains(&"file_summary_reconciliation_runs".to_string()));
+        assert!(tables.contains(&"file_summary_reconciliation_records".to_string()));
+        assert!(tables.contains(&"file_summary_reconciliation_rollbacks".to_string()));
+        assert!(tables.contains(&"file_summary_reconciliation_run_reasons".to_string()));
     }
 
     #[test]
@@ -95,7 +105,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 2);
+        assert_eq!(first, 3);
         assert_eq!(second, 0);
     }
 
@@ -112,6 +122,72 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn version_two_database_upgrades_additively_without_rewriting_summaries() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        for migration in &super::MIGRATIONS[..2] {
+            db.conn().execute_batch(migration.sql).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 'before')",
+                    params![migration.version],
+                )
+                .unwrap();
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO projects \
+                 (id, name, repo_root, active, last_used_at, ignored_paths_json, created_at, updated_at) \
+                 VALUES (1, 'legacy', '/legacy', 1, 'before', '[]', 'before', 'before')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO file_summaries \
+                 (id, project_id, path, summary, tags_json, extracted_symbols_json, \
+                  last_updated_at, created_at, updated_at) \
+                 VALUES (7, 1, '/legacy/src/main.rs', 'legacy payload', '[]', '[]', \
+                         'before', 'before', 'before')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(db.run_migrations().unwrap(), 1);
+        let unchanged: (i64, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT id, path, summary FROM file_summaries WHERE id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            unchanged,
+            (7, "/legacy/src/main.rs".into(), "legacy payload".into())
+        );
+        let records: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM file_summary_reconciliation_records",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            records, 0,
+            "schema upgrade must not synthesize legacy history"
+        );
     }
 }

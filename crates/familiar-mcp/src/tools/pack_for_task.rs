@@ -527,4 +527,64 @@ mod tests {
         // Should still include files (recency fallback)
         assert!(result["included"]["files"].as_u64().unwrap() > 0);
     }
+
+    #[tokio::test]
+    async fn reconciled_conflict_is_excluded_from_packed_context() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let pid = db
+            .create_project(&NewProject {
+                name: "reconciled".into(),
+                repo_root: "/test/repo".into(),
+                ignored_paths: vec![],
+                token_budget: None,
+            })
+            .unwrap()
+            .id;
+        db.create_or_update_file_summary(&NewFileSummary {
+            project_id: pid,
+            path: "src/main.rs".into(),
+            summary: "canonical active payload".into(),
+            tags: vec![],
+            extracted_symbols: vec![],
+            last_known_mtime: None,
+            last_known_size: None,
+        })
+        .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO file_summaries \
+                 (project_id, path, summary, tags_json, extracted_symbols_json, \
+                  last_updated_at, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, '[]', '[]', ?4, ?4, ?4)",
+                (
+                    pid,
+                    "/test/repo/src/main.rs",
+                    "archived conflicting payload",
+                    "2026-01-02T03:04:05Z",
+                ),
+            )
+            .unwrap();
+        let reconciliation = db.reconcile_file_summary_identities(pid).unwrap();
+        assert_eq!(reconciliation.conflicts, 1);
+
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(Arc::new(Mutex::new(db))));
+        let ctx = ToolContext {
+            storage,
+            status: Arc::new(Mutex::new(AppStatus::new())),
+            config: Arc::new(Config::default()),
+            router: None,
+        };
+        let result = PackForTaskTool
+            .call(
+                json!({"project_id": pid, "task": "main payload", "max_tokens": 1000}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let context = result["context"].as_str().unwrap();
+        assert!(context.contains("canonical active payload"));
+        assert!(!context.contains("archived conflicting payload"));
+        assert!(!context.contains("/test/repo/src/main.rs"));
+    }
 }
