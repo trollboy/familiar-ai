@@ -17,12 +17,15 @@ use tokio::sync::mpsc;
 
 use familiar_core::config::{Config, LoggingConfig};
 use familiar_core::models::NewProject;
-use familiar_core::{AppPaths, AppStatus, VersionInfo};
+use familiar_core::{AppPaths, AppStatus, CanonicalFileIdentity, VersionInfo};
 use familiar_llm::InferenceRouter;
-use familiar_storage::{Database, ProjectRepository};
+use familiar_storage::{
+    Database, FileSummaryRepository, LifecycleChange, LifecycleRepository, ProjectRepository,
+    RetirementReason,
+};
 use familiar_watcher::{FileWatcher, WatcherEvent};
 
-use crate::summary_worker::{enqueue_initial_scan, SummaryRequest, SummaryWorker};
+use crate::summary_worker::{run_repository_scan, SummaryRequest, SummaryWorker};
 
 use crate::cli::Cli;
 use crate::command::{handle_commands, CommandState, DaemonCommand};
@@ -509,10 +512,11 @@ async fn handle_watcher_events(
 
                 // Initial scan to populate file summaries
                 if let (Some(pid), Some(tx)) = (resolved_pid, summary_tx.as_ref()) {
-                    enqueue_initial_scan(&repo_root, pid, tx, max_file_size_bytes);
+                    run_repository_scan(&db, &repo_root, pid, tx, max_file_size_bytes);
                 }
             }
-            WatcherEvent::FileChanged { path, repo_root } => {
+            WatcherEvent::FileCreated { path, repo_root }
+            | WatcherEvent::FileChanged { path, repo_root } => {
                 tracing::debug!(
                     path = %path.display(),
                     repo = repo_root.as_ref().map(|r| r.display().to_string()).unwrap_or_default(),
@@ -520,13 +524,89 @@ async fn handle_watcher_events(
                 );
                 if let (Some(repo), Some(tx)) = (repo_root.as_ref(), summary_tx.as_ref()) {
                     if let Some(pid) = lookup_project_id(&db, repo) {
-                        let _ = tx
-                            .send(SummaryRequest {
+                        let identity = match CanonicalFileIdentity::from_observed(pid, repo, &path)
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(error=%e,"rejected watcher identity");
+                                continue;
+                            }
+                        };
+                        let meta = match std::fs::metadata(&path) {
+                            Ok(v) if v.is_file() && v.len() <= max_file_size_bytes => v,
+                            Ok(_) => {
+                                let _ = db.lock().unwrap().retire_absent(
+                                    pid,
+                                    identity.path(),
+                                    RetirementReason::Ineligible,
+                                    "watcher",
+                                    None,
+                                );
+                                continue;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                let _ = db.lock().unwrap().retire_absent(
+                                    pid,
+                                    identity.path(),
+                                    RetirementReason::Deleted,
+                                    "watcher",
+                                    None,
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!(error=%e,"source unavailable; leaving active summary untouched");
+                                continue;
+                            }
+                        };
+                        if let Err(error) = std::fs::read_to_string(&path) {
+                            if error.kind() == std::io::ErrorKind::InvalidData {
+                                let _ = db.lock().unwrap().retire_absent(
+                                    pid,
+                                    identity.path(),
+                                    RetirementReason::Ineligible,
+                                    "watcher",
+                                    None,
+                                );
+                            } else {
+                                tracing::warn!(error=%error,"source unreadable; active summary retained");
+                            }
+                            continue;
+                        }
+                        let change = if db
+                            .lock()
+                            .unwrap()
+                            .get_file_summary_by_path(pid, identity.path())
+                            .ok()
+                            .flatten()
+                            .is_some()
+                        {
+                            LifecycleChange::Modify
+                        } else {
+                            LifecycleChange::Create
+                        };
+                        let deferred = tx.capacity() == 0;
+                        if let Err(e) = db.lock().unwrap().observe_change(
+                            pid,
+                            identity.path(),
+                            change,
+                            "watcher",
+                            deferred,
+                        ) {
+                            tracing::warn!(error=%e,"failed to persist lifecycle observation");
+                            continue;
+                        }
+                        let _ = meta;
+                        if tx
+                            .try_send(SummaryRequest {
                                 project_id: pid,
                                 repo_root: repo.clone(),
                                 path: path.clone(),
                             })
-                            .await;
+                            .is_err()
+                        {
+                            tracing::debug!(path=%path.display(),"summary dispatch deferred; durable work retained");
+                        }
                     }
                 }
             }
@@ -536,6 +616,14 @@ async fn handle_watcher_events(
                     repo = repo_root.as_ref().map(|r| r.display().to_string()).unwrap_or_default(),
                     "file removed"
                 );
+                if let Some(repo) = repo_root.as_ref() {
+                    if let Some(pid) = lookup_project_id(&db, repo) {
+                        if let Ok(identity) = CanonicalFileIdentity::from_observed(pid, repo, &path)
+                        {
+                            match std::fs::symlink_metadata(&path){Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{if let Err(e)=db.lock().unwrap().retire_absent(pid,identity.path(),RetirementReason::Deleted,"watcher",None){tracing::warn!(error=%e,"failed to retire removed file");}},Ok(_)=>tracing::debug!("removal observation contradicted by current source; reconciliation required"),Err(e)=>tracing::warn!(error=%e,"removal is uncertain; active summary retained")}
+                        }
+                    }
+                }
             }
             WatcherEvent::FileRenamed {
                 old_path,
@@ -548,6 +636,49 @@ async fn handle_watcher_events(
                     repo = repo_root.as_ref().map(|r| r.display().to_string()).unwrap_or_default(),
                     "file renamed"
                 );
+                if let (Some(repo), Some(tx)) = (repo_root.as_ref(), summary_tx.as_ref()) {
+                    if let Some(pid) = lookup_project_id(&db, repo) {
+                        let old = CanonicalFileIdentity::from_observed(pid, repo, &old_path);
+                        let new = CanonicalFileIdentity::from_observed(pid, repo, &new_path);
+                        if let (Ok(old), Ok(new)) = (old, new) {
+                            let old_absent = matches!(std::fs::symlink_metadata(&old_path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+                            let new_valid = std::fs::metadata(&new_path)
+                                .map(|m| m.is_file() && m.len() <= max_file_size_bytes)
+                                .unwrap_or(false);
+                            if old_absent && new_valid {
+                                match db.lock().unwrap().observe_exact_rename(
+                                    pid,
+                                    old.path(),
+                                    new.path(),
+                                    "watcher",
+                                    tx.capacity() == 0,
+                                ) {
+                                    Ok(_) => {
+                                        let _ = tx.try_send(SummaryRequest {
+                                            project_id: pid,
+                                            repo_root: repo.clone(),
+                                            path: new_path,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "exact rename failed closed")
+                                    }
+                                }
+                            } else {
+                                tracing::debug!(
+                                    "rename state is ambiguous; complete scan required"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            WatcherEvent::FileAmbiguous {
+                paths,
+                repo_root,
+                detail,
+            } => {
+                tracing::warn!(?paths, repo=?repo_root, %detail, "ambiguous watcher observation; complete scan required");
             }
             WatcherEvent::WatchError { message } => {
                 tracing::warn!(error = %message, "watcher error");

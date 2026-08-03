@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use familiar_core::config::SummaryConfig;
 use familiar_core::models::NewFileSummary;
 use familiar_core::CanonicalFileIdentity;
-use familiar_storage::{Database, FileSummaryRepository};
+use familiar_storage::{Database, FileSummaryRepository, LifecycleRepository, ProjectRepository};
 use familiar_summary::SummaryGenerator;
 
 use crate::command::CommandState;
@@ -80,6 +80,7 @@ impl SummaryWorker {
 
         let quiet = Duration::from_millis(self.config.per_file_quiet_ms);
         let max_pending = self.config.max_pending_files;
+        self.refill_from_durable(&mut pending, max_pending);
 
         loop {
             tokio::select! {
@@ -102,7 +103,7 @@ impl SummaryWorker {
                                 tracing::warn!(
                                     pending = pending.len(),
                                     max = max_pending,
-                                    "summary worker pending queue full, dropping event"
+                                    "summary worker memory queue full; durable work remains deferred"
                                 );
                                 continue;
                             }
@@ -117,6 +118,7 @@ impl SummaryWorker {
                 }
                 _ = ticker.tick() => {
                     self.flush_quiet(&mut pending, quiet);
+                    self.refill_from_durable(&mut pending, max_pending);
                 }
             }
         }
@@ -124,6 +126,37 @@ impl SummaryWorker {
 
     fn is_paused(&self) -> bool {
         self.command_state.lock().unwrap().paused
+    }
+
+    fn refill_from_durable(
+        &self,
+        pending: &mut HashMap<(i64, String), (PathBuf, PathBuf, Instant)>,
+        max_pending: usize,
+    ) {
+        if pending.len() >= max_pending {
+            return;
+        }
+        let db = self.db.lock().unwrap();
+        let projects = match db.list_active_projects() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        for project in projects {
+            let remaining = max_pending.saturating_sub(pending.len());
+            if remaining == 0 {
+                break;
+            }
+            let work = match db.list_pending_summary_work(project.id, remaining) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let root = PathBuf::from(&project.repo_root);
+            for item in work {
+                pending
+                    .entry((project.id, item.path.clone()))
+                    .or_insert_with(|| (root.clone(), root.join(item.path), Instant::now()));
+            }
+        }
     }
 
     fn flush_quiet(
@@ -207,9 +240,35 @@ impl SummaryWorker {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!(path = %path.display(), error = %e, "failed to read file");
+                let _ = self.db.lock().unwrap().fail_summary_work(
+                    project_id,
+                    identity.path(),
+                    &e.to_string(),
+                );
                 return;
             }
         };
+
+        // Do not publish output if the source changed across the read boundary.
+        let after = match std::fs::metadata(path) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.db.lock().unwrap().fail_summary_work(
+                    project_id,
+                    identity.path(),
+                    &error.to_string(),
+                );
+                return;
+            }
+        };
+        if after.len() != meta.len() || system_time_to_secs(after.modified().ok()) != mtime_secs {
+            let _ = self.db.lock().unwrap().fail_summary_work(
+                project_id,
+                identity.path(),
+                "source changed during summarization",
+            );
+            return;
+        }
 
         let gen = SummaryGenerator::new();
         let generated = gen.generate(Path::new(identity.path()), &content);
@@ -225,7 +284,7 @@ impl SummaryWorker {
         };
 
         let db = self.db.lock().unwrap();
-        match db.create_or_update_file_summary(&new_summary) {
+        match db.commit_summary_work(&new_summary) {
             Ok(_) => {
                 tracing::debug!(path = %path.display(), "summarized file");
             }
@@ -277,6 +336,147 @@ pub fn enqueue_initial_scan(
         if tx.try_send(req).is_err() {
             // Channel full or closed — stop scanning
             break;
+        }
+    }
+}
+
+/// Durable initial/recovery inventory. Enumeration errors are retained and
+/// prevent absence reconciliation; queue capacity only affects dispatch.
+pub fn run_repository_scan(
+    db: &Arc<Mutex<Database>>,
+    repo_root: &Path,
+    project_id: i64,
+    tx: &mpsc::Sender<SummaryRequest>,
+    max_file_size_bytes: u64,
+) {
+    let root = match repo_root.to_str() {
+        Some(v) => v,
+        None => {
+            tracing::warn!("scan root is not losslessly representable");
+            return;
+        }
+    };
+    let run = match db
+        .lock()
+        .unwrap()
+        .start_repository_scan(project_id, root, "prd003-v1")
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error=%e,"scan blocked");
+            return;
+        }
+    };
+    let walker = ignore::WalkBuilder::new(repo_root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !HARDCODED_SKIP_DIRS.contains(&name.as_ref())
+        })
+        .build();
+    for result in walker {
+        let entry = match result {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = db
+                    .lock()
+                    .unwrap()
+                    .fail_repository_scan(run.id, &e.to_string());
+                return;
+            }
+        };
+        let meta = match entry.metadata() {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = db
+                    .lock()
+                    .unwrap()
+                    .fail_repository_scan(run.id, &e.to_string());
+                return;
+            }
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let identity =
+            match CanonicalFileIdentity::from_observed(project_id, repo_root, entry.path()) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = db
+                        .lock()
+                        .unwrap()
+                        .fail_repository_scan(run.id, &e.to_string());
+                    return;
+                }
+            };
+        let classification = if meta.len() > max_file_size_bytes {
+            "excluded"
+        } else {
+            match std::fs::read_to_string(entry.path()) {
+                Ok(_) => "eligible",
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => "excluded",
+                Err(error) => {
+                    let _ = db
+                        .lock()
+                        .unwrap()
+                        .fail_repository_scan(run.id, &error.to_string());
+                    return;
+                }
+            }
+        };
+        if let Err(e) =
+            db.lock()
+                .unwrap()
+                .stage_scan_entry(&run, identity.path(), classification, None)
+        {
+            let _ = db
+                .lock()
+                .unwrap()
+                .fail_repository_scan(run.id, &e.to_string());
+            return;
+        }
+        if classification == "excluded" {
+            let _ = db.lock().unwrap().retire_absent(
+                project_id,
+                identity.path(),
+                familiar_storage::RetirementReason::Ineligible,
+                "scan",
+                Some(run.id),
+            );
+        }
+    }
+    {
+        let locked = db.lock().unwrap();
+        if let Err(e) = locked
+            .mark_scan_enumeration_complete(run.id)
+            .and_then(|_| locked.reconcile_repository_scan(&run))
+        {
+            tracing::warn!(error=%e,"scan reconciliation incomplete");
+            return;
+        }
+    }
+    let pending = match db
+        .lock()
+        .unwrap()
+        .list_pending_summary_work(project_id, usize::MAX)
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error=%e,"failed to resume scan work");
+            return;
+        }
+    };
+    for item in pending {
+        let request = SummaryRequest {
+            project_id,
+            repo_root: repo_root.to_path_buf(),
+            path: repo_root.join(&item.path),
+        };
+        if tx.try_send(request).is_err() {
+            tracing::debug!(path=%item.path,"summary dispatch deferred; durable work retained");
         }
     }
 }

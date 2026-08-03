@@ -19,6 +19,7 @@ tray = ["dep:familiar-tray"]
 
 [dependencies]
 familiar-agent = { path = "../familiar-agent" }
+familiar-context = { path = "../familiar-context" }
 familiar-core = { path = "../familiar-core" }
 familiar-logging = { path = "../familiar-logging" }
 familiar-storage = { path = "../familiar-storage" }

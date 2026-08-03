@@ -75,6 +75,152 @@ fn file_based_db_lifecycle() {
     }
 }
 
+fn lifecycle_fixture(root: &std::path::Path) -> (Database, i64) {
+    let db = Database::open_in_memory().unwrap();
+    db.run_migrations().unwrap();
+    let project = db
+        .create_project(&NewProject {
+            name: "lifecycle".into(),
+            repo_root: root.to_str().unwrap().into(),
+            ignored_paths: vec![],
+            token_budget: None,
+        })
+        .unwrap();
+    (db, project.id)
+}
+
+#[test]
+fn modification_tombstones_complete_row_and_deduplicates_pending_work() {
+    let tmp = tempdir().unwrap();
+    let (db, pid) = lifecycle_fixture(tmp.path());
+    let original = db
+        .create_or_update_file_summary(&NewFileSummary {
+            project_id: pid,
+            path: "src/a.rs".into(),
+            summary: "old".into(),
+            tags: vec!["tag".into()],
+            extracted_symbols: vec!["A".into()],
+            last_known_mtime: Some(4),
+            last_known_size: Some(8),
+        })
+        .unwrap();
+    db.observe_change(pid, "src/a.rs", LifecycleChange::Modify, "watcher", false)
+        .unwrap();
+    db.observe_change(pid, "src/a.rs", LifecycleChange::Modify, "watcher", true)
+        .unwrap();
+    assert!(db
+        .get_file_summary_by_path(pid, "src/a.rs")
+        .unwrap()
+        .is_none());
+    assert_eq!(db.list_pending_summary_work(pid, 10).unwrap().len(), 1);
+    #[allow(clippy::type_complexity)]
+    let row:(i64,String,String,String,Option<String>,Option<i64>,Option<i64>,String,String,String)=db.conn().query_row("SELECT original_file_summary_id,path,summary,tags_json,extracted_symbols_json,last_known_mtime,last_known_size,last_updated_at,original_created_at,original_updated_at FROM file_summary_lifecycle_tombstones WHERE project_id=?1",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?))).unwrap();
+    assert_eq!(row.0, original.id);
+    assert_eq!(row.1, "src/a.rs");
+    assert_eq!(row.2, "old");
+    assert_eq!(row.3, "[\"tag\"]");
+    assert_eq!(row.4.as_deref(), Some("[\"A\"]"));
+    assert_eq!(row.5, Some(4));
+    assert_eq!(row.6, Some(8));
+    assert_eq!(row.7, original.last_updated_at.to_rfc3339());
+    assert_eq!(row.8, original.created_at.to_rfc3339());
+    assert_eq!(row.9, original.updated_at.to_rfc3339());
+}
+
+#[test]
+fn exact_rename_is_atomic_and_never_rekeys_summary() {
+    let tmp = tempdir().unwrap();
+    let (db, pid) = lifecycle_fixture(tmp.path());
+    db.create_or_update_file_summary(&NewFileSummary {
+        project_id: pid,
+        path: "old.rs".into(),
+        summary: "old".into(),
+        tags: vec![],
+        extracted_symbols: vec![],
+        last_known_mtime: None,
+        last_known_size: None,
+    })
+    .unwrap();
+    db.observe_exact_rename(pid, "old.rs", "new.rs", "watcher", false)
+        .unwrap();
+    assert!(db
+        .get_file_summary_by_path(pid, "old.rs")
+        .unwrap()
+        .is_none());
+    assert!(db
+        .get_file_summary_by_path(pid, "new.rs")
+        .unwrap()
+        .is_none());
+    let pending = db.list_pending_summary_work(pid, 10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].path, "new.rs");
+    let related: String = db
+        .conn()
+        .query_row(
+            "SELECT related_path FROM file_summary_lifecycle_tombstones WHERE project_id=?1",
+            [pid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(related, "new.rs");
+}
+
+#[test]
+fn incomplete_scan_cannot_reconcile_absence_but_complete_empty_scan_can() {
+    let tmp = tempdir().unwrap();
+    let (db, pid) = lifecycle_fixture(tmp.path());
+    db.create_or_update_file_summary(&NewFileSummary {
+        project_id: pid,
+        path: "gone.rs".into(),
+        summary: "gone".into(),
+        tags: vec![],
+        extracted_symbols: vec![],
+        last_known_mtime: None,
+        last_known_size: None,
+    })
+    .unwrap();
+    let run = db
+        .start_repository_scan(pid, tmp.path().to_str().unwrap(), "prd003-v1")
+        .unwrap();
+    db.fail_repository_scan(run.id, "walker failed").unwrap();
+    assert!(db.reconcile_repository_scan(&run).is_err());
+    assert!(db
+        .get_file_summary_by_path(pid, "gone.rs")
+        .unwrap()
+        .is_some());
+    let run = db
+        .start_repository_scan(pid, tmp.path().to_str().unwrap(), "prd003-v1")
+        .unwrap();
+    db.mark_scan_enumeration_complete(run.id).unwrap();
+    db.reconcile_repository_scan(&run).unwrap();
+    assert!(db
+        .get_file_summary_by_path(pid, "gone.rs")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        db.latest_scan_status(pid).unwrap().unwrap().status,
+        "reconciliation_complete"
+    );
+}
+
+#[test]
+fn lifecycle_schema_passes_sqlite_integrity_checks() {
+    let tmp = tempdir().unwrap();
+    let (db, _) = lifecycle_fixture(tmp.path());
+    let integrity: String = db
+        .conn()
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    let foreign_key_errors: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    assert_eq!(foreign_key_errors, 0);
+}
+
 #[test]
 fn foreign_key_cascade_deletes_children() {
     let db = Database::open_in_memory().unwrap();

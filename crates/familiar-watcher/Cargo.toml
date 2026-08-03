@@ -8,7 +8,6 @@ rust-version.workspace = true
 [dependencies]
 familiar-core = { path = "../familiar-core" }
 notify.workspace = true
-notify-debouncer-mini.workspace = true
 ignore.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 tracing.workspace = true

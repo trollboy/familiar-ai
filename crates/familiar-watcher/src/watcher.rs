@@ -1,9 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
-use notify::RecursiveMode;
-use notify_debouncer_mini::new_debouncer;
+use notify::event::{ModifyKind, RenameMode};
+use notify::{Config, Event, EventKind, PollWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
 use familiar_core::config::WatcherConfig;
@@ -75,23 +74,23 @@ impl FileWatcher {
         // 2. Build ignore matcher from custom patterns
         let ignore_matcher = build_ignore_matcher(&self.config.ignore_patterns);
 
-        // 3. Set up notify debouncer
+        // 3. Use notify directly: the mini debouncer discards the native kind.
         let (bridge_tx, bridge_rx) = std::sync::mpsc::channel();
-        let debounce_duration = Duration::from_millis(self.config.debounce_ms);
-
-        let mut debouncer = new_debouncer(debounce_duration, move |result| {
-            let _ = bridge_tx.send(result);
-        })
+        let mut watcher = PollWatcher::new(
+            move |result| {
+                let _ = bridge_tx.send(result);
+            },
+            Config::default().with_poll_interval(std::time::Duration::from_millis(
+                self.config.debounce_ms.max(25),
+            )),
+        )
         .map_err(|e| FamiliarError::Watcher(e.to_string()))?;
 
         // 4. Add watches on resolved paths
         for path in &watch_paths {
-            debouncer
-                .watcher()
-                .watch(path, RecursiveMode::Recursive)
-                .map_err(|e| {
-                    FamiliarError::Watcher(format!("failed to watch {}: {e}", path.display()))
-                })?;
+            watcher.watch(path, RecursiveMode::Recursive).map_err(|e| {
+                FamiliarError::Watcher(format!("failed to watch {}: {e}", path.display()))
+            })?;
             tracing::info!(path = %path.display(), "watching directory");
         }
 
@@ -111,7 +110,7 @@ impl FileWatcher {
 
         // Drop debouncer to stop its internal thread, which closes bridge_tx,
         // which causes bridge_rx.recv() to return Err, ending the bridge thread.
-        drop(debouncer);
+        drop(watcher);
         let _ = bridge_handle.join();
 
         Ok(())
@@ -119,28 +118,29 @@ impl FileWatcher {
 }
 
 fn bridge_thread(
-    rx: std::sync::mpsc::Receiver<
-        Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>,
-    >,
+    rx: std::sync::mpsc::Receiver<Result<Event, notify::Error>>,
     tx: mpsc::Sender<WatcherEvent>,
     repo_map: &RepoMap,
     ignore_matcher: &IgnoreMatcher,
 ) {
     while let Ok(result) = rx.recv() {
         match result {
-            Ok(events) => {
-                for event in events {
-                    if ignore_matcher.is_ignored(&event.path) {
-                        continue;
-                    }
-                    let repo_root = repo_map.find_repo(&event.path).map(Path::to_path_buf);
-                    let watcher_event = WatcherEvent::FileChanged {
-                        path: event.path,
-                        repo_root,
-                    };
-                    if tx.blocking_send(watcher_event).is_err() {
-                        return;
-                    }
+            Ok(event) => {
+                let paths: Vec<_> = event
+                    .paths
+                    .into_iter()
+                    .filter(|p| !ignore_matcher.is_ignored(p))
+                    .collect();
+                if paths.is_empty() {
+                    continue;
+                }
+                let repo_root = paths
+                    .first()
+                    .and_then(|p| repo_map.find_repo(p))
+                    .map(Path::to_path_buf);
+                let translated = translate_native(event.kind, paths, repo_root);
+                if tx.blocking_send(translated).is_err() {
+                    return;
                 }
             }
             Err(e) => {
@@ -152,10 +152,100 @@ fn bridge_thread(
     }
 }
 
+fn translate_native(
+    kind: EventKind,
+    paths: Vec<std::path::PathBuf>,
+    repo_root: Option<std::path::PathBuf>,
+) -> WatcherEvent {
+    match kind {
+        EventKind::Create(_) if paths.len() == 1 => WatcherEvent::FileCreated {
+            path: paths[0].clone(),
+            repo_root,
+        },
+        EventKind::Remove(_) if paths.len() == 1 => WatcherEvent::FileRemoved {
+            path: paths[0].clone(),
+            repo_root,
+        },
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if paths.len() == 2 => {
+            WatcherEvent::FileRenamed {
+                old_path: paths[0].clone(),
+                new_path: paths[1].clone(),
+                repo_root,
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(_)) => WatcherEvent::FileAmbiguous {
+            paths,
+            repo_root,
+            detail: "unpaired or platform-ambiguous rename".into(),
+        },
+        EventKind::Modify(_) if paths.len() == 1 => WatcherEvent::FileChanged {
+            path: paths[0].clone(),
+            repo_root,
+        },
+        kind => WatcherEvent::FileAmbiguous {
+            paths,
+            repo_root,
+            detail: format!("unsupported or coalesced native event: {kind:?}"),
+        },
+    }
+}
+
+#[cfg(test)]
+mod native_translation_tests {
+    use super::*;
+
+    #[test]
+    fn exact_pair_is_rename_and_unpaired_is_ambiguous() {
+        let old = std::path::PathBuf::from("/repo/old.rs");
+        let new = std::path::PathBuf::from("/repo/new.rs");
+        assert!(
+            matches!(translate_native(EventKind::Modify(ModifyKind::Name(RenameMode::Both)),vec![old.clone(),new.clone()],Some("/repo".into())),WatcherEvent::FileRenamed{old_path,new_path,..} if old_path==old && new_path==new)
+        );
+        assert!(matches!(
+            translate_native(
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                vec![old],
+                Some("/repo".into())
+            ),
+            WatcherEvent::FileAmbiguous { .. }
+        ));
+    }
+
+    #[test]
+    fn create_modify_and_remove_remain_typed() {
+        let path = std::path::PathBuf::from("/repo/a.rs");
+        assert!(matches!(
+            translate_native(
+                EventKind::Create(notify::event::CreateKind::File),
+                vec![path.clone()],
+                None
+            ),
+            WatcherEvent::FileCreated { .. }
+        ));
+        assert!(matches!(
+            translate_native(
+                EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+                vec![path.clone()],
+                None
+            ),
+            WatcherEvent::FileChanged { .. }
+        ));
+        assert!(matches!(
+            translate_native(
+                EventKind::Remove(notify::event::RemoveKind::File),
+                vec![path],
+                None
+            ),
+            WatcherEvent::FileRemoved { .. }
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn watcher_emits_file_changed() {
@@ -192,19 +282,16 @@ mod tests {
         // Create a file to trigger an event
         fs::write(root.join("repo/test.txt"), "hello").unwrap();
 
-        // Wait for debounced event
-        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timeout waiting for event")
-            .expect("channel closed");
-
-        match event {
-            WatcherEvent::FileChanged { path, repo_root } => {
-                assert!(path.to_string_lossy().contains("test.txt"));
-                assert!(repo_root.is_some());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut found = false;
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if matches!(event, WatcherEvent::FileCreated { ref path, ref repo_root } | WatcherEvent::FileChanged { ref path, ref repo_root } if path.ends_with("test.txt") && repo_root.is_some())
+            {
+                found = true;
+                break;
             }
-            other => panic!("expected FileChanged, got {other:?}"),
         }
+        assert!(found, "watcher did not emit a typed event for test.txt");
 
         let _ = shutdown_tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;

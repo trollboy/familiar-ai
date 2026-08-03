@@ -9,6 +9,10 @@ pub enum WatcherEvent {
         path: PathBuf,
         repo_root: Option<PathBuf>,
     },
+    FileCreated {
+        path: PathBuf,
+        repo_root: Option<PathBuf>,
+    },
     FileRemoved {
         path: PathBuf,
         repo_root: Option<PathBuf>,
@@ -17,6 +21,11 @@ pub enum WatcherEvent {
         old_path: PathBuf,
         new_path: PathBuf,
         repo_root: Option<PathBuf>,
+    },
+    FileAmbiguous {
+        paths: Vec<PathBuf>,
+        repo_root: Option<PathBuf>,
+        detail: String,
     },
     WatchError {
         message: String,

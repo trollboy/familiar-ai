@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/familiar-agent",
+    "crates/familiar-context",
     "crates/familiar-core",
     "crates/familiar-logging",
     "crates/familiar-mcp",

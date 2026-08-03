@@ -586,6 +586,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "familiar-context"
+version = "0.1.0"
+dependencies = [
+ "familiar-tokens",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "familiar-core"
 version = "0.1.0"
 dependencies = [
@@ -610,6 +619,7 @@ dependencies = [
  "chrono",
  "clap",
  "familiar-agent",
+ "familiar-context",
  "familiar-core",
  "familiar-llm",
  "familiar-logging",

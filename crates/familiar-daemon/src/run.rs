@@ -1,21 +1,21 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
-use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use chrono::Utc;
 use familiar_agent::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
+use familiar_context::{
+    ContextCompilationError, ContextCompiler, ContextRequest, ExecutionContext,
+};
 use familiar_core::{AppPaths, Config, ExecutionPrice};
 use familiar_storage::{
     Database, ExecutionFinalization, ExecutionHistoryRepository, ExecutionStart,
 };
 
-const REFERENCE_PREFIXES: [&str; 2] = ["docs/adr/", "docs/contracts/"];
 const EXECUTION_CONSTRAINTS: &str = r#"- Implement the supplied PRD exactly as written and do not broaden its scope.
 - Treat repository source and Git state as authoritative.
 - Inspect the existing implementation and identify blocking conflicts before editing.
@@ -31,13 +31,7 @@ static EXECUTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug)]
 pub enum RunError {
     CurrentDirectory(io::Error),
-    RepositoryRootNotFound(PathBuf),
-    InvalidPrdPath(String),
-    ReadDocument {
-        path: PathBuf,
-        source: io::Error,
-    },
-    Git(String),
+    Context(ContextCompilationError),
     Config(String),
     Storage(String),
     Agent(AgentExecutionError),
@@ -50,16 +44,7 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CurrentDirectory(e) => write!(f, "cannot resolve current directory: {e}"),
-            Self::RepositoryRootNotFound(p) => write!(
-                f,
-                "no Git repository root found at or above {}",
-                p.display()
-            ),
-            Self::InvalidPrdPath(m) => f.write_str(m),
-            Self::ReadDocument { path, source } => {
-                write!(f, "cannot read {}: {source}", path.display())
-            }
-            Self::Git(m) => write!(f, "Git query failed: {m}"),
+            Self::Context(error) => error.fmt(f),
             Self::Config(m) => write!(f, "configuration failed: {m}"),
             Self::Storage(m) => write!(f, "execution history failed: {m}"),
             Self::Agent(error) => error.fmt(f),
@@ -71,15 +56,6 @@ impl fmt::Display for RunError {
     }
 }
 impl std::error::Error for RunError {}
-
-#[derive(Debug)]
-struct Context {
-    worktree: PathBuf,
-    repository: PathBuf,
-    commit: Option<String>,
-    prd_path: PathBuf,
-    prd_identity: String,
-}
 
 pub fn execute(prd_path: &Path, agent: &dyn CodingAgent) -> Result<ExecutionResult, RunError> {
     let paths = AppPaths::new();
@@ -95,8 +71,13 @@ pub fn execute_with_config(
     paths: &AppPaths,
 ) -> Result<ExecutionResult, RunError> {
     let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
-    let context = resolve_context(&current, prd_path)?;
-    let prompt = build_prompt(&context.worktree, &context.prd_path)?;
+    let context = ContextCompiler::new()
+        .compile(ContextRequest {
+            repository: &current,
+            prd: prd_path,
+        })
+        .map_err(RunError::Context)?;
+    let prompt = render_prompt(&context);
     let database_path = config.database.resolve_path(&paths.data_dir);
     let db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
     db.run_migrations()
@@ -119,24 +100,24 @@ pub fn execute_with_config(
     ] {
         unavailable.insert(field.into(), "runner_interrupted".into());
     }
-    if context.commit.is_none() {
+    if context.repository.git_commit.is_none() {
         unavailable.insert("git_commit".into(), "git_unavailable".into());
     }
     ExecutionHistoryRepository::new(db.conn())
         .insert_running(&ExecutionStart {
             execution_id: id.clone(),
             started_at,
-            repository: slash(&context.repository),
-            worktree: slash(&context.worktree),
-            git_commit: context.commit.clone(),
-            prd_path: context.prd_identity.clone(),
+            repository: slash(&context.repository.repository),
+            worktree: slash(&context.repository.worktree),
+            git_commit: context.repository.git_commit.clone(),
+            prd_path: context.prd.path.clone(),
             unavailable_fields: unavailable.clone(),
         })
         .map_err(|e| RunError::Storage(e.to_string()))?;
 
     let execution = agent.execute(
         ExecutionRequest {
-            working_directory: &context.worktree,
+            working_directory: &context.repository.worktree,
             prompt: &prompt,
         },
         &mut io::stdout(),
@@ -325,183 +306,49 @@ fn new_id() -> String {
 fn slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
-fn git(cwd: &Path, args: &[&str]) -> Result<Option<String>, RunError> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| RunError::Git(e.to_string()))?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8(out.stdout)
-        .map_err(|e| RunError::Git(e.to_string()))?
-        .trim()
-        .to_owned();
-    Ok((!value.is_empty()).then_some(value))
-}
-fn resolve_context(start: &Path, supplied: &Path) -> Result<Context, RunError> {
-    let worktree_raw = git(start, &["rev-parse", "--show-toplevel"])?
-        .ok_or_else(|| RunError::Git("worktree root unavailable".into()))?;
-    let worktree = PathBuf::from(worktree_raw)
-        .canonicalize()
-        .map_err(RunError::CurrentDirectory)?;
-    let common = git(&worktree, &["rev-parse", "--git-common-dir"])?
-        .ok_or_else(|| RunError::Git("common directory unavailable".into()))?;
-    let common = PathBuf::from(common);
-    let repository = if common.is_absolute() {
-        common
-    } else {
-        worktree.join(common)
-    }
-    .canonicalize()
-    .map_err(RunError::CurrentDirectory)?;
-    let prd_path = validate_prd_path(&worktree, supplied)?;
-    let identity = slash(prd_path.strip_prefix(&worktree).expect("validated PRD"));
-    let commit = git(&worktree, &["rev-parse", "--verify", "HEAD"])?;
-    Ok(Context {
-        worktree,
-        repository,
-        commit,
-        prd_path,
-        prd_identity: identity,
-    })
-}
-
-pub fn resolve_repository_root(start: &Path) -> Result<PathBuf, RunError> {
-    git(start, &["rev-parse", "--show-toplevel"])?
-        .ok_or_else(|| RunError::RepositoryRootNotFound(start.into()))
-        .and_then(|p| {
-            PathBuf::from(p)
-                .canonicalize()
-                .map_err(RunError::CurrentDirectory)
-        })
-}
 pub fn build_prompt(repository_root: &Path, supplied_path: &Path) -> Result<String, RunError> {
-    let repository_root = repository_root
-        .canonicalize()
-        .map_err(RunError::CurrentDirectory)?;
-    let prd_path = validate_prd_path(&repository_root, supplied_path)?;
-    let prd = read_utf8(&prd_path)?;
-    let references = discover_references(&repository_root, &prd)?;
-    let relative_prd = prd_path
-        .strip_prefix(&repository_root)
-        .expect("validated path");
-    let mut prompt = String::new();
-    prompt.push_str("# Familiar execution request\n\nImplement the PRD below in this repository.\n\n## Fixed execution constraints\n\n");
-    prompt.push_str(EXECUTION_CONSTRAINTS);
-    prompt.push_str("\n\n## PRD: ");
-    prompt.push_str(&relative_prd.to_string_lossy());
-    prompt.push_str("\n\n");
-    prompt.push_str(&prd);
-    prompt.push('\n');
-    for reference in references {
-        let relative = reference
-            .strip_prefix(&repository_root)
-            .expect("contained reference");
-        prompt.push_str("\n## Directly referenced document: ");
-        prompt.push_str(&relative.to_string_lossy());
-        prompt.push_str("\n\n");
-        prompt.push_str(&read_utf8(&reference)?);
-        prompt.push('\n');
-    }
-    Ok(prompt)
-}
-fn validate_prd_path(repository_root: &Path, supplied_path: &Path) -> Result<PathBuf, RunError> {
-    if supplied_path.as_os_str().is_empty() {
-        return Err(RunError::InvalidPrdPath("PRD path cannot be empty".into()));
-    }
-    let candidate = if supplied_path.is_absolute() {
-        supplied_path.into()
+    let supplied = if supplied_path.is_absolute() {
+        supplied_path.to_owned()
     } else {
         env::current_dir()
             .map_err(RunError::CurrentDirectory)?
             .join(supplied_path)
     };
-    let path = candidate.canonicalize().map_err(|e| {
-        RunError::InvalidPrdPath(format!(
-            "cannot resolve PRD path {}: {e}",
-            candidate.display()
-        ))
-    })?;
-    let prd_dir = repository_root
-        .join("docs/prds")
-        .canonicalize()
-        .map_err(|e| {
-            RunError::InvalidPrdPath(format!("cannot resolve repository PRD directory: {e}"))
-        })?;
-    if !path.starts_with(&prd_dir) {
-        return Err(RunError::InvalidPrdPath(format!(
-            "PRD path must be contained in {}",
-            prd_dir.display()
-        )));
-    }
-    if !path.is_file() {
-        return Err(RunError::InvalidPrdPath(format!(
-            "PRD path is not a regular file: {}",
-            path.display()
-        )));
-    }
-    if path.extension().and_then(|v| v.to_str()) != Some("md") {
-        return Err(RunError::InvalidPrdPath(format!(
-            "PRD path must have a .md extension: {}",
-            path.display()
-        )));
-    }
-    Ok(path)
-}
-fn discover_references(repository_root: &Path, prd: &str) -> Result<Vec<PathBuf>, RunError> {
-    let mut paths = BTreeSet::new();
-    for prefix in REFERENCE_PREFIXES {
-        let mut rest = prd;
-        while let Some(i) = rest.find(prefix) {
-            rest = &rest[i..];
-            let end = rest
-                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')))
-                .unwrap_or(rest.len());
-            let reference = rest[..end].trim_end_matches('.');
-            if reference.ends_with(".md") {
-                paths.insert(reference.to_owned());
-            }
-            rest = &rest[end..];
-        }
-    }
-    paths
-        .into_iter()
-        .map(|relative| {
-            let path = repository_root
-                .join(&relative)
-                .canonicalize()
-                .map_err(|e| {
-                    RunError::InvalidPrdPath(format!(
-                        "directly referenced document {relative} cannot be resolved: {e}"
-                    ))
-                })?;
-            let allowed = if relative.starts_with("docs/adr/") {
-                repository_root.join("docs/adr")
-            } else {
-                repository_root.join("docs/contracts")
-            };
-            if !path.starts_with(allowed) || !path.is_file() {
-                return Err(RunError::InvalidPrdPath(format!(
-                    "directly referenced document escapes its documentation directory: {relative}"
-                )));
-            }
-            Ok(path)
+    let context = ContextCompiler::new()
+        .compile(ContextRequest {
+            repository: repository_root,
+            prd: &supplied,
         })
-        .collect()
+        .map_err(RunError::Context)?;
+    Ok(render_prompt(&context))
 }
-fn read_utf8(path: &Path) -> Result<String, RunError> {
-    fs::read_to_string(path).map_err(|source| RunError::ReadDocument {
-        path: path.into(),
-        source,
-    })
+
+fn render_prompt(context: &ExecutionContext) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("# Familiar execution request\n\nImplement the PRD below in this repository.\n\n## Fixed execution constraints\n\n");
+    prompt.push_str(EXECUTION_CONSTRAINTS);
+    prompt.push_str("\n\n## PRD: ");
+    prompt.push_str(&context.prd.path);
+    prompt.push_str("\n\n");
+    prompt.push_str(&context.prd.content);
+    prompt.push('\n');
+    for document in &context.documents {
+        prompt.push_str("\n## Directly referenced document: ");
+        prompt.push_str(&document.path);
+        prompt.push_str("\n\n");
+        prompt.push_str(&document.content);
+        prompt.push('\n');
+    }
+    prompt
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use familiar_context::{ContextDocument, DocumentKind, InclusionReason, RepositoryContext};
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     struct FakeAgent {
@@ -521,6 +368,85 @@ mod tests {
             ));
             Ok(self.result.clone())
         }
+    }
+
+    fn legacy_prompt(repository: &Path, prd_path: &Path) -> String {
+        let prd = fs::read_to_string(prd_path).unwrap();
+        let mut references = BTreeSet::new();
+        for prefix in ["docs/adr/", "docs/contracts/"] {
+            let mut rest = prd.as_str();
+            while let Some(index) = rest.find(prefix) {
+                rest = &rest[index..];
+                let end = rest
+                    .find(|character: char| {
+                        !(character.is_ascii_alphanumeric()
+                            || matches!(character, '/' | '-' | '_' | '.'))
+                    })
+                    .unwrap_or(rest.len());
+                let reference = rest[..end].trim_end_matches('.');
+                if reference.ends_with(".md") {
+                    references.insert(reference.to_owned());
+                }
+                rest = &rest[end..];
+            }
+        }
+        let identity = prd_path.strip_prefix(repository).unwrap().to_string_lossy();
+        let mut prompt = format!(
+            "# Familiar execution request\n\nImplement the PRD below in this repository.\n\n## Fixed execution constraints\n\n{EXECUTION_CONSTRAINTS}\n\n## PRD: {identity}\n\n{prd}\n"
+        );
+        for reference in references {
+            prompt.push_str(&format!(
+                "\n## Directly referenced document: {reference}\n\n{}\n",
+                fs::read_to_string(repository.join(&reference)).unwrap()
+            ));
+        }
+        prompt
+    }
+
+    #[test]
+    fn prompt_bytes_match_legacy_renderer() {
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let prd = repository.join("docs/prds/PRD-003.md");
+        assert_eq!(
+            build_prompt(&repository, &prd).unwrap().as_bytes(),
+            legacy_prompt(&repository, &prd).as_bytes()
+        );
+    }
+
+    #[test]
+    fn supporting_document_uses_existing_rendering_form() {
+        let context = ExecutionContext {
+            repository: RepositoryContext {
+                repository: PathBuf::from("repo"),
+                worktree: PathBuf::from("worktree"),
+                git_commit: None,
+            },
+            prd: ContextDocument {
+                path: "docs/prds/work.md".into(),
+                kind: DocumentKind::Prd,
+                content: "prd".into(),
+                inclusion: InclusionReason::RequestedPrd,
+                estimated_tokens: 1,
+            },
+            documents: vec![ContextDocument {
+                path: "docs/supporting/input.md".into(),
+                kind: DocumentKind::Supporting,
+                content: "support".into(),
+                inclusion: InclusionReason::DirectReference {
+                    referenced_by: "docs/prds/work.md".into(),
+                },
+                estimated_tokens: 2,
+            }],
+            estimated_tokens: 3,
+        };
+        assert!(render_prompt(&context)
+            .contains("\n## Directly referenced document: docs/supporting/input.md\n\nsupport\n"));
     }
 
     #[test]
