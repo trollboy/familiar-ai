@@ -27,6 +27,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
     let output = Command::new(env!("CARGO_BIN_EXE_familiar"))
         .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
         .args(["run", "docs/prds/PRD-003.md"])
+        .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
         .env("FAKE_CODEX_ARGS", &args)
         .env("FAKE_CODEX_PROMPT", &capture)
@@ -67,6 +68,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
 
     let history = Command::new(env!("CARGO_BIN_EXE_familiar"))
         .args(["history", "--limit", "1", "--verbose"])
+        .env("HOME", temp.path())
         .env("FAMILIAR_DATABASE__PATH", &database)
         .output()
         .unwrap();
@@ -77,6 +79,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
 
     let usage = Command::new(env!("CARGO_BIN_EXE_familiar"))
         .arg("usage")
+        .env("HOME", temp.path())
         .env("FAMILIAR_DATABASE__PATH", &database)
         .output()
         .unwrap();
@@ -104,6 +107,7 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_familiar"))
         .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
         .args(["run", "docs/prds/PRD-004.md"])
+        .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
         .env("FAMILIAR_DATABASE__PATH", temp.path().join("familiar.db"))
         .stdout(Stdio::piped())

@@ -4,7 +4,7 @@ use familiar_core::{
     RepositoryPath,
 };
 use familiar_review::{
-    FindingStatus, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewFinding,
+    FindingStatus, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewFinding, ReviewRequest,
     ReviewStopReason, ReviewTask, VerificationEvidence, VerificationStatus,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -208,6 +208,7 @@ impl<'a> SqliteBacklogRepository<'a> {
             ));
         }
         validate_completion_cycle(&cycle, execution_id, required_checks)?;
+        validate_persisted_review_request(&tx, &cycle)?;
         validate_persisted_evidence(&tx, &cycle)?;
         validate_persisted_findings(&tx, &cycle)?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -226,6 +227,70 @@ impl<'a> SqliteBacklogRepository<'a> {
             status: BacklogStatus::Completed,
         })
     }
+}
+
+fn validate_persisted_review_request(
+    tx: &Transaction<'_>,
+    cycle: &ReviewCycle,
+) -> Result<(), BacklogStoreError> {
+    let reference = cycle.review_request.as_ref().ok_or_else(|| {
+        BacklogStoreError::Storage("terminal review request evidence is missing".into())
+    })?;
+    let expected_storage_ref = format!("sqlite:review_artifacts/{}", reference.content_hash);
+    if reference.media_type != "application/json"
+        || reference.storage_ref != expected_storage_ref
+        || reference.truncated
+        || reference.omitted_bytes != 0
+    {
+        return Err(BacklogStoreError::Storage(
+            "terminal review request reference is invalid".into(),
+        ));
+    }
+    let (kind, media_type, byte_size, content): (String, String, u64, Vec<u8>) = tx
+        .query_row(
+            "SELECT kind,media_type,byte_size,content FROM review_artifacts WHERE content_hash=?1",
+            [&reference.content_hash],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(storage)?;
+    if kind != "review_request"
+        || media_type != reference.media_type
+        || byte_size != reference.byte_size
+        || usize::try_from(byte_size).ok() != Some(content.len())
+        || familiar_review::content_hash(&content) != reference.content_hash
+    {
+        return Err(BacklogStoreError::Storage(
+            "persisted terminal review request is corrupt".into(),
+        ));
+    }
+    let request: ReviewRequest = serde_json::from_slice(&content).map_err(|error| {
+        BacklogStoreError::Storage(format!(
+            "invalid persisted terminal review request: {error}"
+        ))
+    })?;
+    let result = cycle
+        .review_result
+        .as_ref()
+        .ok_or_else(|| BacklogStoreError::Storage("terminal review result is missing".into()))?;
+    let current = if cycle.verification_after_remediation.is_empty() {
+        &cycle.verification_before_review
+    } else {
+        &cycle.verification_after_remediation
+    };
+    if request.task.task_id != cycle.task_id
+        || result.review_id != request.review_id
+        || result.reviewed_manifest_hash != request.manifest.manifest_hash
+        || request.verification != *current
+        || request
+            .verification
+            .iter()
+            .any(|evidence| evidence.tested_identity != request.diff.content_hash)
+    {
+        return Err(BacklogStoreError::Storage(
+            "terminal review request does not match accepted evidence".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_persisted_evidence(
@@ -871,6 +936,16 @@ mod tests {
         )
         .unwrap();
         assert!(validate_persisted_evidence(&tx, &cycle).is_err());
+    }
+
+    #[test]
+    fn completion_rejects_a_terminal_cycle_without_review_request_evidence() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let cycle = cycle_with_evidence();
+        let tx = db.conn_mut().transaction().unwrap();
+
+        assert!(validate_persisted_review_request(&tx, &cycle).is_err());
     }
 
     #[test]
