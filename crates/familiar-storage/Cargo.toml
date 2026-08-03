@@ -7,8 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 familiar-core = { path = "../familiar-core" }
+familiar-review = { path = "../familiar-review" }
 rusqlite.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 

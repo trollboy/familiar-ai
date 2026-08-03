@@ -23,6 +23,7 @@ familiar-context = { path = "../familiar-context" }
 familiar-core = { path = "../familiar-core" }
 familiar-logging = { path = "../familiar-logging" }
 familiar-storage = { path = "../familiar-storage" }
+familiar-review = { path = "../familiar-review" }
 familiar-summary = { path = "../familiar-summary" }
 familiar-llm = { path = "../familiar-llm" }
 familiar-watcher = { path = "../familiar-watcher" }

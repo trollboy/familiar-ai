@@ -18,4 +18,5 @@ pub use repos::lifecycle::{
     ScanRun, ScanStatus,
 };
 pub use repos::project::ProjectRepository;
+pub use repos::review::ReviewRepository;
 pub use repos::session_rollup::SessionRollupRepository;

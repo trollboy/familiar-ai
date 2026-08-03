@@ -21,7 +21,7 @@ use familiar_core::{AppPaths, AppStatus, CanonicalFileIdentity, VersionInfo};
 use familiar_llm::InferenceRouter;
 use familiar_storage::{
     Database, FileSummaryRepository, LifecycleChange, LifecycleRepository, ProjectRepository,
-    RetirementReason,
+    RetirementReason, ReviewRepository,
 };
 use familiar_watcher::{FileWatcher, WatcherEvent};
 
@@ -85,6 +85,13 @@ fn bootstrap() -> familiar_core::Result<(DaemonState, familiar_logging::LogGuard
     {
         let db_lock = db.lock().unwrap();
         let migrations_applied = db_lock.run_migrations()?;
+        let interrupted_reviews = ReviewRepository::new(db_lock.conn()).recover_incomplete()?;
+        if interrupted_reviews > 0 {
+            tracing::warn!(
+                count = interrupted_reviews,
+                "marked incomplete review cycles interrupted without replay"
+            );
+        }
         if migrations_applied > 0 {
             tracing::info!(count = migrations_applied, "applied database migrations");
         } else {

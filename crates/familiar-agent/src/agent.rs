@@ -8,12 +8,35 @@ pub trait CodingAgent {
         request: ExecutionRequest<'_>,
         output: &mut dyn io::Write,
     ) -> Result<ExecutionResult, AgentExecutionError>;
+
+    fn isolation_capability(&self) -> IsolationCapability {
+        IsolationCapability::Unavailable
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationCapability {
+    Unavailable,
+    FreshProcessPerExecution,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ExecutionRequest<'a> {
     pub working_directory: &'a Path,
+    /// Repository tree that the child process must not be able to read.
+    /// Used only for isolated review execution.
+    pub denied_read_path: Option<&'a Path>,
     pub prompt: &'a str,
+    pub filesystem: FilesystemPolicy,
+    pub model: Option<&'a str>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesystemPolicy {
+    Normal,
+    ReadOnly,
+    WorkspaceWrite,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -46,6 +69,9 @@ pub enum AgentExecutionError {
         source: Box<io::Error>,
         result: Box<ExecutionResult>,
     },
+    Timeout {
+        result: Box<ExecutionResult>,
+    },
 }
 
 impl AgentExecutionError {
@@ -54,7 +80,8 @@ impl AgentExecutionError {
             Self::Launch { result, .. }
             | Self::Input { result, .. }
             | Self::Wait { result, .. }
-            | Self::Output { result, .. } => result.as_ref(),
+            | Self::Output { result, .. }
+            | Self::Timeout { result } => result.as_ref(),
         }
     }
 }
@@ -72,20 +99,25 @@ impl fmt::Display for AgentExecutionError {
             Self::Output { source, .. } => {
                 write!(f, "cannot read Codex structured output: {source}")
             }
+            Self::Timeout { .. } => write!(f, "Codex execution exceeded its configured timeout"),
         }
     }
 }
 
 impl std::error::Error for AgentExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(
-            match self {
-                Self::Launch { source, .. }
-                | Self::Input { source, .. }
-                | Self::Wait { source, .. }
-                | Self::Output { source, .. } => source,
-            }
-            .as_ref(),
-        )
+        match self {
+            Self::Timeout { .. } => None,
+            _ => Some(
+                match self {
+                    Self::Launch { source, .. }
+                    | Self::Input { source, .. }
+                    | Self::Wait { source, .. }
+                    | Self::Output { source, .. } => source,
+                    Self::Timeout { .. } => unreachable!(),
+                }
+                .as_ref(),
+            ),
+        }
     }
 }

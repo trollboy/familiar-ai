@@ -581,6 +581,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 name = "familiar-agent"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde_json",
  "tempfile",
 ]
@@ -623,6 +624,7 @@ dependencies = [
  "familiar-core",
  "familiar-llm",
  "familiar-logging",
+ "familiar-review",
  "familiar-storage",
  "familiar-summary",
  "familiar-testutil",
@@ -691,12 +693,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "familiar-review"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "familiar-agent",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "familiar-storage"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "familiar-core",
+ "familiar-review",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",

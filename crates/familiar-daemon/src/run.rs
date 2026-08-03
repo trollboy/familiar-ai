@@ -3,6 +3,7 @@ use std::env;
 use std::fmt;
 use std::io;
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -13,8 +14,14 @@ use familiar_context::{
     ContextRequest, ExecutionContext,
 };
 use familiar_core::{AppPaths, Config, ExecutionPrice};
+use familiar_review::{
+    AgentAssignment, AgentObservation, AgentRole, BlockingPolicy, BoundedDocument,
+    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, GitEvidenceCollector,
+    ReviewCoordinator, ReviewPackageBudget, ReviewTask, StructuredReviewAdapter, VerificationCheck,
+    VerificationPlan, WorkflowLimits,
+};
 use familiar_storage::{
-    Database, ExecutionFinalization, ExecutionHistoryRepository, ExecutionStart,
+    Database, ExecutionFinalization, ExecutionHistoryRepository, ExecutionStart, ReviewRepository,
 };
 
 const EXECUTION_CONSTRAINTS: &str = r#"- Implement the supplied PRD exactly as written and do not broaden its scope.
@@ -99,7 +106,20 @@ pub fn execute_with_config(
     let db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
     db.run_migrations()
         .map_err(|e| RunError::Storage(e.to_string()))?;
+    ReviewRepository::new(db.conn())
+        .recover_incomplete()
+        .map_err(|e| RunError::Storage(e.to_string()))?;
     let id = new_id();
+    let review_baseline = if config.review.enabled {
+        config.review.validate().map_err(RunError::Config)?;
+        Some(capture_worktree_baseline(
+            &context.repository.worktree,
+            &paths.data_dir,
+            &id,
+        )?)
+    } else {
+        None
+    };
     let started_at = Utc::now().to_rfc3339();
     let timer = Instant::now();
     let mut unavailable = BTreeMap::new();
@@ -135,7 +155,15 @@ pub fn execute_with_config(
     let execution = agent.execute(
         ExecutionRequest {
             working_directory: &context.repository.worktree,
+            denied_read_path: None,
             prompt: &prompt,
+            filesystem: familiar_agent::FilesystemPolicy::Normal,
+            model: config
+                .review
+                .enabled
+                .then_some(config.review.implementation_agent.model.as_deref())
+                .flatten(),
+            timeout_ms: None,
         },
         &mut io::stdout(),
     );
@@ -145,13 +173,317 @@ pub fn execute_with_config(
         Err(AgentExecutionError::Input { result, .. }) => (result.as_ref(), "input_failed"),
         Err(AgentExecutionError::Wait { result, .. }) => (result.as_ref(), "failed"),
         Err(AgentExecutionError::Output { result, .. }) => (result.as_ref(), outcome(result)),
+        Err(AgentExecutionError::Timeout { result }) => (result.as_ref(), "timed_out"),
     };
     if result.agent_version.is_none() {
         unavailable.insert("agent_version".into(), "version_probe_failed".into());
     }
     let finalization = terminal(&timer, result, outcome, unavailable, config);
     finalize(&db, &id, &finalization)?;
-    execution.map_err(RunError::Agent)
+    let result = execution.map_err(RunError::Agent)?;
+    if config.review.enabled && result.exit_code == Some(0) {
+        run_review(ReviewRunInput {
+            db: &db,
+            context: &context,
+            execution_id: &id,
+            implementation_result: &result,
+            implementation_finalization: &finalization,
+            agent,
+            config,
+            paths,
+            base_revision: review_baseline.as_deref().expect("enabled review baseline"),
+        })?;
+    }
+    Ok(result)
+}
+
+struct ReviewRunInput<'a> {
+    db: &'a Database,
+    context: &'a ExecutionContext,
+    execution_id: &'a str,
+    implementation_result: &'a ExecutionResult,
+    implementation_finalization: &'a ExecutionFinalization,
+    agent: &'a dyn CodingAgent,
+    config: &'a Config,
+    paths: &'a AppPaths,
+    base_revision: &'a str,
+}
+
+fn run_review(input: ReviewRunInput<'_>) -> Result<(), RunError> {
+    let ReviewRunInput {
+        db,
+        context,
+        execution_id,
+        implementation_result,
+        implementation_finalization,
+        agent,
+        config,
+        paths,
+        base_revision,
+    } = input;
+    let implementation = AgentAssignment {
+        adapter_id: config.review.implementation_agent.adapter_id.clone(),
+        agent_id: config.review.implementation_agent.agent_id.clone(),
+        provider: config.review.implementation_agent.provider.clone(),
+        requested_model: config
+            .review
+            .implementation_agent
+            .model
+            .clone()
+            .or_else(|| implementation_result.model.clone()),
+        role: AgentRole::Implementation,
+        session_id: None,
+    };
+    let reviewer = AgentAssignment {
+        adapter_id: config.review.reviewer_agent.adapter_id.clone(),
+        agent_id: config.review.reviewer_agent.agent_id.clone(),
+        provider: config.review.reviewer_agent.provider.clone(),
+        requested_model: config.review.reviewer_agent.model.clone(),
+        role: AgentRole::Review,
+        session_id: None,
+    };
+    let criteria = acceptance_criteria(&context.prd.content);
+    if criteria.is_empty() {
+        return Err(RunError::Config(
+            "enabled review requires an explicit PRD Acceptance Criteria section".into(),
+        ));
+    }
+    let task = ReviewTask {
+        task_id: execution_id.into(),
+        objective: markdown_section(&context.prd.content, "Objective")
+            .unwrap_or_else(|| context.prd.content.clone()),
+        acceptance_criteria: criteria,
+        base_revision: base_revision.into(),
+        allowed_paths: config.review.allowed_paths.clone(),
+        prohibited_changes: config.review.prohibited_changes.clone(),
+        verification_plan_id: format!("{execution_id}-verification"),
+    };
+    let policy = BlockingPolicy::default();
+    let repository = ReviewRepository::new(db.conn());
+    repository
+        .insert_task(&task, &policy)
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    let artifact_directory = paths.data_dir.join("review-artifacts");
+    let collector =
+        GitEvidenceCollector::new(artifact_directory.clone(), config.review.max_evidence_bytes);
+    let verifier = CommandVerificationRunner::new(
+        artifact_directory,
+        config.review.max_verification_log_bytes,
+    );
+    let review_timeout = nonzero(config.review.max_total_duration_ms)
+        .map(|value| value / u64::from(config.review.max_review_attempts))
+        .unwrap_or(300_000)
+        .max(1);
+    let reviewer_adapter = StructuredReviewAdapter::new(
+        agent,
+        context.repository.worktree.clone(),
+        reviewer.clone(),
+        review_timeout,
+    );
+    let remediation_adapter = CodingRemediationAdapter::new(
+        agent,
+        context.repository.worktree.clone(),
+        implementation.clone(),
+    );
+    let checks = config
+        .review
+        .verification
+        .iter()
+        .map(|check| VerificationCheck {
+            check_id: check.check_id.clone(),
+            argv: check.argv.clone(),
+            working_directory: check.working_directory.clone(),
+            environment: check.environment.clone(),
+            timeout_ms: check.timeout_ms,
+            required: check.required,
+            path_prefixes: check.path_prefixes.clone(),
+        })
+        .collect();
+    let coordinator = ReviewCoordinator {
+        collector: &collector,
+        verifier: &verifier,
+        reviewer: &reviewer_adapter,
+        implementer: &remediation_adapter,
+        store: &repository,
+        policy,
+    };
+    let contracts = context
+        .documents
+        .iter()
+        .filter(|document| {
+            matches!(
+                document.kind,
+                familiar_context::DocumentKind::Contract | familiar_context::DocumentKind::Adr
+            )
+        })
+        .map(|document| BoundedDocument {
+            source: document.path.clone(),
+            content: document.content.clone(),
+            content_hash: familiar_review::content_hash(document.content.as_bytes()),
+            selection_reason: "direct task reference".into(),
+            estimated_tokens: document.estimated_tokens,
+        })
+        .collect();
+    let request = CoordinationRequest {
+        cycle_id: format!("{execution_id}-cycle"),
+        task,
+        implementation: AgentObservation {
+            assignment: implementation,
+            agent_version: implementation_result.agent_version.clone(),
+            reported_model: implementation_result.model.clone(),
+            unavailable_fields: BTreeMap::new(),
+        },
+        reviewer,
+        contracts,
+        invariants: Vec::new(),
+        verification_plan: VerificationPlan {
+            plan_id: format!("{execution_id}-verification"),
+            checks,
+            full_after_remediation: false,
+        },
+        package_budget: ReviewPackageBudget {
+            max_bytes: config.review.max_package_bytes,
+            max_estimated_tokens: config.review.max_package_tokens,
+        },
+        limits: WorkflowLimits {
+            max_review_attempts: config.review.max_review_attempts,
+            max_remediation_attempts: config.review.max_remediation_attempts,
+            max_total_tokens: nonzero(config.review.max_total_tokens),
+            max_total_cost_microusd: nonzero(config.review.max_total_cost_microusd),
+            max_total_duration_ms: nonzero(config.review.max_total_duration_ms),
+            review_reservation_tokens: nonzero(config.review.max_total_tokens)
+                .map(|v| v / u64::from(config.review.max_review_attempts)),
+            remediation_reservation_tokens: nonzero(config.review.max_total_tokens)
+                .map(|v| v / u64::from(config.review.max_remediation_attempts)),
+            action_reservation_cost_microusd: nonzero(config.review.max_total_cost_microusd).map(
+                |v| {
+                    v / u64::from(
+                        config.review.max_review_attempts + config.review.max_remediation_attempts,
+                    )
+                },
+            ),
+            action_reservation_duration_ms: nonzero(config.review.max_total_duration_ms)
+                .map(|v| {
+                    v / u64::from(
+                        config.review.max_review_attempts
+                            + config.review.max_remediation_attempts
+                            + 1,
+                    )
+                })
+                .unwrap_or(300_000)
+                .max(1),
+        },
+        allow_same_model_fallback: config.review.allow_isolated_same_model_fallback,
+        implementation_usage: familiar_review::ExecutionUsage {
+            input_tokens: implementation_result.input_tokens,
+            output_tokens: implementation_result.output_tokens,
+            cached_tokens: implementation_result.cached_tokens,
+            total_tokens: implementation_finalization.total_tokens,
+            estimated_cost_microusd: implementation_finalization.estimated_cost_microusd,
+            pricing_provenance: implementation_finalization
+                .estimated_cost_microusd
+                .map(|_| "execution_history_pricing".into()),
+            unavailable_fields: implementation_finalization.unavailable_fields.clone(),
+        },
+        implementation_duration_ms: implementation_finalization.duration_ms,
+    };
+    let cycle = coordinator
+        .run(&context.repository.worktree, request, &mut io::stdout())
+        .map_err(|e| RunError::Storage(format!("review workflow failed: {e}")))?;
+    println!(
+        "Review disposition: {:?}; independence: {:?}; stop reasons: {:?}",
+        cycle.disposition,
+        cycle.independence.as_ref().map(|value| value.kind),
+        cycle.stop_reasons
+    );
+    Ok(())
+}
+
+fn markdown_section(document: &str, heading: &str) -> Option<String> {
+    let marker = format!("## {heading}");
+    let start = document.lines().position(|line| line.trim() == marker)?;
+    let lines: Vec<_> = document
+        .lines()
+        .skip(start + 1)
+        .take_while(|line| !line.starts_with("## "))
+        .collect();
+    let value = lines.join("\n").trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+fn acceptance_criteria(document: &str) -> Vec<String> {
+    markdown_section(document, "Acceptance Criteria")
+        .map(|section| {
+            section
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    let (_, criterion) = line.split_once(". ")?;
+                    line.chars()
+                        .next()
+                        .is_some_and(|value| value.is_ascii_digit())
+                        .then(|| criterion.to_owned())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn capture_worktree_baseline(
+    worktree: &Path,
+    data_dir: &Path,
+    execution_id: &str,
+) -> Result<String, RunError> {
+    std::fs::create_dir_all(data_dir).map_err(|error| RunError::Config(error.to_string()))?;
+    let index = data_dir.join(format!("review-baseline-{execution_id}.index"));
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(worktree)
+            .env("GIT_INDEX_FILE", &index)
+            .output()
+            .map_err(|error| RunError::Config(format!("cannot capture review baseline: {error}")))
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(output.stdout)
+                } else {
+                    Err(RunError::Config(format!(
+                        "cannot capture review baseline: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )))
+                }
+            })
+    };
+    let result = (|| {
+        let has_head = Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(worktree)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if has_head {
+            run(&["read-tree", "HEAD"])?;
+        } else {
+            run(&["read-tree", "--empty"])?;
+        }
+        run(&["add", "-A"])?;
+        let tree = run(&["write-tree"])?;
+        String::from_utf8(tree)
+            .map(|value| value.trim().to_owned())
+            .map_err(|error| RunError::Config(error.to_string()))
+    })();
+    match std::fs::remove_file(&index) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RunError::Config(format!(
+                "cannot remove temporary review baseline index: {error}"
+            )))
+        }
+    }
+    result
+}
+
+fn nonzero(value: u64) -> Option<u64> {
+    (value != 0).then_some(value)
 }
 
 fn outcome(result: &ExecutionResult) -> &'static str {
@@ -363,6 +695,10 @@ fn render_prompt(context: &ExecutionContext) -> String {
 mod tests {
     use super::*;
     use familiar_context::{ContextDocument, DocumentKind, InclusionReason, RepositoryContext};
+    use familiar_review::{
+        FindingCategory, FindingEvidence, FindingSeverity, FindingStatus, ReviewDisposition,
+        ReviewFinding, ReviewRequest, ReviewResult,
+    };
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
@@ -676,5 +1012,267 @@ mod tests {
             calculate_cost(Some(1), None, Some(1), Some(&p)).2,
             "usage_incomplete"
         );
+    }
+
+    struct WorkflowFakeAgent {
+        repository: PathBuf,
+        remediation: bool,
+        reviews: Mutex<u32>,
+    }
+    impl CodingAgent for WorkflowFakeAgent {
+        fn isolation_capability(&self) -> familiar_agent::IsolationCapability {
+            familiar_agent::IsolationCapability::FreshProcessPerExecution
+        }
+        fn execute(
+            &self,
+            request: ExecutionRequest<'_>,
+            output: &mut dyn io::Write,
+        ) -> Result<ExecutionResult, AgentExecutionError> {
+            if request
+                .prompt
+                .starts_with("You are an independent code reviewer")
+            {
+                let marker = "REVIEW_PACKAGE_JSON:\n";
+                let json = request.prompt.split_once(marker).unwrap().1;
+                let package: ReviewRequest = serde_json::from_str(json).unwrap();
+                let mut count = self.reviews.lock().unwrap();
+                *count += 1;
+                let findings = if self.remediation {
+                    let status = if *count == 1 {
+                        FindingStatus::Open
+                    } else {
+                        FindingStatus::Resolved
+                    };
+                    vec![ReviewFinding {
+                        finding_id: "finding".into(),
+                        category: FindingCategory::CorrectnessDefect,
+                        severity: FindingSeverity::High,
+                        blocking: false,
+                        title: "incorrect value".into(),
+                        claim: "implementation value requires remediation".into(),
+                        evidence: vec![
+                            FindingEvidence::FileRange {
+                                path: "src/lib.rs".into(),
+                                range: familiar_review::LineRange { start: 1, end: 1 },
+                            },
+                            FindingEvidence::Verification {
+                                check_id: "verify".into(),
+                                output: package.verification[0].stdout.clone().unwrap(),
+                            },
+                        ],
+                        remediation: "write the corrected value".into(),
+                        status,
+                        supersedes: None,
+                    }]
+                } else {
+                    vec![]
+                };
+                let result = ReviewResult {
+                    review_id: package.review_id.clone(),
+                    reviewer: familiar_review::AgentObservation {
+                        assignment: package.reviewer.clone(),
+                        agent_version: None,
+                        reported_model: None,
+                        unavailable_fields: BTreeMap::new(),
+                    },
+                    started_at: "2026-08-03T00:00:00Z".into(),
+                    ended_at: "2026-08-03T00:00:00Z".into(),
+                    duration_ms: 1,
+                    findings,
+                    reviewed_manifest_hash: package.manifest.manifest_hash,
+                    usage: familiar_review::ExecutionUsage {
+                        input_tokens: Some(1),
+                        output_tokens: Some(1),
+                        cached_tokens: Some(0),
+                        total_tokens: Some(2),
+                        estimated_cost_microusd: None,
+                        pricing_provenance: None,
+                        unavailable_fields: BTreeMap::new(),
+                    },
+                    disposition: ReviewDisposition::Pending,
+                    unavailable_fields: BTreeMap::new(),
+                };
+                write!(output, "{}", serde_json::to_string(&result).unwrap()).unwrap();
+            } else if request.prompt.starts_with("Remediate only") {
+                fs::write(self.repository.join("src/lib.rs"), "corrected\n").unwrap();
+            }
+            Ok(ExecutionResult {
+                agent_version: Some("fake 1".into()),
+                model: request.model.map(str::to_owned),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cached_tokens: Some(0),
+                exit_code: Some(0),
+                signal: None,
+            })
+        }
+    }
+
+    fn production_review_fixture(
+        remediation: bool,
+    ) -> (
+        tempfile::TempDir,
+        Database,
+        ExecutionContext,
+        Config,
+        AppPaths,
+        String,
+        WorkflowFakeAgent,
+        ExecutionFinalization,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repo");
+        fs::create_dir_all(repository.join("src")).unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repository)
+            .status()
+            .unwrap();
+        fs::write(repository.join("src/lib.rs"), "base\n").unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&repository)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ])
+            .current_dir(&repository)
+            .status()
+            .unwrap();
+        let paths = test_paths(&temp.path().join("app"));
+        let baseline = capture_worktree_baseline(&repository, &paths.data_dir, "test").unwrap();
+        fs::write(repository.join("src/lib.rs"), "implemented\n").unwrap();
+        let context = ExecutionContext {
+            repository: RepositoryContext {
+                repository: repository.join(".git"),
+                worktree: repository.clone(),
+                git_commit: Some(baseline.clone()),
+            },
+            prd: ContextDocument {
+                path: "docs/prds/test.md".into(),
+                kind: DocumentKind::Prd,
+                content: "## Objective\nobjective\n\n## Acceptance Criteria\n1. criterion\n".into(),
+                inclusion: InclusionReason::RequestedPrd,
+                estimated_tokens: 1,
+            },
+            documents: vec![],
+            estimated_tokens: 1,
+        };
+        let mut config = Config::default();
+        config.review.enabled = true;
+        config.review.max_review_attempts = 3;
+        config.review.max_remediation_attempts = 2;
+        config.review.max_total_duration_ms = 10_000;
+        config.review.allow_isolated_same_model_fallback = false;
+        config.review.allowed_paths = vec!["src/".into()];
+        config.review.prohibited_changes = vec!["dependency changes".into()];
+        config.review.implementation_agent = familiar_core::config::ReviewAgentConfig {
+            adapter_id: "fake".into(),
+            agent_id: "implementation".into(),
+            provider: Some("fake".into()),
+            model: Some("implementation-model".into()),
+        };
+        config.review.reviewer_agent = familiar_core::config::ReviewAgentConfig {
+            adapter_id: "fake".into(),
+            agent_id: "reviewer".into(),
+            provider: Some("fake".into()),
+            model: Some("review-model".into()),
+        };
+        config.review.verification = vec![familiar_core::config::ReviewVerificationConfig {
+            check_id: "verify".into(),
+            argv: vec!["/usr/bin/true".into()],
+            working_directory: ".".into(),
+            timeout_ms: 1_000,
+            required: true,
+            path_prefixes: vec!["src/".into()],
+            environment: BTreeMap::new(),
+        }];
+        let database = Database::open_in_memory().unwrap();
+        database.run_migrations().unwrap();
+        let agent = WorkflowFakeAgent {
+            repository,
+            remediation,
+            reviews: Mutex::new(0),
+        };
+        let finalization = ExecutionFinalization {
+            ended_at: "2026-08-03T00:00:00Z".into(),
+            duration_ms: 1,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            cached_tokens: Some(0),
+            total_tokens: Some(2),
+            outcome: "succeeded".into(),
+            exit_code: Some(0),
+            unavailable_fields: BTreeMap::from([(
+                "estimated_cost_microusd".into(),
+                "pricing_not_configured".into(),
+            )]),
+            ..Default::default()
+        };
+        (
+            temp,
+            database,
+            context,
+            config,
+            paths,
+            baseline,
+            agent,
+            finalization,
+        )
+    }
+
+    #[test]
+    fn production_composition_handles_clean_review_and_one_remediation() {
+        for remediation in [false, true] {
+            let (_temp, db, context, config, paths, baseline, agent, finalization) =
+                production_review_fixture(remediation);
+            run_review(ReviewRunInput {
+                db: &db,
+                context: &context,
+                execution_id: if remediation { "remediation" } else { "clean" },
+                implementation_result: &ExecutionResult {
+                    agent_version: Some("fake".into()),
+                    model: Some("implementation-model".into()),
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    cached_tokens: Some(0),
+                    exit_code: Some(0),
+                    signal: None,
+                },
+                implementation_finalization: &finalization,
+                agent: &agent,
+                config: &config,
+                paths: &paths,
+                base_revision: &baseline,
+            })
+            .unwrap();
+            let cycle = ReviewRepository::new(db.conn())
+                .get_cycle(if remediation {
+                    "remediation-cycle"
+                } else {
+                    "clean-cycle"
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(cycle.disposition, ReviewDisposition::ReadyForHumanApproval);
+            assert_eq!(
+                *agent.reviews.lock().unwrap(),
+                if remediation { 2 } else { 1 }
+            );
+            if remediation {
+                assert_eq!(
+                    fs::read_to_string(context.repository.worktree.join("src/lib.rs")).unwrap(),
+                    "corrected\n"
+                );
+            }
+        }
     }
 }

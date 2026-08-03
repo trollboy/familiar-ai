@@ -33,6 +33,171 @@ pub struct Config {
     pub execution_history: ExecutionHistoryConfig,
     #[serde(default)]
     pub execution_context: ExecutionContextConfig,
+    #[serde(default)]
+    pub review: ReviewConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_max_review_attempts")]
+    pub max_review_attempts: u32,
+    #[serde(default = "default_max_remediation_attempts")]
+    pub max_remediation_attempts: u32,
+    #[serde(default)]
+    pub max_total_tokens: u64,
+    #[serde(default)]
+    pub max_total_cost_microusd: u64,
+    #[serde(default)]
+    pub max_total_duration_ms: u64,
+    #[serde(default)]
+    pub allow_isolated_same_model_fallback: bool,
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub prohibited_changes: Vec<String>,
+    #[serde(default)]
+    pub verification: Vec<ReviewVerificationConfig>,
+    #[serde(default)]
+    pub implementation_agent: ReviewAgentConfig,
+    #[serde(default)]
+    pub reviewer_agent: ReviewAgentConfig,
+    #[serde(default = "default_review_package_bytes")]
+    pub max_package_bytes: u64,
+    #[serde(default = "default_review_package_tokens")]
+    pub max_package_tokens: u64,
+    #[serde(default = "default_review_evidence_bytes")]
+    pub max_evidence_bytes: u64,
+    #[serde(default = "default_verification_log_bytes")]
+    pub max_verification_log_bytes: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewAgentConfig {
+    pub adapter_id: String,
+    pub agent_id: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewVerificationConfig {
+    pub check_id: String,
+    pub argv: Vec<String>,
+    #[serde(default = "default_working_directory")]
+    pub working_directory: String,
+    #[serde(default = "default_review_action_duration_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    #[serde(default)]
+    pub path_prefixes: Vec<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+}
+fn default_working_directory() -> String {
+    ".".into()
+}
+const fn default_review_action_duration_ms() -> u64 {
+    300_000
+}
+const fn default_review_package_bytes() -> u64 {
+    1_000_000
+}
+const fn default_review_package_tokens() -> u64 {
+    250_000
+}
+const fn default_review_evidence_bytes() -> u64 {
+    16_000_000
+}
+const fn default_verification_log_bytes() -> usize {
+    256_000
+}
+
+const fn default_max_review_attempts() -> u32 {
+    3
+}
+const fn default_max_remediation_attempts() -> u32 {
+    2
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_review_attempts: default_max_review_attempts(),
+            max_remediation_attempts: default_max_remediation_attempts(),
+            max_total_tokens: 0,
+            max_total_cost_microusd: 0,
+            max_total_duration_ms: 0,
+            allow_isolated_same_model_fallback: false,
+            allowed_paths: Vec::new(),
+            prohibited_changes: Vec::new(),
+            verification: Vec::new(),
+            implementation_agent: ReviewAgentConfig::default(),
+            reviewer_agent: ReviewAgentConfig::default(),
+            max_package_bytes: default_review_package_bytes(),
+            max_package_tokens: default_review_package_tokens(),
+            max_evidence_bytes: default_review_evidence_bytes(),
+            max_verification_log_bytes: default_verification_log_bytes(),
+        }
+    }
+}
+
+impl ReviewConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.max_review_attempts == 0 || self.max_remediation_attempts == 0 {
+            return Err(
+                "enabled review requires finite positive review and remediation attempt limits"
+                    .into(),
+            );
+        }
+        if self.max_total_tokens == 0
+            && self.max_total_cost_microusd == 0
+            && self.max_total_duration_ms == 0
+        {
+            return Err(
+                "enabled review requires at least one enforceable aggregate resource ceiling"
+                    .into(),
+            );
+        }
+        if self.allowed_paths.is_empty()
+            || self.verification.is_empty()
+            || self.verification.iter().any(|check| {
+                check.check_id.is_empty()
+                    || check.argv.is_empty()
+                    || check.timeout_ms == 0
+                    || (!check.argv[0].contains('/') && !check.environment.contains_key("PATH"))
+            })
+        {
+            return Err(
+                "enabled review requires allowed paths and non-empty bounded verification checks"
+                    .into(),
+            );
+        }
+        if self.implementation_agent.adapter_id.is_empty()
+            || self.implementation_agent.agent_id.is_empty()
+            || self.reviewer_agent.adapter_id.is_empty()
+            || self.reviewer_agent.agent_id.is_empty()
+        {
+            return Err(
+                "enabled review requires explicit implementation and reviewer agent identities"
+                    .into(),
+            );
+        }
+        if self.max_package_bytes == 0
+            || self.max_package_tokens == 0
+            || self.max_evidence_bytes == 0
+            || self.max_verification_log_bytes == 0
+        {
+            return Err("enabled review requires positive package and evidence ceilings".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -524,6 +689,8 @@ mod tests {
         assert!(config.daemon.socket_path.is_none());
         assert!(config.database.path.is_none());
         assert_eq!(config.execution_context.hard_ceiling_tokens, None);
+        assert!(!config.review.enabled);
+        assert_eq!(config.review.max_review_attempts, 3);
     }
 
     #[test]
@@ -652,5 +819,40 @@ output_microusd_per_million = 300
     fn missing_config_file_does_not_error() {
         let config = Config::load(Some(Path::new("/nonexistent/config.toml")));
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn enabled_review_requires_finite_attempts_and_a_resource_ceiling() {
+        let mut review = ReviewConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(review.validate().is_err());
+        review.max_total_duration_ms = 60_000;
+        review.allowed_paths = vec!["src/".into()];
+        review.verification = vec![ReviewVerificationConfig {
+            check_id: "tests".into(),
+            argv: vec!["cargo".into(), "test".into()],
+            working_directory: ".".into(),
+            timeout_ms: 1_000,
+            required: true,
+            path_prefixes: vec!["src/".into()],
+            environment: BTreeMap::from([("PATH".into(), "/usr/bin".into())]),
+        }];
+        review.implementation_agent = ReviewAgentConfig {
+            adapter_id: "fake".into(),
+            agent_id: "implementation".into(),
+            provider: None,
+            model: None,
+        };
+        review.reviewer_agent = ReviewAgentConfig {
+            adapter_id: "fake".into(),
+            agent_id: "reviewer".into(),
+            provider: None,
+            model: None,
+        };
+        assert!(review.validate().is_ok());
+        review.max_review_attempts = 0;
+        assert!(review.validate().is_err());
     }
 }

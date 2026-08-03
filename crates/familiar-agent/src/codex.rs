@@ -1,5 +1,11 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -38,17 +44,46 @@ impl CodexAgent {
 }
 
 impl CodingAgent for CodexAgent {
+    fn isolation_capability(&self) -> crate::IsolationCapability {
+        crate::IsolationCapability::FreshProcessPerExecution
+    }
+
     fn execute(
         &self,
         request: ExecutionRequest<'_>,
         output: &mut dyn Write,
     ) -> Result<ExecutionResult, AgentExecutionError> {
         let mut result = ExecutionResult {
-            agent_version: self.probe_version(),
+            // Probing executes the adapter binary. Never do that outside the
+            // isolated filesystem boundary used for review.
+            agent_version: request
+                .denied_read_path
+                .is_none()
+                .then(|| self.probe_version())
+                .flatten(),
             ..ExecutionResult::default()
         };
-        let mut child = Command::new(&self.executable)
-            .args(["exec", "--json", "-"])
+        let mut command = isolated_command(&self.executable, request.denied_read_path)?;
+        command.arg("exec");
+        match request.filesystem {
+            crate::FilesystemPolicy::ReadOnly => {
+                command.args(["--sandbox", "read-only"]);
+            }
+            crate::FilesystemPolicy::WorkspaceWrite => {
+                command.args(["--sandbox", "workspace-write"]);
+            }
+            crate::FilesystemPolicy::Normal => {}
+        }
+        if let Some(model) = request.model {
+            command.args(["--model", model]);
+        }
+        #[cfg(unix)]
+        if request.timeout_ms.is_some() {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command
+            .args(["--json", "-"])
             .current_dir(request.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -64,6 +99,25 @@ impl CodingAgent for CodexAgent {
             .take()
             .expect("piped stdin")
             .write_all(request.prompt.as_bytes());
+        #[cfg(unix)]
+        let watchdog = request.timeout_ms.map(|timeout| {
+            let timed_out = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&timed_out);
+            let pid = child.id();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                if done_rx
+                    .recv_timeout(Duration::from_millis(timeout))
+                    .is_err()
+                {
+                    flag.store(true, Ordering::Release);
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                }
+            });
+            (done_tx, handle, timed_out)
+        });
         let output_result = stream_json(
             child.stdout.take().expect("piped stdout"),
             output,
@@ -73,6 +127,14 @@ impl CodingAgent for CodexAgent {
             source: Box::new(source),
             result: Box::new(result.clone()),
         })?;
+        #[cfg(unix)]
+        let timed_out = if let Some((done, handle, flag)) = watchdog {
+            let _ = done.send(());
+            let _ = handle.join();
+            flag.load(Ordering::Acquire)
+        } else {
+            false
+        };
         result.exit_code = status.code();
         #[cfg(unix)]
         {
@@ -85,6 +147,12 @@ impl CodingAgent for CodexAgent {
                 result: Box::new(result),
             });
         }
+        #[cfg(unix)]
+        if timed_out {
+            return Err(AgentExecutionError::Timeout {
+                result: Box::new(result),
+            });
+        }
         match input {
             Ok(()) => Ok(result),
             Err(_) if !status.success() => Ok(result),
@@ -93,6 +161,46 @@ impl CodingAgent for CodexAgent {
                 result: Box::new(result),
             }),
         }
+    }
+}
+
+fn isolated_command(
+    executable: &str,
+    denied_read_path: Option<&std::path::Path>,
+) -> Result<Command, AgentExecutionError> {
+    let Some(denied) = denied_read_path else {
+        return Ok(Command::new(executable));
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let canonical = denied
+            .canonicalize()
+            .map_err(|source| AgentExecutionError::Launch {
+                executable: executable.to_owned(),
+                source: Box::new(source),
+                result: Box::default(),
+            })?;
+        let escaped = canonical
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let profile =
+            format!("(version 1) (allow default) (deny file-read* (subpath \"{escaped}\"))");
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command.args(["-p", &profile, executable]);
+        Ok(command)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = denied;
+        Err(AgentExecutionError::Launch {
+            executable: executable.to_owned(),
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "isolated review filesystem is unavailable on this platform",
+            )),
+            result: Box::default(),
+        })
     }
 }
 
@@ -192,5 +300,77 @@ mod tests {
         .unwrap();
         assert_eq!(output, b"not json\n");
         assert_eq!(result.input_tokens, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_execution_kills_a_timed_out_process() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("codex");
+        fs::write(&executable,"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi\ncat >/dev/null\nsleep 10\n").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let started = Instant::now();
+        let result = CodexAgent::new(executable.to_string_lossy()).execute(
+            ExecutionRequest {
+                working_directory: temp.path(),
+                denied_read_path: None,
+                prompt: "review",
+                filesystem: crate::FilesystemPolicy::ReadOnly,
+                model: None,
+                timeout_ms: Some(50),
+            },
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, Err(AgentExecutionError::Timeout { .. })));
+        assert!(started.elapsed().as_secs() < 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn isolated_execution_cannot_read_denied_repository() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        let workspace = temp.path().join("review-workspace");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let secret = repository.join("unrelated.txt");
+        fs::write(&secret, "private repository content").unwrap();
+        let executable = temp.path().join("codex-test");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then text=READ; else text=DENIED; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s\"}}}}\\n' \"$text\"\n",
+                secret.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let mut output = Vec::new();
+        let result = CodexAgent::new(executable.to_string_lossy())
+            .execute(
+                ExecutionRequest {
+                    working_directory: &workspace,
+                    denied_read_path: Some(&repository),
+                    prompt: "review",
+                    filesystem: crate::FilesystemPolicy::ReadOnly,
+                    model: None,
+                    timeout_ms: Some(1_000),
+                },
+                &mut output,
+            )
+            .unwrap();
+        assert_ne!(output, b"READ\n");
+        assert!(output == b"DENIED\n" || result.exit_code != Some(0));
     }
 }

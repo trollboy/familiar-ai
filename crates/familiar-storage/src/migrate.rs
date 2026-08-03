@@ -28,6 +28,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: include_str!("../migrations/005_execution_history.sql"),
     },
+    Migration {
+        version: 6,
+        sql: include_str!("../migrations/006_review_cycles.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_core::Result<usize> {
@@ -106,6 +110,19 @@ mod tests {
         assert!(tables.contains(&"file_summary_reconciliation_records".to_string()));
         assert!(tables.contains(&"file_summary_reconciliation_rollbacks".to_string()));
         assert!(tables.contains(&"file_summary_reconciliation_run_reasons".to_string()));
+        for table in [
+            "review_tasks",
+            "review_artifacts",
+            "review_cycles",
+            "review_stage_executions",
+            "review_findings",
+            "review_finding_events",
+            "review_verification_evidence",
+            "lesson_proposals",
+            "lesson_proposal_events",
+        ] {
+            assert!(tables.contains(&table.to_string()), "missing {table}");
+        }
     }
 
     #[test]
@@ -113,7 +130,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 5);
+        assert_eq!(first, 6);
         assert_eq!(second, 0);
     }
 
@@ -130,7 +147,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
@@ -172,7 +189,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 3);
+        assert_eq!(db.run_migrations().unwrap(), 4);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(

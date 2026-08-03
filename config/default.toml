@@ -24,6 +24,39 @@
 [execution_context]
 # hard_ceiling_tokens = 12000  # Optional; disabled when absent
 
+[review]
+enabled = false
+max_review_attempts = 3
+max_remediation_attempts = 2
+max_total_tokens = 0
+max_total_cost_microusd = 0
+max_total_duration_ms = 0
+allow_isolated_same_model_fallback = false
+max_package_bytes = 1000000
+max_package_tokens = 250000
+max_evidence_bytes = 16000000
+max_verification_log_bytes = 256000
+# allowed_paths = ["src/", "tests/"]
+# prohibited_changes = ["commit", "push", "deployment"]
+# [[review.verification]]
+# check_id = "tests"
+# argv = ["cargo", "test"]
+# working_directory = "."
+# timeout_ms = 300000
+# required = true
+# path_prefixes = ["crates/"]
+# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }
+# [review.implementation_agent]
+# adapter_id = "codex-cli"
+# agent_id = "implementation"
+# provider = "openai"
+# model = "configured-model"
+# [review.reviewer_agent]
+# adapter_id = "codex-cli"
+# agent_id = "reviewer"
+# provider = "openai"
+# model = "configured-model"
+
 [watcher]
 # enabled = true
 # paths = []                                    # Directories to watch (e.g. ["~/Projects"])
