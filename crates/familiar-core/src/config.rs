@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use figment::providers::{Env, Format, Serialized, Toml};
@@ -28,6 +29,21 @@ pub struct Config {
     pub dashboard: DashboardConfig,
     #[serde(default)]
     pub inference: InferenceConfig,
+    #[serde(default)]
+    pub execution_history: ExecutionHistoryConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutionHistoryConfig {
+    #[serde(default)]
+    pub pricing: BTreeMap<String, ExecutionPrice>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutionPrice {
+    pub input_microusd_per_million: Option<u64>,
+    pub cached_input_microusd_per_million: Option<u64>,
+    pub output_microusd_per_million: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,6 +538,26 @@ format = "json"
         let config = Config::load(Some(tmp.path())).unwrap();
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, LogFormat::Json);
+    }
+
+    #[test]
+    fn loads_exact_model_execution_pricing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"
+[execution_history.pricing."exact-model"]
+input_microusd_per_million = 100
+cached_input_microusd_per_million = 20
+output_microusd_per_million = 300
+"#,
+        )
+        .unwrap();
+        let config = Config::load(Some(tmp.path())).unwrap();
+        let price = &config.execution_history.pricing["exact-model"];
+        assert_eq!(price.input_microusd_per_million, Some(100));
+        assert_eq!(price.cached_input_microusd_per_million, Some(20));
+        assert_eq!(price.output_microusd_per_million, Some(300));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 pub mod decision;
+pub mod execution_history;
 pub mod file_summary;
+pub mod lifecycle;
 pub mod project;
 pub mod session_rollup;
 pub mod stats;

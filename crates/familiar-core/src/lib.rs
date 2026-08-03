@@ -7,8 +7,9 @@ pub mod status;
 pub mod version;
 
 pub use config::{
-    BudgetProfile, Config, DashboardConfig, InferenceConfig, InferenceMode, PackerConfig,
-    ProviderKind, RollupConfig, SummaryConfig, TrayConfig, WatcherConfig,
+    BudgetProfile, Config, DashboardConfig, ExecutionHistoryConfig, ExecutionPrice,
+    InferenceConfig, InferenceMode, PackerConfig, ProviderKind, RollupConfig, SummaryConfig,
+    TrayConfig, WatcherConfig,
 };
 pub use error::{FamiliarError, Result};
 pub use paths::AppPaths;
