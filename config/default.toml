@@ -1,0 +1,79 @@
+# Familiar Daemon Configuration
+#
+# This is the default configuration file. Copy to:
+#   Linux:  ~/.config/familiar/config.toml
+#   macOS:  ~/Library/Application Support/Familiar/config.toml
+#
+# All values shown are defaults. Uncomment and modify as needed.
+# Environment variables override file values (prefix: FAMILIAR_, separator: __)
+# Example: FAMILIAR_DAEMON__HEARTBEAT_INTERVAL_SECS=30
+
+[daemon]
+# heartbeat_interval_secs = 60
+# pid_file = ""         # Default: platform-specific (see AppPaths)
+# socket_path = ""      # Default: platform-specific (see AppPaths)
+
+[logging]
+# level = "info"        # Options: trace, debug, info, warn, error
+# format = "pretty"     # Options: pretty, json
+# file = ""             # Optional: path to log file (logs also go to stdout)
+
+[database]
+# path = ""             # Default: <data_dir>/familiar.db
+
+[watcher]
+# enabled = true
+# paths = []                                    # Directories to watch (e.g. ["~/Projects"])
+# debounce_ms = 1000
+# ignore_patterns = ["target/**", "node_modules/**"]
+# respect_gitignore = true
+
+[tray]
+# enabled = true
+# recent_projects_count = 5
+
+[summary]
+# enabled = true
+# staleness_threshold_secs = 86400      # forced refresh window (24h)
+# flush_interval_secs = 3
+# max_file_size_bytes = 1048576         # 1 MB
+# max_pending_files = 10000
+# per_file_quiet_ms = 1500              # debounce per path before regen
+
+[rollup]
+# enabled = true
+# default_limit = 20
+# max_rollup_tokens = 4000
+# max_rollup_chars = 50000
+
+[dashboard]
+# enabled = false                     # opt-in: set true to start localhost dashboard
+# bind_address = "127.0.0.1:9400"
+
+[packer]
+# default_profile = "balanced"        # Options: minimal, balanced, aggressive, max_accuracy
+# hard_ceiling_tokens = 15000
+
+[inference.text]
+# mode = "disabled"             # Options: disabled, local_only, remote_only, hybrid
+# provider = "disabled"         # Options: disabled, builtin, remote
+# builtin_model = "qwen2.5:3b"
+# builtin_url = "http://127.0.0.1:11434/v1"
+# remote_url = ""
+# remote_api_key = ""
+# fallback_enabled = true
+# prefer_privacy = false
+# prefer_cost_savings = true
+# max_input_chars = 16000
+# max_concurrent_requests = 4
+# request_timeout_secs = 60
+
+[inference.embedding]
+# provider = "disabled"         # Options: disabled, builtin, remote
+# builtin_model = "nomic-embed-text"
+# builtin_url = "http://127.0.0.1:11434/v1"
+# remote_url = ""
+# remote_api_key = ""
+# fallback_enabled = true
+# max_concurrent_requests = 4
+# request_timeout_secs = 60

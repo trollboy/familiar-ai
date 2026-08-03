@@ -1,0 +1,26 @@
+services:
+  app:
+    build:
+      context: .
+      target: runtime
+    volumes:
+      - familiar-data:/data
+      - familiar-config:/config
+    environment:
+      - FAMILIAR_LOGGING__LEVEL=info
+      - FAMILIAR_LOGGING__FORMAT=json
+
+  test:
+    build:
+      context: .
+      target: tester
+    working_dir: /app
+    command: >
+      cargo llvm-cov test --workspace --no-fail-fast --no-default-features
+    volumes:
+      - cargo-cache:/usr/local/cargo/registry
+
+volumes:
+  familiar-data:
+  familiar-config:
+  cargo-cache:

@@ -1,0 +1,28 @@
+[package]
+name = "familiar-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "familiar-mcp"
+path = "src/bin/familiar-mcp.rs"
+
+[dependencies]
+familiar-core = { path = "../familiar-core" }
+familiar-storage = { path = "../familiar-storage" }
+familiar-summary = { path = "../familiar-summary" }
+familiar-tokens = { path = "../familiar-tokens" }
+familiar-llm = { path = "../familiar-llm" }
+familiar-logging = { path = "../familiar-logging" }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "io-std", "io-util", "macros"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
