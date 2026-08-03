@@ -603,6 +603,7 @@ dependencies = [
  "dirs",
  "figment",
  "libc",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

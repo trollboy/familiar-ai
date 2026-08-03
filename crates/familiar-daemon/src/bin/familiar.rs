@@ -3,9 +3,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use familiar_agent::{CodexAgent, ExecutionResult};
-use familiar_core::{AppPaths, Config};
+use familiar_core::{
+    AppPaths, BacklogDiscovery, BacklogManager, Config, FilesystemBacklogDiscovery,
+};
 use familiar_daemon::run::execute;
-use familiar_storage::{Database, ExecutionHistoryRepository};
+use familiar_storage::{Database, ExecutionHistoryRepository, SqliteBacklogRepository};
 
 #[derive(Debug, Parser)]
 #[command(name = "familiar", about = "Familiar command-line interface")]
@@ -16,6 +18,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Select the next eligible repository PRD without executing it.
+    Next,
     /// Execute a repository PRD with the locally installed Codex CLI.
     Run { prd_path: PathBuf },
     /// List recent standalone executions.
@@ -32,6 +36,10 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Next => match next() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Run { prd_path } => match execute(&prd_path, &CodexAgent::new("codex")) {
             Ok(result) => exit_code(&result),
             Err(error) => fail(error),
@@ -45,6 +53,28 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         },
     }
+}
+
+fn next() -> Result<(), String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
+    // Resolve Git before opening or migrating storage, preserving the domain's
+    // required operation order for invalid working directories.
+    FilesystemBacklogDiscovery
+        .resolve(&cwd)
+        .map_err(|e| e.to_string())?;
+    let mut db = database()?;
+    let store = SqliteBacklogRepository::new(db.conn_mut());
+    let mut manager = BacklogManager::new(FilesystemBacklogDiscovery, store);
+    let selected = manager.next(&cwd).map_err(|e| e.to_string())?;
+    println!(
+        "{}\t{}\t{}\t{}",
+        selected.id,
+        selected.path,
+        selected.status.as_str(),
+        selected.title
+    );
+    Ok(())
 }
 
 fn database() -> Result<Database, String> {
@@ -149,5 +179,10 @@ mod tests {
             Cli::try_parse_from(["familiar", "usage"]).unwrap().command,
             Command::Usage
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["familiar", "next"]).unwrap().command,
+            Command::Next
+        ));
+        assert!(Cli::try_parse_from(["familiar", "next", "PRD-1.md"]).is_err());
     }
 }

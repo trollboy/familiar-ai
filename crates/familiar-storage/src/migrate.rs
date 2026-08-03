@@ -32,6 +32,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: include_str!("../migrations/006_review_cycles.sql"),
     },
+    Migration {
+        version: 7,
+        sql: include_str!("../migrations/007_backlog.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_core::Result<usize> {
@@ -110,6 +114,13 @@ mod tests {
         assert!(tables.contains(&"file_summary_reconciliation_records".to_string()));
         assert!(tables.contains(&"file_summary_reconciliation_rollbacks".to_string()));
         assert!(tables.contains(&"file_summary_reconciliation_run_reasons".to_string()));
+        assert!(tables.contains(&"backlog_prds".to_string()));
+        assert!(tables.contains(&"backlog_status_events".to_string()));
+        let backlog_rows: i64 = db
+            .conn()
+            .query_row("SELECT count(*) FROM backlog_prds", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(backlog_rows, 0);
         for table in [
             "review_tasks",
             "review_artifacts",
@@ -130,7 +141,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 6);
+        assert_eq!(first, 7);
         assert_eq!(second, 0);
     }
 
@@ -147,7 +158,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]
@@ -189,7 +200,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 4);
+        assert_eq!(db.run_migrations().unwrap(), 5);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -214,5 +225,51 @@ mod tests {
             records, 0,
             "schema upgrade must not synthesize legacy history"
         );
+    }
+
+    #[test]
+    fn exact_pre_backlog_database_upgrades_without_fabricating_backlog_rows() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        for migration in &super::MIGRATIONS[..6] {
+            db.conn().execute_batch(migration.sql).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, 'before')",
+                    params![migration.version],
+                )
+                .unwrap();
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO projects
+                 (id, name, repo_root, active, last_used_at, ignored_paths_json, created_at, updated_at)
+                 VALUES (42, 'preserved', '/preserved', 1, 'before', '[]', 'before', 'before')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(db.run_migrations().unwrap(), 1);
+        let project: (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT name, repo_root FROM projects WHERE id = 42",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(project, ("preserved".into(), "/preserved".into()));
+        let backlog_rows: i64 = db
+            .conn()
+            .query_row("SELECT count(*) FROM backlog_prds", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(backlog_rows, 0);
     }
 }
