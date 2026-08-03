@@ -1,4 +1,5 @@
 pub mod backlog;
+pub mod bootstrap;
 pub mod decision;
 pub mod execution_history;
 pub mod file_summary;

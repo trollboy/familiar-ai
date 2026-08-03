@@ -484,7 +484,7 @@ fn malformed(path: &str, message: impl Into<String>) -> BacklogError {
     }
 }
 
-fn validate_graph(prds: &[DiscoveredPrd]) -> Result<(), BacklogError> {
+pub fn validate_graph(prds: &[DiscoveredPrd]) -> Result<(), BacklogError> {
     let by_id: BTreeMap<_, _> = prds.iter().map(|p| (p.id.clone(), p)).collect();
     for prd in prds {
         for dependency in &prd.dependencies {

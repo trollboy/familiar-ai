@@ -1,0 +1,37 @@
+version = 1
+
+[[completed]]
+path = "docs/prds/PRD-001.md"
+sha256 = "5b6e404068f82a3ac7839844edffa5225d2dedec54a3029553226a68f7f84e50"
+
+[[completed]]
+path = "docs/prds/PRD-002.md"
+sha256 = "a4600d0bcf06d850cca33c066de9ce073c0be0d8d8418106e50aeadd0e6a2e03"
+
+[[completed]]
+path = "docs/prds/PRD-003.md"
+sha256 = "041d77a64d5e4beb9b87e506c75fc9bbbd2666431f41e269fd324cd243b93a10"
+
+[[completed]]
+path = "docs/prds/PRD-004.md"
+sha256 = "406afe325a486fd9a2efff18cacdd3f757d4d68e63ec2d4021cc5802c08fecc3"
+
+[[completed]]
+path = "docs/prds/PRD-005.md"
+sha256 = "07524c1706b55012480dc05e59ed6e638f5719b3db03ba1b624c2621089feb0c"
+
+[[completed]]
+path = "docs/prds/PRD-006.md"
+sha256 = "4ded46586c088fc085c4c59f9bf225e61585f41204f0d744138414ad5bb0c075"
+
+[[completed]]
+path = "docs/prds/PRD-007.md"
+sha256 = "a74a730991e463ed475712c02667eefb1d06b1aa38aee879c72d086efe9b0db0"
+
+[[completed]]
+path = "docs/prds/PRD-008.md"
+sha256 = "3efe1422d7b21603258475152e0d72e8d261a23452b12260e9602503134b6053"
+
+[[completed]]
+path = "docs/prds/PRD-009.md"
+sha256 = "4c1bbc308a81f3353e4f8a0c5fe2b4e3449623f5495f70fab4202772144d8eeb"

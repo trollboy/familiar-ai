@@ -36,6 +36,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 7,
         sql: include_str!("../migrations/007_backlog.sql"),
     },
+    Migration {
+        version: 8,
+        sql: include_str!("../migrations/008_backlog_bootstrap.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_core::Result<usize> {
@@ -116,6 +120,10 @@ mod tests {
         assert!(tables.contains(&"file_summary_reconciliation_run_reasons".to_string()));
         assert!(tables.contains(&"backlog_prds".to_string()));
         assert!(tables.contains(&"backlog_status_events".to_string()));
+        assert!(tables.contains(&"backlog_bootstrap_runs".to_string()));
+        assert!(tables.contains(&"backlog_bootstrap_items".to_string()));
+        assert!(tables.contains(&"backlog_bootstrap_rollbacks".to_string()));
+        assert!(tables.contains(&"backlog_bootstrap_rollback_items".to_string()));
         let backlog_rows: i64 = db
             .conn()
             .query_row("SELECT count(*) FROM backlog_prds", [], |row| row.get(0))
@@ -141,7 +149,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 7);
+        assert_eq!(first, 8);
         assert_eq!(second, 0);
     }
 
@@ -158,7 +166,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -200,7 +208,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 5);
+        assert_eq!(db.run_migrations().unwrap(), 6);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -256,7 +264,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 1);
+        assert_eq!(db.run_migrations().unwrap(), 2);
         let project: (String, String) = db
             .conn()
             .query_row(
@@ -271,5 +279,33 @@ mod tests {
             .query_row("SELECT count(*) FROM backlog_prds", [], |row| row.get(0))
             .unwrap();
         assert_eq!(backlog_rows, 0);
+    }
+
+    #[test]
+    fn exact_post_backlog_database_upgrades_without_bootstrap_evidence() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.conn().execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);").unwrap();
+        for migration in &super::MIGRATIONS[..7] {
+            db.conn().execute_batch(migration.sql).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,'before')",
+                    params![migration.version],
+                )
+                .unwrap();
+        }
+        db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
+        assert_eq!(db.run_migrations().unwrap(), 1);
+        let preserved: String = db
+            .conn()
+            .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
+            .unwrap();
+        let runs: i64 = db
+            .conn()
+            .query_row("SELECT count(*) FROM backlog_bootstrap_runs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!((preserved, runs), ("pending".into(), 0));
     }
 }

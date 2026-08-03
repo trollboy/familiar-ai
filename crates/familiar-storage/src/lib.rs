@@ -5,6 +5,7 @@ pub(crate) mod sql;
 
 pub use db::Database;
 pub use repos::backlog::SqliteBacklogRepository;
+pub use repos::bootstrap::SqliteBootstrapRepository;
 pub use repos::decision::DecisionRepository;
 pub use repos::execution_history::{
     ExecutionFinalization, ExecutionHistoryRepository, ExecutionRecord, ExecutionStart,
