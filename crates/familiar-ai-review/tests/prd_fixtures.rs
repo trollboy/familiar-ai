@@ -87,6 +87,81 @@ fn prd_015_pins_as_a_valid_rename_contract_with_both_sides() {
 }
 
 #[test]
+fn prd_016_pins_as_a_valid_contract() {
+    assert_eq!(
+        parse("PRD-016.md").unwrap(),
+        vec![
+            "crates/familiar-ai-agent/src/isolation.rs",
+            "crates/familiar-ai-agent/src/codex.rs",
+            "crates/familiar-ai-agent/src/claude_code.rs",
+            "crates/familiar-ai-agent/tests/",
+            "Dockerfile",
+            "docker-compose.yml",
+        ]
+    );
+}
+
+#[test]
+fn prds_017_through_020_pin_as_valid_contracts() {
+    assert_eq!(
+        parse("PRD-017.md").unwrap(),
+        vec![
+            "crates/familiar-ai-daemon/src/drive.rs",
+            "crates/familiar-ai-daemon/src/lib.rs",
+            "crates/familiar-ai-daemon/src/run.rs",
+            "crates/familiar-ai-daemon/src/bin/familiar-ai.rs",
+            "crates/familiar-ai-core/src/config.rs",
+            "config/default.toml",
+            "crates/familiar-ai-storage/migrations/",
+            "crates/familiar-ai-storage/src/",
+            "crates/familiar-ai-storage/tests/",
+            "crates/familiar-ai-daemon/tests/",
+        ]
+    );
+    assert_eq!(
+        parse("PRD-018.md").unwrap(),
+        vec![
+            "crates/familiar-ai-daemon/src/report.rs",
+            "crates/familiar-ai-daemon/src/lib.rs",
+            "crates/familiar-ai-daemon/src/bin/familiar-ai.rs",
+            "crates/familiar-ai-storage/src/",
+            "crates/familiar-ai-storage/tests/",
+            "crates/familiar-ai-daemon/tests/",
+        ]
+    );
+    assert_eq!(
+        parse("PRD-019.md").unwrap(),
+        vec![
+            "crates/familiar-ai-daemon/src/plan.rs",
+            "crates/familiar-ai-daemon/src/lib.rs",
+            "crates/familiar-ai-daemon/src/bin/familiar-ai.rs",
+            "crates/familiar-ai-core/src/config.rs",
+            "config/default.toml",
+            "crates/familiar-ai-storage/migrations/",
+            "crates/familiar-ai-storage/src/",
+            "crates/familiar-ai-storage/tests/",
+            "crates/familiar-ai-daemon/tests/",
+        ]
+    );
+    assert_eq!(
+        parse("PRD-020.md").unwrap(),
+        vec![
+            "crates/familiar-ai-daemon/src/drive.rs",
+            "crates/familiar-ai-daemon/src/worktree.rs",
+            "crates/familiar-ai-daemon/src/lib.rs",
+            "crates/familiar-ai-daemon/src/report.rs",
+            "crates/familiar-ai-daemon/src/bin/familiar-ai.rs",
+            "crates/familiar-ai-core/src/config.rs",
+            "config/default.toml",
+            "crates/familiar-ai-storage/migrations/",
+            "crates/familiar-ai-storage/src/",
+            "crates/familiar-ai-storage/tests/",
+            "crates/familiar-ai-daemon/tests/",
+        ]
+    );
+}
+
+#[test]
 fn every_wave_two_prd_parses_deterministically() {
     let mut outcomes = Vec::new();
     let mut names: Vec<_> = fs::read_dir(prd_dir())
@@ -119,7 +194,12 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-007.md",
             "PRD-013.md",
             "PRD-014.md",
-            "PRD-015.md"
+            "PRD-015.md",
+            "PRD-016.md",
+            "PRD-017.md",
+            "PRD-018.md",
+            "PRD-019.md",
+            "PRD-020.md"
         ]
     );
 }
