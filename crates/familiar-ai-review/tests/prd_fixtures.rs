@@ -162,6 +162,23 @@ fn prds_017_through_020_pin_as_valid_contracts() {
 }
 
 #[test]
+fn prd_021_pins_as_a_valid_contract() {
+    assert_eq!(
+        parse("PRD-021.md").unwrap(),
+        vec![
+            "crates/familiar-ai-agent/src/isolation.rs",
+            "crates/familiar-ai-agent/src/codex.rs",
+            "crates/familiar-ai-agent/src/claude_code.rs",
+            "crates/familiar-ai-agent/Cargo.toml",
+            "Cargo.toml",
+            "Cargo.lock",
+            "Dockerfile",
+            "docker-compose.yml",
+        ]
+    );
+}
+
+#[test]
 fn every_wave_two_prd_parses_deterministically() {
     let mut outcomes = Vec::new();
     let mut names: Vec<_> = fs::read_dir(prd_dir())
@@ -199,7 +216,8 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-017.md",
             "PRD-018.md",
             "PRD-019.md",
-            "PRD-020.md"
+            "PRD-020.md",
+            "PRD-021.md"
         ]
     );
 }
