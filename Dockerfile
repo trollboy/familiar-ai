@@ -7,6 +7,9 @@ RUN cargo build --release --no-default-features --bin familiar-ai-daemon
 # Stage 2: Test (used by docker compose test service)
 FROM rust:1.88-bookworm AS tester
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bubblewrap \
+    && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-llvm-cov
 RUN rustup component add llvm-tools-preview
 COPY . .

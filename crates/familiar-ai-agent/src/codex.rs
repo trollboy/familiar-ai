@@ -256,6 +256,59 @@ mod tests {
         assert!(started.elapsed().as_secs() < 2);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_isolation_denies_repository_reads_or_fails_closed() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::isolation::ISOLATION_TEST_ENV.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        let workspace = temp.path().join("review-workspace");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let secret = repository.join("unrelated.txt");
+        fs::write(&secret, "private repository content").unwrap();
+        let outside = temp.path().join("outside.txt");
+        fs::write(&outside, "readable").unwrap();
+        let executable = temp.path().join("codex-test");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s/%s\"}}}}\\n' \"$inner\" \"$outer\"\n",
+                secret.display(),
+                outside.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let mut output = Vec::new();
+        let result = CodexAgent::new(executable.to_string_lossy()).execute(
+            ExecutionRequest {
+                working_directory: &workspace,
+                denied_read_path: Some(&repository),
+                prompt: "review",
+                filesystem: crate::FilesystemPolicy::ReadOnly,
+                model: None,
+                timeout_ms: Some(5_000),
+            },
+            &mut output,
+        );
+        if crate::isolation::linux_sandbox_available() {
+            let result = result.unwrap();
+            assert_eq!(output, b"DENIED/OK\n", "exit={:?}", result.exit_code);
+        } else {
+            assert!(
+                matches!(result, Err(AgentExecutionError::Launch { .. })),
+                "environment cannot sandbox: launch must fail closed"
+            );
+            assert!(output.is_empty());
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn isolated_execution_cannot_read_denied_repository() {

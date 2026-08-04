@@ -734,7 +734,7 @@ mod tests {
         assert!(started.elapsed().as_secs() < 2);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn denied_read_path_fails_closed_without_platform_isolation() {
         let temp = tempfile::tempdir().unwrap();
@@ -746,6 +746,45 @@ mod tests {
         })
         .execute(request, &mut Vec::new());
         assert!(matches!(result, Err(AgentExecutionError::Launch { .. })));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_isolation_denies_repository_reads_or_fails_closed() {
+        let _guard = crate::isolation::ISOLATION_TEST_ENV.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        let workspace = temp.path().join("review-workspace");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let secret = repository.join("unrelated.txt");
+        fs::write(&secret, "private repository content").unwrap();
+        let outside = temp.path().join("outside.txt");
+        fs::write(&outside, "readable").unwrap();
+        let executable = temp.path().join("claude-test");
+        write_executable(
+            &executable,
+            &format!(
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nprintf '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"%s/%s\"}}]}}}}\\n' \"$inner\" \"$outer\"\n",
+                secret.display(),
+                outside.display()
+            ),
+        );
+        let mut output = Vec::new();
+        let mut request = request(&workspace, None, crate::FilesystemPolicy::ReadOnly);
+        request.denied_read_path = Some(&repository);
+        request.timeout_ms = Some(5_000);
+        let result = agent(settings(&executable)).execute(request, &mut output);
+        if crate::isolation::linux_sandbox_available() {
+            let result = result.unwrap();
+            assert_eq!(output, b"DENIED/OK\n", "exit={:?}", result.exit_code);
+        } else {
+            assert!(
+                matches!(result, Err(AgentExecutionError::Launch { .. })),
+                "environment cannot sandbox: launch must fail closed"
+            );
+            assert!(output.is_empty());
+        }
     }
 
     #[cfg(target_os = "macos")]
