@@ -229,8 +229,9 @@ fn db(e: rusqlite::Error) -> FamiliarError {
 mod tests {
     use super::*;
     use familiar_review::{
-        AgentAssignment, AgentObservation, AgentRole, ExecutionUsage, ReviewCycleState,
-        ReviewDisposition,
+        AgentAssignment, AgentObservation, AgentRole, ExecutionUsage, ExpectedFileMatch,
+        ExpectedMatchKind, GitChangeKind, ReviewCycleState, ReviewDisposition, ScopeCheckResult,
+        ScopeDecision, ScopeDisposition, ScopeFileClass, ScopeFinding, ScopeRuleSource,
     };
     use std::collections::BTreeMap;
 
@@ -279,6 +280,43 @@ mod tests {
             verification_before_review: vec![],
             verification_after_remediation: vec![],
             verification_history: vec![],
+            scope_policy_snapshot: Some(
+                repository
+                    .save_artifact(
+                        "scope_policy_snapshot",
+                        b"{\"schema_version\":\"scope-policy/1\"}",
+                    )
+                    .unwrap(),
+            ),
+            scope_evaluations: vec![ScopeCheckResult {
+                added: vec!["src/new.rs".into()],
+                modified: vec![],
+                deleted: vec![],
+                renamed: vec![],
+                disposition: ScopeDisposition::Broadened,
+                findings: vec![ScopeFinding {
+                    finding_id: "added:-:src/new.rs#new".into(),
+                    change_id: "added:-:src/new.rs".into(),
+                    path: "src/new.rs".into(),
+                    old_path: None,
+                    change_kind: GitChangeKind::Added,
+                    file_class: ScopeFileClass::OrdinarySource,
+                    decision: ScopeDecision::UndeclaredScopeExpansion,
+                    rule_id: "static_allowed_path_ceiling".into(),
+                    rule_source: ScopeRuleSource::Configuration,
+                    rule_detail: "declared at Expected Files line 7 but expansion disabled".into(),
+                    expected_file_match: Some(ExpectedFileMatch {
+                        normalized: "src/new.rs".into(),
+                        source_line: 7,
+                        match_kind: ExpectedMatchKind::ExactFile,
+                    }),
+                    allowed_path_match: None,
+                    prohibited_rule_match: None,
+                    policy_snapshot_hash: "sha256:policy".into(),
+                }],
+                policy_snapshot_hash: "sha256:policy".into(),
+                phase: "initial".into(),
+            }],
             aggregate_usage: ExecutionUsage::default(),
             aggregate_duration_ms: 0,
             started_at: "2026-08-03T00:00:00Z".into(),
@@ -289,7 +327,10 @@ mod tests {
             remediation_attempts: vec![],
         };
         repository.save_cycle(&cycle).unwrap();
-        assert_eq!(repository.get_cycle("cycle").unwrap(), Some(cycle));
+        assert_eq!(repository.get_cycle("cycle").unwrap(), Some(cycle.clone()));
+        let reloaded = repository.get_cycle("cycle").unwrap().unwrap();
+        assert_eq!(reloaded.scope_evaluations, cycle.scope_evaluations);
+        assert_eq!(reloaded.scope_policy_snapshot, cycle.scope_policy_snapshot);
         assert_eq!(repository.recover_incomplete().unwrap(), 1);
         let recovered = repository.get_cycle("cycle").unwrap().unwrap();
         assert_eq!(recovered.state, ReviewCycleState::Interrupted);
@@ -297,6 +338,71 @@ mod tests {
             recovered.disposition,
             ReviewDisposition::HumanReviewRequired
         );
+    }
+
+    #[test]
+    fn legacy_cycle_json_without_scope_fields_still_deserializes() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = ReviewRepository::new(db.conn());
+        let task = ReviewTask {
+            task_id: "task".into(),
+            objective: "objective".into(),
+            acceptance_criteria: vec!["criterion".into()],
+            base_revision: "tree".into(),
+            allowed_paths: vec!["src/".into()],
+            prohibited_changes: vec![],
+            verification_plan_id: "checks".into(),
+        };
+        repository
+            .insert_task(&task, &BlockingPolicy::default())
+            .unwrap();
+        let modern = serde_json::json!({
+            "cycle_id": "legacy",
+            "task_id": "task",
+            "attempt": 1,
+            "state": "verifying",
+            "implementation": {
+                "assignment": {
+                    "adapter_id": "fake",
+                    "agent_id": "fake",
+                    "provider": null,
+                    "requested_model": null,
+                    "role": "implementation",
+                    "session_id": null
+                },
+                "agent_version": null,
+                "reported_model": null,
+                "unavailable_fields": {}
+            },
+            "implementation_execution": null,
+            "reviewer": null,
+            "independence": null,
+            "review_request": null,
+            "review_result": null,
+            "remediation_request": null,
+            "remediation_result": null,
+            "verification_before_review": [],
+            "verification_after_remediation": [],
+            "verification_history": [],
+            "aggregate_usage": ExecutionUsage::default(),
+            "aggregate_duration_ms": 0,
+            "started_at": "2026-08-03T00:00:00Z",
+            "ended_at": null,
+            "disposition": "pending",
+            "stop_reasons": [],
+            "review_attempts": [],
+            "remediation_attempts": []
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO review_cycles(cycle_id,task_id,attempt,state,disposition,cycle_json,started_at,ended_at) VALUES('legacy','task',1,'\"verifying\"','\"pending\"',?1,'2026-08-03T00:00:00Z',NULL)",
+                params![modern.to_string()],
+            )
+            .unwrap();
+        let cycle = repository.get_cycle("legacy").unwrap().unwrap();
+        assert_eq!(cycle.scope_policy_snapshot, None);
+        assert!(cycle.scope_evaluations.is_empty());
     }
 
     #[test]

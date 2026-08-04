@@ -35,6 +35,191 @@ pub struct Config {
     pub execution_context: ExecutionContextConfig,
     #[serde(default)]
     pub review: ReviewConfig,
+    /// Absent means exactly today's behavior: Codex for both roles and no
+    /// review-identity consistency checking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<AgentsConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentAdapterKind {
+    #[default]
+    Codex,
+    ClaudeCode,
+}
+
+impl AgentAdapterKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
+        }
+    }
+    pub fn default_executable(&self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl AgentEffort {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentPermissionMode {
+    #[serde(rename = "default")]
+    Default,
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "acceptEdits")]
+    AcceptEdits,
+    #[serde(rename = "bypassPermissions")]
+    BypassPermissions,
+}
+
+impl AgentPermissionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+            Self::AcceptEdits => "acceptEdits",
+            Self::BypassPermissions => "bypassPermissions",
+        }
+    }
+}
+
+/// Flags the adapter owns or forbids; configured `extra_args` may not name
+/// them, exactly or in `<flag>=value` form.
+pub const FORBIDDEN_AGENT_EXTRA_ARGS: [&str; 11] = [
+    "--print",
+    "--output-format",
+    "--input-format",
+    "--verbose",
+    "--model",
+    "--permission-mode",
+    "--resume",
+    "--continue",
+    "--session-id",
+    "--fork-session",
+    "--dangerously-skip-permissions",
+];
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentEntryConfig {
+    #[serde(default)]
+    pub adapter: AgentAdapterKind,
+    #[serde(default)]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<AgentEffort>,
+    #[serde(default)]
+    pub permission_mode: Option<AgentPermissionMode>,
+    /// 0 or absent means no adapter budget ceiling.
+    #[serde(default)]
+    pub max_budget_microusd: u64,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+impl AgentEntryConfig {
+    pub fn resolved_executable(&self) -> String {
+        self.executable
+            .clone()
+            .unwrap_or_else(|| self.adapter.default_executable().to_owned())
+    }
+
+    fn validate(&self, role: &str, is_reviewer: bool) -> Result<(), String> {
+        if let Some(executable) = &self.executable {
+            if executable.trim().is_empty() {
+                return Err(format!("[agents.{role}] executable must be non-empty"));
+            }
+        }
+        if self.adapter == AgentAdapterKind::Codex
+            && (self.effort.is_some() || self.permission_mode.is_some())
+        {
+            return Err(format!(
+                "[agents.{role}] effort and permission_mode are valid only for adapter \"claude-code\""
+            ));
+        }
+        if is_reviewer && self.permission_mode == Some(AgentPermissionMode::BypassPermissions) {
+            return Err(format!(
+                "[agents.{role}] bypassPermissions is never permitted for the reviewer"
+            ));
+        }
+        for arg in &self.extra_args {
+            for flag in FORBIDDEN_AGENT_EXTRA_ARGS {
+                if arg == flag || arg.starts_with(&format!("{flag}=")) {
+                    return Err(format!(
+                        "[agents.{role}] extra_args may not include adapter-owned or forbidden flag '{flag}'"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentsConfig {
+    #[serde(default)]
+    pub implementation: AgentEntryConfig,
+    #[serde(default)]
+    pub reviewer: AgentEntryConfig,
+}
+
+impl AgentsConfig {
+    /// Fail-closed validation, including consistency with the authoritative
+    /// review audit identities when review is enabled. Runs only when the
+    /// `[agents]` section is present.
+    pub fn validate(&self, review: &ReviewConfig) -> Result<(), String> {
+        self.implementation.validate("implementation", false)?;
+        self.reviewer.validate("reviewer", true)?;
+        if review.enabled {
+            for (role, entry, identity) in [
+                (
+                    "implementation",
+                    &self.implementation,
+                    &review.implementation_agent,
+                ),
+                ("reviewer", &self.reviewer, &review.reviewer_agent),
+            ] {
+                if identity.adapter_id != entry.adapter.as_str() {
+                    return Err(format!(
+                        "review.{role}_agent.adapter_id '{}' contradicts agents.{role}.adapter '{}'",
+                        identity.adapter_id,
+                        entry.adapter.as_str()
+                    ));
+                }
+                if let (Some(review_model), Some(agent_model)) = (&identity.model, &entry.model) {
+                    if review_model != agent_model {
+                        return Err(format!(
+                            "review.{role}_agent.model '{review_model}' contradicts agents.{role}.model '{agent_model}'"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,7 +241,9 @@ pub struct ReviewConfig {
     #[serde(default)]
     pub allowed_paths: Vec<String>,
     #[serde(default)]
-    pub prohibited_changes: Vec<String>,
+    pub prohibited_changes: Vec<ProhibitedChangeConfig>,
+    #[serde(default)]
+    pub scope: ReviewScopeConfig,
     #[serde(default)]
     pub verification: Vec<ReviewVerificationConfig>,
     #[serde(default)]
@@ -79,6 +266,291 @@ pub struct ReviewAgentConfig {
     pub agent_id: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeDeclarationModeConfig {
+    ExpectedOrConfigured,
+    ExpectedRequired,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeClassPolicyConfig {
+    Deny,
+    HumanReview,
+    AllowWhenExpected,
+    AllowWhenConfigured,
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeFileClassName {
+    DependencyManifest,
+    DependencyLockfile,
+    Migration,
+    Configuration,
+    Test,
+    GeneratedArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScopeFileClassConfig {
+    #[serde(default = "human_review_policy")]
+    pub dependency_manifest: ScopeClassPolicyConfig,
+    #[serde(default = "human_review_policy")]
+    pub dependency_lockfile: ScopeClassPolicyConfig,
+    #[serde(default = "human_review_policy")]
+    pub migration: ScopeClassPolicyConfig,
+    #[serde(default = "human_review_policy")]
+    pub configuration: ScopeClassPolicyConfig,
+    #[serde(default = "allow_when_expected_policy")]
+    pub test: ScopeClassPolicyConfig,
+    #[serde(default = "human_review_policy")]
+    pub generated_artifact: ScopeClassPolicyConfig,
+}
+
+const fn human_review_policy() -> ScopeClassPolicyConfig {
+    ScopeClassPolicyConfig::HumanReview
+}
+const fn allow_when_expected_policy() -> ScopeClassPolicyConfig {
+    ScopeClassPolicyConfig::AllowWhenExpected
+}
+
+impl Default for ScopeFileClassConfig {
+    fn default() -> Self {
+        Self {
+            dependency_manifest: human_review_policy(),
+            dependency_lockfile: human_review_policy(),
+            migration: human_review_policy(),
+            configuration: human_review_policy(),
+            test: allow_when_expected_policy(),
+            generated_artifact: human_review_policy(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScopeClassificationConfig {
+    pub id: String,
+    pub class: ScopeFileClassName,
+    pub path: String,
+    #[serde(default)]
+    pub precedence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewScopeConfig {
+    #[serde(default)]
+    pub allow_prd_expected_file_expansion: bool,
+    #[serde(default = "default_declaration_mode")]
+    pub declaration_mode: ScopeDeclarationModeConfig,
+    #[serde(default)]
+    pub file_classes: ScopeFileClassConfig,
+    #[serde(default)]
+    pub classification: Vec<ScopeClassificationConfig>,
+}
+
+const fn default_declaration_mode() -> ScopeDeclarationModeConfig {
+    ScopeDeclarationModeConfig::ExpectedOrConfigured
+}
+
+impl Default for ReviewScopeConfig {
+    fn default() -> Self {
+        Self {
+            allow_prd_expected_file_expansion: false,
+            declaration_mode: default_declaration_mode(),
+            file_classes: ScopeFileClassConfig::default(),
+            classification: Vec::new(),
+        }
+    }
+}
+
+pub const SUPPORTED_CHANGE_KINDS: [&str; 7] = [
+    "added",
+    "modified",
+    "deleted",
+    "renamed",
+    "copied",
+    "type_changed",
+    "unmerged",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ProhibitedChangeConfig {
+    Typed(TypedProhibitedChange),
+    Legacy(String),
+}
+
+impl From<&str> for ProhibitedChangeConfig {
+    fn from(value: &str) -> Self {
+        Self::Legacy(value.into())
+    }
+}
+impl From<String> for ProhibitedChangeConfig {
+    fn from(value: String) -> Self {
+        Self::Legacy(value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TypedProhibitedChange {
+    pub id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub class: Option<ScopeFileClassName>,
+    #[serde(default)]
+    pub change_kinds: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// A prohibited-change rule after lossless resolution of the closed legacy grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedProhibitedRule {
+    pub id: String,
+    pub path: Option<String>,
+    pub class: Option<ScopeFileClassName>,
+    pub change_kinds: Vec<String>,
+    pub description: Option<String>,
+}
+
+/// Closed scope-path grammar shared with review's Expected Files contract:
+/// exact repository-relative file, `dir/`, or `dir/**` (normalized to `dir/`).
+pub fn validate_scope_path(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("empty path expression".into());
+    }
+    if value.starts_with('/') {
+        return Err("absolute paths are not supported".into());
+    }
+    if value.contains('\\') {
+        return Err("backslashes are not supported".into());
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err("whitespace is not supported in path expressions".into());
+    }
+    if value.starts_with('~') {
+        return Err("home expansion is not supported".into());
+    }
+    if value.contains('$') {
+        return Err("variable expansion is not supported".into());
+    }
+    if value.contains(':') {
+        return Err("URI forms are not supported".into());
+    }
+    let (body, directory) = if let Some(prefix) = value.strip_suffix("/**") {
+        (prefix, true)
+    } else if let Some(prefix) = value.strip_suffix('/') {
+        (prefix, true)
+    } else {
+        (value, false)
+    };
+    if body.is_empty() {
+        return Err("empty path expression".into());
+    }
+    if body.contains(['*', '?', '{', '}', '[', ']']) {
+        return Err("glob syntax other than a terminal '/**' is not supported".into());
+    }
+    if body
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("empty, '.' or '..' path components are not supported".into());
+    }
+    Ok(if directory {
+        format!("{body}/")
+    } else {
+        body.to_owned()
+    })
+}
+
+impl ProhibitedChangeConfig {
+    /// Resolve under the closed legacy grammar: a path-shaped string becomes a
+    /// typed path rule; the exact phrase `dependency changes` becomes typed
+    /// prohibitions of the dependency manifest and lockfile classes; any other
+    /// free-form string fails with a migration diagnostic.
+    pub fn resolve(&self) -> Result<Vec<ResolvedProhibitedRule>, String> {
+        match self {
+            Self::Legacy(value) if value == "dependency changes" => Ok(vec![
+                ResolvedProhibitedRule {
+                    id: "legacy:class:dependency_manifest".into(),
+                    path: None,
+                    class: Some(ScopeFileClassName::DependencyManifest),
+                    change_kinds: Vec::new(),
+                    description: Some("legacy 'dependency changes' prohibition".into()),
+                },
+                ResolvedProhibitedRule {
+                    id: "legacy:class:dependency_lockfile".into(),
+                    path: None,
+                    class: Some(ScopeFileClassName::DependencyLockfile),
+                    change_kinds: Vec::new(),
+                    description: Some("legacy 'dependency changes' prohibition".into()),
+                },
+            ]),
+            Self::Legacy(value) => {
+                // A bare word ("commit", "push", "deployment") is not a path
+                // under the closed legacy grammar even though it is a valid
+                // single path component; legacy path strings must look like
+                // paths so free-form prose always fails closed.
+                let path_shaped = value.contains('/') || value.contains('.');
+                match validate_scope_path(value) {
+                    Ok(normalized) if path_shaped => Ok(vec![ResolvedProhibitedRule {
+                        id: format!("legacy:path:{normalized}"),
+                        path: Some(normalized),
+                        class: None,
+                        change_kinds: Vec::new(),
+                        description: Some(format!("legacy prohibited path '{value}'")),
+                    }]),
+                    _ => Err(format!(
+                        "prohibited_changes entry '{value}' is not in the closed legacy grammar \
+                         (a repository-relative path containing '/' or '.', or the exact phrase \
+                         'dependency changes'); migrate it to a typed \
+                         [[review.prohibited_changes]] table with id and path or class"
+                    )),
+                }
+            }
+            Self::Typed(rule) => {
+                if rule.id.trim().is_empty() {
+                    return Err("typed prohibited_changes rule requires a non-empty id".into());
+                }
+                match (&rule.path, &rule.class) {
+                    (Some(_), Some(_)) | (None, None) => {
+                        return Err(format!(
+                            "prohibited_changes rule '{}' must declare exactly one of path or class",
+                            rule.id
+                        ));
+                    }
+                    _ => {}
+                }
+                let path = match &rule.path {
+                    Some(path) => Some(validate_scope_path(path).map_err(|error| {
+                        format!("prohibited_changes rule '{}': {error}", rule.id)
+                    })?),
+                    None => None,
+                };
+                for kind in &rule.change_kinds {
+                    if !SUPPORTED_CHANGE_KINDS.contains(&kind.as_str()) {
+                        return Err(format!(
+                            "prohibited_changes rule '{}' names unsupported change kind '{kind}'",
+                            rule.id
+                        ));
+                    }
+                }
+                Ok(vec![ResolvedProhibitedRule {
+                    id: rule.id.clone(),
+                    path,
+                    class: rule.class,
+                    change_kinds: rule.change_kinds.clone(),
+                    description: rule.description.clone(),
+                }])
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,6 +606,7 @@ impl Default for ReviewConfig {
             allow_isolated_same_model_fallback: false,
             allowed_paths: Vec::new(),
             prohibited_changes: Vec::new(),
+            scope: ReviewScopeConfig::default(),
             verification: Vec::new(),
             implementation_agent: ReviewAgentConfig::default(),
             reviewer_agent: ReviewAgentConfig::default(),
@@ -165,8 +638,42 @@ impl ReviewConfig {
                     .into(),
             );
         }
-        if self.allowed_paths.is_empty()
-            || self.verification.is_empty()
+        if self.allowed_paths.is_empty() && !self.scope.allow_prd_expected_file_expansion {
+            return Err(
+                "enabled review requires allowed paths unless PRD expected-file expansion is enabled"
+                    .into(),
+            );
+        }
+        for path in &self.allowed_paths {
+            validate_scope_path(path)
+                .map_err(|error| format!("review allowed path '{path}': {error}"))?;
+        }
+        let mut prohibited_ids = std::collections::BTreeSet::new();
+        for entry in &self.prohibited_changes {
+            for rule in entry.resolve()? {
+                if !prohibited_ids.insert(rule.id.clone()) {
+                    return Err(format!(
+                        "duplicate prohibited_changes rule id '{}'",
+                        rule.id
+                    ));
+                }
+            }
+        }
+        let mut classification_ids = std::collections::BTreeSet::new();
+        for rule in &self.scope.classification {
+            if rule.id.trim().is_empty() {
+                return Err("scope classification rule requires a non-empty id".into());
+            }
+            if !classification_ids.insert(rule.id.clone()) {
+                return Err(format!(
+                    "duplicate scope classification rule id '{}'",
+                    rule.id
+                ));
+            }
+            validate_scope_path(&rule.path)
+                .map_err(|error| format!("scope classification rule '{}': {error}", rule.id))?;
+        }
+        if self.verification.is_empty()
             || self.verification.iter().any(|check| {
                 check.check_id.is_empty()
                     || check.argv.is_empty()
@@ -854,5 +1361,314 @@ output_microusd_per_million = 300
         assert!(review.validate().is_ok());
         review.max_review_attempts = 0;
         assert!(review.validate().is_err());
+    }
+
+    fn valid_enabled_review() -> ReviewConfig {
+        let mut review = ReviewConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        review.max_total_duration_ms = 60_000;
+        review.allowed_paths = vec!["src/".into()];
+        review.verification = vec![ReviewVerificationConfig {
+            check_id: "tests".into(),
+            argv: vec!["/usr/bin/true".into()],
+            working_directory: ".".into(),
+            timeout_ms: 1_000,
+            required: true,
+            path_prefixes: vec![],
+            environment: BTreeMap::new(),
+        }];
+        review.implementation_agent = ReviewAgentConfig {
+            adapter_id: "fake".into(),
+            agent_id: "implementation".into(),
+            provider: None,
+            model: None,
+        };
+        review.reviewer_agent = ReviewAgentConfig {
+            adapter_id: "fake".into(),
+            agent_id: "reviewer".into(),
+            provider: None,
+            model: None,
+        };
+        review
+    }
+
+    #[test]
+    fn legacy_prohibited_grammar_is_closed_and_lossless() {
+        let path = ProhibitedChangeConfig::from("secrets/").resolve().unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].id, "legacy:path:secrets/");
+        assert_eq!(path[0].path.as_deref(), Some("secrets/"));
+        let glob = ProhibitedChangeConfig::from("secrets/**")
+            .resolve()
+            .unwrap();
+        assert_eq!(glob[0].path.as_deref(), Some("secrets/"));
+        let dependency = ProhibitedChangeConfig::from("dependency changes")
+            .resolve()
+            .unwrap();
+        assert_eq!(
+            dependency
+                .iter()
+                .map(|rule| (rule.id.as_str(), rule.class))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "legacy:class:dependency_manifest",
+                    Some(ScopeFileClassName::DependencyManifest)
+                ),
+                (
+                    "legacy:class:dependency_lockfile",
+                    Some(ScopeFileClassName::DependencyLockfile)
+                ),
+            ]
+        );
+        for stale in ["commit", "push", "deployment", "no big rewrites"] {
+            let error = ProhibitedChangeConfig::from(stale).resolve().unwrap_err();
+            assert!(error.contains(stale), "diagnostic must name '{stale}'");
+            assert!(error.contains("[[review.prohibited_changes]]"));
+        }
+    }
+
+    #[test]
+    fn typed_prohibited_rules_validate_fail_closed() {
+        let valid = ProhibitedChangeConfig::Typed(TypedProhibitedChange {
+            id: "no_migration_edits".into(),
+            path: None,
+            class: Some(ScopeFileClassName::Migration),
+            change_kinds: vec!["modified".into(), "deleted".into()],
+            description: None,
+        });
+        assert_eq!(valid.resolve().unwrap()[0].change_kinds.len(), 2);
+        let both = ProhibitedChangeConfig::Typed(TypedProhibitedChange {
+            id: "x".into(),
+            path: Some("a".into()),
+            class: Some(ScopeFileClassName::Test),
+            change_kinds: vec![],
+            description: None,
+        });
+        assert!(both.resolve().unwrap_err().contains("exactly one"));
+        let bad_kind = ProhibitedChangeConfig::Typed(TypedProhibitedChange {
+            id: "x".into(),
+            path: Some("a".into()),
+            class: None,
+            change_kinds: vec!["committed".into()],
+            description: None,
+        });
+        assert!(bad_kind.resolve().unwrap_err().contains("committed"));
+    }
+
+    #[test]
+    fn enabled_review_scope_validation_is_fail_closed() {
+        let mut review = valid_enabled_review();
+        review.prohibited_changes = vec!["dependency changes".into()];
+        assert!(review.validate().is_ok());
+        review.prohibited_changes = vec!["push".into()];
+        assert!(review
+            .validate()
+            .unwrap_err()
+            .contains("closed legacy grammar"));
+        review.prohibited_changes = vec!["secrets/".into(), "secrets/".into()];
+        assert!(review.validate().unwrap_err().contains("duplicate"));
+        let mut review = valid_enabled_review();
+        review.allowed_paths = vec!["../outside".into()];
+        assert!(review.validate().is_err());
+        let mut review = valid_enabled_review();
+        review.allowed_paths = vec![];
+        assert!(review.validate().is_err());
+        review.scope.allow_prd_expected_file_expansion = true;
+        assert!(review.validate().is_ok());
+        let mut review = valid_enabled_review();
+        review.scope.classification = vec![ScopeClassificationConfig {
+            id: "migrations".into(),
+            class: ScopeFileClassName::Migration,
+            path: "migrations/".into(),
+            precedence: None,
+        }];
+        assert!(review.validate().is_ok());
+        review.scope.classification.push(ScopeClassificationConfig {
+            id: "migrations".into(),
+            class: ScopeFileClassName::Configuration,
+            path: "config/".into(),
+            precedence: None,
+        });
+        assert!(review.validate().unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn scope_config_toml_round_trip_and_defaults() {
+        let parsed: ReviewScopeConfig = toml::from_str(
+            "allow_prd_expected_file_expansion = true\ndeclaration_mode = \"expected_required\"\n\n[file_classes]\ndependency_lockfile = \"deny\"\n",
+        )
+        .unwrap();
+        assert!(parsed.allow_prd_expected_file_expansion);
+        assert_eq!(
+            parsed.declaration_mode,
+            ScopeDeclarationModeConfig::ExpectedRequired
+        );
+        assert_eq!(
+            parsed.file_classes.dependency_lockfile,
+            ScopeClassPolicyConfig::Deny
+        );
+        assert_eq!(
+            parsed.file_classes.dependency_manifest,
+            ScopeClassPolicyConfig::HumanReview
+        );
+        assert_eq!(
+            parsed.file_classes.test,
+            ScopeClassPolicyConfig::AllowWhenExpected
+        );
+        let defaults = ReviewScopeConfig::default();
+        assert!(!defaults.allow_prd_expected_file_expansion);
+        assert_eq!(
+            defaults.declaration_mode,
+            ScopeDeclarationModeConfig::ExpectedOrConfigured
+        );
+    }
+
+    #[test]
+    fn prohibited_changes_toml_accepts_legacy_strings_and_typed_tables() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            prohibited_changes: Vec<ProhibitedChangeConfig>,
+        }
+        let parsed: Wrapper =
+            toml::from_str("prohibited_changes = [\"dependency changes\", \"secrets/\"]\n")
+                .unwrap();
+        assert_eq!(parsed.prohibited_changes.len(), 2);
+        assert!(matches!(
+            parsed.prohibited_changes[0],
+            ProhibitedChangeConfig::Legacy(_)
+        ));
+        let parsed: Wrapper = toml::from_str(
+            "[[prohibited_changes]]\nid = \"no_secrets\"\npath = \"secrets/\"\nchange_kinds = [\"added\"]\n",
+        )
+        .unwrap();
+        match &parsed.prohibited_changes[0] {
+            ProhibitedChangeConfig::Typed(rule) => {
+                assert_eq!(rule.id, "no_secrets");
+                assert_eq!(rule.change_kinds, vec!["added".to_owned()]);
+            }
+            other => panic!("expected typed rule, got {other:?}"),
+        }
+    }
+
+    static AGENTS_ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn agents_section_parses_canonical_toml_and_defaults_to_absent() {
+        let _guard = AGENTS_ENV.lock().unwrap();
+        assert!(Config::default().agents.is_none());
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "").unwrap();
+        assert!(Config::load(Some(tmp.path())).unwrap().agents.is_none());
+        std::fs::write(
+            tmp.path(),
+            "[agents.implementation]\nadapter = \"claude-code\"\nexecutable = \"claude\"\nmodel = \"sonnet\"\neffort = \"high\"\npermission_mode = \"acceptEdits\"\nmax_budget_microusd = 5\nextra_args = [\"--add-dir\", \"/tmp/x\"]\n\n[agents.reviewer]\nadapter = \"claude-code\"\npermission_mode = \"default\"\n",
+        )
+        .unwrap();
+        let config = Config::load(Some(tmp.path())).unwrap();
+        let agents = config.agents.unwrap();
+        assert_eq!(agents.implementation.adapter, AgentAdapterKind::ClaudeCode);
+        assert_eq!(agents.implementation.resolved_executable(), "claude");
+        assert_eq!(agents.implementation.model.as_deref(), Some("sonnet"));
+        assert_eq!(agents.implementation.effort, Some(AgentEffort::High));
+        assert_eq!(
+            agents.implementation.permission_mode,
+            Some(AgentPermissionMode::AcceptEdits)
+        );
+        assert_eq!(agents.implementation.max_budget_microusd, 5);
+        assert_eq!(agents.implementation.extra_args.len(), 2);
+        assert_eq!(
+            agents.reviewer.permission_mode,
+            Some(AgentPermissionMode::Default)
+        );
+        assert!(agents.validate(&ReviewConfig::default()).is_ok());
+        // Codex entries resolve their executable by adapter default.
+        assert_eq!(AgentEntryConfig::default().resolved_executable(), "codex");
+    }
+
+    #[test]
+    fn agents_env_overrides_round_trip_through_existing_mapping() {
+        let _guard = AGENTS_ENV.lock().unwrap();
+        let env_key = "FAMILIAR_AGENTS__IMPLEMENTATION__ADAPTER";
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "[agents.implementation]\nadapter = \"codex\"\n").unwrap();
+        std::env::set_var(env_key, "claude-code");
+        let config = Config::load(Some(tmp.path())).unwrap();
+        std::env::remove_var(env_key);
+        assert_eq!(
+            config.agents.unwrap().implementation.adapter,
+            AgentAdapterKind::ClaudeCode
+        );
+    }
+
+    #[test]
+    fn agents_validation_is_fail_closed() {
+        let mut config: AgentsConfig = toml::from_str("").unwrap();
+        assert!(config.validate(&ReviewConfig::default()).is_ok());
+        // Unknown adapters fail at parse time (closed enum).
+        assert!(
+            toml::from_str::<AgentsConfig>("[implementation]\nadapter = \"cursor\"\n").is_err()
+        );
+        // Empty executable.
+        config.implementation.executable = Some("  ".into());
+        assert!(config.validate(&ReviewConfig::default()).is_err());
+        // Effort/permission mode are claude-code only.
+        let mut config = AgentsConfig::default();
+        config.implementation.effort = Some(AgentEffort::Low);
+        assert!(config
+            .validate(&ReviewConfig::default())
+            .unwrap_err()
+            .contains("claude-code"));
+        // Reviewer bypassPermissions is always rejected.
+        let mut config = AgentsConfig::default();
+        config.reviewer.adapter = AgentAdapterKind::ClaudeCode;
+        config.reviewer.permission_mode = Some(AgentPermissionMode::BypassPermissions);
+        assert!(config
+            .validate(&ReviewConfig::default())
+            .unwrap_err()
+            .contains("bypassPermissions"));
+        // Forbidden extra args: exact and =-joined forms.
+        for arg in [
+            "--resume",
+            "--model=haiku",
+            "--dangerously-skip-permissions",
+        ] {
+            let mut config = AgentsConfig::default();
+            config.implementation.adapter = AgentAdapterKind::ClaudeCode;
+            config.implementation.extra_args = vec![arg.into()];
+            assert!(
+                config.validate(&ReviewConfig::default()).is_err(),
+                "extra arg {arg} must be rejected"
+            );
+        }
+        // A non-forbidden arg passes.
+        let mut config = AgentsConfig::default();
+        config.implementation.adapter = AgentAdapterKind::ClaudeCode;
+        config.implementation.extra_args = vec!["--add-dir".into(), "/tmp/x".into()];
+        assert!(config.validate(&ReviewConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn agents_review_consistency_is_enforced_only_with_review_enabled() {
+        let mut review = ReviewConfig::default();
+        review.implementation_agent.adapter_id = "codex-cli".into();
+        review.reviewer_agent.adapter_id = "codex".into();
+        let agents = AgentsConfig::default();
+        // Review disabled: no consistency requirement.
+        assert!(agents.validate(&review).is_ok());
+        review.enabled = true;
+        let error = agents.validate(&review).unwrap_err();
+        assert!(error.contains("contradicts"), "got: {error}");
+        review.implementation_agent.adapter_id = "codex".into();
+        assert!(agents.validate(&review).is_ok());
+        // Model contradiction when both declare one.
+        review.implementation_agent.model = Some("model-a".into());
+        let mut agents = AgentsConfig::default();
+        agents.implementation.model = Some("model-b".into());
+        assert!(agents.validate(&review).unwrap_err().contains("model"));
+        agents.implementation.model = Some("model-a".into());
+        assert!(agents.validate(&review).is_ok());
     }
 }

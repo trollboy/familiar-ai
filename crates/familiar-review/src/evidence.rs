@@ -291,99 +291,26 @@ pub enum EvidenceError {
     Io(#[from] io::Error),
 }
 
-pub fn check_scope(files: &[ChangedFile], allowed: &[String]) -> ScopeCheckResult {
-    let permitted = |p: &str| {
-        allowed
-            .iter()
-            .any(|a| p == a || (a.ends_with('/') && p.starts_with(a)))
-    };
-    let mut r = ScopeCheckResult {
-        added: vec![],
-        modified: vec![],
-        deleted: vec![],
-        renamed: vec![],
-        disposition: ScopeDisposition::Contained,
-    };
-    for f in files {
-        if !permitted(&f.path) || f.old_path.as_deref().is_some_and(|p| !permitted(p)) {
-            r.disposition = ScopeDisposition::Broadened;
-        }
-        match f.kind {
-            GitChangeKind::Added => r.added.push(f.path.clone()),
-            GitChangeKind::Deleted => r.deleted.push(f.path.clone()),
-            GitChangeKind::Renamed => r
-                .renamed
-                .push((f.old_path.clone().unwrap_or_default(), f.path.clone())),
-            _ => r.modified.push(f.path.clone()),
-        }
-    }
-    r
-}
-
-pub fn enforce_scope(
+/// Collect deterministic filesystem metadata required for scope evaluation.
+pub fn collect_scope_evidence(
     repository: &Path,
-    resulting_tree: &str,
     files: &[ChangedFile],
-    allowed: &[String],
-    prohibited: &[String],
-) -> Result<ScopeCheckResult, EvidenceError> {
-    let mut result = check_scope(files, allowed);
-    let dependency_forbidden = prohibited
-        .iter()
-        .any(|item| item.to_ascii_lowercase().contains("dependenc"));
+) -> Result<ScopeEvidence, EvidenceError> {
+    let mut evidence = ScopeEvidence::default();
     for file in files {
-        let explicitly_prohibited = prohibited
-            .iter()
-            .filter(|value| valid_scope_path(value))
-            .any(|value| {
-                file.path == *value || (value.ends_with('/') && file.path.starts_with(value))
-            });
-        let dependency_manifest = matches!(
-            file.path.rsplit('/').next().unwrap_or(&file.path),
-            "Cargo.toml"
-                | "Cargo.lock"
-                | "package.json"
-                | "package-lock.json"
-                | "pnpm-lock.yaml"
-                | "yarn.lock"
-                | "go.mod"
-                | "go.sum"
-                | "requirements.txt"
-                | "pyproject.toml"
-                | "poetry.lock"
-        );
-        if explicitly_prohibited
-            || (dependency_forbidden && dependency_manifest)
-            || path_is_symlink(repository, resulting_tree, file)?
-        {
-            result.disposition = ScopeDisposition::Broadened;
+        if file.kind == GitChangeKind::Deleted {
+            continue;
+        }
+        match fs::symlink_metadata(repository.join(&file.path)) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                evidence.symlink_paths.insert(file.path.clone());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(EvidenceError::Io(error)),
         }
     }
-    Ok(result)
-}
-
-fn valid_scope_path(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with('/')
-        && !value.contains('\\')
-        && !value.contains(' ')
-        && !value
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-}
-fn path_is_symlink(
-    repository: &Path,
-    _tree: &str,
-    file: &ChangedFile,
-) -> Result<bool, EvidenceError> {
-    if file.kind == GitChangeKind::Deleted {
-        return Ok(false);
-    }
-    match fs::symlink_metadata(repository.join(&file.path)) {
-        Ok(metadata) => Ok(metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(EvidenceError::Io(error)),
-    }
+    Ok(evidence)
 }
 
 #[cfg(test)]
@@ -444,38 +371,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn scope_rejects_symlink_dependency_and_prohibited_path_expansion() {
+    fn scope_evidence_flags_symlinks_and_skips_deleted_and_missing_paths() {
         use std::os::unix::fs::symlink;
         let repository = tempdir().unwrap();
         symlink("target", repository.path().join("link")).unwrap();
-        let files = vec![
-            ChangedFile {
-                path: "link".into(),
-                kind: GitChangeKind::Added,
-                old_path: None,
-                line_summary: vec![],
-            },
-            ChangedFile {
-                path: "Cargo.toml".into(),
-                kind: GitChangeKind::Modified,
-                old_path: None,
-                line_summary: vec![],
-            },
-            ChangedFile {
-                path: "secrets/config".into(),
-                kind: GitChangeKind::Added,
-                old_path: None,
-                line_summary: vec![],
-            },
-        ];
-        let result = enforce_scope(
+        fs::write(repository.path().join("plain.rs"), "code\n").unwrap();
+        let file = |path: &str, kind| ChangedFile {
+            path: path.into(),
+            kind,
+            old_path: None,
+            line_summary: vec![],
+        };
+        let evidence = collect_scope_evidence(
             repository.path(),
-            "tree",
-            &files,
-            &["link".into(), "Cargo.toml".into(), "secrets/".into()],
-            &["dependency changes".into(), "secrets/".into()],
+            &[
+                file("link", GitChangeKind::Added),
+                file("plain.rs", GitChangeKind::Modified),
+                file("gone.rs", GitChangeKind::Deleted),
+                file("never-existed.rs", GitChangeKind::Modified),
+            ],
         )
         .unwrap();
-        assert_eq!(result.disposition, ScopeDisposition::Broadened);
+        assert_eq!(
+            evidence.symlink_paths.into_iter().collect::<Vec<_>>(),
+            vec!["link".to_owned()]
+        );
     }
 }

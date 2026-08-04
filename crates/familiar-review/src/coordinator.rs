@@ -69,6 +69,7 @@ pub struct CoordinationRequest {
     pub allow_same_model_fallback: bool,
     pub implementation_usage: ExecutionUsage,
     pub implementation_duration_ms: u64,
+    pub scope_policy: ScopePolicySnapshot,
 }
 
 pub struct ReviewCoordinator<'a> {
@@ -117,6 +118,8 @@ impl ReviewCoordinator<'_> {
             verification_before_review: vec![],
             verification_after_remediation: vec![],
             verification_history: vec![],
+            scope_policy_snapshot: None,
+            scope_evaluations: vec![],
             aggregate_usage: initial_usage,
             aggregate_duration_ms: request.implementation_duration_ms,
             started_at: started,
@@ -126,6 +129,13 @@ impl ReviewCoordinator<'_> {
             review_attempts: vec![],
             remediation_attempts: vec![],
         };
+        let snapshot_bytes = serde_json::to_vec(&request.scope_policy)
+            .map_err(|e| CoordinatorError::Persistence(e.to_string()))?;
+        cycle.scope_policy_snapshot = Some(
+            self.store
+                .save_artifact("scope_policy_snapshot", &snapshot_bytes)
+                .map_err(CoordinatorError::Persistence)?,
+        );
         self.store
             .save_cycle(&cycle)
             .map_err(CoordinatorError::Persistence)?;
@@ -146,18 +156,32 @@ impl ReviewCoordinator<'_> {
             Ok(value) => value,
             Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
         };
-        let initial_scope = match enforce_scope(
-            repository,
-            &captured.resulting_tree,
-            &captured.changed_files,
-            &request.task.allowed_paths,
-            &request.task.prohibited_changes,
-        ) {
+        let scope_evidence = match collect_scope_evidence(repository, &captured.changed_files) {
             Ok(value) => value,
             Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
         };
-        if initial_scope.disposition == ScopeDisposition::Broadened {
-            return self.stop(cycle, ReviewStopReason::ScopeBroadened);
+        let evaluation = evaluate_scope(
+            &request.scope_policy,
+            &captured.changed_files,
+            &scope_evidence,
+        );
+        cycle.scope_evaluations.push(scope_check_result(
+            &captured.changed_files,
+            &evaluation,
+            &request.scope_policy,
+            "initial",
+        ));
+        self.store
+            .save_cycle(&cycle)
+            .map_err(CoordinatorError::Persistence)?;
+        match evaluation.disposition {
+            ScopeDisposition::Broadened => {
+                return self.stop(cycle, ReviewStopReason::ScopeBroadened)
+            }
+            ScopeDisposition::HumanReviewRequired => {
+                return self.stop(cycle, ReviewStopReason::ScopeAmbiguous)
+            }
+            ScopeDisposition::Contained => {}
         }
         cycle.state = ReviewCycleState::Verifying;
         self.store
@@ -364,8 +388,18 @@ impl ReviewCoordinator<'_> {
                     task: request.task.clone(),
                     implementation: request.implementation.assignment.clone(),
                     base_revision: request.task.base_revision.clone(),
-                    allowed_paths: request.task.allowed_paths.clone(),
-                    prohibited_paths: request.task.prohibited_changes.clone(),
+                    allowed_paths: request
+                        .scope_policy
+                        .allowed_paths
+                        .iter()
+                        .map(|entry| entry.normalized.clone())
+                        .collect(),
+                    prohibited_paths: request
+                        .scope_policy
+                        .prohibited_rules
+                        .iter()
+                        .map(|rule| rule.rule_id.clone())
+                        .collect(),
                     blocking_findings: blocking.clone(),
                     relevant_diff: captured.diff.clone(),
                     relevant_contracts: request.contracts.clone(),
@@ -385,6 +419,27 @@ impl ReviewCoordinator<'_> {
                         max_cost_microusd: request.limits.action_reservation_cost_microusd,
                         max_duration_ms: request.limits.action_reservation_duration_ms,
                     },
+                    scope_rules: Some(scope_rule_summary(
+                        &request.scope_policy,
+                        cycle
+                            .scope_evaluations
+                            .last()
+                            .map(|evaluation| {
+                                evaluation
+                                    .findings
+                                    .iter()
+                                    .filter(|finding| {
+                                        !matches!(
+                                            finding.decision,
+                                            ScopeDecision::AllowedChange
+                                                | ScopeDecision::JustifiedExpectedFileChange
+                                        )
+                                    })
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    )),
                 };
                 let remediation_bytes = serde_json::to_vec(&remediation)
                     .map_err(|e| CoordinatorError::Persistence(e.to_string()))?;
@@ -461,24 +516,39 @@ impl ReviewCoordinator<'_> {
                 Ok(value) => value,
                 Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
             };
-            let scope = match enforce_scope(
-                repository,
-                &captured.resulting_tree,
-                &captured.changed_files,
-                &request.task.allowed_paths,
-                &request.task.prohibited_changes,
-            ) {
+            let scope_evidence = match collect_scope_evidence(repository, &captured.changed_files) {
                 Ok(value) => value,
                 Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
             };
+            let evaluation = evaluate_scope(
+                &request.scope_policy,
+                &captured.changed_files,
+                &scope_evidence,
+            );
+            let scope = scope_check_result(
+                &captured.changed_files,
+                &evaluation,
+                &request.scope_policy,
+                &format!("remediation-{remediation_count}"),
+            );
+            cycle.scope_evaluations.push(scope.clone());
             cycle.remediation_result = Some(RemediationResult {
                 changed_files: captured.changed_files.clone(),
                 resulting_diff: captured.diff.clone(),
-                scope_check: scope.clone(),
+                scope_check: scope,
                 ..remediation_result
             });
-            if scope.disposition == ScopeDisposition::Broadened {
-                return self.stop(cycle, ReviewStopReason::ScopeBroadened);
+            self.store
+                .save_cycle(&cycle)
+                .map_err(CoordinatorError::Persistence)?;
+            match evaluation.disposition {
+                ScopeDisposition::Broadened => {
+                    return self.stop(cycle, ReviewStopReason::ScopeBroadened)
+                }
+                ScopeDisposition::HumanReviewRequired => {
+                    return self.stop(cycle, ReviewStopReason::ScopeAmbiguous)
+                }
+                ScopeDisposition::Contained => {}
             }
             cycle.state = ReviewCycleState::Reverifying;
             cycle.verification_after_remediation.clear();
@@ -1016,6 +1086,9 @@ mod tests {
                     deleted: vec![],
                     renamed: vec![],
                     disposition: ScopeDisposition::Contained,
+                    findings: vec![],
+                    policy_snapshot_hash: String::new(),
+                    phase: String::new(),
                 },
                 usage: known_usage(),
                 unavailable_fields: BTreeMap::new(),
@@ -1032,6 +1105,39 @@ mod tests {
             pricing_provenance: None,
             unavailable_fields: BTreeMap::new(),
         }
+    }
+    fn test_scope_policy(allowed: &[&str]) -> ScopePolicySnapshot {
+        compile_scope_policy(ScopePolicyInput {
+            prd_path: "docs/prds/PRD-000.md".into(),
+            prd_content_hash: "sha256:test".into(),
+            contract: vec![],
+            allowed_paths: allowed.iter().map(|value| (*value).to_owned()).collect(),
+            allow_prd_expected_file_expansion: false,
+            declaration_mode: ScopeDeclarationMode::ExpectedOrConfigured,
+            prohibited_rules: vec![
+                ProhibitedRule {
+                    rule_id: "no_dependency_manifest_changes".into(),
+                    rule: ProhibitedRuleKind::FileClass {
+                        class: ScopeFileClass::DependencyManifest,
+                    },
+                    change_kinds: vec![],
+                    description: Some("dependency changes are prohibited".into()),
+                },
+                ProhibitedRule {
+                    rule_id: "no_dependency_lockfile_changes".into(),
+                    rule: ProhibitedRuleKind::FileClass {
+                        class: ScopeFileClass::DependencyLockfile,
+                    },
+                    change_kinds: vec![],
+                    description: Some("dependency changes are prohibited".into()),
+                },
+            ],
+            file_class_policies: ScopeFileClassPolicies::default(),
+            classification_rules: vec![],
+            baseline_revision: "base".into(),
+            config_provenance: "test".into(),
+        })
+        .expect("test scope policy compiles")
     }
     fn base_request() -> CoordinationRequest {
         CoordinationRequest {
@@ -1085,6 +1191,7 @@ mod tests {
             allow_same_model_fallback: true,
             implementation_usage: known_usage(),
             implementation_duration_ms: 1,
+            scope_policy: test_scope_policy(&["src/"]),
         }
     }
     struct FailingVerifier;
@@ -1311,6 +1418,7 @@ mod tests {
             allow_same_model_fallback: true,
             implementation_usage: known_usage(),
             implementation_duration_ms: 1,
+            scope_policy: test_scope_policy(&["src/"]),
         };
         let result = coordinator
             .run(Path::new("."), req, &mut Vec::new())
@@ -1388,6 +1496,7 @@ mod tests {
             allow_same_model_fallback: true,
             implementation_usage: known_usage(),
             implementation_duration_ms: 1,
+            scope_policy: test_scope_policy(&["src/"]),
         };
         let cycle = coordinator
             .run(Path::new("."), request, &mut Vec::new())
@@ -1448,10 +1557,67 @@ mod tests {
             store: &store,
             policy: BlockingPolicy::default(),
         };
+        let request = base_request();
+        let policy_hash = request.scope_policy.snapshot_hash.clone();
+        let cycle = coordinator
+            .run(Path::new("."), request, &mut Vec::new())
+            .unwrap();
+        assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::ScopeBroadened]);
+        assert_eq!(cycle.attempt, 0);
+        assert!(cycle.verification_before_review.is_empty());
+        assert!(cycle.scope_policy_snapshot.is_some());
+        let evaluation = cycle.scope_evaluations.last().unwrap();
+        assert_eq!(evaluation.phase, "initial");
+        assert_eq!(evaluation.policy_snapshot_hash, policy_hash);
+        let finding = &evaluation.findings[0];
+        assert_eq!(finding.path, "outside.txt");
+        assert_eq!(finding.change_kind, GitChangeKind::Added);
+        assert_eq!(finding.decision, ScopeDecision::UndeclaredScopeExpansion);
+        assert_eq!(finding.rule_id, "undeclared_change");
+        let persisted = store.cycles.borrow();
+        let stored = persisted.last().unwrap();
+        assert_eq!(stored.scope_evaluations, cycle.scope_evaluations);
+    }
+
+    struct UnmergedCollector;
+    impl EvidenceCollector for UnmergedCollector {
+        fn capture(&self, _: &Path, _: &str) -> Result<CapturedDiff, EvidenceError> {
+            Ok(CapturedDiff {
+                base_revision: "base".into(),
+                resulting_tree: "result".into(),
+                changed_files: vec![ChangedFile {
+                    path: "src/conflict.rs".into(),
+                    kind: GitChangeKind::Unmerged,
+                    old_path: None,
+                    line_summary: vec![LineRange { start: 1, end: 1 }],
+                }],
+                diff: reference(),
+                bytes: b"diff".to_vec(),
+            })
+        }
+    }
+    #[test]
+    fn ambiguous_scope_stops_with_distinct_reason_before_verification_and_review() {
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &UnmergedCollector,
+            verifier: &FailingVerifier,
+            reviewer: &Reviewer,
+            implementer: &Implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+        };
         let cycle = coordinator
             .run(Path::new("."), base_request(), &mut Vec::new())
             .unwrap();
-        assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::ScopeBroadened])
+        assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::ScopeAmbiguous]);
+        assert_eq!(cycle.state, ReviewCycleState::HumanReviewRequired);
+        assert_eq!(cycle.disposition, ReviewDisposition::HumanReviewRequired);
+        assert_eq!(cycle.attempt, 0);
+        assert!(cycle.verification_before_review.is_empty());
+        let finding = &cycle.scope_evaluations[0].findings[0];
+        assert_eq!(finding.decision, ScopeDecision::AmbiguousHumanReview);
+        assert_eq!(finding.rule_id, "evidence:unmerged");
     }
     #[test]
     fn conflicting_findings_stop_without_choosing() {
@@ -1560,10 +1726,69 @@ mod tests {
             store: &store,
             policy: BlockingPolicy::default(),
         };
+        let request = base_request();
+        let policy_hash = request.scope_policy.snapshot_hash.clone();
         let cycle = coordinator
-            .run(Path::new("."), base_request(), &mut Vec::new())
+            .run(Path::new("."), request, &mut Vec::new())
             .unwrap();
         assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::ScopeBroadened]);
         assert_eq!(*implementer.calls.borrow(), 1);
+        // Both evaluations reuse the identical compiled policy snapshot.
+        assert_eq!(cycle.scope_evaluations.len(), 2);
+        assert_eq!(cycle.scope_evaluations[0].phase, "initial");
+        assert_eq!(cycle.scope_evaluations[1].phase, "remediation-1");
+        assert!(cycle
+            .scope_evaluations
+            .iter()
+            .all(|evaluation| evaluation.policy_snapshot_hash == policy_hash));
+        let remediation = cycle.remediation_result.as_ref().unwrap();
+        assert_eq!(remediation.scope_check.policy_snapshot_hash, policy_hash);
+        assert_eq!(
+            remediation.scope_check.disposition,
+            ScopeDisposition::Broadened
+        );
+        assert!(!remediation.scope_check.findings.is_empty());
+    }
+
+    struct FailingStore {
+        after: u32,
+        saves: RefCell<u32>,
+    }
+    impl ReviewStore for FailingStore {
+        fn save_cycle(&self, _: &ReviewCycle) -> Result<(), String> {
+            let mut saves = self.saves.borrow_mut();
+            *saves += 1;
+            if *saves > self.after {
+                Err("injected storage failure".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn save_artifact(&self, kind: &str, value: &[u8]) -> Result<ArtifactRef, String> {
+            Store::default().save_artifact(kind, value)
+        }
+    }
+    #[test]
+    fn storage_failure_around_scope_persistence_prevents_review_invocation() {
+        // Fail on the very first save (before scope findings persist) and on
+        // the save that persists the initial scope evaluation.
+        for after in [0, 1] {
+            let store = FailingStore {
+                after,
+                saves: RefCell::new(0),
+            };
+            let coordinator = ReviewCoordinator {
+                collector: &Collector,
+                verifier: &Verifier,
+                reviewer: &Reviewer,
+                implementer: &Implementer,
+                store: &store,
+                policy: BlockingPolicy::default(),
+            };
+            let error = coordinator
+                .run(Path::new("."), base_request(), &mut Vec::new())
+                .unwrap_err();
+            assert!(matches!(error, CoordinatorError::Persistence(_)));
+        }
     }
 }

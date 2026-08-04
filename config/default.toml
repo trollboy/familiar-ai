@@ -37,7 +37,57 @@ max_package_tokens = 250000
 max_evidence_bytes = 16000000
 max_verification_log_bytes = 256000
 # allowed_paths = ["src/", "tests/"]
-# prohibited_changes = ["commit", "push", "deployment"]
+# Prohibited changes are typed rules with stable ids. Each rule names exactly
+# one of `path` (closed grammar: exact file, `dir/`, or `dir/**`) or `class`
+# (dependency_manifest | dependency_lockfile | migration | configuration |
+# test | generated_artifact). Optional `change_kinds` restricts the rule to
+# specific Git change kinds; empty means all. The only accepted legacy string
+# forms are a repository-relative path containing '/' or '.', or the exact
+# phrase "dependency changes".
+# [[review.prohibited_changes]]
+# id = "no_secret_changes"
+# path = "secrets/"
+# description = "secret material is never agent-editable"
+# [[review.prohibited_changes]]
+# id = "no_dependency_manifest_changes"
+# class = "dependency_manifest"
+
+# Deterministic coding-agent selection. When this section is absent both the
+# implementation and reviewer agents resolve to the Codex adapter with
+# executable "codex" — exactly the historical behavior — and no review
+# consistency checking applies. When present, validation is fail-closed and,
+# with review enabled, review.*_agent.adapter_id must equal agents.*.adapter.
+# [agents.implementation]
+# adapter = "claude-code"          # "codex" | "claude-code"; default "codex"
+# executable = "claude"            # default: "codex" for codex, "claude" for claude-code
+# model = "sonnet"                 # optional; omitted -> CLI default
+# effort = "high"                  # optional; claude-code only: "low" | "medium" | "high"
+# permission_mode = "acceptEdits"  # optional; claude-code only:
+#                                  # "default" | "plan" | "acceptEdits" | "bypassPermissions"
+# max_budget_microusd = 0          # optional; 0/absent -> no adapter budget ceiling
+# extra_args = []                  # optional; validated passthrough
+# [agents.reviewer]
+# adapter = "claude-code"
+# executable = "claude"
+# model = "sonnet"
+# effort = "high"
+# permission_mode = "default"      # bypassPermissions is always rejected here
+
+[review.scope]
+allow_prd_expected_file_expansion = false
+declaration_mode = "expected_or_configured"
+# [[review.scope.classification]]
+# id = "storage_migrations"
+# class = "migration"
+# path = "crates/familiar-storage/migrations/"
+
+[review.scope.file_classes]
+dependency_manifest = "human_review"
+dependency_lockfile = "human_review"
+migration = "human_review"
+configuration = "human_review"
+test = "allow_when_expected"
+generated_artifact = "human_review"
 # [[review.verification]]
 # check_id = "tests"
 # argv = ["cargo", "test"]

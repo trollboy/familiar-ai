@@ -8,21 +8,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use chrono::Utc;
-use familiar_agent::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
+use familiar_agent::{
+    AgentExecutionError, ClaudeCodeAgent, ClaudeCodeSettings, CodexAgent, CodingAgent,
+    ExecutionRequest, ExecutionResult,
+};
 use familiar_context::{
     ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
     ContextRequest, ExecutionContext,
 };
 use familiar_core::{
-    admit_run_prd, resolve_run_prd, validate_graph, AppPaths, BacklogDiscovery, BacklogStatusStore,
-    Config, ExecutionPrice, FilesystemBacklogDiscovery,
+    admit_run_prd, resolve_run_prd, validate_graph, AgentAdapterKind, AgentEntryConfig, AppPaths,
+    BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice, FilesystemBacklogDiscovery,
+    ScopeClassPolicyConfig, ScopeDeclarationModeConfig, ScopeFileClassName,
 };
 use familiar_review::{
+    compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
     AgentAssignment, AgentObservation, AgentRole, BlockingPolicy, BoundedDocument,
-    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, GitEvidenceCollector,
-    ReviewCoordinator, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewPackageBudget,
-    ReviewStopReason, ReviewTask, StructuredReviewAdapter, VerificationCheck, VerificationPlan,
-    WorkflowLimits,
+    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, GitChangeKind,
+    GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator, ReviewCycle,
+    ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason, ReviewTask,
+    ScopeClassPolicy, ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass,
+    ScopeFileClassPolicies, ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
+    StructuredReviewAdapter, VerificationCheck, VerificationPlan, WorkflowLimits,
 };
 use familiar_storage::{
     Database, ExecutionFinalization, ExecutionHistoryRepository, ExecutionStart, ReviewRepository,
@@ -95,16 +102,48 @@ pub struct RunWorkflowResult {
     pub implementation: ExecutionResult,
 }
 
-pub fn execute(prd_path: &Path, agent: &dyn CodingAgent) -> Result<RunWorkflowResult, RunError> {
-    let paths = AppPaths::new();
-    let config = Config::load(Some(&paths.config_dir.join("config.toml")))
-        .map_err(|e| RunError::Config(e.to_string()))?;
-    execute_with_config(prd_path, agent, &config, &paths)
+/// The independently configured implementation and reviewer agents.
+/// Orchestration never inspects which concrete adapter it holds.
+pub struct AgentSet<'a> {
+    pub implementation: &'a dyn CodingAgent,
+    pub reviewer: &'a dyn CodingAgent,
+}
+
+/// Resolve the configured agent entries: validated when `[agents]` is
+/// present (including review-identity consistency), exact historical Codex
+/// defaults when absent.
+pub fn resolved_agent_entries(
+    config: &Config,
+) -> Result<(AgentEntryConfig, AgentEntryConfig), String> {
+    match &config.agents {
+        Some(agents) => {
+            agents.validate(&config.review)?;
+            Ok((agents.implementation.clone(), agents.reviewer.clone()))
+        }
+        None => Ok((AgentEntryConfig::default(), AgentEntryConfig::default())),
+    }
+}
+
+/// Deterministic constructor: adapter enum to concrete agent, nothing else.
+/// Performs no probing, filesystem checks, or model calls.
+pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
+    match entry.adapter {
+        AgentAdapterKind::Codex => Box::new(CodexAgent::new(entry.resolved_executable())),
+        AgentAdapterKind::ClaudeCode => Box::new(ClaudeCodeAgent::new(ClaudeCodeSettings {
+            executable: entry.resolved_executable(),
+            model: entry.model.clone(),
+            effort: entry.effort.map(|effort| effort.as_str().to_owned()),
+            permission_mode: entry.permission_mode.map(|mode| mode.as_str().to_owned()),
+            max_budget_microusd: (entry.max_budget_microusd > 0)
+                .then_some(entry.max_budget_microusd),
+            extra_args: entry.extra_args.clone(),
+        })),
+    }
 }
 
 pub fn execute_with_config(
     prd_path: &Path,
-    agent: &dyn CodingAgent,
+    agents: &AgentSet<'_>,
     config: &Config,
     paths: &AppPaths,
 ) -> Result<RunWorkflowResult, RunError> {
@@ -138,16 +177,17 @@ pub fn execute_with_config(
         .recover_incomplete()
         .map_err(|e| RunError::Storage(e.to_string()))?;
     let id = new_id();
-    let review_baseline = if config.review.enabled {
-        config.review.validate().map_err(RunError::Config)?;
-        Some(capture_worktree_baseline(
-            &context.repository.worktree,
-            &paths.data_dir,
-            &id,
-        )?)
-    } else {
-        None
-    };
+    // Contradictory agent configuration must fail closed before any claim,
+    // regardless of which caller constructed the agents.
+    resolved_agent_entries(config).map_err(RunError::Config)?;
+    let review_preflight = compute_review_preflight(
+        config,
+        prd_path,
+        &context.prd.path,
+        &context.repository.worktree,
+        &paths.data_dir,
+        &id,
+    )?;
     let discovery = FilesystemBacklogDiscovery;
     let repository = discovery
         .resolve(&current)
@@ -172,6 +212,17 @@ pub fn execute_with_config(
         return Err(RunError::Config(
             "backlog changed during run admission".into(),
         ));
+    }
+    if let Some(preflight) = &review_preflight {
+        let current = std::fs::read_to_string(prd_path).map_err(|error| {
+            RunError::Config(format!("cannot re-read PRD before claim: {error}"))
+        })?;
+        if current != preflight.prd_bytes {
+            return Err(RunError::Config(format!(
+                "scope policy compiled against stale PRD {}: content changed during admission",
+                preflight.snapshot.prd_path
+            )));
+        }
     }
     let actor = format!("system:familiar-run:{id}");
     SqliteBacklogRepository::new(db.conn_mut())
@@ -213,7 +264,7 @@ pub fn execute_with_config(
         })
         .map_err(|e| retained(&target, "history_failed", RunError::Storage(e.to_string())))?;
 
-    let execution = agent.execute(
+    let execution = agents.implementation.execute(
         ExecutionRequest {
             working_directory: &context.repository.worktree,
             denied_read_path: None,
@@ -235,6 +286,9 @@ pub fn execute_with_config(
         Err(AgentExecutionError::Wait { result, .. }) => (result.as_ref(), "failed"),
         Err(AgentExecutionError::Output { result, .. }) => (result.as_ref(), outcome(result)),
         Err(AgentExecutionError::Timeout { result }) => (result.as_ref(), "timed_out"),
+        Err(AgentExecutionError::BudgetExceeded { result, .. }) => {
+            (result.as_ref(), "budget_exceeded")
+        }
     };
     if result.agent_version.is_none() {
         unavailable.insert("agent_version".into(), "version_probe_failed".into());
@@ -262,16 +316,19 @@ pub fn execute_with_config(
             },
         ));
     }
+    let preflight = review_preflight.as_ref().expect("enabled review preflight");
     let cycle = run_review(ReviewRunInput {
         db: &db,
         context: &context,
         execution_id: &id,
         implementation_result: &result,
         implementation_finalization: &finalization,
-        agent,
+        implementation_agent: agents.implementation,
+        reviewer_agent: agents.reviewer,
         config,
         paths,
-        base_revision: review_baseline.as_deref().expect("enabled review baseline"),
+        base_revision: &preflight.baseline,
+        scope_policy: &preflight.snapshot,
     })
     .map_err(|e| retained(&target, "review_failed", e))?;
     if cycle.state != ReviewCycleState::Completed
@@ -319,6 +376,16 @@ pub fn execute_with_config(
 fn review_retained_reason(cycle: &ReviewCycle) -> &'static str {
     if cycle
         .stop_reasons
+        .contains(&ReviewStopReason::ScopeBroadened)
+    {
+        "scope_broadened"
+    } else if cycle
+        .stop_reasons
+        .contains(&ReviewStopReason::ScopeAmbiguous)
+    {
+        "scope_ambiguous"
+    } else if cycle
+        .stop_reasons
         .contains(&ReviewStopReason::VerificationUnsuccessful)
     {
         "verification_failed"
@@ -326,6 +393,189 @@ fn review_retained_reason(cycle: &ReviewCycle) -> &'static str {
         "interrupted"
     } else {
         "human_review_required"
+    }
+}
+
+#[derive(Debug)]
+struct ReviewPreflight {
+    baseline: String,
+    snapshot: ScopePolicySnapshot,
+    prd_bytes: String,
+}
+
+/// Enabled-review preflight: validate configuration, parse the active PRD's
+/// Expected Files contract, capture the worktree baseline, and compile the
+/// scope-policy snapshot — all before any backlog claim or agent launch.
+/// Fails closed without touching backlog state or launching an agent.
+fn compute_review_preflight(
+    config: &Config,
+    prd_path: &Path,
+    prd_repository_path: &str,
+    worktree: &Path,
+    data_dir: &Path,
+    execution_id: &str,
+) -> Result<Option<ReviewPreflight>, RunError> {
+    if !config.review.enabled {
+        return Ok(None);
+    }
+    config.review.validate().map_err(RunError::Config)?;
+    let prd_bytes = std::fs::read_to_string(prd_path).map_err(|error| {
+        RunError::Config(format!(
+            "cannot read PRD for scope policy compilation: {error}"
+        ))
+    })?;
+    let contract = parse_expected_files(&prd_bytes).map_err(|error| {
+        RunError::Config(format!(
+            "PRD {prd_repository_path} Expected Files contract is invalid: {error}"
+        ))
+    })?;
+    let baseline = capture_worktree_baseline(worktree, data_dir, execution_id)?;
+    let snapshot = build_scope_policy(
+        config,
+        prd_repository_path,
+        contract,
+        content_hash(prd_bytes.as_bytes()),
+        &baseline,
+    )?;
+    Ok(Some(ReviewPreflight {
+        baseline,
+        snapshot,
+        prd_bytes,
+    }))
+}
+
+fn build_scope_policy(
+    config: &Config,
+    prd_repository_path: &str,
+    contract: Vec<familiar_review::ExpectedFileEntry>,
+    prd_content_hash: String,
+    baseline: &str,
+) -> Result<ScopePolicySnapshot, RunError> {
+    let mut prohibited = Vec::new();
+    for entry in &config.review.prohibited_changes {
+        for rule in entry.resolve().map_err(RunError::Config)? {
+            let kind = match (&rule.path, rule.class) {
+                (Some(path), None) => {
+                    let (normalized, match_kind) = normalize_scope_path(path).map_err(|rule| {
+                        RunError::Config(format!("prohibited path '{path}': {rule}"))
+                    })?;
+                    ProhibitedRuleKind::Path {
+                        entry: ScopePathEntry {
+                            normalized,
+                            match_kind,
+                        },
+                    }
+                }
+                (None, Some(class)) => ProhibitedRuleKind::FileClass {
+                    class: map_file_class(class),
+                },
+                _ => {
+                    return Err(RunError::Config(format!(
+                        "prohibited rule '{}' must declare exactly one of path or class",
+                        rule.id
+                    )))
+                }
+            };
+            prohibited.push(ProhibitedRule {
+                rule_id: rule.id,
+                rule: kind,
+                change_kinds: rule
+                    .change_kinds
+                    .iter()
+                    .map(|value| map_change_kind(value))
+                    .collect::<Result<_, _>>()?,
+                description: rule.description,
+            });
+        }
+    }
+    let classification = config
+        .review
+        .scope
+        .classification
+        .iter()
+        .map(|rule| {
+            let (normalized, match_kind) = normalize_scope_path(&rule.path).map_err(|error| {
+                RunError::Config(format!("scope classification rule '{}': {error}", rule.id))
+            })?;
+            Ok(ScopeClassificationRule {
+                rule_id: rule.id.clone(),
+                class: map_file_class(rule.class),
+                entry: ScopePathEntry {
+                    normalized,
+                    match_kind,
+                },
+                source: ScopeRuleSource::Configuration,
+                precedence: rule.precedence,
+            })
+        })
+        .collect::<Result<Vec<_>, RunError>>()?;
+    compile_scope_policy(ScopePolicyInput {
+        prd_path: prd_repository_path.into(),
+        prd_content_hash,
+        contract,
+        allowed_paths: config.review.allowed_paths.clone(),
+        allow_prd_expected_file_expansion: config.review.scope.allow_prd_expected_file_expansion,
+        declaration_mode: match config.review.scope.declaration_mode {
+            ScopeDeclarationModeConfig::ExpectedOrConfigured => {
+                ScopeDeclarationMode::ExpectedOrConfigured
+            }
+            ScopeDeclarationModeConfig::ExpectedRequired => ScopeDeclarationMode::ExpectedRequired,
+        },
+        prohibited_rules: prohibited,
+        file_class_policies: ScopeFileClassPolicies {
+            dependency_manifest: map_class_policy(
+                config.review.scope.file_classes.dependency_manifest,
+            ),
+            dependency_lockfile: map_class_policy(
+                config.review.scope.file_classes.dependency_lockfile,
+            ),
+            migration: map_class_policy(config.review.scope.file_classes.migration),
+            configuration: map_class_policy(config.review.scope.file_classes.configuration),
+            test: map_class_policy(config.review.scope.file_classes.test),
+            generated_artifact: map_class_policy(
+                config.review.scope.file_classes.generated_artifact,
+            ),
+        },
+        classification_rules: classification,
+        baseline_revision: baseline.into(),
+        config_provenance: "config:[review]".into(),
+    })
+    .map_err(|error| RunError::Config(format!("scope policy compilation failed: {error}")))
+}
+
+fn map_file_class(class: ScopeFileClassName) -> ScopeFileClass {
+    match class {
+        ScopeFileClassName::DependencyManifest => ScopeFileClass::DependencyManifest,
+        ScopeFileClassName::DependencyLockfile => ScopeFileClass::DependencyLockfile,
+        ScopeFileClassName::Migration => ScopeFileClass::Migration,
+        ScopeFileClassName::Configuration => ScopeFileClass::Configuration,
+        ScopeFileClassName::Test => ScopeFileClass::Test,
+        ScopeFileClassName::GeneratedArtifact => ScopeFileClass::GeneratedArtifact,
+    }
+}
+
+fn map_class_policy(policy: ScopeClassPolicyConfig) -> ScopeClassPolicy {
+    match policy {
+        ScopeClassPolicyConfig::Deny => ScopeClassPolicy::Deny,
+        ScopeClassPolicyConfig::HumanReview => ScopeClassPolicy::HumanReview,
+        ScopeClassPolicyConfig::AllowWhenExpected => ScopeClassPolicy::AllowWhenExpected,
+        ScopeClassPolicyConfig::AllowWhenConfigured => ScopeClassPolicy::AllowWhenConfigured,
+        ScopeClassPolicyConfig::Allow => ScopeClassPolicy::Allow,
+    }
+}
+
+fn map_change_kind(value: &str) -> Result<GitChangeKind, RunError> {
+    match value {
+        "added" => Ok(GitChangeKind::Added),
+        "modified" => Ok(GitChangeKind::Modified),
+        "deleted" => Ok(GitChangeKind::Deleted),
+        "renamed" => Ok(GitChangeKind::Renamed),
+        "copied" => Ok(GitChangeKind::Copied),
+        "type_changed" => Ok(GitChangeKind::TypeChanged),
+        "unmerged" => Ok(GitChangeKind::Unmerged),
+        other => Err(RunError::Config(format!(
+            "unsupported prohibited change kind '{other}'"
+        ))),
     }
 }
 
@@ -343,6 +593,7 @@ fn retained(
 fn agent_reason(error: &AgentExecutionError) -> &'static str {
     match error {
         AgentExecutionError::Timeout { .. } => "interrupted",
+        AgentExecutionError::BudgetExceeded { .. } => "budget_exceeded",
         _ => "implementation_failed",
     }
 }
@@ -353,10 +604,12 @@ struct ReviewRunInput<'a> {
     execution_id: &'a str,
     implementation_result: &'a ExecutionResult,
     implementation_finalization: &'a ExecutionFinalization,
-    agent: &'a dyn CodingAgent,
+    implementation_agent: &'a dyn CodingAgent,
+    reviewer_agent: &'a dyn CodingAgent,
     config: &'a Config,
     paths: &'a AppPaths,
     base_revision: &'a str,
+    scope_policy: &'a ScopePolicySnapshot,
 }
 
 fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
@@ -366,10 +619,12 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         execution_id,
         implementation_result,
         implementation_finalization,
-        agent,
+        implementation_agent,
+        reviewer_agent,
         config,
         paths,
         base_revision,
+        scope_policy,
     } = input;
     let implementation = AgentAssignment {
         adapter_id: config.review.implementation_agent.adapter_id.clone(),
@@ -404,8 +659,16 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             .unwrap_or_else(|| context.prd.content.clone()),
         acceptance_criteria: criteria,
         base_revision: base_revision.into(),
-        allowed_paths: config.review.allowed_paths.clone(),
-        prohibited_changes: config.review.prohibited_changes.clone(),
+        allowed_paths: scope_policy
+            .allowed_paths
+            .iter()
+            .map(|entry| entry.normalized.clone())
+            .collect(),
+        prohibited_changes: scope_policy
+            .prohibited_rules
+            .iter()
+            .map(|rule| rule.rule_id.clone())
+            .collect(),
         verification_plan_id: format!("{execution_id}-verification"),
     };
     let policy = BlockingPolicy::default();
@@ -425,13 +688,13 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         .unwrap_or(300_000)
         .max(1);
     let reviewer_adapter = StructuredReviewAdapter::new(
-        agent,
+        reviewer_agent,
         context.repository.worktree.clone(),
         reviewer.clone(),
         review_timeout,
     );
     let remediation_adapter = CodingRemediationAdapter::new(
-        agent,
+        implementation_agent,
         context.repository.worktree.clone(),
         implementation.clone(),
     );
@@ -524,6 +787,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
                 .max(1),
         },
         allow_same_model_fallback: config.review.allow_isolated_same_model_fallback,
+        scope_policy: scope_policy.clone(),
         implementation_usage: familiar_review::ExecutionUsage {
             input_tokens: implementation_result.input_tokens,
             output_tokens: implementation_result.output_tokens,
@@ -546,7 +810,54 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         cycle.independence.as_ref().map(|value| value.kind),
         cycle.stop_reasons
     );
+    report_scope_findings(&cycle);
     Ok(cycle)
+}
+
+const SCOPE_FINDING_RENDER_LIMIT: usize = 50;
+
+/// Render the exact per-file scope decisions for a scope-terminated cycle.
+/// Canonical findings are already persisted; rendering is bounded and any
+/// omission is reported with the exact count and snapshot artifact reference.
+fn report_scope_findings(cycle: &ReviewCycle) {
+    if !cycle
+        .stop_reasons
+        .contains(&ReviewStopReason::ScopeBroadened)
+        && !cycle
+            .stop_reasons
+            .contains(&ReviewStopReason::ScopeAmbiguous)
+    {
+        return;
+    }
+    let Some(evaluation) = cycle.scope_evaluations.last() else {
+        return;
+    };
+    println!(
+        "Scope evaluation '{}' under policy {}:",
+        evaluation.phase, evaluation.policy_snapshot_hash
+    );
+    for finding in evaluation.findings.iter().take(SCOPE_FINDING_RENDER_LIMIT) {
+        let old = finding
+            .old_path
+            .as_deref()
+            .map(|old| format!(" (from {old})"))
+            .unwrap_or_default();
+        println!(
+            "scope: {:?} {:?} {}{} rule={}",
+            finding.decision, finding.change_kind, finding.path, old, finding.rule_id
+        );
+    }
+    if evaluation.findings.len() > SCOPE_FINDING_RENDER_LIMIT {
+        println!(
+            "scope: {} additional findings omitted from rendering; all findings persisted under snapshot artifact {}",
+            evaluation.findings.len() - SCOPE_FINDING_RENDER_LIMIT,
+            cycle
+                .scope_policy_snapshot
+                .as_ref()
+                .map(|artifact| artifact.content_hash.as_str())
+                .unwrap_or("<unpersisted>")
+        );
+    }
 }
 
 fn markdown_section(document: &str, heading: &str) -> Option<String> {
@@ -984,12 +1295,14 @@ mod tests {
                 cached_tokens: Some(3),
                 exit_code: Some(23),
                 signal: None,
+                session_id: None,
+                reported_cost_microusd: None,
             },
         };
 
         let error = execute_with_config(
             &repository.join("docs/prds/PRD-004.md"),
-            &agent,
+            &same_agent(&agent),
             &config,
             &paths,
         )
@@ -1031,7 +1344,7 @@ mod tests {
         let paths = test_paths(temp.path());
         let agent = successful_fake_agent();
 
-        execute_with_config(&prd, &agent, &config, &paths).unwrap_err();
+        execute_with_config(&prd, &same_agent(&agent), &config, &paths).unwrap_err();
 
         let captured = agent.request.lock().unwrap();
         assert_eq!(captured.as_ref().unwrap().1.as_bytes(), expected.as_bytes());
@@ -1073,7 +1386,7 @@ mod tests {
         let paths = test_paths(temp.path());
         let agent = successful_fake_agent();
 
-        execute_with_config(&prd, &agent, &config, &paths).unwrap_err();
+        execute_with_config(&prd, &same_agent(&agent), &config, &paths).unwrap_err();
 
         let captured = agent.request.lock().unwrap();
         assert_eq!(captured.as_ref().unwrap().1, expected_prompt);
@@ -1098,7 +1411,7 @@ mod tests {
 
         let error = execute_with_config(
             &repository.join("docs/prds/PRD-007.md"),
-            &agent,
+            &same_agent(&agent),
             &config,
             &paths,
         )
@@ -1112,6 +1425,13 @@ mod tests {
         assert!(!database_path.exists());
     }
 
+    fn same_agent<'a>(agent: &'a dyn CodingAgent) -> AgentSet<'a> {
+        AgentSet {
+            implementation: agent,
+            reviewer: agent,
+        }
+    }
+
     fn successful_fake_agent() -> FakeAgent {
         FakeAgent {
             request: Mutex::new(None),
@@ -1123,6 +1443,8 @@ mod tests {
                 cached_tokens: None,
                 exit_code: Some(0),
                 signal: None,
+                session_id: None,
+                reported_cost_microusd: None,
             },
         }
     }
@@ -1254,10 +1576,13 @@ mod tests {
                 cached_tokens: Some(0),
                 exit_code: Some(0),
                 signal: None,
+                session_id: None,
+                reported_cost_microusd: None,
             })
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn production_review_fixture(
         remediation: bool,
     ) -> (
@@ -1269,6 +1594,7 @@ mod tests {
         String,
         WorkflowFakeAgent,
         ExecutionFinalization,
+        ScopePolicySnapshot,
     ) {
         let temp = tempfile::tempdir().unwrap();
         let repository = temp.path().join("repo");
@@ -1367,6 +1693,15 @@ mod tests {
             )]),
             ..Default::default()
         };
+        let prd_spec = format!("{}\n## Expected Files\n\n- `src/`\n", context.prd.content);
+        let snapshot = build_scope_policy(
+            &config,
+            &context.prd.path,
+            parse_expected_files(&prd_spec).unwrap(),
+            content_hash(prd_spec.as_bytes()),
+            &baseline,
+        )
+        .unwrap();
         (
             temp,
             database,
@@ -1376,13 +1711,14 @@ mod tests {
             baseline,
             agent,
             finalization,
+            snapshot,
         )
     }
 
     #[test]
     fn production_composition_handles_clean_review_and_one_remediation() {
         for remediation in [false, true] {
-            let (_temp, db, context, config, paths, baseline, agent, finalization) =
+            let (_temp, db, context, config, paths, baseline, agent, finalization, snapshot) =
                 production_review_fixture(remediation);
             run_review(ReviewRunInput {
                 db: &db,
@@ -1396,12 +1732,16 @@ mod tests {
                     cached_tokens: Some(0),
                     exit_code: Some(0),
                     signal: None,
+                    session_id: None,
+                    reported_cost_microusd: None,
                 },
                 implementation_finalization: &finalization,
-                agent: &agent,
+                implementation_agent: &agent,
+                reviewer_agent: &agent,
                 config: &config,
                 paths: &paths,
                 base_revision: &baseline,
+                scope_policy: &snapshot,
             })
             .unwrap();
             let cycle = ReviewRepository::new(db.conn())
@@ -1424,5 +1764,243 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Delegates to the workflow fake but records calls and asserts it only
+    /// ever receives prompts for its configured role.
+    struct RoleProbe<'a> {
+        inner: &'a WorkflowFakeAgent,
+        review_role: bool,
+        calls: Mutex<u32>,
+    }
+    impl CodingAgent for RoleProbe<'_> {
+        fn isolation_capability(&self) -> familiar_agent::IsolationCapability {
+            self.inner.isolation_capability()
+        }
+        fn execute(
+            &self,
+            request: ExecutionRequest<'_>,
+            output: &mut dyn io::Write,
+        ) -> Result<ExecutionResult, AgentExecutionError> {
+            let is_review = request
+                .prompt
+                .starts_with("You are an independent code reviewer");
+            assert_eq!(
+                is_review, self.review_role,
+                "agent received a prompt for the wrong role"
+            );
+            *self.calls.lock().unwrap() += 1;
+            self.inner.execute(request, output)
+        }
+    }
+
+    #[test]
+    fn split_agents_route_review_and_remediation_to_the_right_role() {
+        let (_temp, db, context, config, paths, baseline, agent, finalization, snapshot) =
+            production_review_fixture(true);
+        let implementer = RoleProbe {
+            inner: &agent,
+            review_role: false,
+            calls: Mutex::new(0),
+        };
+        let reviewer = RoleProbe {
+            inner: &agent,
+            review_role: true,
+            calls: Mutex::new(0),
+        };
+        let cycle = run_review(ReviewRunInput {
+            db: &db,
+            context: &context,
+            execution_id: "split",
+            implementation_result: &ExecutionResult {
+                agent_version: Some("fake".into()),
+                model: Some("implementation-model".into()),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cached_tokens: Some(0),
+                exit_code: Some(0),
+                signal: None,
+                session_id: None,
+                reported_cost_microusd: None,
+            },
+            implementation_finalization: &finalization,
+            implementation_agent: &implementer,
+            reviewer_agent: &reviewer,
+            config: &config,
+            paths: &paths,
+            base_revision: &baseline,
+            scope_policy: &snapshot,
+        })
+        .unwrap();
+        assert_eq!(cycle.disposition, ReviewDisposition::ReadyForHumanApproval);
+        assert_eq!(*reviewer.calls.lock().unwrap(), 2);
+        assert_eq!(*implementer.calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn budget_exceedance_maps_to_a_distinct_retained_reason() {
+        let error = AgentExecutionError::BudgetExceeded {
+            limit_microusd: 1,
+            reported_microusd: 2,
+            result: Box::default(),
+        };
+        assert_eq!(agent_reason(&error), "budget_exceeded");
+        assert_eq!(error.result().exit_code, None);
+    }
+
+    #[test]
+    fn expansion_enabled_justified_expected_file_reaches_clean_review() {
+        let (_temp, db, context, mut config, paths, baseline, agent, finalization, _) =
+            production_review_fixture(false);
+        fs::write(context.repository.worktree.join("docs-notes.md"), "notes\n").unwrap();
+        config.review.scope.allow_prd_expected_file_expansion = true;
+        let prd_spec = format!(
+            "{}\n## Expected Files\n\n- `src/`\n- `docs-notes.md`\n",
+            context.prd.content
+        );
+        let snapshot = build_scope_policy(
+            &config,
+            &context.prd.path,
+            parse_expected_files(&prd_spec).unwrap(),
+            content_hash(prd_spec.as_bytes()),
+            &baseline,
+        )
+        .unwrap();
+        let cycle = run_review(ReviewRunInput {
+            db: &db,
+            context: &context,
+            execution_id: "expansion",
+            implementation_result: &ExecutionResult {
+                agent_version: Some("fake".into()),
+                model: Some("implementation-model".into()),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cached_tokens: Some(0),
+                exit_code: Some(0),
+                signal: None,
+                session_id: None,
+                reported_cost_microusd: None,
+            },
+            implementation_finalization: &finalization,
+            implementation_agent: &agent,
+            reviewer_agent: &agent,
+            config: &config,
+            paths: &paths,
+            base_revision: &baseline,
+            scope_policy: &snapshot,
+        })
+        .unwrap();
+        assert_eq!(cycle.state, ReviewCycleState::Completed);
+        assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::CleanReview]);
+        let evaluation = cycle.scope_evaluations.last().unwrap();
+        let justified = evaluation
+            .findings
+            .iter()
+            .find(|finding| finding.path == "docs-notes.md")
+            .unwrap();
+        assert_eq!(
+            justified.decision,
+            familiar_review::ScopeDecision::JustifiedExpectedFileChange
+        );
+        assert_eq!(justified.rule_id, "prd_expected_file_expansion");
+    }
+
+    #[test]
+    fn undeclared_file_stops_scope_broadened_before_any_review() {
+        let (_temp, db, context, config, paths, baseline, agent, finalization, snapshot) =
+            production_review_fixture(false);
+        fs::write(context.repository.worktree.join("rogue.md"), "rogue\n").unwrap();
+        let error = run_review(ReviewRunInput {
+            db: &db,
+            context: &context,
+            execution_id: "rogue",
+            implementation_result: &ExecutionResult {
+                agent_version: Some("fake".into()),
+                model: Some("implementation-model".into()),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                cached_tokens: Some(0),
+                exit_code: Some(0),
+                signal: None,
+                session_id: None,
+                reported_cost_microusd: None,
+            },
+            implementation_finalization: &finalization,
+            implementation_agent: &agent,
+            reviewer_agent: &agent,
+            config: &config,
+            paths: &paths,
+            base_revision: &baseline,
+            scope_policy: &snapshot,
+        });
+        let cycle = error.unwrap();
+        assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::ScopeBroadened]);
+        assert_eq!(*agent.reviews.lock().unwrap(), 0);
+        assert_eq!(review_retained_reason(&cycle), "scope_broadened");
+        let finding = cycle.scope_evaluations[0]
+            .findings
+            .iter()
+            .find(|finding| finding.path == "rogue.md")
+            .unwrap();
+        assert_eq!(
+            finding.decision,
+            familiar_review::ScopeDecision::UndeclaredScopeExpansion
+        );
+        assert_eq!(finding.rule_id, "undeclared_change");
+        let stored = ReviewRepository::new(db.conn())
+            .get_cycle("rogue-cycle")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.scope_evaluations, cycle.scope_evaluations);
+        assert!(stored.scope_policy_snapshot.is_some());
+    }
+
+    #[test]
+    fn invalid_expected_files_fails_preflight_before_claim_and_agent() {
+        let (_temp, db, context, config, paths, _baseline, _agent, _finalization, _snapshot) =
+            production_review_fixture(false);
+        let prd_file = context.repository.worktree.join("docs-prd.md");
+        fs::write(
+            &prd_file,
+            "## Objective\nobjective\n\n## Acceptance Criteria\n1. criterion\n\n## Expected Files\n\n- no code span bullet\n",
+        )
+        .unwrap();
+
+        let error = compute_review_preflight(
+            &config,
+            &prd_file,
+            "docs/prds/test.md",
+            &context.repository.worktree,
+            &paths.data_dir,
+            "preflight",
+        )
+        .unwrap_err();
+        match &error {
+            RunError::Config(message) => {
+                assert!(message.contains("Expected Files"), "got: {message}");
+                assert!(message.contains("line 9"), "got: {message}");
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+        // Preflight has no storage access: the backlog is untouched, so the
+        // PRD necessarily remains pending and no agent was launched.
+        let backlog: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM backlog_prds", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(backlog, 0);
+
+        let mut disabled = config.clone();
+        disabled.review.enabled = false;
+        assert!(compute_review_preflight(
+            &disabled,
+            &prd_file,
+            "docs/prds/test.md",
+            &context.repository.worktree,
+            &paths.data_dir,
+            "preflight-disabled",
+        )
+        .unwrap()
+        .is_none());
     }
 }

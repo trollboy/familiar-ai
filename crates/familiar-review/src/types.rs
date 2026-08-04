@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::expected_files::{ExpectedFileEntry, ExpectedMatchKind};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentAssignment {
     pub adapter_id: String,
@@ -91,7 +93,7 @@ pub struct ChangedFile {
     pub line_summary: Vec<LineRange>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitChangeKind {
     Added,
@@ -337,6 +339,8 @@ pub struct RemediationRequest {
     pub verification_failures: Vec<VerificationEvidence>,
     pub acceptance_checks: Vec<RemediationCheck>,
     pub budget: RemediationBudget,
+    #[serde(default)]
+    pub scope_rules: Option<ScopeRuleSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +393,12 @@ pub struct ScopeCheckResult {
     pub deleted: Vec<String>,
     pub renamed: Vec<(String, String)>,
     pub disposition: ScopeDisposition,
+    #[serde(default)]
+    pub findings: Vec<ScopeFinding>,
+    #[serde(default)]
+    pub policy_snapshot_hash: String,
+    #[serde(default)]
+    pub phase: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,6 +406,180 @@ pub struct ScopeCheckResult {
 pub enum ScopeDisposition {
     Contained,
     Broadened,
+    HumanReviewRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeFileClass {
+    OrdinarySource,
+    DependencyManifest,
+    DependencyLockfile,
+    Migration,
+    Configuration,
+    Test,
+    GeneratedArtifact,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeDecision {
+    AllowedChange,
+    JustifiedExpectedFileChange,
+    ProhibitedChange,
+    UndeclaredScopeExpansion,
+    AmbiguousHumanReview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeRuleSource {
+    BuiltIn,
+    Configuration,
+    ExpectedFiles,
+    EvidenceValidation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedFileMatch {
+    pub normalized: String,
+    pub source_line: u64,
+    pub match_kind: ExpectedMatchKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeFinding {
+    pub finding_id: String,
+    pub change_id: String,
+    pub path: String,
+    pub old_path: Option<String>,
+    pub change_kind: GitChangeKind,
+    pub file_class: ScopeFileClass,
+    pub decision: ScopeDecision,
+    pub rule_id: String,
+    pub rule_source: ScopeRuleSource,
+    pub rule_detail: String,
+    pub expected_file_match: Option<ExpectedFileMatch>,
+    pub allowed_path_match: Option<String>,
+    pub prohibited_rule_match: Option<String>,
+    pub policy_snapshot_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeDeclarationMode {
+    ExpectedOrConfigured,
+    ExpectedRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeClassPolicy {
+    Deny,
+    HumanReview,
+    AllowWhenExpected,
+    AllowWhenConfigured,
+    Allow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeFileClassPolicies {
+    pub dependency_manifest: ScopeClassPolicy,
+    pub dependency_lockfile: ScopeClassPolicy,
+    pub migration: ScopeClassPolicy,
+    pub configuration: ScopeClassPolicy,
+    pub test: ScopeClassPolicy,
+    pub generated_artifact: ScopeClassPolicy,
+}
+
+impl Default for ScopeFileClassPolicies {
+    fn default() -> Self {
+        Self {
+            dependency_manifest: ScopeClassPolicy::HumanReview,
+            dependency_lockfile: ScopeClassPolicy::HumanReview,
+            migration: ScopeClassPolicy::HumanReview,
+            configuration: ScopeClassPolicy::HumanReview,
+            test: ScopeClassPolicy::AllowWhenExpected,
+            generated_artifact: ScopeClassPolicy::HumanReview,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopePathEntry {
+    pub normalized: String,
+    pub match_kind: ExpectedMatchKind,
+}
+
+impl ScopePathEntry {
+    pub fn matches(&self, path: &str) -> bool {
+        match self.match_kind {
+            ExpectedMatchKind::ExactFile => path == self.normalized,
+            ExpectedMatchKind::Directory => {
+                path.starts_with(&self.normalized) && path.len() > self.normalized.len()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProhibitedRuleKind {
+    Path { entry: ScopePathEntry },
+    FileClass { class: ScopeFileClass },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProhibitedRule {
+    pub rule_id: String,
+    pub rule: ProhibitedRuleKind,
+    /// Empty means the rule applies to every supported change kind.
+    pub change_kinds: Vec<GitChangeKind>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeClassificationRule {
+    pub rule_id: String,
+    pub class: ScopeFileClass,
+    pub entry: ScopePathEntry,
+    pub source: ScopeRuleSource,
+    pub precedence: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopePolicySnapshot {
+    pub schema_version: String,
+    pub prd_path: String,
+    pub prd_content_hash: String,
+    pub contract: Vec<ExpectedFileEntry>,
+    pub allowed_paths: Vec<ScopePathEntry>,
+    pub allow_prd_expected_file_expansion: bool,
+    pub declaration_mode: ScopeDeclarationMode,
+    pub prohibited_rules: Vec<ProhibitedRule>,
+    pub file_class_policies: ScopeFileClassPolicies,
+    pub classification_rules: Vec<ScopeClassificationRule>,
+    pub builtin_rules_version: String,
+    pub baseline_revision: String,
+    pub config_provenance: String,
+    pub snapshot_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeEvaluation {
+    pub findings: Vec<ScopeFinding>,
+    pub disposition: ScopeDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeRuleSummary {
+    pub policy_snapshot_hash: String,
+    pub authorized_paths: Vec<ScopePathEntry>,
+    pub expected_files: Vec<ExpectedFileEntry>,
+    pub prohibited_rules: Vec<ProhibitedRule>,
+    pub file_class_policies: ScopeFileClassPolicies,
+    pub blocking_scope_findings: Vec<ScopeFinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -433,6 +617,10 @@ pub struct ReviewCycle {
     pub verification_before_review: Vec<VerificationEvidence>,
     pub verification_after_remediation: Vec<VerificationEvidence>,
     pub verification_history: Vec<VerificationEvidence>,
+    #[serde(default)]
+    pub scope_policy_snapshot: Option<ArtifactRef>,
+    #[serde(default)]
+    pub scope_evaluations: Vec<ScopeCheckResult>,
     pub aggregate_usage: ExecutionUsage,
     pub aggregate_duration_ms: u64,
     pub started_at: String,
@@ -497,6 +685,7 @@ pub enum ReviewStopReason {
     DurationLimitExhausted,
     ConflictingFindings,
     ScopeBroadened,
+    ScopeAmbiguous,
     ArchitecturalApprovalRequired,
     VerificationUnsuccessful,
     NoIndependentReviewer,

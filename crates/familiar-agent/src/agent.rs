@@ -48,6 +48,13 @@ pub struct ExecutionResult {
     pub cached_tokens: Option<u64>,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
+    /// Vendor session identity, recorded as provenance only. `None` for
+    /// adapters that do not report one.
+    pub session_id: Option<String>,
+    /// Cost self-reported by the agent in micro-USD. Observability only:
+    /// pricing-config estimation remains the sole source of
+    /// `estimated_cost_microusd` in execution history.
+    pub reported_cost_microusd: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -72,6 +79,13 @@ pub enum AgentExecutionError {
     Timeout {
         result: Box<ExecutionResult>,
     },
+    /// The agent's self-reported cost exceeded the configured adapter budget
+    /// ceiling. Detection is post-execution; the complete result is retained.
+    BudgetExceeded {
+        limit_microusd: u64,
+        reported_microusd: u64,
+        result: Box<ExecutionResult>,
+    },
 }
 
 impl AgentExecutionError {
@@ -81,7 +95,8 @@ impl AgentExecutionError {
             | Self::Input { result, .. }
             | Self::Wait { result, .. }
             | Self::Output { result, .. }
-            | Self::Timeout { result } => result.as_ref(),
+            | Self::Timeout { result }
+            | Self::BudgetExceeded { result, .. } => result.as_ref(),
         }
     }
 }
@@ -91,15 +106,25 @@ impl fmt::Display for AgentExecutionError {
         match self {
             Self::Launch {
                 executable, source, ..
-            } => write!(f, "cannot launch Codex executable {executable:?}: {source}"),
+            } => write!(f, "cannot launch agent executable {executable:?}: {source}"),
             Self::Input { source, .. } => {
-                write!(f, "cannot feed execution prompt to Codex: {source}")
+                write!(f, "cannot feed execution prompt to the agent: {source}")
             }
-            Self::Wait { source, .. } => write!(f, "cannot wait for Codex: {source}"),
+            Self::Wait { source, .. } => write!(f, "cannot wait for the agent: {source}"),
             Self::Output { source, .. } => {
-                write!(f, "cannot read Codex structured output: {source}")
+                write!(f, "cannot read agent structured output: {source}")
             }
-            Self::Timeout { .. } => write!(f, "Codex execution exceeded its configured timeout"),
+            Self::Timeout { .. } => {
+                write!(f, "agent execution exceeded its configured timeout")
+            }
+            Self::BudgetExceeded {
+                limit_microusd,
+                reported_microusd,
+                ..
+            } => write!(
+                f,
+                "agent-reported cost {reported_microusd} micro-USD exceeds the configured adapter budget {limit_microusd} micro-USD"
+            ),
         }
     }
 }
@@ -107,17 +132,11 @@ impl fmt::Display for AgentExecutionError {
 impl std::error::Error for AgentExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Timeout { .. } => None,
-            _ => Some(
-                match self {
-                    Self::Launch { source, .. }
-                    | Self::Input { source, .. }
-                    | Self::Wait { source, .. }
-                    | Self::Output { source, .. } => source,
-                    Self::Timeout { .. } => unreachable!(),
-                }
-                .as_ref(),
-            ),
+            Self::Timeout { .. } | Self::BudgetExceeded { .. } => None,
+            Self::Launch { source, .. }
+            | Self::Input { source, .. }
+            | Self::Wait { source, .. }
+            | Self::Output { source, .. } => Some(source.as_ref()),
         }
     }
 }

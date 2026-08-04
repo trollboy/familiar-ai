@@ -1,14 +1,9 @@
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::process::{Command, Stdio};
-#[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
-use std::sync::Arc;
-#[cfg(unix)]
-use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::isolation::{isolated_command, stream_lines, StreamAction};
 use crate::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
 
 #[derive(Debug, Clone)]
@@ -100,24 +95,7 @@ impl CodingAgent for CodexAgent {
             .expect("piped stdin")
             .write_all(request.prompt.as_bytes());
         #[cfg(unix)]
-        let watchdog = request.timeout_ms.map(|timeout| {
-            let timed_out = Arc::new(AtomicBool::new(false));
-            let flag = Arc::clone(&timed_out);
-            let pid = child.id();
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let handle = std::thread::spawn(move || {
-                if done_rx
-                    .recv_timeout(Duration::from_millis(timeout))
-                    .is_err()
-                {
-                    flag.store(true, Ordering::Release);
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
-                    }
-                }
-            });
-            (done_tx, handle, timed_out)
-        });
+        let watchdog = crate::isolation::spawn_watchdog(child.id(), request.timeout_ms);
         let output_result = stream_json(
             child.stdout.take().expect("piped stdout"),
             output,
@@ -128,13 +106,7 @@ impl CodingAgent for CodexAgent {
             result: Box::new(result.clone()),
         })?;
         #[cfg(unix)]
-        let timed_out = if let Some((done, handle, flag)) = watchdog {
-            let _ = done.send(());
-            let _ = handle.join();
-            flag.load(Ordering::Acquire)
-        } else {
-            false
-        };
+        let timed_out = crate::isolation::finish_watchdog(watchdog);
         result.exit_code = status.code();
         #[cfg(unix)]
         {
@@ -161,46 +133,6 @@ impl CodingAgent for CodexAgent {
                 result: Box::new(result),
             }),
         }
-    }
-}
-
-fn isolated_command(
-    executable: &str,
-    denied_read_path: Option<&std::path::Path>,
-) -> Result<Command, AgentExecutionError> {
-    let Some(denied) = denied_read_path else {
-        return Ok(Command::new(executable));
-    };
-    #[cfg(target_os = "macos")]
-    {
-        let canonical = denied
-            .canonicalize()
-            .map_err(|source| AgentExecutionError::Launch {
-                executable: executable.to_owned(),
-                source: Box::new(source),
-                result: Box::default(),
-            })?;
-        let escaped = canonical
-            .to_string_lossy()
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let profile =
-            format!("(version 1) (allow default) (deny file-read* (subpath \"{escaped}\"))");
-        let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.args(["-p", &profile, executable]);
-        Ok(command)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = denied;
-        Err(AgentExecutionError::Launch {
-            executable: executable.to_owned(),
-            source: Box::new(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "isolated review filesystem is unavailable on this platform",
-            )),
-            result: Box::default(),
-        })
     }
 }
 
@@ -244,17 +176,11 @@ fn stream_json(
     output: &mut dyn Write,
     result: &mut ExecutionResult,
 ) -> io::Result<()> {
-    for line in BufReader::new(reader).lines() {
-        let line = line?;
-        if let Some(text) = parse_event(&line, result) {
-            writeln!(output, "{text}")?;
-            output.flush()?;
-        } else if serde_json::from_str::<Value>(&line).is_err() {
-            writeln!(output, "{line}")?;
-            output.flush()?;
-        }
-    }
-    Ok(())
+    stream_lines(reader, output, |line| match parse_event(line, result) {
+        Some(text) => StreamAction::Text(text),
+        None if serde_json::from_str::<Value>(line).is_err() => StreamAction::Forward,
+        None => StreamAction::Silent,
+    })
 }
 
 #[cfg(test)]

@@ -2,13 +2,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use familiar_agent::CodexAgent;
 use familiar_core::{
     load_manifest, resolve_run_prd, validate_graph, validate_recovery_attribution, AppPaths,
     BacklogDiscovery, BacklogManager, BacklogRecoveryAction, BacklogStatusStore,
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery,
 };
-use familiar_daemon::run::execute;
+use familiar_daemon::run::{build_agent, execute_with_config, resolved_agent_entries, AgentSet};
 use familiar_storage::{
     Database, ExecutionHistoryRepository, SqliteBacklogRepository, SqliteBootstrapRepository,
 };
@@ -87,8 +86,8 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
-        Command::Run { prd_path } => match execute(&prd_path, &CodexAgent::new("codex")) {
-            Ok(_) => ExitCode::SUCCESS,
+        Command::Run { prd_path } => match run(&prd_path) {
+            Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 let code = error.exit_code();
                 eprintln!("error: {error}");
@@ -109,6 +108,29 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         },
     }
+}
+
+/// The CLI composition root: read validated configuration and construct the
+/// implementation and reviewer agents deterministically.
+fn run(prd_path: &std::path::Path) -> Result<(), familiar_daemon::run::RunError> {
+    use familiar_daemon::run::RunError;
+    let paths = AppPaths::new();
+    let config = Config::load(Some(&paths.config_dir.join("config.toml")))
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let (implementation_entry, reviewer_entry) =
+        resolved_agent_entries(&config).map_err(RunError::Config)?;
+    let implementation = build_agent(&implementation_entry);
+    let reviewer = build_agent(&reviewer_entry);
+    execute_with_config(
+        prd_path,
+        &AgentSet {
+            implementation: implementation.as_ref(),
+            reviewer: reviewer.as_ref(),
+        },
+        &config,
+        &paths,
+    )
+    .map(|_| ())
 }
 
 fn next() -> Result<(), String> {
