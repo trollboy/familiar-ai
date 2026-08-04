@@ -55,3 +55,4 @@ ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 wiremock = "0.6"
 axum = "0.8"
+landlock = "0.4"

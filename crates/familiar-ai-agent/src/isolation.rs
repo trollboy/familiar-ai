@@ -47,14 +47,37 @@ pub(crate) fn isolated_command(
                 source: Box::new(source),
                 result: Box::default(),
             })?;
-        probe_linux_sandbox(&canonical).map_err(|source| AgentExecutionError::Launch {
-            executable: executable.to_owned(),
-            source: Box::new(source),
-            result: Box::default(),
-        })?;
-        let mut command = Command::new(bwrap_program());
-        command.args(bwrap_wrapper_argv(&canonical));
-        command.arg(executable);
+        // Built before fork: unsupported kernels and enumeration failures stop
+        // the launch here, before any agent process exists.
+        let ruleset =
+            build_landlock_ruleset(std::path::Path::new("/"), &canonical).map_err(|source| {
+                AgentExecutionError::Launch {
+                    executable: executable.to_owned(),
+                    source: Box::new(source),
+                    result: Box::default(),
+                }
+            })?;
+        let mut command = Command::new(executable);
+        let mut ruleset = Some(ruleset);
+        // SAFETY: the closure runs between fork and exec and performs only
+        // Landlock/prctl syscalls on a ruleset prepared above; it allocates
+        // nothing. Returning Err aborts the spawn, so the agent can never come
+        // into existence unsandboxed.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                let ruleset = ruleset
+                    .take()
+                    .ok_or_else(|| io::Error::other("landlock ruleset consumed before exec"))?;
+                restrict_self_fully(ruleset).inspect_err(|error| {
+                    // The pre-exec error channel can only carry a raw errno, so
+                    // a non-OS error would reach the parent as a meaningless
+                    // EINVAL. Report the real reason on inherited stderr.
+                    let message = format!("familiar-ai: landlock isolation failed: {error}\n");
+                    libc::write(2, message.as_ptr().cast(), message.len());
+                })
+            });
+        }
         Ok(command)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -71,83 +94,140 @@ pub(crate) fn isolated_command(
     }
 }
 
-#[cfg(target_os = "linux")]
-const BWRAP_EXECUTABLE: &str = "bwrap";
-
-/// Serializes tests that exercise isolation, because the probe-failure test
-/// overrides the bwrap program for the duration of its run.
+/// Serializes tests that exercise isolation, because the forced-unsupported
+/// test sets a process-wide override for the duration of its run.
 #[cfg(all(target_os = "linux", test))]
 pub(crate) static ISOLATION_TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(all(target_os = "linux", test))]
-fn bwrap_program() -> std::ffi::OsString {
-    std::env::var_os("FAMILIAR_AI_TEST_BWRAP_OVERRIDE").unwrap_or_else(|| BWRAP_EXECUTABLE.into())
+fn landlock_forced_unsupported() -> bool {
+    std::env::var_os("FAMILIAR_AI_TEST_LANDLOCK_UNSUPPORTED").is_some()
 }
 
 #[cfg(all(target_os = "linux", not(test)))]
-fn bwrap_program() -> std::ffi::OsString {
-    BWRAP_EXECUTABLE.into()
+fn landlock_forced_unsupported() -> bool {
+    false
 }
 
-/// The pinned bubblewrap wrapper: bind the host filesystem through unchanged,
-/// mask the denied tree with an empty tmpfs, and tie the sandbox to the
-/// watchdog's process-group kill. Shared by the probe and the real launch so
-/// the proven sandbox and the executed sandbox cannot diverge.
+/// Every path the sandboxed child may still reach: walking from `root` toward
+/// the denied path, each level contributes its entries except the next
+/// ancestor on the path. The denied tree and its ancestors are granted
+/// nothing, so denial is by omission — Landlock is allowlist-only.
+/// `root` is a parameter so tests can pin enumeration over a fixture tree.
 #[cfg(target_os = "linux")]
-fn bwrap_wrapper_argv(canonical_denied: &std::path::Path) -> Vec<std::ffi::OsString> {
-    use std::ffi::OsString;
-    vec![
-        OsString::from("--dev-bind"),
-        OsString::from("/"),
-        OsString::from("/"),
-        OsString::from("--tmpfs"),
-        canonical_denied.as_os_str().to_owned(),
-        OsString::from("--die-with-parent"),
-        OsString::from("--"),
-    ]
-}
-
-/// Prove the sandbox can be created before any agent process is spawned.
-/// A missing `bwrap`, blocked namespaces, or any non-zero probe exit fails
-/// the launch closed with the probe's diagnostic.
-#[cfg(target_os = "linux")]
-fn probe_linux_sandbox(canonical_denied: &std::path::Path) -> std::io::Result<()> {
-    use std::process::Stdio;
-    let output = Command::new(bwrap_program())
-        .args(bwrap_wrapper_argv(canonical_denied))
-        .arg("/bin/true")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|source| {
-            std::io::Error::new(
-                source.kind(),
-                format!("sandbox probe cannot launch {BWRAP_EXECUTABLE}: {source}"),
-            )
-        })?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
+fn landlock_grant_paths(
+    root: &std::path::Path,
+    canonical_denied: &std::path::Path,
+) -> io::Result<Vec<std::path::PathBuf>> {
+    let relative = canonical_denied.strip_prefix(root).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
             format!(
-                "sandbox probe failed (status {:?}): {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
+                "denied path {} is not beneath {}",
+                canonical_denied.display(),
+                root.display()
             ),
-        ))
+        )
+    })?;
+    let mut granted = Vec::new();
+    let mut level = root.to_path_buf();
+    for component in relative.components() {
+        let next = level.join(component.as_os_str());
+        for entry in std::fs::read_dir(&level)? {
+            let path = entry?.path();
+            if path != next {
+                granted.push(path);
+            }
+        }
+        level = next;
+    }
+    granted.sort();
+    Ok(granted)
+}
+
+/// Build the read/execute allowlist for everything outside the denied tree.
+/// Pure pre-fork work: an unsupported kernel or a failed enumeration stops the
+/// launch before any agent process exists.
+#[cfg(target_os = "linux")]
+fn build_landlock_ruleset(
+    root: &std::path::Path,
+    canonical_denied: &std::path::Path,
+) -> io::Result<landlock::RulesetCreated> {
+    use landlock::{AccessFs, PathBeneath, PathFd, RulesetAttr, RulesetCreatedAttr, ABI};
+    if landlock_forced_unsupported() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "landlock forced unsupported for testing",
+        ));
+    }
+    let abi = ABI::V1;
+    let read_access = AccessFs::from_read(abi);
+    let mut ruleset = landlock::Ruleset::default()
+        .handle_access(read_access)
+        .map_err(landlock_error)?
+        .create()
+        .map_err(landlock_error)?;
+    let file_access = AccessFs::ReadFile | AccessFs::Execute;
+    for path in landlock_grant_paths(root, canonical_denied)? {
+        // A path that cannot be opened or stat'd (dangling symlink, denied
+        // permission) is simply not granted: that narrows the child's access,
+        // never widens it, so an unrelated broken entry must not fail review.
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let Ok(fd) = PathFd::new(&path) else {
+            continue;
+        };
+        // Directory-only rights (ReadDir) are invalid on a regular file: the
+        // kernel rejects such a rule and best-effort compatibility would
+        // downgrade the whole ruleset to partially enforced.
+        let access = if metadata.is_dir() {
+            read_access
+        } else {
+            file_access
+        };
+        ruleset = ruleset
+            .add_rule(PathBeneath::new(fd, access))
+            .map_err(landlock_error)?;
+    }
+    Ok(ruleset)
+}
+
+#[cfg(target_os = "linux")]
+fn landlock_error(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("landlock isolation unavailable: {error}"),
+    )
+}
+
+/// Apply the ruleset to the current (post-fork, pre-exec) process. Anything
+/// short of full enforcement is an error, so a partially-restricted agent can
+/// never run.
+#[cfg(target_os = "linux")]
+fn restrict_self_fully(ruleset: landlock::RulesetCreated) -> io::Result<()> {
+    use landlock::RulesetStatus;
+    let status = ruleset.restrict_self().map_err(landlock_error)?;
+    match status.ruleset {
+        RulesetStatus::FullyEnforced => Ok(()),
+        other => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("landlock ruleset not fully enforced: {other:?}"),
+        )),
     }
 }
 
-/// Test support: whether this environment can actually create the sandbox.
-/// Production code never consults this; it probes per launch.
+/// Test support: whether this kernel can enforce the sandbox at all.
+/// Production code never consults this; every launch builds and enforces.
 #[cfg(all(target_os = "linux", test))]
 pub(crate) fn linux_sandbox_available() -> bool {
     let Ok(temp) = tempfile::tempdir() else {
         return false;
     };
-    probe_linux_sandbox(temp.path()).is_ok()
+    let Ok(canonical) = temp.path().canonicalize() else {
+        return false;
+    };
+    build_landlock_ruleset(std::path::Path::new("/"), &canonical).is_ok()
 }
 
 /// Per-line decision made by an adapter's stream parser.
@@ -231,27 +311,40 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn wrapper_argv_is_pinned_and_contains_only_the_canonical_path() {
+    fn grant_enumeration_omits_the_denied_tree_and_its_ancestors() {
         let temp = tempfile::tempdir().unwrap();
-        let canonical = temp.path().canonicalize().unwrap();
-        let argv = bwrap_wrapper_argv(&canonical);
+        let root = temp.path().canonicalize().unwrap();
+        // root/{keep-a, keep-b, mid/{keep-c, repo/{secret}}}
+        let mid = root.join("mid");
+        let repo = mid.join("repo");
+        fs::create_dir_all(repo.join("inner")).unwrap();
+        fs::create_dir_all(mid.join("keep-c")).unwrap();
+        fs::create_dir_all(root.join("keep-a")).unwrap();
+        fs::write(root.join("keep-b"), "file").unwrap();
+
+        let granted = landlock_grant_paths(&root, &repo).unwrap();
         assert_eq!(
-            argv,
-            vec![
-                std::ffi::OsString::from("--dev-bind"),
-                "/".into(),
-                "/".into(),
-                "--tmpfs".into(),
-                canonical.as_os_str().to_owned(),
-                "--die-with-parent".into(),
-                "--".into(),
-            ]
+            granted,
+            vec![root.join("keep-a"), root.join("keep-b"), mid.join("keep-c")]
         );
+        // Neither the denied tree nor any ancestor is granted: denial is by
+        // omission, and ancestors are therefore not listable by the child.
+        assert!(!granted.contains(&repo));
+        assert!(!granted.contains(&mid));
+        assert!(!granted.iter().any(|path| path.starts_with(&repo)));
     }
 
     #[test]
-    fn probe_failure_fails_closed_before_the_agent_ever_runs() {
-        let _guard = ISOLATION_TEST_ENV.lock().unwrap();
+    fn enumeration_rejects_a_denied_path_outside_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let outside = std::path::Path::new("/elsewhere/repo");
+        assert!(landlock_grant_paths(&root, outside).is_err());
+    }
+
+    #[test]
+    fn unsupported_landlock_fails_closed_before_the_agent_ever_runs() {
+        let _guard = ISOLATION_TEST_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let ran_marker = temp.path().join("agent-ran");
         let agent_exe = temp.path().join("codex");
@@ -266,10 +359,7 @@ mod tests {
         let denied = temp.path().join("denied");
         fs::create_dir_all(&denied).unwrap();
 
-        std::env::set_var(
-            "FAMILIAR_AI_TEST_BWRAP_OVERRIDE",
-            temp.path().join("no-such-bwrap"),
-        );
+        std::env::set_var("FAMILIAR_AI_TEST_LANDLOCK_UNSUPPORTED", "1");
         let result = crate::CodexAgent::new(agent_exe.to_string_lossy()).execute(
             ExecutionRequest {
                 working_directory: temp.path(),
@@ -281,7 +371,7 @@ mod tests {
             },
             &mut Vec::new(),
         );
-        std::env::remove_var("FAMILIAR_AI_TEST_BWRAP_OVERRIDE");
+        std::env::remove_var("FAMILIAR_AI_TEST_LANDLOCK_UNSUPPORTED");
         assert!(matches!(result, Err(AgentExecutionError::Launch { .. })));
         assert!(
             !ran_marker.exists(),

@@ -15,14 +15,6 @@ services:
       context: .
       target: tester
     working_dir: /app
-    # Mount-namespace creation for the bubblewrap review-isolation tests
-    # (PRD-016). Test container only; production isolation depends solely on
-    # the host's own bubblewrap.
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - apparmor=unconfined
-      - seccomp=unconfined
     command: >
       cargo llvm-cov test --workspace --no-fail-fast --no-default-features
     volumes:

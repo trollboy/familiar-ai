@@ -261,7 +261,9 @@ mod tests {
     fn linux_isolation_denies_repository_reads_or_fails_closed() {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
-        let _guard = crate::isolation::ISOLATION_TEST_ENV.lock().unwrap();
+        let _guard = crate::isolation::ISOLATION_TEST_ENV
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let repository = temp.path().join("repository");
         let workspace = temp.path().join("review-workspace");
@@ -275,9 +277,10 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s/%s\"}}}}\\n' \"$inner\" \"$outer\"\n",
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nif ls '{}' >/dev/null 2>&1; then anc=LISTED; else anc=HIDDEN; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s/%s/%s\"}}}}\\n' \"$inner\" \"$outer\" \"$anc\"\n",
                 secret.display(),
-                outside.display()
+                outside.display(),
+                repository.display()
             ),
         )
         .unwrap();
@@ -299,7 +302,8 @@ mod tests {
         );
         if crate::isolation::linux_sandbox_available() {
             let result = result.unwrap();
-            assert_eq!(output, b"DENIED/OK\n", "exit={:?}", result.exit_code);
+            // Denied tree unreadable and unlistable; unrelated paths readable.
+            assert_eq!(output, b"DENIED/OK/HIDDEN\n", "exit={:?}", result.exit_code);
         } else {
             assert!(
                 matches!(result, Err(AgentExecutionError::Launch { .. })),
