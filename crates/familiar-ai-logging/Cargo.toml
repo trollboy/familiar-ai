@@ -1,0 +1,15 @@
+[package]
+name = "familiar-ai-logging"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+familiar-ai-core = { path = "../familiar-ai-core" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

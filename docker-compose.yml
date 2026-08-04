@@ -4,11 +4,11 @@ services:
       context: .
       target: runtime
     volumes:
-      - familiar-data:/data
-      - familiar-config:/config
+      - familiar-ai-data:/data
+      - familiar-ai-config:/config
     environment:
-      - FAMILIAR_LOGGING__LEVEL=info
-      - FAMILIAR_LOGGING__FORMAT=json
+      - FAMILIAR_AI_LOGGING__LEVEL=info
+      - FAMILIAR_AI_LOGGING__FORMAT=json
 
   test:
     build:
@@ -21,6 +21,6 @@ services:
       - cargo-cache:/usr/local/cargo/registry
 
 volumes:
-  familiar-data:
-  familiar-config:
+  familiar-ai-data:
+  familiar-ai-config:
   cargo-cache:

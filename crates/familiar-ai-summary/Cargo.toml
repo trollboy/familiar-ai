@@ -1,0 +1,17 @@
+[package]
+name = "familiar-ai-summary"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+familiar-ai-core = { path = "../familiar-ai-core" }
+regex.workspace = true
+once_cell.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

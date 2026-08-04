@@ -1,0 +1,18 @@
+[package]
+name = "familiar-ai-storage"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+familiar-ai-core = { path = "../familiar-ai-core" }
+familiar-ai-review = { path = "../familiar-ai-review" }
+rusqlite.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

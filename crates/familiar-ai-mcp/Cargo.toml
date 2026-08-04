@@ -1,0 +1,28 @@
+[package]
+name = "familiar-ai-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "familiar-ai-mcp"
+path = "src/bin/familiar-ai-mcp.rs"
+
+[dependencies]
+familiar-ai-core = { path = "../familiar-ai-core" }
+familiar-ai-storage = { path = "../familiar-ai-storage" }
+familiar-ai-summary = { path = "../familiar-ai-summary" }
+familiar-ai-tokens = { path = "../familiar-ai-tokens" }
+familiar-ai-llm = { path = "../familiar-ai-llm" }
+familiar-ai-logging = { path = "../familiar-ai-logging" }
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "io-std", "io-util", "macros"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

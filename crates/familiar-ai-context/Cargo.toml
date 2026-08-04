@@ -1,0 +1,13 @@
+[package]
+name = "familiar-ai-context"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+familiar-ai-tokens = { path = "../familiar-ai-tokens" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

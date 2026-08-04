@@ -1,12 +1,12 @@
 # Familiar Daemon Configuration
 #
 # This is the default configuration file. Copy to:
-#   Linux:  ~/.config/familiar/config.toml
-#   macOS:  ~/Library/Application Support/Familiar/config.toml
+#   Linux:  ~/.config/familiar-ai/config.toml
+#   macOS:  ~/Library/Application Support/Familiar-AI/config.toml
 #
 # All values shown are defaults. Uncomment and modify as needed.
-# Environment variables override file values (prefix: FAMILIAR_, separator: __)
-# Example: FAMILIAR_DAEMON__HEARTBEAT_INTERVAL_SECS=30
+# Environment variables override file values (prefix: FAMILIAR_AI_, separator: __)
+# Example: FAMILIAR_AI_DAEMON__HEARTBEAT_INTERVAL_SECS=30
 
 [daemon]
 # heartbeat_interval_secs = 60
@@ -79,7 +79,7 @@ declaration_mode = "expected_or_configured"
 # [[review.scope.classification]]
 # id = "storage_migrations"
 # class = "migration"
-# path = "crates/familiar-storage/migrations/"
+# path = "crates/familiar-ai-storage/migrations/"
 
 [review.scope.file_classes]
 dependency_manifest = "human_review"

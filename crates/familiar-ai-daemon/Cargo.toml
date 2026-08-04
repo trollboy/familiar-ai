@@ -1,0 +1,49 @@
+[package]
+name = "familiar-ai-daemon"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "familiar-ai-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "familiar-ai"
+path = "src/bin/familiar-ai.rs"
+
+[features]
+default = ["tray"]
+tray = ["dep:familiar-ai-tray"]
+
+[dependencies]
+familiar-ai-agent = { path = "../familiar-ai-agent" }
+familiar-ai-context = { path = "../familiar-ai-context" }
+familiar-ai-core = { path = "../familiar-ai-core" }
+familiar-ai-logging = { path = "../familiar-ai-logging" }
+familiar-ai-storage = { path = "../familiar-ai-storage" }
+familiar-ai-review = { path = "../familiar-ai-review" }
+familiar-ai-summary = { path = "../familiar-ai-summary" }
+familiar-ai-llm = { path = "../familiar-ai-llm" }
+familiar-ai-watcher = { path = "../familiar-ai-watcher" }
+familiar-ai-tray = { path = "../familiar-ai-tray", optional = true }
+ignore.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+libc.workspace = true
+chrono.workspace = true
+figment.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+
+[dev-dependencies]
+familiar-ai-testutil = { path = "../familiar-ai-testutil" }
+tempfile.workspace = true
+assert_cmd = "2"
+predicates = "3"
+nix = { version = "0.29", features = ["signal"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

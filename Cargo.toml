@@ -1,22 +1,22 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/familiar-agent",
-    "crates/familiar-review",
-    "crates/familiar-context",
-    "crates/familiar-core",
-    "crates/familiar-logging",
-    "crates/familiar-mcp",
-    "crates/familiar-storage",
-    "crates/familiar-summary",
-    "crates/familiar-tokens",
-    "crates/familiar-llm",
-    "crates/familiar-watcher",
-    "crates/familiar-testutil",
-    "crates/familiar-daemon",
+    "crates/familiar-ai-agent",
+    "crates/familiar-ai-review",
+    "crates/familiar-ai-context",
+    "crates/familiar-ai-core",
+    "crates/familiar-ai-logging",
+    "crates/familiar-ai-mcp",
+    "crates/familiar-ai-storage",
+    "crates/familiar-ai-summary",
+    "crates/familiar-ai-tokens",
+    "crates/familiar-ai-llm",
+    "crates/familiar-ai-watcher",
+    "crates/familiar-ai-testutil",
+    "crates/familiar-ai-daemon",
 ]
 exclude = [
-    "crates/familiar-tray",
+    "crates/familiar-ai-tray",
 ]
 
 [workspace.package]
