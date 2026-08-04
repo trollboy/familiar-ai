@@ -64,15 +64,26 @@ fn prd_014_pins_as_a_valid_contract() {
 }
 
 #[test]
-fn prd_015_pins_as_a_validation_error_until_amended() {
-    // Its Expected Files section uses a non-terminal glob (`crates/familiar-*`),
-    // which the closed grammar rejects; PRD-015 must be amended before it can
-    // execute under enabled review.
-    let error = parse("PRD-015.md").unwrap_err();
-    assert!(
-        matches!(error, ExpectedFilesError::UnsupportedExpression { .. }),
-        "unexpected PRD-015 parse outcome: {error:?}"
+fn prd_015_pins_as_a_valid_rename_contract_with_both_sides() {
+    // A rename is authorized only when both sides are declared, so the
+    // contract enumerates every old and new crate directory.
+    let crates = [
+        "agent", "context", "core", "daemon", "llm", "logging", "mcp", "review", "storage",
+        "summary", "testutil", "tokens", "tray", "watcher",
+    ];
+    let mut expected = vec!["Cargo.toml".to_owned(), "Cargo.lock".to_owned()];
+    expected.extend(crates.iter().map(|name| format!("crates/familiar-{name}/")));
+    expected.extend(
+        crates
+            .iter()
+            .map(|name| format!("crates/familiar-ai-{name}/")),
     );
+    expected.extend([
+        "Dockerfile".to_owned(),
+        "docker-compose.yml".to_owned(),
+        "config/".to_owned(),
+    ]);
+    assert_eq!(parse("PRD-015.md").unwrap(), expected);
 }
 
 #[test]
@@ -107,7 +118,8 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-005.md",
             "PRD-007.md",
             "PRD-013.md",
-            "PRD-014.md"
+            "PRD-014.md",
+            "PRD-015.md"
         ]
     );
 }
