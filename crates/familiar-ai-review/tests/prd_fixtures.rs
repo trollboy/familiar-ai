@@ -203,6 +203,25 @@ fn prds_022_and_023_pin_as_valid_contracts() {
 }
 
 #[test]
+fn prd_024_pins_as_a_valid_contract() {
+    assert_eq!(
+        parse("PRD-024.md").unwrap(),
+        vec![
+            "crates/familiar-ai-agent/src/agent.rs",
+            "crates/familiar-ai-agent/src/claude_code.rs",
+            "crates/familiar-ai-agent/src/codex.rs",
+            "crates/familiar-ai-agent/tests/",
+            "crates/familiar-ai-core/src/config.rs",
+            "config/default.toml",
+            "crates/familiar-ai-daemon/src/run.rs",
+            "crates/familiar-ai-daemon/src/drive.rs",
+            "crates/familiar-ai-daemon/src/report.rs",
+            "crates/familiar-ai-daemon/tests/",
+        ]
+    );
+}
+
+#[test]
 fn every_wave_two_prd_parses_deterministically() {
     let mut outcomes = Vec::new();
     let mut names: Vec<_> = fs::read_dir(prd_dir())
@@ -243,7 +262,8 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-020.md",
             "PRD-021.md",
             "PRD-022.md",
-            "PRD-023.md"
+            "PRD-023.md",
+            "PRD-024.md"
         ]
     );
 }
