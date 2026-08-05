@@ -194,6 +194,14 @@ mod tests {
     }
 
     #[test]
+    fn declares_no_native_budget_capability() {
+        assert_eq!(
+            CodexAgent::new("codex").budget_capability(),
+            crate::BudgetCapability::default()
+        );
+    }
+
+    #[test]
     fn parses_only_supported_typed_events() {
         let mut result = ExecutionResult::default();
         assert_eq!(
@@ -249,6 +257,7 @@ mod tests {
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(50),
+                budget: crate::ExecutionBudget::NONE,
             },
             &mut Vec::new(),
         );
@@ -297,6 +306,7 @@ mod tests {
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(5_000),
+                budget: crate::ExecutionBudget::NONE,
             },
             &mut output,
         );
@@ -349,6 +359,7 @@ mod tests {
                     filesystem: crate::FilesystemPolicy::ReadOnly,
                     model: None,
                     timeout_ms: Some(1_000),
+                    budget: crate::ExecutionBudget::NONE,
                 },
                 &mut output,
             )

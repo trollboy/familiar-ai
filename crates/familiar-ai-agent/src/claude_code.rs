@@ -4,7 +4,10 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 use crate::isolation::{isolated_command, stream_lines, StreamAction};
-use crate::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
+use crate::{
+    AgentExecutionError, BudgetCapability, CodingAgent, DenominationCapability, ExecutionRequest,
+    ExecutionResult,
+};
 
 /// Adapter-owned tool restrictions guaranteeing that a `ReadOnly` execution
 /// cannot edit files or run repository-modifying commands, independent of the
@@ -66,6 +69,10 @@ impl ClaudeCodeAgent {
         let mut argv: Vec<String> = ["--print", "--output-format", "stream-json", "--verbose"]
             .map(str::to_owned)
             .to_vec();
+        if let Some(max_cost_microusd) = request.budget.max_cost_microusd {
+            argv.push("--max-budget-usd".into());
+            argv.push(format_usd_microunits(max_cost_microusd));
+        }
         if let Some(model) = request.model.or(self.settings.model.as_deref()) {
             argv.push("--model".into());
             argv.push(model.to_owned());
@@ -98,6 +105,14 @@ impl ClaudeCodeAgent {
 impl CodingAgent for ClaudeCodeAgent {
     fn isolation_capability(&self) -> crate::IsolationCapability {
         crate::IsolationCapability::FreshProcessPerExecution
+    }
+
+    fn budget_capability(&self) -> BudgetCapability {
+        BudgetCapability {
+            cost: DenominationCapability::Enforced,
+            tokens: DenominationCapability::Unenforced,
+            duration: DenominationCapability::Unenforced,
+        }
     }
 
     fn execute(
@@ -170,6 +185,13 @@ impl CodingAgent for ClaudeCodeAgent {
                 result: Box::new(result),
             });
         }
+        if stream.budget_stopped {
+            // A distinct, closed outcome: the vendor's own pre-emptive
+            // ceiling stopped the run, not a failure to retry.
+            return Err(AgentExecutionError::BudgetStopped {
+                result: Box::new(result),
+            });
+        }
         match input {
             Ok(()) => {}
             Err(_) if !status.success() => {}
@@ -196,6 +218,13 @@ impl CodingAgent for ClaudeCodeAgent {
     }
 }
 
+/// Render micro-USD as a fixed six-decimal USD string for `--max-budget-usd`,
+/// e.g. `8000000` -> `"8.000000"`. Integer arithmetic keeps the conversion
+/// exact regardless of magnitude.
+fn format_usd_microunits(microusd: u64) -> String {
+    format!("{}.{:06}", microusd / 1_000_000, microusd % 1_000_000)
+}
+
 #[derive(Debug, Default)]
 struct ClaudeStream {
     init_model: Option<String>,
@@ -206,8 +235,18 @@ struct ClaudeStream {
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    /// Fallback token counts aggregated across all `modelUsage` entries, used
+    /// only when the top-level `usage` block is absent or fully zeroed (as
+    /// on a budget stop, where the real counts live only here).
+    model_usage_input_tokens: Option<u64>,
+    model_usage_cache_creation_input_tokens: Option<u64>,
+    model_usage_cache_read_input_tokens: Option<u64>,
+    model_usage_output_tokens: Option<u64>,
     total_cost_usd: Option<f64>,
     terminal_seen: bool,
+    /// The terminal result reported `subtype == "error_max_budget_usd"`: the
+    /// vendor's own pre-emptive ceiling stopped the run.
+    budget_stopped: bool,
 }
 
 impl ClaudeStream {
@@ -220,18 +259,41 @@ impl ClaudeStream {
             .init_session
             .clone()
             .or_else(|| self.result_session.clone());
-        result.input_tokens = match (
+        let raw = [
             self.input_tokens,
             self.cache_creation_input_tokens,
             self.cache_read_input_tokens,
-        ) {
+            self.output_tokens,
+        ];
+        // A budget-stopped (or otherwise truncated) result often carries an
+        // absent or fully-zeroed top-level `usage` block while the real
+        // counts live in `modelUsage`; fall back there rather than reporting
+        // a false zero.
+        let credible_missing = raw.iter().all(Option::is_none);
+        let credible_zeroed = raw.iter().all(|value| *value == Some(0));
+        let (input, created, read, output) = if credible_missing || credible_zeroed {
+            (
+                self.model_usage_input_tokens,
+                self.model_usage_cache_creation_input_tokens,
+                self.model_usage_cache_read_input_tokens,
+                self.model_usage_output_tokens,
+            )
+        } else {
+            (
+                self.input_tokens,
+                self.cache_creation_input_tokens,
+                self.cache_read_input_tokens,
+                self.output_tokens,
+            )
+        };
+        result.input_tokens = match (input, created, read) {
             (Some(direct), Some(created), Some(read)) => direct
                 .checked_add(created)
                 .and_then(|sum| sum.checked_add(read)),
             _ => None,
         };
-        result.cached_tokens = self.cache_read_input_tokens;
-        result.output_tokens = self.output_tokens;
+        result.cached_tokens = read;
+        result.output_tokens = output;
         result.reported_cost_microusd = self.total_cost_usd.and_then(cost_to_microusd);
     }
 }
@@ -310,6 +372,11 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
                 stream.cache_read_input_tokens = uint(usage.get("cache_read_input_tokens"));
                 stream.output_tokens = uint(usage.get("output_tokens"));
             }
+            let aggregated = aggregate_model_usage(&value);
+            stream.model_usage_input_tokens = aggregated.0;
+            stream.model_usage_cache_creation_input_tokens = aggregated.1;
+            stream.model_usage_cache_read_input_tokens = aggregated.2;
+            stream.model_usage_output_tokens = aggregated.3;
             stream.total_cost_usd = value
                 .get("total_cost_usd")
                 .and_then(Value::as_f64)
@@ -323,6 +390,9 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            if subtype == Some("error_max_budget_usd") {
+                stream.budget_stopped = true;
+            }
             if is_error || subtype.is_some_and(|subtype| subtype != "success") {
                 let detail = subtype
                     .filter(|subtype| *subtype != "success")
@@ -346,6 +416,33 @@ fn single_result_model(value: &Value) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Sum token fields across every `modelUsage` entry. A missing or empty
+/// `modelUsage` object, or any entry missing or malforming a field, leaves
+/// that component `None` — fail closed, never a partial or fabricated sum.
+fn aggregate_model_usage(value: &Value) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+    let Some(usage) = value.get("modelUsage").and_then(Value::as_object) else {
+        return (None, None, None, None);
+    };
+    if usage.is_empty() {
+        return (None, None, None, None);
+    }
+    let mut input = Some(0u64);
+    let mut created = Some(0u64);
+    let mut read = Some(0u64);
+    let mut output = Some(0u64);
+    for entry in usage.values() {
+        input = sum_field(input, entry.get("inputTokens"));
+        created = sum_field(created, entry.get("cacheCreationInputTokens"));
+        read = sum_field(read, entry.get("cacheReadInputTokens"));
+        output = sum_field(output, entry.get("outputTokens"));
+    }
+    (input, created, read, output)
+}
+
+fn sum_field(accumulator: Option<u64>, value: Option<&Value>) -> Option<u64> {
+    accumulator?.checked_add(uint(value)?)
 }
 
 #[cfg(test)]
@@ -384,6 +481,7 @@ mod tests {
             filesystem,
             model,
             timeout_ms: None,
+            budget: crate::ExecutionBudget::NONE,
         }
     }
 
@@ -506,6 +604,104 @@ mod tests {
     }
 
     #[test]
+    fn budget_stopped_subtype_sets_flag_and_streams_error_text() {
+        let mut stream = ClaudeStream::default();
+        match parse_event(
+            r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"result":"Reached maximum budget ($0.0001)"}"#,
+            &mut stream,
+        ) {
+            StreamAction::Text(text) => assert_eq!(text, "error: error_max_budget_usd"),
+            StreamAction::Silent | StreamAction::Forward => panic!("expected error text"),
+        }
+        assert!(stream.budget_stopped);
+    }
+
+    #[test]
+    fn zeroed_or_absent_usage_falls_back_to_model_usage_aggregate() {
+        // Top-level usage absent; modelUsage carries the real counts.
+        let mut stream = ClaudeStream::default();
+        parse_event(
+            r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"modelUsage":{"claude-sonnet-4-5":{"inputTokens":100,"outputTokens":20,"cacheReadInputTokens":5,"cacheCreationInputTokens":3}}}"#,
+            &mut stream,
+        );
+        let mut result = ExecutionResult::default();
+        stream.apply(&mut result);
+        assert_eq!(result.input_tokens, Some(108));
+        assert_eq!(result.cached_tokens, Some(5));
+        assert_eq!(result.output_tokens, Some(20));
+
+        // Top-level usage present but fully zeroed; modelUsage still wins,
+        // and is summed across more than one model.
+        let mut stream = ClaudeStream::default();
+        parse_event(
+            r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{"m1":{"inputTokens":10,"outputTokens":1,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},"m2":{"inputTokens":5,"outputTokens":2,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#,
+            &mut stream,
+        );
+        let mut result = ExecutionResult::default();
+        stream.apply(&mut result);
+        assert_eq!(result.input_tokens, Some(15));
+        assert_eq!(result.output_tokens, Some(3));
+    }
+
+    #[test]
+    fn model_usage_fallback_stays_unknown_when_neither_source_credible() {
+        // Usage zeroed and modelUsage absent: unknown, never a fabricated zero.
+        let mut stream = ClaudeStream::default();
+        parse_event(
+            r#"{"type":"result","subtype":"error_max_budget_usd","is_error":true,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}"#,
+            &mut stream,
+        );
+        let mut result = ExecutionResult::default();
+        stream.apply(&mut result);
+        assert_eq!(result.input_tokens, None);
+        assert_eq!(result.cached_tokens, None);
+        assert_eq!(result.output_tokens, None);
+
+        // modelUsage present but one entry is malformed: whole aggregate unknown.
+        let mut stream = ClaudeStream::default();
+        parse_event(
+            r#"{"type":"result","subtype":"success","modelUsage":{"m1":{"inputTokens":10,"outputTokens":1,"cacheReadInputTokens":0,"cacheCreationInputTokens":0},"m2":{"inputTokens":"bad","outputTokens":2,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#,
+            &mut stream,
+        );
+        let mut result = ExecutionResult::default();
+        stream.apply(&mut result);
+        assert_eq!(result.input_tokens, None);
+    }
+
+    #[test]
+    fn format_usd_microunits_is_six_decimal_places() {
+        assert_eq!(format_usd_microunits(8_000_000), "8.000000");
+        assert_eq!(format_usd_microunits(100), "0.000100");
+        assert_eq!(format_usd_microunits(1), "0.000001");
+        assert_eq!(format_usd_microunits(0), "0.000000");
+    }
+
+    #[test]
+    fn argv_includes_max_budget_usd_right_after_verbose_when_declared() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = agent(settings(&temp.path().join("claude")));
+        let mut req = request(temp.path(), None, crate::FilesystemPolicy::Normal);
+        req.budget = crate::ExecutionBudget::try_new(Some(8_000_000), None, None).unwrap();
+        let argv = agent.argv(&req);
+        assert_eq!(
+            argv,
+            vec![
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--max-budget-usd",
+                "8.000000",
+                "--permission-mode",
+                "default",
+            ]
+        );
+        // Absent budget: no flag at all.
+        let argv = agent.argv(&request(temp.path(), None, crate::FilesystemPolicy::Normal));
+        assert!(!argv.iter().any(|arg| arg == "--max-budget-usd"));
+    }
+
+    #[test]
     fn cost_conversion_rounds_half_up_with_checked_range() {
         assert_eq!(cost_to_microusd(0.0000005), Some(1));
         assert_eq!(cost_to_microusd(0.0000004), Some(0));
@@ -527,11 +723,13 @@ mod tests {
             max_budget_microusd: None,
             extra_args: vec!["--add-dir".into(), "/tmp/extra".into()],
         });
-        let argv = agent.argv(&request(
+        let mut req = request(
             temp.path(),
             Some("request-model"),
             crate::FilesystemPolicy::WorkspaceWrite,
-        ));
+        );
+        req.budget = crate::ExecutionBudget::try_new(Some(8_000_000), None, None).unwrap();
+        let argv = agent.argv(&req);
         assert_eq!(
             argv,
             vec![
@@ -539,6 +737,8 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--max-budget-usd",
+                "8.000000",
                 "--model",
                 "request-model",
                 "--permission-mode",
@@ -548,6 +748,10 @@ mod tests {
                 "--add-dir",
                 "/tmp/extra",
             ]
+        );
+        assert_eq!(
+            argv.iter().filter(|arg| *arg == "--max-budget-usd").count(),
+            1
         );
         for forbidden in [
             "--resume",
@@ -713,6 +917,40 @@ mod tests {
             } else {
                 assert!(outcome.is_ok(), "cost {cost_fragment:?} should pass");
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn budget_capability_declares_only_cost_enforced() {
+        assert_eq!(
+            agent(settings(Path::new("claude"))).budget_capability(),
+            BudgetCapability {
+                cost: DenominationCapability::Enforced,
+                tokens: DenominationCapability::Unenforced,
+                duration: DenominationCapability::Unenforced,
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_maps_vendor_budget_stop_to_a_distinct_closed_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("claude");
+        write_executable(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'claude 2'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_max_budget_usd\",\"is_error\":true,\"result\":\"Reached maximum budget ($0.0001)\",\"modelUsage\":{\"m\":{\"inputTokens\":7,\"outputTokens\":1,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0}}}'\nexit 1\n",
+        );
+        let mut req = request(temp.path(), None, crate::FilesystemPolicy::Normal);
+        req.budget = crate::ExecutionBudget::try_new(Some(100), None, None).unwrap();
+        let outcome = agent(settings(&executable)).execute(req, &mut Vec::new());
+        match outcome {
+            Err(AgentExecutionError::BudgetStopped { result }) => {
+                assert_eq!(result.input_tokens, Some(7));
+                assert_eq!(result.output_tokens, Some(1));
+            }
+            other => panic!("expected BudgetStopped, got {other:?}"),
         }
     }
 

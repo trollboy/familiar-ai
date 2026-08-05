@@ -500,4 +500,61 @@ mod tests {
         assert!(report.contains("reason=review_disabled"));
         assert!(!report.contains("scope:"));
     }
+
+    #[test]
+    fn budget_stopped_attempt_renders_as_a_named_closed_outcome_byte_exactly() {
+        // A vendor pre-emptive budget stop is a distinct, closed outcome; it
+        // renders through the same generic reason line as any other retained
+        // reason, byte-exact like every other pinned report section.
+        let db = database();
+        let repository = seed(&db, "drive-6", "{}");
+        let sequence = repository
+            .record_attempt_started(
+                "drive-6",
+                "PRD-24",
+                "docs/prds/PRD-024.md",
+                Some("exec-budget"),
+            )
+            .unwrap();
+        repository
+            .record_attempt_finished(
+                "drive-6",
+                sequence,
+                "retained",
+                Some("budget_stopped"),
+                None,
+                Some(500),
+            )
+            .unwrap();
+        repository
+            .finish_session("drive-6", "nothing_eligible")
+            .unwrap();
+        let session = repository.get_session("drive-6").unwrap().unwrap();
+        let expected = format!(
+            "Familiar morning report\n\
+             session:     drive-6\n\
+             started:     {started}\n\
+             ended:       {ended}\n\
+             termination: nothing_eligible\n\
+             warrant:     {{}}\n\
+             \n\
+             BUILT (0)\n  \
+             (nothing completed)\n\
+             \n\
+             STOPPED (1)\n  \
+             PRD-24  docs/prds/PRD-024.md  reason=budget_stopped\n\
+             \n\
+             COST\n  \
+             known:   0 micro-USD across 0 attempt(s)\n  \
+             unknown: 1 attempt(s) with no measurable cost\n\
+             \n\
+             NEEDS HUMAN JUDGMENT (1)\n  \
+             PRD-24 docs/prds/PRD-024.md\n    \
+             familiar-ai backlog release docs/prds/PRD-024.md --actor human:<you> --reason \"<why>\"\n    \
+             familiar-ai backlog complete docs/prds/PRD-024.md --actor human:<you> --reason \"<why>\"\n",
+            started = session.started_at,
+            ended = session.ended_at.unwrap(),
+        );
+        assert_eq!(render(&db, None).unwrap(), expected);
+    }
 }

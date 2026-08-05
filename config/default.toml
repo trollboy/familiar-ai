@@ -30,10 +30,15 @@
 # Note: cost ceilings require *known* per-run cost, which comes from
 # [execution_history.pricing]; without pricing configured every run's cost is
 # unknown and a cost ceiling ends the session after the first attempt
-# (unknown is never treated as zero).
+# (unknown is never treated as zero). The same rule applies to token
+# ceilings: an attempt with unknown token usage ends the session rather than
+# being silently treated as zero. Ceilings are enforced between executions
+# against recorded attempt totals, so they work for every adapter regardless
+# of native per-execution enforcement.
 [driver]
 max_prds_per_session = 0      # 0 = unlimited
 max_session_cost_microusd = 0 # 0 = no cost ceiling
+max_session_tokens = 0        # 0 = no token ceiling
 max_session_duration_ms = 0   # 0 = no duration ceiling
 
 [review]
@@ -78,6 +83,16 @@ max_verification_log_bytes = 256000
 #                                  # "default" | "plan" | "acceptEdits" | "bypassPermissions"
 # max_budget_microusd = 0          # optional; 0/absent -> no adapter budget ceiling
 # extra_args = []                  # optional; validated passthrough
+# Per-execution budget, implementation role only. A declared ceiling is
+# refused before launch (no process spawned) unless the constructed adapter
+# declares native enforcement for that denomination — see
+# CodingAgent::budget_capability(). The Claude Code adapter enforces cost
+# natively via --max-budget-usd; it does not enforce tokens or duration.
+# Absent means no per-execution ceiling in that denomination; a declared
+# value must be positive.
+# max_execution_cost_microusd = 8000000   # optional; e.g. $8.00 per execution
+# max_execution_tokens = 0                # optional; refused unless adapter-enforced
+# max_execution_duration_ms = 0           # optional; refused unless adapter-enforced
 # [agents.reviewer]
 # adapter = "claude-code"
 # executable = "claude"

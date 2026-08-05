@@ -53,6 +53,8 @@ pub struct DriverConfig {
     #[serde(default)]
     pub max_session_cost_microusd: u64,
     #[serde(default)]
+    pub max_session_tokens: u64,
+    #[serde(default)]
     pub max_session_duration_ms: u64,
 }
 
@@ -60,11 +62,13 @@ impl DriverConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.max_prds_per_session == 0
             && self.max_session_cost_microusd == 0
+            && self.max_session_tokens == 0
             && self.max_session_duration_ms == 0
         {
             return Err(
                 "unattended drive requires at least one finite ceiling in [driver]: \
-                 max_prds_per_session, max_session_cost_microusd, or max_session_duration_ms"
+                 max_prds_per_session, max_session_cost_microusd, max_session_tokens, or \
+                 max_session_duration_ms"
                     .into(),
             );
         }
@@ -138,7 +142,7 @@ impl AgentPermissionMode {
 
 /// Flags the adapter owns or forbids; configured `extra_args` may not name
 /// them, exactly or in `<flag>=value` form.
-pub const FORBIDDEN_AGENT_EXTRA_ARGS: [&str; 11] = [
+pub const FORBIDDEN_AGENT_EXTRA_ARGS: [&str; 12] = [
     "--print",
     "--output-format",
     "--input-format",
@@ -150,6 +154,7 @@ pub const FORBIDDEN_AGENT_EXTRA_ARGS: [&str; 11] = [
     "--session-id",
     "--fork-session",
     "--dangerously-skip-permissions",
+    "--max-budget-usd",
 ];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +174,22 @@ pub struct AgentEntryConfig {
     pub max_budget_microusd: u64,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Per-execution cost ceiling, enforced pre-emptively by an adapter that
+    /// declares native cost capability. Valid only for the implementation
+    /// role; absent means no per-execution cost ceiling. A declared value
+    /// must be positive.
+    #[serde(default)]
+    pub max_execution_cost_microusd: Option<u64>,
+    /// Per-execution token ceiling. Valid only for the implementation role;
+    /// refused before launch unless the constructed adapter declares native
+    /// token enforcement.
+    #[serde(default)]
+    pub max_execution_tokens: Option<u64>,
+    /// Per-execution duration ceiling. Valid only for the implementation
+    /// role; refused before launch unless the constructed adapter declares
+    /// native duration enforcement.
+    #[serde(default)]
+    pub max_execution_duration_ms: Option<u64>,
 }
 
 impl AgentEntryConfig {
@@ -195,6 +216,29 @@ impl AgentEntryConfig {
             return Err(format!(
                 "[agents.{role}] bypassPermissions is never permitted for the reviewer"
             ));
+        }
+        if is_reviewer
+            && (self.max_execution_cost_microusd.is_some()
+                || self.max_execution_tokens.is_some()
+                || self.max_execution_duration_ms.is_some())
+        {
+            return Err(format!(
+                "[agents.{role}] execution budget ceilings are valid only for the implementation agent"
+            ));
+        }
+        for (value, name) in [
+            (
+                self.max_execution_cost_microusd,
+                "max_execution_cost_microusd",
+            ),
+            (self.max_execution_tokens, "max_execution_tokens"),
+            (self.max_execution_duration_ms, "max_execution_duration_ms"),
+        ] {
+            if value == Some(0) {
+                return Err(format!(
+                    "[agents.{role}] {name} must be finite and positive when declared"
+                ));
+            }
         }
         for arg in &self.extra_args {
             for flag in FORBIDDEN_AGENT_EXTRA_ARGS {
@@ -1264,6 +1308,17 @@ mod tests {
     }
 
     #[test]
+    fn driver_config_requires_at_least_one_finite_ceiling_including_tokens() {
+        assert!(DriverConfig::default().validate().is_err());
+        assert!(DriverConfig {
+            max_session_tokens: 40_000_000,
+            ..DriverConfig::default()
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
     fn load_without_file_succeeds() {
         // Note: actual values may differ from defaults if FAMILIAR_AI_ env vars are set
         let config = Config::load(None);
@@ -1711,6 +1766,53 @@ output_microusd_per_million = 300
         config.implementation.adapter = AgentAdapterKind::ClaudeCode;
         config.implementation.extra_args = vec!["--add-dir".into(), "/tmp/x".into()];
         assert!(config.validate(&ReviewConfig::default()).is_ok());
+        // --max-budget-usd is adapter-owned; extra_args may not name it.
+        let mut config = AgentsConfig::default();
+        config.implementation.adapter = AgentAdapterKind::ClaudeCode;
+        config.implementation.extra_args = vec!["--max-budget-usd".into()];
+        assert!(config.validate(&ReviewConfig::default()).is_err());
+    }
+
+    #[test]
+    fn execution_budget_fields_parse_and_reject_zero() {
+        let mut config = AgentsConfig::default();
+        config.implementation.max_execution_cost_microusd = Some(8_000_000);
+        assert!(config.validate(&ReviewConfig::default()).is_ok());
+        assert_eq!(
+            config.implementation.max_execution_cost_microusd,
+            Some(8_000_000)
+        );
+
+        let mut zero_cost = AgentsConfig::default();
+        zero_cost.implementation.max_execution_cost_microusd = Some(0);
+        assert!(zero_cost
+            .validate(&ReviewConfig::default())
+            .unwrap_err()
+            .contains("max_execution_cost_microusd"));
+
+        let mut zero_tokens = AgentsConfig::default();
+        zero_tokens.implementation.max_execution_tokens = Some(0);
+        assert!(zero_tokens
+            .validate(&ReviewConfig::default())
+            .unwrap_err()
+            .contains("max_execution_tokens"));
+
+        let mut zero_duration = AgentsConfig::default();
+        zero_duration.implementation.max_execution_duration_ms = Some(0);
+        assert!(zero_duration
+            .validate(&ReviewConfig::default())
+            .unwrap_err()
+            .contains("max_execution_duration_ms"));
+    }
+
+    #[test]
+    fn execution_budget_fields_are_rejected_on_the_reviewer_entry() {
+        let mut config = AgentsConfig::default();
+        config.reviewer.max_execution_cost_microusd = Some(1);
+        assert!(config
+            .validate(&ReviewConfig::default())
+            .unwrap_err()
+            .contains("implementation agent"));
     }
 
     #[test]

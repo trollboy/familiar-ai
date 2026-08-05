@@ -5,7 +5,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use familiar_ai_agent::{ExecutionRequest, FilesystemPolicy, IsolationCapability};
+use familiar_ai_agent::{
+    BudgetRefusal, ExecutionBudget, ExecutionRequest, FilesystemPolicy, IsolationCapability,
+};
 use familiar_ai_core::{
     config::ReviewAgentConfig, AgentAdapterKind, AgentEntryConfig, AgentPermissionMode,
     AgentsConfig, Config,
@@ -112,6 +114,7 @@ fn build_agent_maps_each_adapter_to_its_invocation_shape() {
             filesystem: FilesystemPolicy::Normal,
             model: None,
             timeout_ms: None,
+            budget: ExecutionBudget::NONE,
         }
     }
     codex_agent
@@ -128,4 +131,69 @@ fn build_agent_maps_each_adapter_to_its_invocation_shape() {
         fs::read_to_string(&claude_argv).unwrap(),
         "--print\n--output-format\nstream-json\n--verbose\n--permission-mode\nacceptEdits\n"
     );
+
+    // A declared per-execution cost ceiling reaches the Claude Code adapter
+    // as --max-budget-usd, exactly once, correctly formatted.
+    let mut budgeted = request(temp.path());
+    budgeted.budget = ExecutionBudget::try_new(Some(8_000_000), None, None).unwrap();
+    claude_agent.execute(budgeted, &mut Vec::new()).unwrap();
+    let argv = fs::read_to_string(&claude_argv).unwrap();
+    assert_eq!(
+        argv,
+        "--print\n--output-format\nstream-json\n--verbose\n--max-budget-usd\n8.000000\n--permission-mode\nacceptEdits\n"
+    );
+    assert_eq!(argv.matches("--max-budget-usd").count(), 1);
+}
+
+#[test]
+fn execution_budget_config_fields_round_trip_through_agent_entry() {
+    let entry = AgentEntryConfig {
+        adapter: AgentAdapterKind::ClaudeCode,
+        max_execution_cost_microusd: Some(8_000_000),
+        ..AgentEntryConfig::default()
+    };
+    let budget = ExecutionBudget::try_new(
+        entry.max_execution_cost_microusd,
+        entry.max_execution_tokens,
+        entry.max_execution_duration_ms,
+    )
+    .unwrap();
+    assert_eq!(budget.max_cost_microusd, Some(8_000_000));
+    assert!(budget.max_tokens.is_none());
+}
+
+#[test]
+fn a_denomination_the_constructed_adapter_cannot_enforce_is_refused_before_launch() {
+    let codex_agent = build_agent(&AgentEntryConfig {
+        adapter: AgentAdapterKind::Codex,
+        executable: Some("codex".into()),
+        ..AgentEntryConfig::default()
+    });
+    let budget = ExecutionBudget::try_new(Some(1), None, None).unwrap();
+    let error = budget
+        .validate_for_adapter(&codex_agent.budget_capability(), "codex")
+        .unwrap_err();
+    assert_eq!(
+        error,
+        BudgetRefusal::Unenforceable {
+            adapter: "codex".into(),
+            denomination: "cost",
+        }
+    );
+
+    // The Claude Code adapter enforces cost but not tokens or duration.
+    let claude_agent = build_agent(&AgentEntryConfig {
+        adapter: AgentAdapterKind::ClaudeCode,
+        executable: Some("claude".into()),
+        ..AgentEntryConfig::default()
+    });
+    let token_budget = ExecutionBudget::try_new(None, Some(1), None).unwrap();
+    assert!(matches!(
+        token_budget.validate_for_adapter(&claude_agent.budget_capability(), "claude-code"),
+        Err(BudgetRefusal::Unenforceable { .. })
+    ));
+    let cost_budget = ExecutionBudget::try_new(Some(1), None, None).unwrap();
+    assert!(cost_budget
+        .validate_for_adapter(&claude_agent.budget_capability(), "claude-code")
+        .is_ok());
 }

@@ -320,6 +320,84 @@ fn an_empty_backlog_terminates_immediately_without_attempts() {
     let _ = permissions_fixup;
 }
 
+/// `RecordingAgent` never declares budget capability (trait default: every
+/// denomination `Unenforced`), so this proves session-level token
+/// enforcement works even for an adapter with no native capability.
+#[test]
+fn a_token_ceiling_stops_the_session_once_the_cumulative_total_is_reached() {
+    let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    // Each attempt reports 1 input + 1 output = 2 known tokens; a ceiling of
+    // 4 is exhausted exactly after the second attempt.
+    let (temp, paths, config) = fixture(3, false);
+    let agent = RecordingAgent {
+        calls: Mutex::new(Vec::new()),
+    };
+    let summary = with_working_directory(&temp.path().join("repo"), || {
+        drive(
+            &agents(&agent),
+            &config,
+            &paths,
+            DriveWarrant {
+                max_tokens: 4,
+                ..DriveWarrant::default()
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(summary.attempted, 2);
+    assert_eq!(summary.termination, DriveTermination::BudgetTokensExhausted);
+    assert_eq!(agent.calls.lock().unwrap().len(), 2);
+}
+
+struct UnmeasuredAgent;
+
+impl CodingAgent for UnmeasuredAgent {
+    fn isolation_capability(&self) -> IsolationCapability {
+        IsolationCapability::FreshProcessPerExecution
+    }
+    fn execute(
+        &self,
+        _request: ExecutionRequest<'_>,
+        _output: &mut dyn std::io::Write,
+    ) -> Result<ExecutionResult, AgentExecutionError> {
+        Ok(ExecutionResult {
+            agent_version: Some("fake 1".into()),
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            exit_code: Some(0),
+            signal: None,
+            session_id: None,
+            reported_cost_microusd: None,
+        })
+    }
+}
+
+#[test]
+fn a_token_ceiling_with_unknown_usage_ends_the_session_after_one_attempt() {
+    let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let (temp, paths, config) = fixture(3, false);
+    let agent = UnmeasuredAgent;
+    let summary = with_working_directory(&temp.path().join("repo"), || {
+        drive(
+            &AgentSet {
+                implementation: &agent,
+                reviewer: &agent,
+            },
+            &config,
+            &paths,
+            DriveWarrant {
+                max_tokens: 1_000_000,
+                ..DriveWarrant::default()
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(summary.attempted, 1);
+    assert_eq!(summary.termination, DriveTermination::TokensUnknown);
+}
+
 #[test]
 fn a_cost_ceiling_with_unknown_cost_ends_the_session_after_one_attempt() {
     let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());

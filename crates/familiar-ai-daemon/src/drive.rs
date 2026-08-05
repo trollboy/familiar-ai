@@ -26,8 +26,10 @@ pub enum DriveTermination {
     NothingEligible,
     BudgetPrdsExhausted,
     BudgetCostExhausted,
+    BudgetTokensExhausted,
     BudgetDurationExhausted,
     CostUnknown,
+    TokensUnknown,
     StorageFailure,
     Interrupted,
 }
@@ -39,8 +41,10 @@ impl DriveTermination {
             Self::NothingEligible => "nothing_eligible",
             Self::BudgetPrdsExhausted => "budget_prds_exhausted",
             Self::BudgetCostExhausted => "budget_cost_exhausted",
+            Self::BudgetTokensExhausted => "budget_tokens_exhausted",
             Self::BudgetDurationExhausted => "budget_duration_exhausted",
             Self::CostUnknown => "cost_unknown",
+            Self::TokensUnknown => "tokens_unknown",
             Self::StorageFailure => "storage_failure",
             Self::Interrupted => "interrupted",
         }
@@ -48,11 +52,14 @@ impl DriveTermination {
 }
 
 /// The session's budget ceilings. Zero means "no ceiling of this kind"; at
-/// least one must be finite for a session to start.
+/// least one must be finite for a session to start. Enforced between
+/// executions against recorded attempt totals, so it works for every
+/// adapter regardless of native per-execution enforcement.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DriveWarrant {
     pub max_prds: u64,
     pub max_cost_microusd: u64,
+    pub max_tokens: u64,
     pub max_duration_ms: u64,
 }
 
@@ -61,13 +68,15 @@ impl DriveWarrant {
         Self {
             max_prds: config.driver.max_prds_per_session,
             max_cost_microusd: config.driver.max_session_cost_microusd,
+            max_tokens: config.driver.max_session_tokens,
             max_duration_ms: config.driver.max_session_duration_ms,
         }
     }
 
     /// Command-line ceilings may only tighten configuration: a supplied value
     /// wins when it is lower, or when configuration set no ceiling at all.
-    /// Loosening is never possible.
+    /// Loosening is never possible. There is no command-line flag for the
+    /// token ceiling; it carries through from configuration unchanged.
     pub fn tightened_by(self, prds: Option<u64>, cost: Option<u64>, duration: Option<u64>) -> Self {
         fn tighten(configured: u64, supplied: Option<u64>) -> u64 {
             match (configured, supplied) {
@@ -79,12 +88,17 @@ impl DriveWarrant {
         Self {
             max_prds: tighten(self.max_prds, prds),
             max_cost_microusd: tighten(self.max_cost_microusd, cost),
+            max_tokens: self.max_tokens,
             max_duration_ms: tighten(self.max_duration_ms, duration),
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.max_prds == 0 && self.max_cost_microusd == 0 && self.max_duration_ms == 0 {
+        if self.max_prds == 0
+            && self.max_cost_microusd == 0
+            && self.max_tokens == 0
+            && self.max_duration_ms == 0
+        {
             return Err("unattended drive requires at least one finite ceiling".into());
         }
         Ok(())
@@ -92,18 +106,27 @@ impl DriveWarrant {
 
     fn as_json(&self) -> String {
         format!(
-            "{{\"max_prds\":{},\"max_cost_microusd\":{},\"max_duration_ms\":{}}}",
-            self.max_prds, self.max_cost_microusd, self.max_duration_ms
+            "{{\"max_prds\":{},\"max_cost_microusd\":{},\"max_tokens\":{},\"max_duration_ms\":{}}}",
+            self.max_prds, self.max_cost_microusd, self.max_tokens, self.max_duration_ms
         )
     }
 
     /// The ceiling breached before starting another attempt, if any.
-    fn exhausted(&self, attempted: u64, cost: u64, elapsed_ms: u64) -> Option<DriveTermination> {
+    fn exhausted(
+        &self,
+        attempted: u64,
+        cost: u64,
+        tokens: u64,
+        elapsed_ms: u64,
+    ) -> Option<DriveTermination> {
         if self.max_prds > 0 && attempted >= self.max_prds {
             return Some(DriveTermination::BudgetPrdsExhausted);
         }
         if self.max_cost_microusd > 0 && cost >= self.max_cost_microusd {
             return Some(DriveTermination::BudgetCostExhausted);
+        }
+        if self.max_tokens > 0 && tokens >= self.max_tokens {
+            return Some(DriveTermination::BudgetTokensExhausted);
         }
         if self.max_duration_ms > 0 && elapsed_ms >= self.max_duration_ms {
             return Some(DriveTermination::BudgetDurationExhausted);
@@ -219,10 +242,11 @@ pub fn drive(
     let mut attempted = 0_u64;
     let mut completed = 0_u64;
     let mut known_cost = 0_u64;
+    let mut known_tokens = 0_u64;
 
     let termination = loop {
         let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        if let Some(reason) = warrant.exhausted(attempted, known_cost, elapsed) {
+        if let Some(reason) = warrant.exhausted(attempted, known_cost, known_tokens, elapsed) {
             break reason;
         }
         let discovered = match discovery.discover(&repository) {
@@ -270,6 +294,13 @@ pub fn drive(
         if let Some(value) = cost {
             known_cost = known_cost.saturating_add(value);
         }
+        let tokens = trace
+            .execution_id
+            .as_deref()
+            .and_then(|id| attempt_tokens(&db, id));
+        if let Some(value) = tokens {
+            known_tokens = known_tokens.saturating_add(value);
+        }
         let (outcome, retained_reason) = match &result {
             Ok(_) => {
                 completed += 1;
@@ -296,11 +327,14 @@ pub fn drive(
                 .unwrap_or_default()
         );
 
-        // Unknown cost is never treated as zero: with a cost ceiling in force,
-        // an unmeasurable attempt ends the session rather than silently
-        // consuming an unaccounted budget.
+        // Unknown cost or tokens is never treated as zero: with a ceiling in
+        // force, an unmeasurable attempt ends the session rather than
+        // silently consuming an unaccounted budget.
         if warrant.max_cost_microusd > 0 && cost.is_none() {
             break DriveTermination::CostUnknown;
+        }
+        if warrant.max_tokens > 0 && tokens.is_none() {
+            break DriveTermination::TokensUnknown;
         }
     };
 
@@ -330,6 +364,16 @@ fn attempt_cost(db: &Database, execution_id: &str) -> Option<u64> {
         .and_then(|row| row.estimated_cost_microusd)
 }
 
+/// The recorded total tokens of one execution, when usage made it knowable.
+fn attempt_tokens(db: &Database, execution_id: &str) -> Option<u64> {
+    ExecutionHistoryRepository::new(db.conn())
+        .recent(100)
+        .ok()?
+        .into_iter()
+        .find(|row| row.execution_id == execution_id)
+        .and_then(|row| row.total_tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +400,7 @@ mod tests {
         let configured = DriveWarrant {
             max_prds: 10,
             max_cost_microusd: 500,
+            max_tokens: 0,
             max_duration_ms: 1_000,
         };
         // Lower values win.
@@ -365,6 +410,7 @@ mod tests {
             DriveWarrant {
                 max_prds: 3,
                 max_cost_microusd: 100,
+                max_tokens: 0,
                 max_duration_ms: 250
             }
         );
@@ -383,6 +429,18 @@ mod tests {
                 ..DriveWarrant::default()
             }
         );
+        // No command-line flag exists for the token ceiling; it carries
+        // through from configuration unchanged.
+        let with_tokens = DriveWarrant {
+            max_tokens: 40_000_000,
+            ..DriveWarrant::default()
+        };
+        assert_eq!(
+            with_tokens
+                .tightened_by(Some(1), Some(1), Some(1))
+                .max_tokens,
+            40_000_000
+        );
     }
 
     #[test]
@@ -390,19 +448,24 @@ mod tests {
         let warrant = DriveWarrant {
             max_prds: 2,
             max_cost_microusd: 100,
+            max_tokens: 1_000_000,
             max_duration_ms: 1_000,
         };
-        assert_eq!(warrant.exhausted(0, 0, 0), None);
+        assert_eq!(warrant.exhausted(0, 0, 0, 0), None);
         assert_eq!(
-            warrant.exhausted(2, 0, 0),
+            warrant.exhausted(2, 0, 0, 0),
             Some(DriveTermination::BudgetPrdsExhausted)
         );
         assert_eq!(
-            warrant.exhausted(0, 100, 0),
+            warrant.exhausted(0, 100, 0, 0),
             Some(DriveTermination::BudgetCostExhausted)
         );
         assert_eq!(
-            warrant.exhausted(0, 0, 1_000),
+            warrant.exhausted(0, 0, 1_000_000, 0),
+            Some(DriveTermination::BudgetTokensExhausted)
+        );
+        assert_eq!(
+            warrant.exhausted(0, 0, 0, 1_000),
             Some(DriveTermination::BudgetDurationExhausted)
         );
         // Ceilings set to zero never trigger.
@@ -410,7 +473,7 @@ mod tests {
             max_prds: 1,
             ..DriveWarrant::default()
         };
-        assert_eq!(only_prds.exhausted(0, u64::MAX, u64::MAX), None);
+        assert_eq!(only_prds.exhausted(0, u64::MAX, u64::MAX, u64::MAX), None);
     }
 
     #[test]
@@ -427,10 +490,15 @@ mod tests {
                 "budget_cost_exhausted",
             ),
             (
+                DriveTermination::BudgetTokensExhausted,
+                "budget_tokens_exhausted",
+            ),
+            (
                 DriveTermination::BudgetDurationExhausted,
                 "budget_duration_exhausted",
             ),
             (DriveTermination::CostUnknown, "cost_unknown"),
+            (DriveTermination::TokensUnknown, "tokens_unknown"),
             (DriveTermination::StorageFailure, "storage_failure"),
             (DriveTermination::Interrupted, "interrupted"),
         ] {
@@ -443,11 +511,12 @@ mod tests {
         let warrant = DriveWarrant {
             max_prds: 4,
             max_cost_microusd: 0,
+            max_tokens: 40_000_000,
             max_duration_ms: 60_000,
         };
         assert_eq!(
             warrant.as_json(),
-            r#"{"max_prds":4,"max_cost_microusd":0,"max_duration_ms":60000}"#
+            r#"{"max_prds":4,"max_cost_microusd":0,"max_tokens":40000000,"max_duration_ms":60000}"#
         );
     }
 }

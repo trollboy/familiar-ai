@@ -10,7 +10,7 @@ use std::time::Instant;
 use chrono::Utc;
 use familiar_ai_agent::{
     AgentExecutionError, ClaudeCodeAgent, ClaudeCodeSettings, CodexAgent, CodingAgent,
-    ExecutionRequest, ExecutionResult,
+    ExecutionBudget, ExecutionRequest, ExecutionResult,
 };
 use familiar_ai_context::{
     ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
@@ -211,7 +211,22 @@ fn execute_tracked_inner(
     trace.execution_id = Some(id.clone());
     // Contradictory agent configuration must fail closed before any claim,
     // regardless of which caller constructed the agents.
-    resolved_agent_entries(config).map_err(RunError::Config)?;
+    let (implementation_entry, _reviewer_entry) =
+        resolved_agent_entries(config).map_err(RunError::Config)?;
+    // A per-execution budget the constructed adapter cannot enforce is
+    // refused before any claim or process spawn — no row mutated.
+    let execution_budget = ExecutionBudget::try_new(
+        implementation_entry.max_execution_cost_microusd,
+        implementation_entry.max_execution_tokens,
+        implementation_entry.max_execution_duration_ms,
+    )
+    .map_err(|e| RunError::Config(e.to_string()))?;
+    execution_budget
+        .validate_for_adapter(
+            &agents.implementation.budget_capability(),
+            implementation_entry.adapter.as_str(),
+        )
+        .map_err(|e| RunError::Config(e.to_string()))?;
     let review_preflight = compute_review_preflight(
         config,
         prd_path,
@@ -315,6 +330,7 @@ fn execute_tracked_inner(
                 .then_some(config.review.implementation_agent.model.as_deref())
                 .flatten(),
             timeout_ms: None,
+            budget: execution_budget,
         },
         &mut io::stdout(),
     );
@@ -328,6 +344,7 @@ fn execute_tracked_inner(
         Err(AgentExecutionError::BudgetExceeded { result, .. }) => {
             (result.as_ref(), "budget_exceeded")
         }
+        Err(AgentExecutionError::BudgetStopped { result }) => (result.as_ref(), "budget_stopped"),
     };
     if result.agent_version.is_none() {
         unavailable.insert("agent_version".into(), "version_probe_failed".into());
@@ -649,6 +666,7 @@ fn agent_reason(error: &AgentExecutionError) -> &'static str {
     match error {
         AgentExecutionError::Timeout { .. } => "interrupted",
         AgentExecutionError::BudgetExceeded { .. } => "budget_exceeded",
+        AgentExecutionError::BudgetStopped { .. } => "budget_stopped",
         _ => "implementation_failed",
     }
 }
@@ -850,9 +868,9 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             cached_tokens: implementation_result.cached_tokens,
             total_tokens: implementation_finalization.total_tokens,
             estimated_cost_microusd: implementation_finalization.estimated_cost_microusd,
-            pricing_provenance: implementation_finalization
-                .estimated_cost_microusd
-                .map(|_| "execution_history_pricing".into()),
+            pricing_provenance: cost_and_provenance(implementation_result, config)
+                .2
+                .map(str::to_owned),
             unavailable_fields: implementation_finalization.unavailable_fields.clone(),
         },
         implementation_duration_ms: implementation_finalization.duration_ms,
@@ -1021,6 +1039,44 @@ fn finalize(db: &Database, id: &str, value: &ExecutionFinalization) -> Result<()
         })
 }
 
+/// The known cost for this execution and how it was known. Vendor-reported
+/// cost is authoritative when a vendor reports one — that is the exact
+/// figure a pre-emptive ceiling is enforced against, so accounting in any
+/// other unit would let the report and the stop disagree. A reported cost
+/// that rounds to zero is a known zero, not unknown. The configured rate
+/// table is the fallback for adapters that report no cost.
+#[allow(clippy::type_complexity)]
+fn cost_and_provenance(
+    result: &ExecutionResult,
+    config: &Config,
+) -> (
+    Option<u64>,
+    (Option<u64>, Option<u64>, Option<u64>),
+    Option<&'static str>,
+    &'static str,
+) {
+    if let Some(reported) = result.reported_cost_microusd {
+        let provenance = if reported == 0 {
+            "known_zero"
+        } else {
+            "vendor_reported"
+        };
+        return (Some(reported), (None, None, None), Some(provenance), "");
+    }
+    let price = result
+        .model
+        .as_ref()
+        .and_then(|m| config.execution_history.pricing.get(m));
+    let (cost, rates, reason) = calculate_cost(
+        result.input_tokens,
+        result.cached_tokens,
+        result.output_tokens,
+        price,
+    );
+    let provenance = cost.map(|_| "configured_rate");
+    (cost, rates, provenance, reason)
+}
+
 fn terminal(
     timer: &Instant,
     result: &ExecutionResult,
@@ -1072,16 +1128,7 @@ fn terminal(
     } else {
         missing.remove("total_tokens");
     }
-    let price = result
-        .model
-        .as_ref()
-        .and_then(|m| config.execution_history.pricing.get(m));
-    let (cost, rates, reason) = calculate_cost(
-        result.input_tokens,
-        result.cached_tokens,
-        result.output_tokens,
-        price,
-    );
+    let (cost, rates, _provenance, reason) = cost_and_provenance(result, config);
     if cost.is_none() {
         missing.insert("estimated_cost_microusd".into(), reason.into());
     } else {
@@ -1902,6 +1949,235 @@ mod tests {
         };
         assert_eq!(agent_reason(&error), "budget_exceeded");
         assert_eq!(error.result().exit_code, None);
+    }
+
+    #[test]
+    fn vendor_budget_stop_maps_to_its_own_distinct_retained_reason() {
+        let error = AgentExecutionError::BudgetStopped {
+            result: Box::default(),
+        };
+        assert_eq!(agent_reason(&error), "budget_stopped");
+    }
+
+    #[test]
+    fn cost_provenance_prefers_vendor_reported_over_configured_rates() {
+        let mut config = Config::default();
+        config.execution_history.pricing.insert(
+            "priced-model".into(),
+            ExecutionPrice {
+                input_microusd_per_million: Some(1_000_000),
+                cached_input_microusd_per_million: Some(1_000_000),
+                output_microusd_per_million: Some(1_000_000),
+            },
+        );
+        // Vendor-reported wins even though a configured rate also applies.
+        let vendor_reported = ExecutionResult {
+            model: Some("priced-model".into()),
+            input_tokens: Some(10),
+            output_tokens: Some(10),
+            cached_tokens: Some(0),
+            reported_cost_microusd: Some(42),
+            ..ExecutionResult::default()
+        };
+        let (cost, _, provenance, _) = cost_and_provenance(&vendor_reported, &config);
+        assert_eq!(cost, Some(42));
+        assert_eq!(provenance, Some("vendor_reported"));
+
+        // A reported cost that rounds to zero is a known zero, not unknown.
+        let known_zero = ExecutionResult {
+            reported_cost_microusd: Some(0),
+            ..ExecutionResult::default()
+        };
+        let (cost, _, provenance, _) = cost_and_provenance(&known_zero, &config);
+        assert_eq!(cost, Some(0));
+        assert_eq!(provenance, Some("known_zero"));
+
+        // No vendor report: the configured rate table is the fallback.
+        let unreported = ExecutionResult {
+            model: Some("priced-model".into()),
+            input_tokens: Some(10),
+            output_tokens: Some(10),
+            cached_tokens: Some(0),
+            reported_cost_microusd: None,
+            ..ExecutionResult::default()
+        };
+        let (cost, _, provenance, _) = cost_and_provenance(&unreported, &config);
+        assert_eq!(cost, Some(20));
+        assert_eq!(provenance, Some("configured_rate"));
+
+        // Neither source credible: unknown, never zero.
+        let unknown = ExecutionResult::default();
+        let (cost, _, provenance, _) = cost_and_provenance(&unknown, &config);
+        assert_eq!(cost, None);
+        assert_eq!(provenance, None);
+    }
+
+    struct CapabilityFakeAgent {
+        capability: familiar_ai_agent::BudgetCapability,
+        request: Mutex<Option<ExecutionBudget>>,
+        result: ExecutionResult,
+    }
+    impl CodingAgent for CapabilityFakeAgent {
+        fn budget_capability(&self) -> familiar_ai_agent::BudgetCapability {
+            self.capability
+        }
+        fn execute(
+            &self,
+            request: ExecutionRequest<'_>,
+            _output: &mut dyn io::Write,
+        ) -> Result<ExecutionResult, AgentExecutionError> {
+            *self.request.lock().unwrap() = Some(request.budget);
+            Ok(self.result.clone())
+        }
+    }
+
+    #[test]
+    fn declared_execution_budget_unenforceable_by_the_agent_is_refused_before_any_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let database_path = temp.path().join("history.db");
+        let mut config = Config::default();
+        config.database.path = Some(database_path.clone());
+        config.agents = Some(familiar_ai_core::AgentsConfig {
+            implementation: familiar_ai_core::AgentEntryConfig {
+                adapter: familiar_ai_core::AgentAdapterKind::ClaudeCode,
+                max_execution_cost_microusd: Some(1_000),
+                ..familiar_ai_core::AgentEntryConfig::default()
+            },
+            reviewer: familiar_ai_core::AgentEntryConfig::default(),
+        });
+        let paths = test_paths(temp.path());
+        let agent = CapabilityFakeAgent {
+            capability: familiar_ai_agent::BudgetCapability::default(), // Unenforced everywhere
+            request: Mutex::new(None),
+            result: ExecutionResult {
+                exit_code: Some(0),
+                ..ExecutionResult::default()
+            },
+        };
+
+        let error = execute_with_config(
+            &repository.join("docs/prds/PRD-007.md"),
+            &same_agent(&agent),
+            &config,
+            &paths,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RunError::Config(_)));
+        let message = error.to_string();
+        assert!(message.contains("claude-code"), "message: {message}");
+        assert!(message.contains("cost"), "message: {message}");
+        assert!(agent.request.lock().unwrap().is_none());
+        // No execution or backlog row was ever written for the refused attempt.
+        let database = Database::open(&database_path).unwrap();
+        assert!(ExecutionHistoryRepository::new(database.conn())
+            .recent(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn cost_only_warrant_against_an_always_zero_cost_adapter_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let database_path = temp.path().join("history.db");
+        let mut config = Config::default();
+        config.database.path = Some(database_path.clone());
+        config.agents = Some(familiar_ai_core::AgentsConfig {
+            implementation: familiar_ai_core::AgentEntryConfig {
+                adapter: familiar_ai_core::AgentAdapterKind::ClaudeCode,
+                max_execution_cost_microusd: Some(1_000),
+                ..familiar_ai_core::AgentEntryConfig::default()
+            },
+            reviewer: familiar_ai_core::AgentEntryConfig::default(),
+        });
+        let paths = test_paths(temp.path());
+        let agent = CapabilityFakeAgent {
+            capability: familiar_ai_agent::BudgetCapability {
+                cost: familiar_ai_agent::DenominationCapability::AlwaysZero,
+                ..familiar_ai_agent::BudgetCapability::default()
+            },
+            request: Mutex::new(None),
+            result: ExecutionResult {
+                exit_code: Some(0),
+                ..ExecutionResult::default()
+            },
+        };
+
+        let error = execute_with_config(
+            &repository.join("docs/prds/PRD-007.md"),
+            &same_agent(&agent),
+            &config,
+            &paths,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RunError::Config(_)));
+        assert!(error.to_string().contains("cost"), "message: {error}");
+        assert!(agent.request.lock().unwrap().is_none());
+        let database = Database::open(&database_path).unwrap();
+        assert!(ExecutionHistoryRepository::new(database.conn())
+            .recent(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn declared_execution_budget_the_agent_can_enforce_reaches_the_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let mut config = Config::default();
+        config.database.path = Some(temp.path().join("history.db"));
+        config.agents = Some(familiar_ai_core::AgentsConfig {
+            implementation: familiar_ai_core::AgentEntryConfig {
+                adapter: familiar_ai_core::AgentAdapterKind::ClaudeCode,
+                max_execution_cost_microusd: Some(8_000_000),
+                ..familiar_ai_core::AgentEntryConfig::default()
+            },
+            reviewer: familiar_ai_core::AgentEntryConfig::default(),
+        });
+        let paths = test_paths(temp.path());
+        let agent = CapabilityFakeAgent {
+            capability: familiar_ai_agent::BudgetCapability {
+                cost: familiar_ai_agent::DenominationCapability::Enforced,
+                ..familiar_ai_agent::BudgetCapability::default()
+            },
+            request: Mutex::new(None),
+            result: ExecutionResult {
+                exit_code: Some(0),
+                ..ExecutionResult::default()
+            },
+        };
+
+        execute_with_config(
+            &repository.join("docs/prds/PRD-007.md"),
+            &same_agent(&agent),
+            &config,
+            &paths,
+        )
+        .unwrap_err(); // review is disabled, so this retains — irrelevant here
+
+        let observed = agent.request.lock().unwrap().unwrap();
+        assert_eq!(observed.max_cost_microusd, Some(8_000_000));
     }
 
     #[test]
