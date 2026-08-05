@@ -48,6 +48,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 10,
         sql: include_str!("../migrations/010_driver_sessions.sql"),
     },
+    Migration {
+        version: 11,
+        sql: include_str!("../migrations/011_backlog_recovery_recorded_complete.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_ai_core::Result<usize> {
@@ -158,7 +162,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 10);
+        assert_eq!(first, 11);
         assert_eq!(second, 0);
     }
 
@@ -175,7 +179,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 
     #[test]
@@ -217,7 +221,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 8);
+        assert_eq!(db.run_migrations().unwrap(), 9);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -273,7 +277,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 4);
+        assert_eq!(db.run_migrations().unwrap(), 5);
         let project: (String, String) = db
             .conn()
             .query_row(
@@ -304,7 +308,7 @@ mod tests {
                 .unwrap();
         }
         db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
-        assert_eq!(db.run_migrations().unwrap(), 3);
+        assert_eq!(db.run_migrations().unwrap(), 4);
         let preserved: String = db
             .conn()
             .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
@@ -316,5 +320,86 @@ mod tests {
             })
             .unwrap();
         assert_eq!((preserved, runs), ("pending".into(), 0));
+    }
+
+    #[test]
+    fn migration_widens_recovery_action_set_and_preserves_prior_rows_and_foreign_keys() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.conn().execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);").unwrap();
+        for migration in &super::MIGRATIONS[..10] {
+            db.conn().execute_batch(migration.sql).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,'before')",
+                    params![migration.version],
+                )
+                .unwrap();
+        }
+        db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
+        db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(1,'repo','docs/prds/PRD-009.md','pending','in_progress','system:familiar-ai-run:00001785772020811891-0000057947-000001','before')",[]).unwrap();
+        db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(2,'repo','docs/prds/PRD-009.md','in_progress','pending','ops:alice','before')",[]).unwrap();
+        db.conn().execute("INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(2,'release','review was disabled')",[]).unwrap();
+        db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(3,'repo','docs/prds/PRD-009.md','pending','completed','human:alice','before')",[]).unwrap();
+        db.conn().execute("INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(3,'manual_complete_override','accepted outside normal review')",[]).unwrap();
+
+        assert_eq!(db.run_migrations().unwrap(), 1);
+
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt = db
+                .conn()
+                .prepare("SELECT status_event_id,action,reason FROM backlog_recovery_events ORDER BY status_event_id")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                (2, "release".into(), "review was disabled".into()),
+                (
+                    3,
+                    "manual_complete_override".into(),
+                    "accepted outside normal review".into()
+                ),
+            ]
+        );
+
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(4,'repo','docs/prds/PRD-009.md','pending','completed','human:bob','before')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(4,'recorded_complete','merged before tracking existed')",
+                [],
+            )
+            .unwrap();
+        let widened: (i64, String, String) = db
+            .conn()
+            .query_row(
+                "SELECT status_event_id,action,reason FROM backlog_recovery_events WHERE status_event_id=4",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            widened,
+            (
+                4,
+                "recorded_complete".into(),
+                "merged before tracking existed".into()
+            )
+        );
+
+        // The rebuilt table's foreign key to backlog_status_events is still enforced.
+        let orphan = db.conn().execute(
+            "INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(999,'release','orphan')",
+            [],
+        );
+        assert!(orphan.is_err());
     }
 }

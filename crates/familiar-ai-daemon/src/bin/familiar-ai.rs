@@ -81,6 +81,18 @@ enum BacklogCommand {
         #[arg(long)]
         reason: String,
     },
+    /// Declare, under recorded human authority, that a `pending` PRD was
+    /// completed outside Familiar's tracking (a fresh database, a restored
+    /// machine, or work merged before Familiar tracked it).
+    RecordComplete {
+        prd_path: PathBuf,
+        /// Mandatory explicit human authority in the form human:<identity>.
+        #[arg(long)]
+        actor: String,
+        /// Mandatory non-empty audit reason for the recorded completion.
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +339,18 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
             &actor,
             &reason,
         )?,
+        BacklogCommand::RecordComplete {
+            prd_path,
+            actor,
+            reason,
+        } => record_complete_backlog(
+            &mut db,
+            &repository,
+            &discovered,
+            &prd_path,
+            &actor,
+            &reason,
+        )?,
     }
     Ok(())
 }
@@ -359,6 +383,38 @@ fn recover_backlog(
         result.prd.path,
         result.status.as_str(),
         action.as_str(),
+        escape_output(actor),
+        escape_output(reason)
+    );
+    Ok(())
+}
+
+fn record_complete_backlog(
+    db: &mut Database,
+    repository: &familiar_ai_core::RepositoryIdentity,
+    discovered: &[familiar_ai_core::DiscoveredPrd],
+    supplied_path: &std::path::Path,
+    actor: &str,
+    reason: &str,
+) -> Result<(), String> {
+    validate_recovery_attribution(BacklogRecoveryAction::RecordedComplete, actor, reason)
+        .map_err(|e| e.to_string())?;
+    let target =
+        resolve_run_prd(repository, discovered, supplied_path).map_err(|e| e.to_string())?;
+    SqliteBacklogRepository::new(db.conn_mut())
+        .reconcile_and_snapshot(repository, discovered)
+        .map_err(|e| e.to_string())?;
+    let result = SqliteBacklogRepository::new(db.conn_mut())
+        .record_complete(repository, discovered, &target, actor, reason)
+        .map_err(|e| e.to_string())?;
+    let actor = actor.trim();
+    let reason = reason.trim();
+    println!(
+        "backlog recovery: {} {} pending -> {} action={} actor={} reason={}",
+        result.prd.id,
+        result.prd.path,
+        result.status.as_str(),
+        BacklogRecoveryAction::RecordedComplete.as_str(),
         escape_output(actor),
         escape_output(reason)
     );
@@ -488,6 +544,23 @@ mod tests {
             .command,
             Command::Backlog {
                 command: BacklogCommand::Complete { .. }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "familiar-ai",
+                "backlog",
+                "record-complete",
+                "docs/prds/PRD-014.md",
+                "--actor",
+                "human:trollboy",
+                "--reason",
+                "implemented, reviewed, and merged before this database existed"
+            ])
+            .unwrap()
+            .command,
+            Command::Backlog {
+                command: BacklogCommand::RecordComplete { .. }
             }
         ));
     }

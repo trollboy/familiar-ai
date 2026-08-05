@@ -99,6 +99,107 @@ impl<'a> SqliteBacklogRepository<'a> {
         })
     }
 
+    /// A human declaration that a `pending` PRD was completed outside Familiar's
+    /// tracking. Legal only from `pending`, and only once every declared
+    /// dependency is itself `completed`.
+    pub fn record_complete(
+        &mut self,
+        repository: &RepositoryIdentity,
+        discovered: &[DiscoveredPrd],
+        target: &DiscoveredPrd,
+        actor: &str,
+        reason: &str,
+    ) -> Result<BacklogEntry, BacklogStoreError> {
+        let (actor, reason) =
+            validate_recovery_attribution(BacklogRecoveryAction::RecordedComplete, actor, reason)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let row: Option<(u64, String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT prd_number,content_hash,status,missing_since FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
+                params![repository.key, target.path.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let (number, hash, status, missing) =
+            row.ok_or_else(|| BacklogStoreError::NotFound(target.path.clone()))?;
+        if status != "pending"
+            || number != target.number
+            || hash != target.content_hash
+            || missing.is_some()
+        {
+            return Err(BacklogStoreError::Conflict {
+                path: target.path.clone(),
+                expected: "pending",
+                actual: BacklogStatus::parse(&status)
+                    .map(|value| value.as_str())
+                    .unwrap_or("conflict"),
+            });
+        }
+        reconcile(&tx, repository, discovered, &now)?;
+        let entries = discovered
+            .iter()
+            .map(|prd| read_entry(&tx, &repository.key, prd))
+            .collect::<Result<Vec<_>, _>>()?;
+        let statuses: std::collections::BTreeMap<_, _> = entries
+            .iter()
+            .map(|entry| (entry.prd.id.clone(), entry.status))
+            .collect();
+        let incomplete: Vec<_> = target
+            .dependencies
+            .iter()
+            .filter(|id| statuses.get(*id) != Some(&BacklogStatus::Completed))
+            .cloned()
+            .collect();
+        if !incomplete.is_empty() {
+            return Err(BacklogStoreError::IncompleteDependencies {
+                path: target.path.clone(),
+                dependencies: incomplete
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            });
+        }
+        let changed = tx
+            .execute(
+                "UPDATE backlog_prds SET status='completed',updated_at=?4 WHERE repository_key=?1 AND prd_path=?2 AND status='pending' AND content_hash=?3 AND prd_number=?5 AND missing_since IS NULL",
+                params![repository.key, target.path.as_str(), target.content_hash, now, target.number],
+            )
+            .map_err(storage)?;
+        if changed != 1 {
+            return Err(BacklogStoreError::Conflict {
+                path: target.path.clone(),
+                expected: "pending",
+                actual: "conflict",
+            });
+        }
+        tx.execute(
+            "INSERT INTO backlog_status_events(repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(?1,?2,'pending','completed',?3,?4)",
+            params![repository.key, target.path.as_str(), actor, now],
+        )
+        .map_err(storage)?;
+        let event_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(?1,?2,?3)",
+            params![
+                event_id,
+                BacklogRecoveryAction::RecordedComplete.as_str(),
+                reason
+            ],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(BacklogEntry {
+            prd: target.clone(),
+            status: BacklogStatus::Completed,
+        })
+    }
+
     pub fn claim_run(
         &mut self,
         repository: &RepositoryIdentity,
@@ -912,6 +1013,231 @@ mod tests {
             )
             .unwrap();
         assert_eq!(recovered.status, BacklogStatus::Completed);
+    }
+
+    fn dependent() -> DiscoveredPrd {
+        DiscoveredPrd {
+            id: PrdId::new(10),
+            number: 10,
+            path: RepositoryPath::new("docs/prds/PRD-010.md").unwrap(),
+            title: "Ten".into(),
+            dependencies: vec![PrdId::new(9)],
+            content_hash: "def".into(),
+        }
+    }
+
+    #[test]
+    fn record_complete_transitions_pending_to_completed_with_audit_rows() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        let recorded = storage
+            .record_complete(
+                &repo(),
+                &[prd()],
+                &prd(),
+                "human:trollboy",
+                "implemented, reviewed, and merged before this database existed",
+            )
+            .unwrap();
+        assert_eq!(recorded.status, BacklogStatus::Completed);
+        let event: (String, String, String) = storage
+            .connection
+            .query_row(
+                "SELECT old_status,new_status,actor FROM backlog_status_events ORDER BY event_id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            event,
+            (
+                "pending".into(),
+                "completed".into(),
+                "human:trollboy".into()
+            )
+        );
+        let recovery: (String, String) = storage
+            .connection
+            .query_row(
+                "SELECT action,reason FROM backlog_recovery_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            recovery,
+            (
+                "recorded_complete".into(),
+                "implemented, reviewed, and merged before this database existed".into()
+            )
+        );
+    }
+
+    #[test]
+    fn record_complete_refuses_non_pending_statuses_and_unknown_entries() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let claim_actor = "system:familiar-ai-run:00001785772020811891-0000057947-000001";
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        storage
+            .claim_run(&repo(), &[prd()], &prd(), claim_actor)
+            .unwrap();
+        assert!(matches!(
+            storage.record_complete(&repo(), &[prd()], &prd(), "human:alice", "declared"),
+            Err(BacklogStoreError::Conflict {
+                expected: "pending",
+                actual: "in_progress",
+                ..
+            })
+        ));
+
+        storage
+            .transition(
+                &repo(),
+                &prd().path,
+                BacklogStatus::InProgress,
+                BacklogStatus::Blocked,
+                "ops",
+            )
+            .unwrap();
+        assert!(matches!(
+            storage.record_complete(&repo(), &[prd()], &prd(), "human:alice", "declared"),
+            Err(BacklogStoreError::Conflict {
+                expected: "pending",
+                actual: "blocked",
+                ..
+            })
+        ));
+
+        storage
+            .transition(
+                &repo(),
+                &prd().path,
+                BacklogStatus::Blocked,
+                BacklogStatus::Completed,
+                "ops",
+            )
+            .unwrap();
+        assert!(matches!(
+            storage.record_complete(&repo(), &[prd()], &prd(), "human:alice", "declared"),
+            Err(BacklogStoreError::Conflict {
+                expected: "pending",
+                actual: "completed",
+                ..
+            })
+        ));
+
+        let unknown = DiscoveredPrd {
+            id: PrdId::new(99),
+            number: 99,
+            path: RepositoryPath::new("docs/prds/PRD-099.md").unwrap(),
+            title: "Unknown".into(),
+            dependencies: vec![],
+            content_hash: "zzz".into(),
+        };
+        assert!(matches!(
+            storage.record_complete(
+                &repo(),
+                &[prd(), unknown.clone()],
+                &unknown,
+                "human:alice",
+                "declared"
+            ),
+            Err(BacklogStoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn record_complete_refuses_incomplete_dependencies_then_succeeds_in_dependency_order() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        let discovered = [prd(), dependent()];
+        storage
+            .reconcile_and_snapshot(&repo(), &discovered)
+            .unwrap();
+
+        let refused = storage
+            .record_complete(
+                &repo(),
+                &discovered,
+                &dependent(),
+                "human:alice",
+                "reversed order",
+            )
+            .unwrap_err();
+        match refused {
+            BacklogStoreError::IncompleteDependencies { dependencies, .. } => {
+                assert_eq!(dependencies, "PRD-9");
+            }
+            other => panic!("expected IncompleteDependencies, got {other:?}"),
+        }
+        let status: String = storage
+            .connection
+            .query_row(
+                "SELECT status FROM backlog_prds WHERE prd_path=?1",
+                [dependent().path.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        let events: i64 = storage
+            .connection
+            .query_row(
+                "SELECT count(*) FROM backlog_status_events WHERE prd_path=?1",
+                [dependent().path.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 0);
+
+        storage
+            .record_complete(
+                &repo(),
+                &discovered,
+                &prd(),
+                "human:alice",
+                "dependency merged earlier",
+            )
+            .unwrap();
+        let completed = storage
+            .record_complete(
+                &repo(),
+                &discovered,
+                &dependent(),
+                "human:alice",
+                "dependent merged after",
+            )
+            .unwrap();
+        assert_eq!(completed.status, BacklogStatus::Completed);
+    }
+
+    #[test]
+    fn record_complete_requires_human_actor_and_non_empty_reason_without_writes() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        assert!(matches!(
+            storage.record_complete(&repo(), &[prd()], &prd(), "ops:alice", "declared complete"),
+            Err(BacklogStoreError::HumanAuthorityRequired)
+        ));
+        assert!(matches!(
+            storage.record_complete(&repo(), &[prd()], &prd(), "human:alice", "   "),
+            Err(BacklogStoreError::InvalidRecoveryReason)
+        ));
+        let status: String = storage
+            .connection
+            .query_row(
+                "SELECT status FROM backlog_prds WHERE prd_path=?1",
+                [prd().path.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[test]

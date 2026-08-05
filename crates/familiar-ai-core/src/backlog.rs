@@ -70,6 +70,7 @@ pub enum BacklogStatus {
 pub enum BacklogRecoveryAction {
     Release,
     ManualCompleteOverride,
+    RecordedComplete,
 }
 
 impl BacklogRecoveryAction {
@@ -77,6 +78,7 @@ impl BacklogRecoveryAction {
         match self {
             Self::Release => BacklogStatus::Pending,
             Self::ManualCompleteOverride => BacklogStatus::Completed,
+            Self::RecordedComplete => BacklogStatus::Completed,
         }
     }
 
@@ -84,6 +86,7 @@ impl BacklogRecoveryAction {
         match self {
             Self::Release => "release",
             Self::ManualCompleteOverride => "manual_complete_override",
+            Self::RecordedComplete => "recorded_complete",
         }
     }
 }
@@ -101,8 +104,10 @@ pub fn validate_recovery_attribution(
     if reason.is_empty() || reason.len() > 2048 || reason.chars().any(char::is_control) {
         return Err(BacklogStoreError::InvalidRecoveryReason);
     }
-    if action == BacklogRecoveryAction::ManualCompleteOverride
-        && !matches!(actor.strip_prefix("human:"), Some(identity) if !identity.trim().is_empty())
+    if matches!(
+        action,
+        BacklogRecoveryAction::ManualCompleteOverride | BacklogRecoveryAction::RecordedComplete
+    ) && !matches!(actor.strip_prefix("human:"), Some(identity) if !identity.trim().is_empty())
     {
         return Err(BacklogStoreError::HumanAuthorityRequired);
     }
@@ -186,6 +191,11 @@ pub enum BacklogStoreError {
     HumanAuthorityRequired,
     #[error("backlog recovery audit lineage is corrupt for {0}")]
     RecoveryAuditCorrupt(RepositoryPath),
+    #[error("cannot record completion for {path}: incomplete dependencies [{dependencies}]")]
+    IncompleteDependencies {
+        path: RepositoryPath,
+        dependencies: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -749,6 +759,20 @@ mod tests {
             validate_recovery_attribution(BacklogRecoveryAction::Release, "alice", "  "),
             Err(BacklogStoreError::InvalidRecoveryReason)
         ));
+        assert!(matches!(
+            validate_recovery_attribution(
+                BacklogRecoveryAction::RecordedComplete,
+                "ops:queue",
+                "merged before tracking existed"
+            ),
+            Err(BacklogStoreError::HumanAuthorityRequired)
+        ));
+        assert!(validate_recovery_attribution(
+            BacklogRecoveryAction::RecordedComplete,
+            "human:trollboy",
+            "implemented, reviewed, and merged before this database existed"
+        )
+        .is_ok());
     }
 
     #[derive(Default)]
