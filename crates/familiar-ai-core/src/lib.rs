@@ -18,7 +18,7 @@ pub use backlog::{
 pub use bootstrap::*;
 pub use config::{
     AgentAdapterKind, AgentEffort, AgentEntryConfig, AgentPermissionMode, AgentsConfig,
-    BudgetProfile, Config, DashboardConfig, ExecutionHistoryConfig, ExecutionPrice,
+    BudgetProfile, Config, DashboardConfig, DriverConfig, ExecutionHistoryConfig, ExecutionPrice,
     InferenceConfig, InferenceMode, PackerConfig, ProhibitedChangeConfig, ProviderKind,
     ResolvedProhibitedRule, ReviewScopeConfig, RollupConfig, ScopeClassPolicyConfig,
     ScopeClassificationConfig, ScopeDeclarationModeConfig, ScopeFileClassName, SummaryConfig,

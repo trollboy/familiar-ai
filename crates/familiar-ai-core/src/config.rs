@@ -39,6 +39,37 @@ pub struct Config {
     /// review-identity consistency checking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentsConfig>,
+    #[serde(default)]
+    pub driver: DriverConfig,
+}
+
+/// The unattended driver's budget warrant. Every ceiling is optional
+/// individually (0 means unlimited), but `drive` refuses to start unless at
+/// least one is finite: an unbounded unattended loop is not a warrant.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DriverConfig {
+    #[serde(default)]
+    pub max_prds_per_session: u64,
+    #[serde(default)]
+    pub max_session_cost_microusd: u64,
+    #[serde(default)]
+    pub max_session_duration_ms: u64,
+}
+
+impl DriverConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_prds_per_session == 0
+            && self.max_session_cost_microusd == 0
+            && self.max_session_duration_ms == 0
+        {
+            return Err(
+                "unattended drive requires at least one finite ceiling in [driver]: \
+                 max_prds_per_session, max_session_cost_microusd, or max_session_duration_ms"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

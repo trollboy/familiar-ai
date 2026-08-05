@@ -7,6 +7,7 @@ use familiar_ai_core::{
     BacklogDiscovery, BacklogManager, BacklogRecoveryAction, BacklogStatusStore,
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery,
 };
+use familiar_ai_daemon::drive::{drive, DriveWarrant};
 use familiar_ai_daemon::run::{build_agent, execute_with_config, resolved_agent_entries, AgentSet};
 use familiar_ai_storage::{
     Database, ExecutionHistoryRepository, SqliteBacklogRepository, SqliteBootstrapRepository,
@@ -23,8 +24,19 @@ struct Cli {
 enum Command {
     /// Select the next eligible repository PRD without executing it.
     Next,
-    /// Execute a repository PRD with the locally installed Codex CLI.
+    /// Execute a repository PRD with the configured coding agent.
     Run { prd_path: PathBuf },
+    /// Execute eligible backlog PRDs unattended until the backlog is empty,
+    /// nothing is eligible, or the budget warrant is exhausted. Flags may only
+    /// tighten the configured warrant, never loosen it.
+    Drive {
+        #[arg(long)]
+        max_prds: Option<u64>,
+        #[arg(long)]
+        max_cost_microusd: Option<u64>,
+        #[arg(long)]
+        max_duration_ms: Option<u64>,
+    },
     /// List recent standalone executions.
     History {
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u8).range(1..=100))]
@@ -95,6 +107,14 @@ fn main() -> ExitCode {
                     .map_or(ExitCode::FAILURE, ExitCode::from)
             }
         },
+        Command::Drive {
+            max_prds,
+            max_cost_microusd,
+            max_duration_ms,
+        } => match drive_command(max_prds, max_cost_microusd, max_duration_ms) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::History { limit, verbose } => match history(limit, verbose) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
@@ -131,6 +151,45 @@ fn run(prd_path: &std::path::Path) -> Result<(), familiar_ai_daemon::run::RunErr
         &paths,
     )
     .map(|_| ())
+}
+
+/// Composition root for the unattended driver: same agent construction as
+/// `run`, plus a warrant that flags may only tighten.
+fn drive_command(
+    max_prds: Option<u64>,
+    max_cost_microusd: Option<u64>,
+    max_duration_ms: Option<u64>,
+) -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
+    let implementation = build_agent(&implementation_entry);
+    let reviewer = build_agent(&reviewer_entry);
+    let warrant = DriveWarrant::from_config(&config).tightened_by(
+        max_prds,
+        max_cost_microusd,
+        max_duration_ms,
+    );
+    let summary = drive(
+        &AgentSet {
+            implementation: implementation.as_ref(),
+            reviewer: reviewer.as_ref(),
+        },
+        &config,
+        &paths,
+        warrant,
+    )
+    .map_err(|e| e.to_string())?;
+    println!(
+        "session={} termination={} attempted={} completed={} known_cost_microusd={}",
+        summary.session_id,
+        summary.termination.as_str(),
+        summary.attempted,
+        summary.completed,
+        summary.known_cost_microusd
+    );
+    Ok(())
 }
 
 fn next() -> Result<(), String> {

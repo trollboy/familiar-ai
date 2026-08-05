@@ -1,6 +1,7 @@
 pub mod backlog;
 pub mod bootstrap;
 pub mod decision;
+pub mod driver;
 pub mod execution_history;
 pub mod file_summary;
 pub mod lifecycle;

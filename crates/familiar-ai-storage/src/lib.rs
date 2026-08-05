@@ -7,6 +7,7 @@ pub use db::Database;
 pub use repos::backlog::SqliteBacklogRepository;
 pub use repos::bootstrap::SqliteBootstrapRepository;
 pub use repos::decision::DecisionRepository;
+pub use repos::driver::{DriverAttempt, DriverRepository, DriverSession};
 pub use repos::execution_history::{
     ExecutionFinalization, ExecutionHistoryRepository, ExecutionRecord, ExecutionStart,
     UsageSummary,

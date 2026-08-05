@@ -24,6 +24,18 @@
 [execution_context]
 # hard_ceiling_tokens = 12000  # Optional; disabled when absent
 
+# Unattended driver warrant. `familiar-ai drive` refuses to start unless at
+# least one ceiling below is finite — an unbounded unattended loop is not a
+# warrant. Command-line flags may only tighten these values, never loosen them.
+# Note: cost ceilings require *known* per-run cost, which comes from
+# [execution_history.pricing]; without pricing configured every run's cost is
+# unknown and a cost ceiling ends the session after the first attempt
+# (unknown is never treated as zero).
+[driver]
+max_prds_per_session = 0      # 0 = unlimited
+max_session_cost_microusd = 0 # 0 = no cost ceiling
+max_session_duration_ms = 0   # 0 = no duration ceiling
+
 [review]
 enabled = false
 max_review_attempts = 3

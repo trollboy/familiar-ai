@@ -147,6 +147,37 @@ pub fn execute_with_config(
     config: &Config,
     paths: &AppPaths,
 ) -> Result<RunWorkflowResult, RunError> {
+    execute_with_config_tracked(prd_path, agents, config, paths).0
+}
+
+/// As [`execute_with_config`], additionally reporting the execution id and the
+/// exact retained reason when the backlog entry stays `in_progress`. The
+/// unattended driver needs both as values; the single-run path is unchanged.
+pub fn execute_with_config_tracked(
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
+    let mut trace = AttemptTrace::default();
+    let result = execute_tracked_inner(prd_path, agents, config, paths, &mut trace);
+    (result, trace)
+}
+
+/// What the driver observes about one attempt beyond success or failure.
+#[derive(Debug, Default, Clone)]
+pub struct AttemptTrace {
+    pub execution_id: Option<String>,
+    pub retained_reason: Option<&'static str>,
+}
+
+fn execute_tracked_inner(
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+    trace: &mut AttemptTrace,
+) -> Result<RunWorkflowResult, RunError> {
     let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
     let context = ContextCompiler::new()
         .compile(ContextRequest {
@@ -177,6 +208,7 @@ pub fn execute_with_config(
         .recover_incomplete()
         .map_err(|e| RunError::Storage(e.to_string()))?;
     let id = new_id();
+    trace.execution_id = Some(id.clone());
     // Contradictory agent configuration must fail closed before any claim,
     // regardless of which caller constructed the agents.
     resolved_agent_entries(config).map_err(RunError::Config)?;
@@ -262,7 +294,14 @@ pub fn execute_with_config(
             prd_path: context.prd.path.clone(),
             unavailable_fields: unavailable.clone(),
         })
-        .map_err(|e| retained(&target, "history_failed", RunError::Storage(e.to_string())))?;
+        .map_err(|e| {
+            retained_traced(
+                trace,
+                &target,
+                "history_failed",
+                RunError::Storage(e.to_string()),
+            )
+        })?;
 
     let execution = agents.implementation.execute(
         ExecutionRequest {
@@ -294,10 +333,13 @@ pub fn execute_with_config(
         unavailable.insert("agent_version".into(), "version_probe_failed".into());
     }
     let finalization = terminal(&timer, result, outcome, unavailable, config);
-    finalize(&db, &id, &finalization).map_err(|e| retained(&target, "history_failed", e))?;
-    let result = execution.map_err(|e| retained(&target, agent_reason(&e), RunError::Agent(e)))?;
+    finalize(&db, &id, &finalization)
+        .map_err(|e| retained_traced(trace, &target, "history_failed", e))?;
+    let result = execution
+        .map_err(|e| retained_traced(trace, &target, agent_reason(&e), RunError::Agent(e)))?;
     if result.exit_code != Some(0) || result.signal.is_some() {
-        return Err(retained(
+        return Err(retained_traced(
+            trace,
             &target,
             "implementation_failed",
             RunError::Workflow {
@@ -307,7 +349,8 @@ pub fn execute_with_config(
         ));
     }
     if !config.review.enabled {
-        return Err(retained(
+        return Err(retained_traced(
+            trace,
             &target,
             "review_disabled",
             RunError::Workflow {
@@ -330,13 +373,14 @@ pub fn execute_with_config(
         base_revision: &preflight.baseline,
         scope_policy: &preflight.snapshot,
     })
-    .map_err(|e| retained(&target, "review_failed", e))?;
+    .map_err(|e| retained_traced(trace, &target, "review_failed", e))?;
     if cycle.state != ReviewCycleState::Completed
         || cycle.disposition != ReviewDisposition::ReadyForHumanApproval
         || cycle.stop_reasons != [ReviewStopReason::CleanReview]
     {
         let reason = review_retained_reason(&cycle);
-        return Err(retained(
+        return Err(retained_traced(
+            trace,
             &target,
             reason,
             RunError::Workflow {
@@ -355,7 +399,8 @@ pub fn execute_with_config(
     SqliteBacklogRepository::new(db.conn_mut())
         .complete_run(&repository, &target, &id, &actor, &required_checks)
         .map_err(|e| {
-            retained(
+            retained_traced(
+                trace,
                 &target,
                 "completion_conflict",
                 RunError::Workflow {
@@ -577,6 +622,16 @@ fn map_change_kind(value: &str) -> Result<GitChangeKind, RunError> {
             "unsupported prohibited change kind '{other}'"
         ))),
     }
+}
+
+fn retained_traced(
+    trace: &mut AttemptTrace,
+    target: &familiar_ai_core::DiscoveredPrd,
+    reason: &'static str,
+    error: RunError,
+) -> RunError {
+    trace.retained_reason = Some(reason);
+    retained(target, reason, error)
 }
 
 fn retained(
@@ -1106,7 +1161,7 @@ pub fn calculate_cost(
     (Some(cost), rates, "")
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     format!(
         "{:020}-{:010}-{:06}",
         Utc::now().timestamp_micros(),
