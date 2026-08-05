@@ -46,7 +46,7 @@ impl EvidenceCollector for GitEvidenceCollector {
         base_revision: &str,
     ) -> Result<CapturedDiff, EvidenceError> {
         fs::create_dir_all(&self.artifact_directory)?;
-        let resulting_tree = snapshot_tree(repository, &self.artifact_directory)?;
+        let resulting_tree = snapshot_tree(repository, &self.artifact_directory, base_revision)?;
         let diff = git(
             repository,
             &[
@@ -110,7 +110,11 @@ impl EvidenceCollector for GitEvidenceCollector {
 
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-fn snapshot_tree(repository: &Path, artifact_directory: &Path) -> Result<String, EvidenceError> {
+fn snapshot_tree(
+    repository: &Path,
+    artifact_directory: &Path,
+    base_revision: &str,
+) -> Result<String, EvidenceError> {
     let index = artifact_directory.join(format!(
         ".review-index-{}-{}",
         std::process::id(),
@@ -131,7 +135,14 @@ fn snapshot_tree(repository: &Path, artifact_directory: &Path) -> Result<String,
         }
     };
     let result = (|| {
-        run(&["read-tree", "--empty"])?;
+        // Seed from the baseline rather than emptying the index. `git add -A`
+        // applies ignore rules only to files the index does not already track,
+        // so an empty index makes every tracked-but-ignored file (a lockfile
+        // under a `*.lock` rule, say) invisible to the scan — it never enters
+        // the tree and the base-to-tree diff reports it as Deleted. Seeding
+        // from the baseline keeps those files tracked, while genuine deletions
+        // are still staged by `-A` and untracked ignored files still stay out.
+        run(&["read-tree", base_revision])?;
         run(&["add", "-A"])?;
         let value = run(&["write-tree"])?;
         String::from_utf8(value)
@@ -341,7 +352,7 @@ mod tests {
         fs::write(repository.path().join("old.txt"), "rename unchanged\n").unwrap();
         command(repository.path(), &["add", "-A"]);
         command(repository.path(), &["commit", "-qm", "base"]);
-        let baseline = snapshot_tree(repository.path(), artifacts.path()).unwrap();
+        let baseline = snapshot_tree(repository.path(), artifacts.path(), "HEAD").unwrap();
         fs::write(repository.path().join("modified.txt"), "one\nchanged\n").unwrap();
         fs::remove_file(repository.path().join("deleted.txt")).unwrap();
         fs::rename(
@@ -367,6 +378,56 @@ mod tests {
         assert_eq!(by_path["new.txt"].old_path.as_deref(), Some("old.txt"));
         assert_eq!(by_path["untracked.txt"].kind, GitChangeKind::Added);
         assert!(by_path.values().all(|file| !file.line_summary.is_empty()));
+    }
+
+    #[test]
+    fn tracked_but_ignored_files_are_not_reported_as_deleted() {
+        // A file can be both tracked and matched by an ignore rule: the rule
+        // was added after the file, or it is broad (`*.lock`) and the file was
+        // force-added. Git keeps tracking it, so an untouched one is not a
+        // change and must not surface as a deletion — a lockfile deletion is
+        // classified as a human-review stop and would halt an unattended run.
+        let repository = tempdir().unwrap();
+        let artifacts = tempdir().unwrap();
+        command(repository.path(), &["init", "-q"]);
+        fs::write(repository.path().join(".gitignore"), "*.lock\nbuild/\n").unwrap();
+        fs::write(repository.path().join("Cargo.lock"), "locked\n").unwrap();
+        fs::write(repository.path().join("kept.lock"), "kept\n").unwrap();
+        fs::write(repository.path().join("src.rs"), "code\n").unwrap();
+        command(repository.path(), &["add", "-A", "-f"]);
+        command(repository.path(), &["commit", "-qm", "base"]);
+        // The baseline is a real commit, exactly as a run supplies it. Deriving
+        // it from `snapshot_tree` instead would hide the defect: both trees
+        // would omit the ignored files symmetrically and the diff would be
+        // empty rather than wrong.
+        let baseline = String::from_utf8(git(repository.path(), &["rev-parse", "HEAD"]).unwrap())
+            .unwrap()
+            .trim()
+            .to_owned();
+
+        // Touch nothing ignored except one genuine deletion, and drop an
+        // untracked ignored artifact in the way of the scan.
+        fs::write(repository.path().join("src.rs"), "changed\n").unwrap();
+        fs::remove_file(repository.path().join("kept.lock")).unwrap();
+        fs::create_dir(repository.path().join("build")).unwrap();
+        fs::write(repository.path().join("build/out.o"), "binary\n").unwrap();
+
+        let captured = GitEvidenceCollector::new(artifacts.path().into(), 1_000_000)
+            .capture(repository.path(), &baseline)
+            .unwrap();
+        let by_path: std::collections::BTreeMap<_, _> = captured
+            .changed_files
+            .iter()
+            .map(|file| (file.path.as_str(), file.kind))
+            .collect();
+        // The untouched tracked-but-ignored lockfile is absent from the change
+        // set entirely; it is not a change of any kind.
+        assert!(!by_path.contains_key("Cargo.lock"));
+        // A real deletion of a tracked-but-ignored file is still reported.
+        assert_eq!(by_path["kept.lock"], GitChangeKind::Deleted);
+        assert_eq!(by_path["src.rs"], GitChangeKind::Modified);
+        // Untracked and ignored stays out of the snapshot.
+        assert!(!by_path.contains_key("build/out.o"));
     }
 
     #[cfg(unix)]
