@@ -46,6 +46,10 @@ enum Command {
     },
     /// Summarize known standalone execution usage and cost.
     Usage,
+    /// Render one unattended driver session: what got built, what stopped and
+    /// why, what it cost, and what needs human judgment. Defaults to the most
+    /// recent session.
+    Report { session_id: Option<String> },
     /// Inspect or roll back the historical backlog bootstrap.
     Backlog {
         #[command(subcommand)]
@@ -123,6 +127,10 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+        Command::Report { session_id } => match report_command(session_id.as_deref()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Backlog { command } => match backlog(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
@@ -189,6 +197,15 @@ fn drive_command(
         summary.completed,
         summary.known_cost_microusd
     );
+    Ok(())
+}
+
+/// Read-only: renders recorded rows and constructs no agents.
+fn report_command(session_id: Option<&str>) -> Result<(), String> {
+    let db = database()?;
+    let rendered =
+        familiar_ai_daemon::report::render(&db, session_id).map_err(|e| e.to_string())?;
+    print!("{rendered}");
     Ok(())
 }
 
