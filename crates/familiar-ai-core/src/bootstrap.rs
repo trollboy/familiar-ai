@@ -277,6 +277,7 @@ mod tests {
             dependencies: vec![],
             content_hash: hash.clone(),
             location: PrdLocation::Active,
+            display: "PRD-1".into(),
         };
         let repo = RepositoryIdentity {
             worktree: dir.path().into(),

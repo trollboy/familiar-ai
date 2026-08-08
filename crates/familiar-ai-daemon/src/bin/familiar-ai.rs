@@ -224,14 +224,19 @@ fn report_command(session_id: Option<&str>) -> Result<(), String> {
 fn next() -> Result<(), String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
+    let profile = repository_profile(&cwd)?;
     // Resolve Git before opening or migrating storage, preserving the domain's
     // required operation order for invalid working directories.
-    let repository = FilesystemBacklogDiscovery
+    let repository = FilesystemBacklogDiscovery::with_profile(profile.clone())
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
-    let discovered = FilesystemBacklogDiscovery
+    let outcome = FilesystemBacklogDiscovery::with_profile(profile.clone())
         .discover(&repository)
         .map_err(|e| e.to_string())?;
+    if let Some(report) = outcome.conflict_report() {
+        eprintln!("refusing conflicting identities: {report}");
+    }
+    let discovered = outcome.prds;
     if discovered.is_empty() {
         return Err("backlog is empty".into());
     }
@@ -251,11 +256,11 @@ fn next() -> Result<(), String> {
         );
     }
     let store = SqliteBacklogRepository::new(db.conn_mut());
-    let mut manager = BacklogManager::new(FilesystemBacklogDiscovery, store);
+    let mut manager = BacklogManager::new(FilesystemBacklogDiscovery::with_profile(profile), store);
     let selected = manager.next(&cwd).map_err(|e| e.to_string())?;
     println!(
         "{}\t{}\t{}\t{}",
-        selected.id,
+        selected.display,
         selected.path,
         selected.status.as_str(),
         selected.title
@@ -266,12 +271,14 @@ fn next() -> Result<(), String> {
 fn backlog(command: BacklogCommand) -> Result<(), String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
-    let repository = FilesystemBacklogDiscovery
-        .resolve(&cwd)
-        .map_err(|e| e.to_string())?;
-    let discovered = FilesystemBacklogDiscovery
-        .discover(&repository)
-        .map_err(|e| e.to_string())?;
+    let profile = repository_profile(&cwd)?;
+    let discovery = FilesystemBacklogDiscovery::with_profile(profile);
+    let repository = discovery.resolve(&cwd).map_err(|e| e.to_string())?;
+    let outcome = discovery.discover(&repository).map_err(|e| e.to_string())?;
+    if let Some(report) = outcome.conflict_report() {
+        eprintln!("refusing conflicting identities: {report}");
+    }
+    let discovered = outcome.prds;
     if discovered.is_empty() {
         return Err("backlog is empty".into());
     }
@@ -423,6 +430,14 @@ fn record_complete_backlog(
 
 fn escape_output(value: &str) -> String {
     format!("{value:?}")
+}
+
+/// The profile the operator declared for this worktree, or canonical.
+fn repository_profile(cwd: &std::path::Path) -> Result<familiar_ai_core::BacklogProfile, String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    Ok(config.repository_profile(cwd))
 }
 
 fn database() -> Result<Database, String> {

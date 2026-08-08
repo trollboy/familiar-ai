@@ -175,3 +175,40 @@ generated_artifact = "human_review"
 # fallback_enabled = true
 # max_concurrent_requests = 4
 # request_timeout_secs = 60
+
+# ---------------------------------------------------------------------------
+# Repository backlog profiles (PRD-025)
+#
+# Familiar drives repositories whose backlog does not follow the canonical
+# `docs/prds/PRD-<n>.md` convention. The grammar is a *profile*: a closed, named
+# parser chosen here, by you, per repository. It is never inferred, never
+# user-defined, and never read from the target repository — a repository cannot
+# choose how it is parsed.
+#
+# A repository with no entry below resolves to `canonical` at the canonical
+# locations, which is exactly the behavior you have today. Nothing needs to be
+# declared for Familiar's own repository.
+#
+# Keys are absolute worktree paths, so these belong in *your* config file
+# (see the copy targets at the top of this file), not in this shared default.
+#
+# Shipped profiles:
+#   canonical     docs/prds/PRD-<digits>.md, "# PRD-<digits>: <title>",
+#                 dependencies declared with "**Depends on:**"
+#   numbered-slug <digits><suffix?>-<slug>.md, "# PRD <identity> — <title>",
+#                 no dependencies at all; eligibility is identity order, with
+#                 epic children (0139a, 0139b) ordered before their umbrella
+#                 (0139) and both before the next number (0140)
+#
+# reference_roots are read-only context data. Declaring one grants no execution
+# authority. Omit them to keep the canonical docs/adr/, docs/contracts/, and
+# docs/supporting/ roots.
+#
+# [repositories."/home/you/Projects/spectra"]
+# profile = "numbered-slug"
+# active_dir = "docs/prd/todo"
+# archived_dir = "docs/prd/done"
+# reference_roots = [
+#   { prefix = "docs/prd/", kind = "prd" },
+#   { prefix = "docs/runbooks/", kind = "supporting" },
+# ]

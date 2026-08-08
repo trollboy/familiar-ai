@@ -16,15 +16,37 @@ use std::process::{Command, Stdio};
 
 use thiserror::Error;
 
-const REFERENCE_ROOTS: [(&str, &str, DocumentKind); 3] = [
-    ("docs/adr/", "docs/adr", DocumentKind::Adr),
-    ("docs/contracts/", "docs/contracts", DocumentKind::Contract),
-    (
-        "docs/supporting/",
-        "docs/supporting",
-        DocumentKind::Supporting,
-    ),
+/// The reference roots a repository nobody described uses, and the PRD root its
+/// PRDs must be contained in. Kept as the `Default` so an undescribed
+/// repository compiles context exactly as it always has.
+const DEFAULT_REFERENCE_ROOTS: [(&str, DocumentKind); 3] = [
+    ("docs/adr", DocumentKind::Adr),
+    ("docs/contracts", DocumentKind::Contract),
+    ("docs/supporting", DocumentKind::Supporting),
 ];
+
+/// Where one repository keeps the documents context compilation may read.
+/// Reference roots are read-only context data; declaring one grants no
+/// execution authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextLayout {
+    /// Repository-relative directory every compiled PRD must be contained in.
+    pub prd_root: String,
+    /// Repository-relative roots, without a trailing slash.
+    pub reference_roots: Vec<(String, DocumentKind)>,
+}
+
+impl Default for ContextLayout {
+    fn default() -> Self {
+        Self {
+            prd_root: "docs/prds".to_owned(),
+            reference_roots: DEFAULT_REFERENCE_ROOTS
+                .iter()
+                .map(|(root, kind)| ((*root).to_owned(), *kind))
+                .collect(),
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ContextCompiler;
@@ -33,6 +55,8 @@ pub struct ContextCompiler;
 pub struct ContextRequest<'a> {
     pub repository: &'a Path,
     pub prd: &'a Path,
+    /// The repository's declared layout. `None` means the canonical layout.
+    pub layout: Option<&'a ContextLayout>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +130,8 @@ impl ContextCompiler {
         &self,
         request: ContextRequest<'_>,
     ) -> Result<ExecutionContext, ContextCompilationError> {
+        let default_layout = ContextLayout::default();
+        let layout = request.layout.unwrap_or(&default_layout);
         let input = request.repository.canonicalize().map_err(|source| {
             ContextCompilationError::RepositoryInput {
                 path: request.repository.to_owned(),
@@ -141,7 +167,7 @@ impl ContextCompiler {
         })?;
         let git_commit = optional_git(&worktree, &["rev-parse", "--verify", "HEAD"]);
 
-        let prd_path = validate_prd(&worktree, &input, request.prd)?;
+        let prd_path = validate_prd(&worktree, &input, request.prd, layout)?;
         let prd_identity = identity(&worktree, &prd_path).map_err(|detail| {
             ContextCompilationError::InvalidPrd {
                 path: prd_path.clone(),
@@ -160,10 +186,10 @@ impl ContextCompiler {
             InclusionReason::RequestedPrd,
         )?;
 
-        let candidates = discover(&prd.content);
+        let candidates = discover(&prd.content, layout);
         let mut validated = BTreeMap::new();
         for (relative, (root, kind)) in candidates {
-            let path = validate_reference(&worktree, &relative, root)?;
+            let path = validate_reference(&worktree, &relative, &root)?;
             let canonical_identity = identity(&worktree, &path).map_err(|detail| {
                 ContextCompilationError::InvalidReference {
                     path: relative.clone(),
@@ -283,6 +309,7 @@ fn validate_prd(
     worktree: &Path,
     input: &Path,
     supplied: &Path,
+    layout: &ContextLayout,
 ) -> Result<PathBuf, ContextCompilationError> {
     if supplied.as_os_str().is_empty() {
         return Err(ContextCompilationError::InvalidPrd {
@@ -301,12 +328,13 @@ fn validate_prd(
             path: candidate.clone(),
             detail: format!("cannot resolve path: {error}"),
         })?;
-    let prd_root = worktree.join("docs/prds").canonicalize().map_err(|error| {
-        ContextCompilationError::InvalidPrd {
-            path: worktree.join("docs/prds"),
+    let prd_root = worktree
+        .join(&layout.prd_root)
+        .canonicalize()
+        .map_err(|error| ContextCompilationError::InvalidPrd {
+            path: worktree.join(&layout.prd_root),
             detail: format!("cannot resolve repository PRD directory: {error}"),
-        }
-    })?;
+        })?;
     if !prd_root.starts_with(worktree) {
         return Err(ContextCompilationError::InvalidPrd {
             path: prd_root,
@@ -334,9 +362,11 @@ fn validate_prd(
     Ok(path)
 }
 
-fn discover(content: &str) -> BTreeMap<String, (&'static str, DocumentKind)> {
+fn discover(content: &str, layout: &ContextLayout) -> BTreeMap<String, (String, DocumentKind)> {
     let mut paths = BTreeMap::new();
-    for (prefix, root, kind) in REFERENCE_ROOTS {
+    for (root, kind) in layout.reference_roots.iter().map(|(r, k)| (r.clone(), *k)) {
+        let prefix = format!("{root}/");
+        let prefix = prefix.as_str();
         let mut rest = content;
         while let Some(index) = rest.find(prefix) {
             let preceding = rest[..index].chars().next_back();
@@ -352,7 +382,7 @@ fn discover(content: &str) -> BTreeMap<String, (&'static str, DocumentKind)> {
                 !(character.is_ascii_alphanumeric() || matches!(character, '/' | '-' | '_' | '.'))
             }) && reference.ends_with(".md")
             {
-                paths.insert(reference.to_owned(), (root, kind));
+                paths.insert(reference.to_owned(), (root.clone(), kind));
             }
             rest = &rest[end..];
         }
@@ -427,6 +457,108 @@ mod tests {
         temp
     }
 
+    /// PRD-025 criterion 7: context compilation follows the repository's declared
+    /// layout — containment against its active PRD directory, and only the
+    /// reference roots it declares.
+    #[test]
+    fn a_declared_layout_moves_both_containment_and_reference_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("docs/prd/todo")).unwrap();
+        fs::create_dir_all(temp.path().join("docs/runbooks")).unwrap();
+        fs::create_dir_all(temp.path().join("docs/adr")).unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(temp.path())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(temp.path().join("docs/runbooks/rotate.md"), "runbook").unwrap();
+        fs::write(temp.path().join("docs/adr/legacy.md"), "adr").unwrap();
+        fs::write(
+            temp.path().join("docs/prd/todo/0139a-keys.md"),
+            "see docs/runbooks/rotate.md and docs/adr/legacy.md",
+        )
+        .unwrap();
+
+        let layout = ContextLayout {
+            prd_root: "docs/prd/todo".into(),
+            reference_roots: vec![("docs/runbooks".into(), DocumentKind::Supporting)],
+        };
+        let compiled = ContextCompiler
+            .compile(ContextRequest {
+                repository: temp.path(),
+                prd: Path::new("docs/prd/todo/0139a-keys.md"),
+                layout: Some(&layout),
+            })
+            .expect("a PRD inside the declared root must compile");
+        // The declared root resolves...
+        assert_eq!(
+            compiled
+                .documents
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/runbooks/rotate.md"]
+        );
+        // ...and a root this repository did not declare is not context data,
+        // even though it is the canonical default.
+        assert!(compiled
+            .documents
+            .iter()
+            .all(|d| d.path != "docs/adr/legacy.md"));
+
+        // Containment moves with the profile: the canonical root is no longer
+        // where this repository's PRDs live.
+        fs::create_dir_all(temp.path().join("docs/prds")).unwrap();
+        fs::write(temp.path().join("docs/prds/stray.md"), "stray").unwrap();
+        let error = ContextCompiler
+            .compile(ContextRequest {
+                repository: temp.path(),
+                prd: Path::new("docs/prds/stray.md"),
+                layout: Some(&layout),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, ContextCompilationError::InvalidPrd { detail, .. }
+                if detail.contains("must be contained in")),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A repository nobody described keeps today's roots untouched.
+    #[test]
+    fn an_undeclared_layout_keeps_the_canonical_reference_roots() {
+        let temp = repository();
+        fs::write(temp.path().join("docs/adr/z.md"), "adr").unwrap();
+        fs::write(temp.path().join("docs/contracts/a.md"), "contract").unwrap();
+        fs::write(temp.path().join("docs/supporting/m.md"), "supporting").unwrap();
+        fs::write(
+            temp.path().join("docs/prds/work.md"),
+            "docs/adr/z.md docs/contracts/a.md docs/supporting/m.md",
+        )
+        .unwrap();
+        let compiled = ContextCompiler
+            .compile(ContextRequest {
+                repository: temp.path(),
+                prd: Path::new("docs/prds/work.md"),
+                layout: None,
+            })
+            .unwrap();
+        assert_eq!(
+            compiled
+                .documents
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "docs/adr/z.md",
+                "docs/contracts/a.md",
+                "docs/supporting/m.md"
+            ]
+        );
+    }
+
     #[test]
     fn compiles_equal_structured_context_with_provenance_ordering_and_estimates() {
         let temp = repository();
@@ -438,6 +570,7 @@ mod tests {
         let request = ContextRequest {
             repository: temp.path(),
             prd: Path::new("docs/prds/work.md"),
+            layout: None,
         };
         let first = ContextCompiler.compile(request).unwrap();
         let second = ContextCompiler.compile(request).unwrap();
@@ -500,6 +633,7 @@ mod tests {
             .compile(ContextRequest {
                 repository: temp.path(),
                 prd: Path::new("docs/prds/work.md"),
+                layout: None,
             })
             .unwrap();
         assert_eq!(context.documents.len(), 1);
@@ -514,6 +648,7 @@ mod tests {
             .compile(ContextRequest {
                 repository: temp.path(),
                 prd: Path::new("docs/prds/work.md"),
+                layout: None,
             })
             .unwrap_err();
         assert!(
@@ -529,6 +664,7 @@ mod tests {
             .compile(ContextRequest {
                 repository: temp.path(),
                 prd: Path::new("outside.md"),
+                layout: None,
             })
             .unwrap_err();
         assert!(matches!(
@@ -540,6 +676,7 @@ mod tests {
             .compile(ContextRequest {
                 repository: temp.path(),
                 prd: Path::new("docs/prds/bad.md"),
+                layout: None,
             })
             .unwrap_err();
         assert!(matches!(bad, ContextCompilationError::ReadPrd { .. }));
@@ -589,6 +726,7 @@ mod tests {
             .compile(ContextRequest {
                 repository: &linked,
                 prd: Path::new("docs/prds/work.md"),
+                layout: None,
             })
             .unwrap();
         let head = required_git(&linked, &["rev-parse", "--verify", "HEAD"], "head").unwrap();

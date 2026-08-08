@@ -131,36 +131,46 @@ fn run_refuses_an_archived_prd_by_exact_diagnostic() {
     );
 }
 
-/// Criterion 5: the same PRD in both locations fails closed naming both paths,
-/// and nothing is recorded while the repository is ambiguous.
+/// PRD-023 criterion 5 as amended by PRD-025: a PRD in both locations is
+/// refused by exact diagnostic naming both paths — but only that identity. The
+/// rest of the backlog stays drivable, because one ambiguous number must not
+/// hold every unambiguous one hostage.
 #[test]
-fn a_prd_in_both_locations_fails_closed_and_records_nothing() {
+fn a_prd_in_both_locations_is_refused_without_stopping_the_rest() {
     let repo = git_repo();
     let database = repo.path().join("state/familiar.db");
     active(repo.path(), "PRD-001.md", "# PRD-001: One\n");
     archived(repo.path(), "PRD-001.md", "# PRD-001: One\n");
+    active(repo.path(), "PRD-002.md", "# PRD-002: Two\n");
 
     let output = next_command(&repo, &database).output().unwrap();
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The unambiguous PRD is still selected...
+    assert_eq!(
+        output.stdout,
+        b"PRD-2\tdocs/prds/PRD-002.md\tpending\tTwo\n"
+    );
+    // ...and the conflict is reported, naming both paths.
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: PRD PRD-1 is present in both locations: docs/prds/PRD-001.md, \
-         docs/prds/done/PRD-001.md\n"
+        "refusing conflicting identities: PRD 1 is present in both locations: \
+         docs/prds/PRD-001.md, docs/prds/done/PRD-001.md\n"
     );
-    // Discovery fails before any storage work, so the backlog table is never
-    // even created. Tolerate both shapes rather than assert on which.
+    // The refused identity is never recorded as backlog work.
     let db = familiar_ai_storage::Database::open(&database).unwrap();
     let rows: i64 = db
         .conn()
         .query_row(
-            "SELECT coalesce((SELECT count(*) FROM backlog_prds \
-             WHERE (SELECT count(*) FROM sqlite_master WHERE name='backlog_prds') > 0), 0)",
+            "SELECT count(*) FROM backlog_prds WHERE prd_number = 1",
             [],
             |row| row.get(0),
         )
-        .unwrap_or(0);
-    assert_eq!(rows, 0, "an ambiguous repository must mutate no row");
+        .unwrap();
+    assert_eq!(rows, 0, "a refused identity must mutate no row");
 }
 
 /// Criteria 2 and 7: archiving tracked work leaves `next` working and retires

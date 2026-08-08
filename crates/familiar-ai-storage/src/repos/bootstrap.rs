@@ -337,6 +337,7 @@ mod tests {
             dependencies: vec![],
             content_hash: format!("{n:064x}"),
             location: PrdLocation::Active,
+            display: format!("PRD-{n}"),
         }
     }
     fn manifest(prds: &[DiscoveredPrd]) -> BootstrapManifest {

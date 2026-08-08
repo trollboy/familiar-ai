@@ -92,8 +92,13 @@ fn record_complete_transitions_a_fresh_pending_entry_and_writes_audit_rows() {
 #[test]
 fn record_complete_refuses_in_progress_and_leaves_prd012_as_the_only_path() {
     let (repo, database) = pending_repo();
-    let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
-    let discovered = FilesystemBacklogDiscovery.discover(&identity).unwrap();
+    let identity = FilesystemBacklogDiscovery::default()
+        .resolve(repo.path())
+        .unwrap();
+    let discovered = FilesystemBacklogDiscovery::default()
+        .discover(&identity)
+        .unwrap()
+        .prds;
     let mut db = Database::open(&database).unwrap();
     db.run_migrations().unwrap();
     {
@@ -190,8 +195,13 @@ fn record_complete_refuses_already_completed_by_exact_diagnostic() {
 #[test]
 fn record_complete_refuses_blocked_by_exact_diagnostic() {
     let (repo, database) = pending_repo();
-    let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
-    let discovered = FilesystemBacklogDiscovery.discover(&identity).unwrap();
+    let identity = FilesystemBacklogDiscovery::default()
+        .resolve(repo.path())
+        .unwrap();
+    let discovered = FilesystemBacklogDiscovery::default()
+        .discover(&identity)
+        .unwrap()
+        .prds;
     let mut db = Database::open(&database).unwrap();
     db.run_migrations().unwrap();
     {

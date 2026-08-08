@@ -52,6 +52,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 11,
         sql: include_str!("../migrations/011_backlog_recovery_recorded_complete.sql"),
     },
+    Migration {
+        version: 12,
+        sql: include_str!("../migrations/012_backlog_identity_suffix.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_ai_core::Result<usize> {
@@ -157,12 +161,95 @@ mod tests {
         }
     }
 
+    /// PRD-025 criterion 8: a populated pre-migration database migrates
+    /// deterministically — the resulting schema and rows are byte-stable across
+    /// two independent replays of the same starting state.
+    #[test]
+    fn migrating_a_populated_database_is_byte_stable_across_replays() {
+        // Build the same version-11 state twice and migrate both to head.
+        let snapshot = |db: &crate::Database| -> Vec<String> {
+            let mut rows: Vec<String> = db
+                .conn()
+                .prepare(
+                    "SELECT type||'|'||name||'|'||coalesce(sql,'') FROM sqlite_master \
+                     ORDER BY type, name",
+                )
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows.extend(
+                db.conn()
+                    .prepare(
+                        "SELECT repository_key||'|'||prd_path||'|'||prd_number||'|'\
+                         ||coalesce(prd_suffix,'<null>')||'|'||status FROM backlog_prds \
+                         ORDER BY prd_path",
+                    )
+                    .unwrap()
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+            );
+            rows
+        };
+        let build = || {
+            let db = crate::Database::open_in_memory().unwrap();
+            db.conn()
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL
+                    );",
+                )
+                .unwrap();
+            for migration in &super::MIGRATIONS[..11] {
+                db.conn().execute_batch(migration.sql).unwrap();
+                db.conn()
+                    .execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'before')",
+                        params![migration.version],
+                    )
+                    .unwrap();
+            }
+            // Populated with the claim and status a real backlog would carry.
+            db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','in_progress','before','before','before','before')",[]).unwrap();
+            db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-010.md',10,'hash','completed','before','before','before','before')",[]).unwrap();
+            db.run_migrations().unwrap();
+            db
+        };
+        let first = build();
+        let second = build();
+        assert_eq!(snapshot(&first), snapshot(&second));
+        // Existing rows keep their status and gain a NULL suffix, never a
+        // fabricated one.
+        let statuses: Vec<String> = first
+            .conn()
+            .prepare("SELECT status FROM backlog_prds ORDER BY prd_path")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(statuses, vec!["in_progress", "completed"]);
+        let suffixes: Vec<Option<String>> = first
+            .conn()
+            .prepare("SELECT prd_suffix FROM backlog_prds")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(suffixes.iter().all(Option::is_none));
+    }
+
     #[test]
     fn migration_is_idempotent() {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 11);
+        assert_eq!(first, 12);
         assert_eq!(second, 0);
     }
 
@@ -179,7 +266,7 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     }
 
     #[test]
@@ -221,7 +308,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 9);
+        assert_eq!(db.run_migrations().unwrap(), 10);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -277,7 +364,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 5);
+        assert_eq!(db.run_migrations().unwrap(), 6);
         let project: (String, String) = db
             .conn()
             .query_row(
@@ -308,7 +395,7 @@ mod tests {
                 .unwrap();
         }
         db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
-        assert_eq!(db.run_migrations().unwrap(), 4);
+        assert_eq!(db.run_migrations().unwrap(), 5);
         let preserved: String = db
             .conn()
             .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
@@ -342,7 +429,7 @@ mod tests {
         db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(3,'repo','docs/prds/PRD-009.md','pending','completed','human:alice','before')",[]).unwrap();
         db.conn().execute("INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(3,'manual_complete_override','accepted outside normal review')",[]).unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 1);
+        assert_eq!(db.run_migrations().unwrap(), 2);
 
         let rows: Vec<(i64, String, String)> = {
             let mut stmt = db

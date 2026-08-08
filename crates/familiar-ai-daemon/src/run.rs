@@ -14,12 +14,12 @@ use familiar_ai_agent::{
 };
 use familiar_ai_context::{
     ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
-    ContextRequest, ExecutionContext,
+    ContextLayout, ContextRequest, DocumentKind, ExecutionContext,
 };
 use familiar_ai_core::{
     admit_run_prd, resolve_run_prd, validate_graph, AgentAdapterKind, AgentEntryConfig, AppPaths,
     BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice, FilesystemBacklogDiscovery,
-    ScopeClassPolicyConfig, ScopeDeclarationModeConfig, ScopeFileClassName,
+    ReferenceRootKind, ScopeClassPolicyConfig, ScopeDeclarationModeConfig, ScopeFileClassName,
 };
 use familiar_ai_review::{
     compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
@@ -179,10 +179,15 @@ fn execute_tracked_inner(
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
+    // Context compilation follows the repository's declared layout: containment
+    // against its active PRD directory, and only the reference roots it
+    // declares. An undescribed repository keeps today's roots untouched.
+    let layout = context_layout(config, &current);
     let context = ContextCompiler::new()
         .compile(ContextRequest {
             repository: &current,
             prd: prd_path,
+            layout: Some(&layout),
         })
         .map_err(RunError::Context)?;
     let context = match config.execution_context.hard_ceiling_tokens {
@@ -220,13 +225,17 @@ fn execute_tracked_inner(
         &paths.data_dir,
         &id,
     )?;
-    let discovery = FilesystemBacklogDiscovery;
+    let discovery = FilesystemBacklogDiscovery::with_profile(config.repository_profile(&current));
     let repository = discovery
         .resolve(&current)
         .map_err(|e| RunError::Config(e.to_string()))?;
-    let discovered = discovery
+    let discovery_outcome = discovery
         .discover(&repository)
         .map_err(|e| RunError::Config(e.to_string()))?;
+    if let Some(report) = discovery_outcome.conflict_report() {
+        eprintln!("run: refusing conflicting identities: {report}");
+    }
+    let discovered = discovery_outcome.prds;
     validate_graph(&discovered).map_err(|e| RunError::Config(e.to_string()))?;
     let target = resolve_run_prd(&repository, &discovered, prd_path)
         .map_err(|e| RunError::Config(e.to_string()))?;
@@ -236,7 +245,8 @@ fn execute_tracked_inner(
     admit_run_prd(&snapshot, &target).map_err(|e| RunError::Config(e.to_string()))?;
     let claim_discovered = discovery
         .discover(&repository)
-        .map_err(|e| RunError::Config(e.to_string()))?;
+        .map_err(|e| RunError::Config(e.to_string()))?
+        .prds;
     validate_graph(&claim_discovered).map_err(|e| RunError::Config(e.to_string()))?;
     let claim_target = resolve_run_prd(&repository, &claim_discovered, prd_path)
         .map_err(|e| RunError::Config(e.to_string()))?;
@@ -1161,6 +1171,36 @@ pub fn calculate_cost(
     (Some(cost), rates, "")
 }
 
+/// Translate a repository's declared entry into a context layout. Absent entry,
+/// absent directories, or absent reference roots each fall back to today's
+/// canonical values.
+fn context_layout(config: &Config, worktree: &std::path::Path) -> ContextLayout {
+    let Some(entry) = config.repository_entry(worktree) else {
+        return ContextLayout::default();
+    };
+    let reference_roots: Vec<_> = entry
+        .reference_roots
+        .iter()
+        .map(|root| {
+            let kind = match root.kind {
+                ReferenceRootKind::Prd => DocumentKind::Prd,
+                ReferenceRootKind::Adr => DocumentKind::Adr,
+                ReferenceRootKind::Contract => DocumentKind::Contract,
+                ReferenceRootKind::Supporting => DocumentKind::Supporting,
+            };
+            (root.prefix.trim_end_matches('/').to_owned(), kind)
+        })
+        .collect();
+    ContextLayout {
+        prd_root: entry.profile().active_dir,
+        reference_roots: if reference_roots.is_empty() {
+            ContextLayout::default().reference_roots
+        } else {
+            reference_roots
+        },
+    }
+}
+
 pub(crate) fn new_id() -> String {
     format!(
         "{:020}-{:010}-{:06}",
@@ -1184,6 +1224,7 @@ pub fn build_prompt(repository_root: &Path, supplied_path: &Path) -> Result<Stri
         .compile(ContextRequest {
             repository: repository_root,
             prd: &supplied,
+            layout: None,
         })
         .map_err(RunError::Context)?;
     Ok(render_prompt(&context))
@@ -1421,6 +1462,7 @@ mod tests {
             .compile(ContextRequest {
                 repository: &repository,
                 prd: &prd,
+                layout: None,
             })
             .unwrap();
         let ceiling = complete.prd.estimated_tokens;

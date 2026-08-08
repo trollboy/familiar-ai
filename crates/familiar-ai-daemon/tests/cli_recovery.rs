@@ -20,8 +20,13 @@ fn claimed_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     )
     .unwrap();
     let database = repo.path().join("state.db");
-    let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
-    let discovered = FilesystemBacklogDiscovery.discover(&identity).unwrap();
+    let identity = FilesystemBacklogDiscovery::default()
+        .resolve(repo.path())
+        .unwrap();
+    let discovered = FilesystemBacklogDiscovery::default()
+        .discover(&identity)
+        .unwrap()
+        .prds;
     let mut db = Database::open(&database).unwrap();
     db.run_migrations().unwrap();
     let mut store = SqliteBacklogRepository::new(db.conn_mut());

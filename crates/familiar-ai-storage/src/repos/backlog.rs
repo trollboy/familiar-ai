@@ -597,7 +597,7 @@ fn reconcile(
         } else {
             BacklogStatus::Pending
         };
-        tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,?6,?5,?5,NULL,?5,?5) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.content_hash,now,seed.as_str()]).map_err(storage)?;
+        tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,prd_suffix,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?7,?4,?6,?5,?5,NULL,?5,?5) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,prd_suffix=excluded.prd_suffix,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.content_hash,now,seed.as_str(),suffix_param(prd)]).map_err(storage)?;
         if prd.location.is_archived() {
             correct_archived_status(tx, &repository.key, prd, now)?;
         }
@@ -607,6 +607,21 @@ fn reconcile(
 
 fn storage(error: rusqlite::Error) -> BacklogStoreError {
     BacklogStoreError::Storage(error.to_string())
+}
+
+/// The stored suffix for a PRD: `NULL` for every canonical identity, which is
+/// what every pre-migration row already holds.
+fn suffix_param(prd: &DiscoveredPrd) -> Option<String> {
+    prd.id.suffix().map(String::from)
+}
+
+/// Rebuild an identity from its persisted parts, ignoring a stored suffix the
+/// identity space cannot represent rather than fabricating one.
+fn identity_from_row(number: u64, suffix: Option<&str>) -> PrdId {
+    suffix
+        .and_then(|value| value.chars().next())
+        .and_then(|letter| PrdId::with_suffix(number, letter))
+        .unwrap_or_else(|| PrdId::new(number))
 }
 
 fn read_entry(
@@ -693,12 +708,12 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
             return Err(BacklogStoreError::EmptyActor);
         }
         let tx = self.connection.transaction().map_err(storage)?;
-        let row: Option<(u64, String, String)> = tx.query_row(
-            "SELECT prd_number, content_hash, status FROM backlog_prds WHERE repository_key = ?1 AND prd_path = ?2",
+        let row: Option<(u64, Option<String>, String, String)> = tx.query_row(
+            "SELECT prd_number, prd_suffix, content_hash, status FROM backlog_prds WHERE repository_key = ?1 AND prd_path = ?2",
             params![repository.key, path.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).optional().map_err(storage)?;
-        let (number, content_hash, current_text) =
+        let (number, suffix, content_hash, current_text) =
             row.ok_or_else(|| BacklogStoreError::NotFound(path.clone()))?;
         let current = BacklogStatus::parse(&current_text)?;
         if current != expected {
@@ -727,15 +742,17 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
             ).map_err(storage)?;
         }
         tx.commit().map_err(storage)?;
+        let identity = identity_from_row(number, suffix.as_deref());
         Ok(BacklogEntry {
             prd: DiscoveredPrd {
-                id: PrdId::new(number),
+                id: identity.clone(),
                 number,
                 path: path.clone(),
                 title: String::new(),
                 dependencies: Vec::new(),
                 content_hash,
                 location: PrdLocation::from_repository_path(path),
+                display: identity.to_string(),
             },
             status: next,
         })
@@ -761,6 +778,7 @@ mod tests {
             dependencies: vec![],
             content_hash: "abc".into(),
             location: PrdLocation::Active,
+            display: String::new(),
         }
     }
     fn repo() -> RepositoryIdentity {
@@ -843,6 +861,7 @@ mod tests {
             dependencies: vec![],
             content_hash: "abc".into(),
             location: PrdLocation::Archived,
+            display: String::new(),
         }
     }
 
@@ -964,6 +983,122 @@ mod tests {
             storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap()[0].status,
             BacklogStatus::InProgress
         );
+    }
+
+    /// PRD-025 criterion 2: a suffixed identity round-trips through persistence,
+    /// and SQL ordering agrees with the domain order for a fixture interleaving
+    /// suffixed and unsuffixed identities.
+    #[test]
+    fn suffixed_identities_round_trip_and_sql_order_matches_domain_order() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let prd = |number: u64, suffix: Option<char>, name: &str| DiscoveredPrd {
+            id: suffix
+                .and_then(|c| PrdId::with_suffix(number, c))
+                .unwrap_or_else(|| PrdId::new(number)),
+            number,
+            path: RepositoryPath::new(format!("docs/prd/todo/{name}")).unwrap(),
+            title: name.into(),
+            dependencies: vec![],
+            content_hash: format!("{number:064x}"),
+            location: PrdLocation::Active,
+            display: format!(
+                "PRD {number}{}",
+                suffix.map(String::from).unwrap_or_default()
+            ),
+        };
+        // Deliberately inserted out of order.
+        let discovered = vec![
+            prd(140, None, "0140-next.md"),
+            prd(139, None, "0139-umbrella.md"),
+            prd(139, Some('b'), "0139b-second.md"),
+            prd(139, Some('a'), "0139a-first.md"),
+        ];
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage
+            .reconcile_and_snapshot(&repo(), &discovered)
+            .unwrap();
+
+        // The domain order: children before their umbrella, umbrella before 140.
+        let mut domain: Vec<_> = discovered.iter().map(|p| p.id.clone()).collect();
+        domain.sort();
+        assert_eq!(
+            domain.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["PRD-139a", "PRD-139b", "PRD-139", "PRD-140"]
+        );
+
+        // The same order, expressed in SQL against the persisted rows.
+        let sql: Vec<String> = db
+            .conn_mut()
+            .prepare(
+                "SELECT prd_number, prd_suffix FROM backlog_prds \
+                 ORDER BY prd_number, prd_suffix IS NULL, prd_suffix",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                let number: u64 = row.get(0)?;
+                let suffix: Option<String> = row.get(1)?;
+                Ok(identity_from_row(number, suffix.as_deref()).to_string())
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            sql,
+            domain.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    }
+
+    /// PRD-025 criterion 2: a suffixed identity survives a claim transition —
+    /// the leg between selection and execution — without losing its suffix.
+    #[test]
+    fn a_suffixed_identity_survives_a_claim_transition() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let child = DiscoveredPrd {
+            id: PrdId::with_suffix(139, 'a').unwrap(),
+            number: 139,
+            path: RepositoryPath::new("docs/prd/todo/0139a-first.md").unwrap(),
+            title: "First".into(),
+            dependencies: vec![],
+            content_hash: "abc".into(),
+            location: PrdLocation::Active,
+            display: "PRD 0139a".into(),
+        };
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage
+            .reconcile_and_snapshot(&repo(), &[child.clone()])
+            .unwrap();
+        let claimed = storage
+            .transition(
+                &repo(),
+                &child.path,
+                BacklogStatus::Pending,
+                BacklogStatus::InProgress,
+                "system:familiar-ai-run:1",
+            )
+            .unwrap();
+        // The identity read back out of storage is the full identity, not the
+        // bare number.
+        assert_eq!(claimed.prd.id, PrdId::with_suffix(139, 'a').unwrap());
+        assert_eq!(claimed.prd.id.suffix(), Some('a'));
+        assert_eq!(claimed.prd.display, "PRD-139a");
+        assert_eq!(claimed.status, BacklogStatus::InProgress);
+    }
+
+    /// Canonical rows carry no suffix, exactly as every pre-migration row does.
+    #[test]
+    fn canonical_identities_persist_without_a_suffix() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&repo(), &[prd()])
+            .unwrap();
+        let suffix: Option<String> = db
+            .conn_mut()
+            .query_row("SELECT prd_suffix FROM backlog_prds", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(suffix, None);
     }
 
     #[test]
@@ -1194,6 +1329,7 @@ mod tests {
             dependencies: vec![PrdId::new(9)],
             content_hash: "def".into(),
             location: PrdLocation::Active,
+            display: String::new(),
         }
     }
 
@@ -1309,6 +1445,7 @@ mod tests {
             dependencies: vec![],
             content_hash: "zzz".into(),
             location: PrdLocation::Active,
+            display: String::new(),
         };
         assert!(matches!(
             storage.record_complete(

@@ -194,7 +194,9 @@ pub fn drive(
     let current = std::env::current_dir().map_err(|error| {
         DriveError::Config(format!("cannot resolve current directory: {error}"))
     })?;
-    let discovery = FilesystemBacklogDiscovery;
+    // The operator's configuration selects the grammar; a repository nobody
+    // described resolves to canonical at the canonical locations.
+    let discovery = FilesystemBacklogDiscovery::with_profile(config.repository_profile(&current));
     let repository = discovery
         .resolve(&current)
         .map_err(|error| DriveError::Config(error.to_string()))?;
@@ -232,6 +234,10 @@ pub fn drive(
                 break DriveTermination::StorageFailure;
             }
         };
+        if let Some(report) = discovered.conflict_report() {
+            eprintln!("drive: refusing conflicting identities: {report}");
+        }
+        let discovered = discovered.prds;
         if let Err(error) = validate_graph(&discovered) {
             eprintln!("drive: backlog graph invalid: {error}");
             break DriveTermination::StorageFailure;

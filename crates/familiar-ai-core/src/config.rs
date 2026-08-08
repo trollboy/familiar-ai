@@ -5,6 +5,7 @@ use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
 use serde::{Deserialize, Serialize};
 
+use crate::backlog::{BacklogProfile, BacklogProfileKind, ACTIVE_PRD_DIR, ARCHIVED_PRD_DIR};
 use crate::FamiliarError;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -41,6 +42,31 @@ pub struct Config {
     pub agents: Option<AgentsConfig>,
     #[serde(default)]
     pub driver: DriverConfig,
+    /// Operator-declared repositories, keyed by absolute worktree path. A
+    /// repository with no entry resolves to `canonical` at the canonical
+    /// locations — existing behavior, unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repositories: BTreeMap<String, RepositoryEntryConfig>,
+}
+
+impl Config {
+    /// The profile governing `worktree`, defaulting to canonical when the
+    /// operator has not described this repository.
+    pub fn repository_profile(&self, worktree: &Path) -> BacklogProfile {
+        self.repository_entry(worktree)
+            .map(RepositoryEntryConfig::profile)
+            .unwrap_or_default()
+    }
+
+    /// The declared entry for `worktree`, matched by canonicalized path so a
+    /// symlinked spelling still resolves.
+    pub fn repository_entry(&self, worktree: &Path) -> Option<&RepositoryEntryConfig> {
+        let target = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        self.repositories.iter().find_map(|(key, entry)| {
+            let candidate = std::fs::canonicalize(key).unwrap_or_else(|_| PathBuf::from(key));
+            (candidate == target).then_some(entry)
+        })
+    }
 }
 
 /// The unattended driver's budget warrant. Every ceiling is optional
@@ -743,6 +769,144 @@ pub struct ExecutionContextConfig {
     pub hard_ceiling_tokens: Option<u64>,
 }
 
+/// The closed set of shipped backlog grammars. An unrecognized name fails at
+/// configuration load: profiles are code, not configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BacklogProfileName {
+    #[default]
+    Canonical,
+    NumberedSlug,
+}
+
+impl BacklogProfileName {
+    pub fn kind(self) -> BacklogProfileKind {
+        match self {
+            Self::Canonical => BacklogProfileKind::Canonical,
+            Self::NumberedSlug => BacklogProfileKind::NumberedSlug,
+        }
+    }
+}
+
+/// The kind of reference document a declared root contains. Reference roots are
+/// read-only context data; declaring one grants no execution authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ReferenceRootKind {
+    Prd,
+    Adr,
+    Contract,
+    Supporting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceRootConfig {
+    pub prefix: String,
+    pub kind: ReferenceRootKind,
+}
+
+/// One operator-declared repository: which grammar parses it, where its PRDs
+/// live, and which roots its PRDs may reference. Binding is by absolute
+/// worktree path in the operator's configuration — the target repository has no
+/// say in how it is parsed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryEntryConfig {
+    #[serde(default)]
+    pub profile: BacklogProfileName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_roots: Vec<ReferenceRootConfig>,
+}
+
+impl RepositoryEntryConfig {
+    /// Resolve to a backlog profile, applying canonical defaults where the
+    /// entry is silent. Assumes `validate_repositories` has already run.
+    pub fn profile(&self) -> BacklogProfile {
+        BacklogProfile {
+            kind: self.profile.kind(),
+            active_dir: self
+                .active_dir
+                .clone()
+                .unwrap_or_else(|| ACTIVE_PRD_DIR.to_owned()),
+            archived_dir: self
+                .archived_dir
+                .clone()
+                .unwrap_or_else(|| ARCHIVED_PRD_DIR.to_owned()),
+        }
+    }
+}
+
+/// A repository-relative directory that is safe to join onto a worktree.
+fn validate_relative_dir(label: &str, worktree: &str, value: &str) -> crate::Result<()> {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(FamiliarError::Config(format!(
+            "repository '{worktree}': {label} '{value}' must be a repository-relative path \
+             without traversal"
+        )));
+    }
+    Ok(())
+}
+
+/// Fail-closed validation of every declared repository, performed at
+/// configuration load so no repository is ever accessed under an invalid
+/// description. Resolution is by canonicalized worktree path; two entries
+/// resolving to one worktree is refused rather than silently ordered.
+pub fn validate_repositories(
+    repositories: &BTreeMap<String, RepositoryEntryConfig>,
+) -> crate::Result<()> {
+    let mut resolved: BTreeMap<PathBuf, &str> = BTreeMap::new();
+    for (worktree, entry) in repositories {
+        if !Path::new(worktree).is_absolute() {
+            return Err(FamiliarError::Config(format!(
+                "repository '{worktree}': key must be an absolute worktree path"
+            )));
+        }
+        let active = entry
+            .active_dir
+            .clone()
+            .unwrap_or_else(|| ACTIVE_PRD_DIR.to_owned());
+        let archived = entry
+            .archived_dir
+            .clone()
+            .unwrap_or_else(|| ARCHIVED_PRD_DIR.to_owned());
+        validate_relative_dir("active_dir", worktree, &active)?;
+        validate_relative_dir("archived_dir", worktree, &archived)?;
+        if active == archived {
+            return Err(FamiliarError::Config(format!(
+                "repository '{worktree}': active_dir and archived_dir must differ (both '{active}')"
+            )));
+        }
+        for root in &entry.reference_roots {
+            validate_relative_dir(
+                "reference_roots prefix",
+                worktree,
+                root.prefix.trim_end_matches('/'),
+            )?;
+        }
+        // Canonicalization collapses symlinked spellings of one worktree, which
+        // is exactly the case a duplicate entry would otherwise hide.
+        let key = std::fs::canonicalize(worktree).unwrap_or_else(|_| PathBuf::from(worktree));
+        if let Some(previous) = resolved.insert(key.clone(), worktree) {
+            return Err(FamiliarError::Config(format!(
+                "repositories '{previous}' and '{worktree}' resolve to the same worktree {}",
+                key.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionHistoryConfig {
     #[serde(default)]
@@ -1214,9 +1378,11 @@ impl Config {
 
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
 
-        figment
+        let config: Config = figment
             .extract()
-            .map_err(|e| FamiliarError::Config(e.to_string()))
+            .map_err(|e| FamiliarError::Config(e.to_string()))?;
+        validate_repositories(&config.repositories)?;
+        Ok(config)
     }
 
     pub fn load_with_overrides(
@@ -1235,9 +1401,11 @@ impl Config {
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
         figment = figment.merge(overrides);
 
-        figment
+        let config: Config = figment
             .extract()
-            .map_err(|e| FamiliarError::Config(e.to_string()))
+            .map_err(|e| FamiliarError::Config(e.to_string()))?;
+        validate_repositories(&config.repositories)?;
+        Ok(config)
     }
 }
 
@@ -1261,6 +1429,106 @@ mod tests {
         assert_eq!(config.execution_context.hard_ceiling_tokens, None);
         assert!(!config.review.enabled);
         assert_eq!(config.review.max_review_attempts, 3);
+    }
+
+    fn entry(profile: BacklogProfileName, active: &str, archived: &str) -> RepositoryEntryConfig {
+        RepositoryEntryConfig {
+            profile,
+            active_dir: Some(active.into()),
+            archived_dir: Some(archived.into()),
+            reference_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn repository_validation_refuses_every_invalid_shape() {
+        let case = |key: &str, entry: RepositoryEntryConfig| {
+            let mut map = BTreeMap::new();
+            map.insert(key.to_string(), entry);
+            validate_repositories(&map)
+        };
+        // Relative keys: binding is by absolute worktree path.
+        assert!(case(
+            "relative/path",
+            entry(BacklogProfileName::Canonical, "docs/prds", "docs/prds/done")
+        )
+        .is_err());
+        // Traversal and absolute directories.
+        assert!(case(
+            "/repo",
+            entry(
+                BacklogProfileName::NumberedSlug,
+                "../escape",
+                "docs/prd/done"
+            )
+        )
+        .is_err());
+        assert!(case(
+            "/repo",
+            entry(BacklogProfileName::NumberedSlug, "/abs", "docs/prd/done")
+        )
+        .is_err());
+        // Identical active and archived directories.
+        assert!(case(
+            "/repo",
+            entry(BacklogProfileName::NumberedSlug, "docs/prd", "docs/prd")
+        )
+        .is_err());
+        // A valid entry passes.
+        assert!(case(
+            "/repo",
+            entry(
+                BacklogProfileName::NumberedSlug,
+                "docs/prd/todo",
+                "docs/prd/done"
+            )
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn two_entries_resolving_to_one_worktree_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("repo");
+        std::fs::create_dir(&real).unwrap();
+        let link = temp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(unix)]
+        {
+            let mut map = BTreeMap::new();
+            map.insert(
+                real.to_string_lossy().into_owned(),
+                entry(BacklogProfileName::Canonical, "docs/prds", "docs/prds/done"),
+            );
+            map.insert(
+                link.to_string_lossy().into_owned(),
+                entry(BacklogProfileName::Canonical, "docs/prds", "docs/prds/done"),
+            );
+            let error = validate_repositories(&map).unwrap_err().to_string();
+            assert!(
+                error.contains("resolve to the same worktree"),
+                "unexpected: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_profile_name_fails_at_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "[repositories.\"/repo\"]\nprofile = \"invented\"\n").unwrap();
+        assert!(Config::load(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn an_undescribed_repository_resolves_to_the_canonical_profile() {
+        let config = Config::default();
+        let profile = config.repository_profile(Path::new("/anywhere"));
+        assert_eq!(profile, BacklogProfile::default());
+        assert_eq!(profile.kind, BacklogProfileKind::Canonical);
+        assert_eq!(profile.active_dir, "docs/prds");
+        assert_eq!(profile.archived_dir, "docs/prds/done");
     }
 
     #[test]

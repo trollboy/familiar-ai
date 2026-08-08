@@ -23,8 +23,13 @@ fn first_next_applies_manifest_then_is_silent_and_idempotent() {
         "# PRD-010: Current\n",
     )
     .unwrap();
-    let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
-    let found = FilesystemBacklogDiscovery.discover(&identity).unwrap();
+    let identity = FilesystemBacklogDiscovery::default()
+        .resolve(repo.path())
+        .unwrap();
+    let found = FilesystemBacklogDiscovery::default()
+        .discover(&identity)
+        .unwrap()
+        .prds;
     let hash = &found.iter().find(|p| p.number == 1).unwrap().content_hash;
     fs::write(
         repo.path().join(".familiar/backlog-bootstrap.toml"),
