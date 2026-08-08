@@ -1,7 +1,7 @@
 use familiar_ai_core::{
     validate_recovery_attribution, BacklogEntry, BacklogRecoveryAction, BacklogStatus,
-    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, PrdId, RepositoryIdentity,
-    RepositoryPath,
+    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, PrdId, PrdLocation, RepositoryIdentity,
+    RepositoryPath, ARCHIVED_LOCATION_ACTOR,
 };
 use familiar_ai_review::{
     FindingStatus, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewFinding, ReviewRequest,
@@ -589,7 +589,18 @@ fn reconcile(
 ) -> Result<(), BacklogStoreError> {
     tx.execute("UPDATE backlog_prds SET missing_since=COALESCE(missing_since,?2),updated_at=CASE WHEN missing_since IS NULL THEN ?2 ELSE updated_at END WHERE repository_key=?1",params![repository.key,now]).map_err(storage)?;
     for prd in discovered {
-        tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,'pending',?5,?5,NULL,?5,?5) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.content_hash,now]).map_err(storage)?;
+        // An archived PRD is completed by virtue of its location, so it is
+        // seeded completed rather than pending. A fresh database over an
+        // archived repository therefore needs no bootstrap manifest.
+        let seed = if prd.location.is_archived() {
+            BacklogStatus::Completed
+        } else {
+            BacklogStatus::Pending
+        };
+        tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,?6,?5,?5,NULL,?5,?5) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.content_hash,now,seed.as_str()]).map_err(storage)?;
+        if prd.location.is_archived() {
+            correct_archived_status(tx, &repository.key, prd, now)?;
+        }
     }
     Ok(())
 }
@@ -613,6 +624,46 @@ fn read_entry(
     })
 }
 
+/// Force a stored status to agree with an archived PRD's location, recording
+/// the correction as a visible status event under a system actor. A row that
+/// already agrees is left untouched, so repeated reconciliation appends no
+/// duplicate events.
+fn correct_archived_status(
+    tx: &Transaction<'_>,
+    repository_key: &str,
+    prd: &DiscoveredPrd,
+    now: &str,
+) -> Result<(), BacklogStoreError> {
+    let stored: String = tx
+        .query_row(
+            "SELECT status FROM backlog_prds WHERE repository_key = ?1 AND prd_path = ?2",
+            params![repository_key, prd.path.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    let stored = BacklogStatus::parse(&stored)?;
+    if stored == BacklogStatus::Completed {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE backlog_prds SET status = 'completed', updated_at = ?3 WHERE repository_key = ?1 AND prd_path = ?2",
+        params![repository_key, prd.path.as_str(), now],
+    )
+    .map_err(storage)?;
+    tx.execute(
+        "INSERT INTO backlog_status_events (repository_key, prd_path, old_status, new_status, actor, changed_at) VALUES (?1, ?2, ?3, 'completed', ?4, ?5)",
+        params![
+            repository_key,
+            prd.path.as_str(),
+            stored.as_str(),
+            ARCHIVED_LOCATION_ACTOR,
+            now
+        ],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
 impl BacklogStatusStore for SqliteBacklogRepository<'_> {
     fn reconcile_and_snapshot(
         &mut self,
@@ -621,22 +672,7 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
     ) -> Result<Vec<BacklogEntry>, BacklogStoreError> {
         let tx = self.connection.transaction().map_err(storage)?;
         let now = chrono::Utc::now().to_rfc3339();
-        tx.execute(
-            "UPDATE backlog_prds SET missing_since = COALESCE(missing_since, ?2), updated_at = CASE WHEN missing_since IS NULL THEN ?2 ELSE updated_at END WHERE repository_key = ?1",
-            params![repository.key, now],
-        ).map_err(storage)?;
-        for prd in discovered {
-            tx.execute(
-                "INSERT INTO backlog_prds (repository_key, prd_path, prd_number, content_hash, status, discovered_at, last_seen_at, missing_since, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5, NULL, ?5, ?5)
-                 ON CONFLICT(repository_key, prd_path) DO UPDATE SET
-                    prd_number = excluded.prd_number,
-                    content_hash = excluded.content_hash,
-                    last_seen_at = excluded.last_seen_at,
-                    missing_since = NULL",
-                params![repository.key, prd.path.as_str(), prd.number.to_string(), prd.content_hash, now],
-            ).map_err(storage)?;
-        }
+        reconcile(&tx, repository, discovered, &now)?;
         let snapshot = discovered
             .iter()
             .map(|prd| read_entry(&tx, &repository.key, prd))
@@ -699,6 +735,7 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
                 title: String::new(),
                 dependencies: Vec::new(),
                 content_hash,
+                location: PrdLocation::from_repository_path(path),
             },
             status: next,
         })
@@ -723,6 +760,7 @@ mod tests {
             title: "Nine".into(),
             dependencies: vec![],
             content_hash: "abc".into(),
+            location: PrdLocation::Active,
         }
     }
     fn repo() -> RepositoryIdentity {
@@ -796,6 +834,138 @@ mod tests {
             remediation_attempts: Vec::new(),
         }
     }
+    fn archived_prd() -> DiscoveredPrd {
+        DiscoveredPrd {
+            id: PrdId::new(9),
+            number: 9,
+            path: RepositoryPath::new("docs/prds/done/PRD-009.md").unwrap(),
+            title: "Nine".into(),
+            dependencies: vec![],
+            content_hash: "abc".into(),
+            location: PrdLocation::Archived,
+        }
+    }
+
+    fn status_events(db: &mut Database, path: &str) -> Vec<(String, String, String)> {
+        db.conn_mut()
+            .prepare(
+                "SELECT old_status,new_status,actor FROM backlog_status_events WHERE prd_path=?1 ORDER BY event_id",
+            )
+            .unwrap()
+            .query_map(params![path], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_records_archived_work_completed_without_a_bootstrap() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        // Location alone is the completion record: no manifest, no transition.
+        assert_eq!(
+            storage
+                .reconcile_and_snapshot(&repo(), &[archived_prd()])
+                .unwrap()[0]
+                .status,
+            BacklogStatus::Completed
+        );
+        // Seeding is not a correction, so it produces no status event.
+        assert!(status_events(&mut db, archived_prd().path.as_str()).is_empty());
+    }
+
+    #[test]
+    fn a_stored_status_disagreeing_with_location_is_corrected_visibly_and_once() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        // The PRD is tracked pending while still active, then archived.
+        let mut still_active = archived_prd();
+        still_active.location = PrdLocation::Active;
+        storage
+            .reconcile_and_snapshot(&repo(), &[still_active])
+            .unwrap();
+        assert_eq!(
+            storage
+                .reconcile_and_snapshot(&repo(), &[archived_prd()])
+                .unwrap()[0]
+                .status,
+            BacklogStatus::Completed
+        );
+        assert_eq!(
+            status_events(&mut db, archived_prd().path.as_str()),
+            vec![(
+                "pending".to_string(),
+                "completed".to_string(),
+                ARCHIVED_LOCATION_ACTOR.to_string()
+            )]
+        );
+        // Reconciling again must not append a second correction.
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage
+            .reconcile_and_snapshot(&repo(), &[archived_prd()])
+            .unwrap();
+        assert_eq!(
+            status_events(&mut db, archived_prd().path.as_str()).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn archiving_a_tracked_prd_retires_its_active_row_without_losing_status() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        // Archiving changes the path, so the active row is a different row. It
+        // must be retired as missing rather than linger as selectable work.
+        storage
+            .reconcile_and_snapshot(&repo(), &[archived_prd()])
+            .unwrap();
+        let missing: Option<String> = db
+            .conn_mut()
+            .query_row(
+                "SELECT missing_since FROM backlog_prds WHERE prd_path=?1",
+                params![prd().path.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(missing.is_some(), "the vacated active row must be missing");
+        let archived_status: String = db
+            .conn_mut()
+            .query_row(
+                "SELECT status FROM backlog_prds WHERE prd_path=?1",
+                params![archived_prd().path.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived_status, "completed");
+    }
+
+    #[test]
+    fn an_active_prds_tracked_status_is_never_overridden_by_location() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        storage
+            .transition(
+                &repo(),
+                &prd().path,
+                BacklogStatus::Pending,
+                BacklogStatus::InProgress,
+                "test",
+            )
+            .unwrap();
+        assert_eq!(
+            storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap()[0].status,
+            BacklogStatus::InProgress
+        );
+    }
+
     #[test]
     fn reconcile_preserves_status_and_transitions_are_checked() {
         let mut db = Database::open_in_memory().unwrap();
@@ -1023,6 +1193,7 @@ mod tests {
             title: "Ten".into(),
             dependencies: vec![PrdId::new(9)],
             content_hash: "def".into(),
+            location: PrdLocation::Active,
         }
     }
 
@@ -1137,6 +1308,7 @@ mod tests {
             title: "Unknown".into(),
             dependencies: vec![],
             content_hash: "zzz".into(),
+            location: PrdLocation::Active,
         };
         assert!(matches!(
             storage.record_complete(

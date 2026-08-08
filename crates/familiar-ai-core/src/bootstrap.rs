@@ -1,4 +1,4 @@
-use crate::{BacklogStatus, DiscoveredPrd, PrdId, RepositoryIdentity, RepositoryPath};
+use crate::{BacklogStatus, DiscoveredPrd, PrdId, PrdLocation, RepositoryIdentity, RepositoryPath};
 use ring::digest::{digest, SHA256};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,8 +114,15 @@ pub fn load_manifest(
             "completed must not be empty".into(),
         ));
     }
-    let by_path: BTreeMap<&str, &DiscoveredPrd> =
-        discovered.iter().map(|p| (p.path.as_str(), p)).collect();
+    // The manifest declares historical completion for *active* PRDs. Archived
+    // PRDs are already completed by location and need no manifest entry, so
+    // admitting them here would let a manifest path that previously errored
+    // start resolving the moment its file was archived.
+    let by_path: BTreeMap<&str, &DiscoveredPrd> = discovered
+        .iter()
+        .filter(|p| p.location != PrdLocation::Archived)
+        .map(|p| (p.path.as_str(), p))
+        .collect();
     let mut seen_paths = BTreeSet::new();
     let mut seen_ids = BTreeSet::new();
     let mut items = Vec::new();
@@ -269,12 +276,37 @@ mod tests {
             title: "One".into(),
             dependencies: vec![],
             content_hash: hash.clone(),
+            location: PrdLocation::Active,
         };
         let repo = RepositoryIdentity {
             worktree: dir.path().into(),
             key: "repo".into(),
         };
         (dir, repo, vec![prd])
+    }
+
+    /// PRD-023 criterion 6: the manifest keeps working exactly as before, which
+    /// means it still resolves only *active* PRDs. Archived work is completed by
+    /// location and must not become manifest-eligible just because discovery
+    /// now returns it.
+    #[test]
+    fn a_manifest_never_resolves_archived_work() {
+        let (dir, repo, mut discovered) = fixture();
+        let hash = discovered[0].content_hash.clone();
+        // Same PRD, now archived: the manifest path no longer matches anything.
+        discovered[0].location = PrdLocation::Archived;
+        discovered[0].path = RepositoryPath::new("docs/prds/done/PRD-001.md").unwrap();
+        fs::write(
+            dir.path().join(BOOTSTRAP_MANIFEST_PATH),
+            format!("version=1\n[[completed]]\npath='docs/prds/PRD-001.md'\nsha256='{hash}'\n"),
+        )
+        .unwrap();
+        let error = load_manifest(&repo, &discovered).unwrap_err();
+        assert!(
+            matches!(&error, BootstrapError::ManifestInvalid(message)
+                if message.contains("path is not an active discovered PRD")),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

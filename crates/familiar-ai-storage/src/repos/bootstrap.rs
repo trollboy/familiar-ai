@@ -326,6 +326,8 @@ mod tests {
             key: "bootstrap-repo".into(),
         }
     }
+    use familiar_ai_core::PrdLocation;
+
     fn prd(n: u64) -> DiscoveredPrd {
         DiscoveredPrd {
             id: PrdId::new(n),
@@ -334,6 +336,7 @@ mod tests {
             title: n.to_string(),
             dependencies: vec![],
             content_hash: format!("{n:064x}"),
+            location: PrdLocation::Active,
         }
     }
     fn manifest(prds: &[DiscoveredPrd]) -> BootstrapManifest {
