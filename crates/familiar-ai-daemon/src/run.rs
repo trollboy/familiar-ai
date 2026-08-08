@@ -18,8 +18,9 @@ use familiar_ai_context::{
 };
 use familiar_ai_core::{
     admit_run_prd, resolve_run_prd, validate_graph, AgentAdapterKind, AgentEntryConfig, AppPaths,
-    BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice, FilesystemBacklogDiscovery,
-    ReferenceRootKind, ScopeClassPolicyConfig, ScopeDeclarationModeConfig, ScopeFileClassName,
+    BacklogDiscovery, BacklogStatusStore, Config, ConfigScope, ExecutionPrice,
+    FilesystemBacklogDiscovery, ReferenceRootKind, ScopeClassPolicyConfig,
+    ScopeDeclarationModeConfig, ScopeFileClassName,
 };
 use familiar_ai_review::{
     compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
@@ -165,10 +166,26 @@ pub fn execute_with_config_tracked(
 }
 
 /// What the driver observes about one attempt beyond success or failure.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct AttemptTrace {
     pub execution_id: Option<String>,
     pub retained_reason: Option<&'static str>,
+    /// Which scope produced the review policy this attempt ran under, so a
+    /// verdict is always attributable to the configuration behind it.
+    pub review_scope: ConfigScope,
+    /// Which scope produced the compiled-prompt ceiling.
+    pub execution_context_scope: ConfigScope,
+}
+
+impl Default for AttemptTrace {
+    fn default() -> Self {
+        Self {
+            execution_id: None,
+            retained_reason: None,
+            review_scope: ConfigScope::Global,
+            execution_context_scope: ConfigScope::Global,
+        }
+    }
 }
 
 fn execute_tracked_inner(
@@ -179,6 +196,14 @@ fn execute_tracked_inner(
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
+    // Resolve the repository-shaped sections once, wholesale. Everything below
+    // reads the effective policy, so review verifies this repository with its
+    // own pipeline against its own paths under its own ceilings — and an
+    // undescribed repository resolves to exactly the global tree.
+    let resolved = config.resolved_for(&current);
+    trace.review_scope = resolved.review_scope;
+    trace.execution_context_scope = resolved.execution_context_scope;
+    let config = &resolved.config;
     // Context compilation follows the repository's declared layout: containment
     // against its active PRD directory, and only the reference roots it
     // declares. An undescribed repository keeps today's roots untouched.

@@ -98,14 +98,28 @@ fn render_built(out: &mut String, built: &[&DriverAttempt]) {
     for attempt in built.iter().take(MAX_LISTED_ATTEMPTS) {
         let _ = writeln!(
             out,
-            "  {}  {}  duration={}  cost={}",
+            "  {}  {}  duration={}  cost={}{}",
             attempt.prd_id,
             attempt.prd_path,
             optional_ms(attempt.duration_ms),
-            optional_cost(attempt.known_cost_microusd)
+            optional_cost(attempt.known_cost_microusd),
+            policy_suffix(attempt)
         );
     }
     render_omitted(out, built.len(), MAX_LISTED_ATTEMPTS);
+}
+
+/// Name the policy scope an attempt ran under, but only when it is not the
+/// global one — so a report for an installation that never scoped a repository
+/// is byte-identical to what it has always produced.
+fn policy_suffix(attempt: &DriverAttempt) -> String {
+    if attempt.review_scope == "global" && attempt.execution_context_scope == "global" {
+        return String::new();
+    }
+    format!(
+        "  policy=review:{},context:{}",
+        attempt.review_scope, attempt.execution_context_scope
+    )
 }
 
 fn render_stopped(db: &Database, out: &mut String, stopped: &[&DriverAttempt]) {
@@ -126,8 +140,10 @@ fn render_stopped(db: &Database, out: &mut String, stopped: &[&DriverAttempt]) {
                 });
         let _ = writeln!(
             out,
-            "  {}  {}  reason={reason}",
-            attempt.prd_id, attempt.prd_path
+            "  {}  {}  reason={reason}{}",
+            attempt.prd_id,
+            attempt.prd_path,
+            policy_suffix(attempt)
         );
         render_scope_detail(db, out, attempt);
     }
@@ -294,6 +310,68 @@ mod tests {
         ));
     }
 
+    /// PRD-026 criterion 6: an attempt that ran under a repository-scoped policy
+    /// is rendered distinguishably from one that ran under the global policy, so
+    /// a verdict is attributable to the configuration that produced it.
+    #[test]
+    fn repository_scoped_attempts_render_distinguishably_from_global_ones() {
+        let db = database();
+        let repository = seed(&db, "drive-9", r#"{"max_prds":2}"#);
+        let scoped = repository
+            .record_attempt_started(
+                "drive-9",
+                "PRD 0139a",
+                "docs/prd/todo/0139a-x.md",
+                Some("e1"),
+            )
+            .unwrap();
+        repository
+            .record_attempt_finished(
+                "drive-9",
+                scoped,
+                "completed",
+                None,
+                Some(2_500),
+                Some(1_200),
+                "repository",
+                "repository",
+            )
+            .unwrap();
+        let global = repository
+            .record_attempt_started("drive-9", "PRD-18", "docs/prds/PRD-018.md", Some("e2"))
+            .unwrap();
+        repository
+            .record_attempt_finished(
+                "drive-9",
+                global,
+                "completed",
+                None,
+                Some(1_000),
+                Some(900),
+                "global",
+                "global",
+            )
+            .unwrap();
+        repository
+            .finish_session("drive-9", "backlog_empty")
+            .unwrap();
+
+        let rendered = render(&db, Some("drive-9")).unwrap();
+        // The scoped attempt names its policy; the global one is unchanged.
+        assert!(
+            rendered.contains(
+                "  PRD 0139a  docs/prd/todo/0139a-x.md  duration=1200ms  cost=2500 micro-USD  \
+                 policy=review:repository,context:repository\n"
+            ),
+            "rendered was:\n{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("  PRD-18  docs/prds/PRD-018.md  duration=900ms  cost=1000 micro-USD\n"),
+            "rendered was:\n{rendered}"
+        );
+    }
+
     #[test]
     fn mixed_session_renders_every_section_byte_exactly() {
         let db = database();
@@ -309,6 +387,8 @@ mod tests {
                 None,
                 Some(2_500),
                 Some(1_200),
+                "global",
+                "global",
             )
             .unwrap();
         let second = repository
@@ -322,6 +402,8 @@ mod tests {
                 Some("review_disabled"),
                 None,
                 Some(900),
+                "global",
+                "global",
             )
             .unwrap();
         repository
@@ -389,7 +471,16 @@ mod tests {
                 )
                 .unwrap();
             repository
-                .record_attempt_finished("drive-3", sequence, "completed", None, cost, Some(10))
+                .record_attempt_finished(
+                    "drive-3",
+                    sequence,
+                    "completed",
+                    None,
+                    cost,
+                    Some(10),
+                    "global",
+                    "global",
+                )
                 .unwrap();
         }
         repository
@@ -429,6 +520,8 @@ mod tests {
                 Some("scope_broadened"),
                 None,
                 Some(5),
+                "global",
+                "global",
             )
             .unwrap();
         repository
@@ -491,6 +584,8 @@ mod tests {
                 Some("review_disabled"),
                 None,
                 Some(1),
+                "global",
+                "global",
             )
             .unwrap();
         repository

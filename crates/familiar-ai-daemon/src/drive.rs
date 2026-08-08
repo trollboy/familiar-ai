@@ -290,6 +290,8 @@ pub fn drive(
             retained_reason,
             cost,
             Some(duration_ms),
+            trace.review_scope.as_str(),
+            trace.execution_context_scope.as_str(),
         ) {
             eprintln!("drive: cannot record attempt outcome: {error}");
             break DriveTermination::StorageFailure;

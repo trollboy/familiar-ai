@@ -58,6 +58,53 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// The review policy governing `worktree`, and the scope it came from.
+    /// Resolution is wholesale: a declared tree replaces the global one
+    /// entirely, so the effective policy can be read from one section of one
+    /// file without computing an overlay.
+    pub fn effective_review(&self, worktree: &Path) -> (&ReviewConfig, ConfigScope) {
+        match self
+            .repository_entry(worktree)
+            .and_then(|e| e.review.as_ref())
+        {
+            Some(review) => (review, ConfigScope::Repository),
+            None => (&self.review, ConfigScope::Global),
+        }
+    }
+
+    /// The compiled-prompt ceiling governing `worktree`, resolved wholesale.
+    pub fn effective_execution_context(
+        &self,
+        worktree: &Path,
+    ) -> (&ExecutionContextConfig, ConfigScope) {
+        match self
+            .repository_entry(worktree)
+            .and_then(|e| e.execution_context.as_ref())
+        {
+            Some(context) => (context, ConfigScope::Repository),
+            None => (&self.execution_context, ConfigScope::Global),
+        }
+    }
+
+    /// This configuration as it applies inside `worktree`: the repository-shaped
+    /// sections replaced wholesale by whatever that repository declared, and the
+    /// scope each one came from. Everything else — agents, driver warrant,
+    /// database, logging, daemon — describes the installation and is carried
+    /// through untouched.
+    pub fn resolved_for(&self, worktree: &Path) -> ResolvedConfig {
+        let (review, review_scope) = self.effective_review(worktree);
+        let (execution_context, execution_context_scope) =
+            self.effective_execution_context(worktree);
+        let mut config = self.clone();
+        config.review = review.clone();
+        config.execution_context = execution_context.clone();
+        ResolvedConfig {
+            config,
+            review_scope,
+            execution_context_scope,
+        }
+    }
+
     /// The declared entry for `worktree`, matched by canonicalized path so a
     /// symlinked spelling still resolves.
     pub fn repository_entry(&self, worktree: &Path) -> Option<&RepositoryEntryConfig> {
@@ -821,6 +868,50 @@ pub struct RepositoryEntryConfig {
     pub archived_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reference_roots: Vec<ReferenceRootConfig>,
+    /// The repository-shaped review policy. Present means it *is* the review
+    /// configuration for this repository, complete; the global `[review]`
+    /// contributes no field. Absent falls back to the global tree whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewConfig>,
+    /// The repository's compiled-prompt ceiling, resolved wholesale like
+    /// `review`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<ExecutionContextConfig>,
+}
+
+/// A configuration resolved for one repository, carrying the scope each
+/// repository-shaped section came from so a verdict is attributable to the
+/// policy that produced it.
+#[derive(Debug, Clone)]
+pub struct ResolvedConfig {
+    pub config: Config,
+    pub review_scope: ConfigScope,
+    pub execution_context_scope: ConfigScope,
+}
+
+/// Which scope produced an effective configuration section. Recorded on every
+/// attempt so a verdict is always attributable to the policy behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigScope {
+    Global,
+    Repository,
+}
+
+impl ConfigScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Repository => "repository",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "global" => Some(Self::Global),
+            "repository" => Some(Self::Repository),
+            _ => None,
+        }
+    }
 }
 
 impl RepositoryEntryConfig {
@@ -864,6 +955,7 @@ fn validate_relative_dir(label: &str, worktree: &str, value: &str) -> crate::Res
 /// resolving to one worktree is refused rather than silently ordered.
 pub fn validate_repositories(
     repositories: &BTreeMap<String, RepositoryEntryConfig>,
+    agents: Option<&AgentsConfig>,
 ) -> crate::Result<()> {
     let mut resolved: BTreeMap<PathBuf, &str> = BTreeMap::new();
     for (worktree, entry) in repositories {
@@ -893,6 +985,19 @@ pub fn validate_repositories(
                 worktree,
                 root.prefix.trim_end_matches('/'),
             )?;
+        }
+        // A scoped review tree passes exactly the validation the global tree
+        // passes. An invalid scoped section is a configuration error, never a
+        // silent fallback to global.
+        if let Some(review) = &entry.review {
+            review.validate().map_err(|detail| {
+                FamiliarError::Config(format!("repository '{worktree}': review {detail}"))
+            })?;
+            if let Some(agents) = agents {
+                agents.validate(review).map_err(|detail| {
+                    FamiliarError::Config(format!("repository '{worktree}': review {detail}"))
+                })?;
+            }
         }
         // Canonicalization collapses symlinked spellings of one worktree, which
         // is exactly the case a duplicate entry would otherwise hide.
@@ -1381,7 +1486,7 @@ impl Config {
         let config: Config = figment
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
-        validate_repositories(&config.repositories)?;
+        validate_repositories(&config.repositories, config.agents.as_ref())?;
         Ok(config)
     }
 
@@ -1404,7 +1509,7 @@ impl Config {
         let config: Config = figment
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
-        validate_repositories(&config.repositories)?;
+        validate_repositories(&config.repositories, config.agents.as_ref())?;
         Ok(config)
     }
 }
@@ -1437,6 +1542,180 @@ mod tests {
             active_dir: Some(active.into()),
             archived_dir: Some(archived.into()),
             reference_roots: Vec::new(),
+            review: None,
+            execution_context: None,
+        }
+    }
+
+    fn scoped_review() -> ReviewConfig {
+        ReviewConfig {
+            enabled: true,
+            allowed_paths: vec!["internal/".into()],
+            max_total_cost_microusd: 5_000_000,
+            ..ReviewConfig::default()
+        }
+    }
+
+    /// PRD-026 criterion 1: a declared tree replaces the global one entirely,
+    /// contributing no field from global.
+    #[test]
+    fn a_scoped_review_tree_replaces_the_global_one_wholesale() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().canonicalize().unwrap();
+        let mut config = Config {
+            review: ReviewConfig {
+                enabled: true,
+                allowed_paths: vec!["crates/".into()],
+                max_total_cost_microusd: 1,
+                ..ReviewConfig::default()
+            },
+            ..Config::default()
+        };
+        config.repositories.insert(
+            worktree.to_string_lossy().into_owned(),
+            RepositoryEntryConfig {
+                review: Some(scoped_review()),
+                ..RepositoryEntryConfig::default()
+            },
+        );
+        let (review, scope) = config.effective_review(&worktree);
+        assert_eq!(scope, ConfigScope::Repository);
+        assert_eq!(review.allowed_paths, vec!["internal/".to_string()]);
+        // Not a merge: the global ceiling does not survive into the scoped tree.
+        assert_eq!(review.max_total_cost_microusd, 5_000_000);
+
+        // A different worktree still gets the global tree, whole.
+        let (global, scope) = config.effective_review(Path::new("/elsewhere"));
+        assert_eq!(scope, ConfigScope::Global);
+        assert_eq!(global.allowed_paths, vec!["crates/".to_string()]);
+    }
+
+    /// Criterion 2: an entry without `review` falls back to the global tree
+    /// whole, rather than to a partially-populated default.
+    #[test]
+    fn an_entry_without_review_falls_back_to_global_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().canonicalize().unwrap();
+        let mut config = Config {
+            review: ReviewConfig {
+                enabled: true,
+                allowed_paths: vec!["crates/".into()],
+                ..ReviewConfig::default()
+            },
+            ..Config::default()
+        };
+        config.repositories.insert(
+            worktree.to_string_lossy().into_owned(),
+            RepositoryEntryConfig {
+                profile: BacklogProfileName::NumberedSlug,
+                active_dir: Some("docs/prd/todo".into()),
+                archived_dir: Some("docs/prd/done".into()),
+                ..RepositoryEntryConfig::default()
+            },
+        );
+        let (review, scope) = config.effective_review(&worktree);
+        assert_eq!(scope, ConfigScope::Global);
+        assert_eq!(review.allowed_paths, vec!["crates/".to_string()]);
+        // The backlog profile is still scoped — sections resolve independently.
+        assert_eq!(
+            config.repository_profile(&worktree).kind,
+            BacklogProfileKind::NumberedSlug
+        );
+    }
+
+    /// Criterion 3: a scoped tree failing validation the global tree would fail
+    /// is a configuration error naming the repository, not a fallback.
+    #[test]
+    fn an_invalid_scoped_review_tree_refuses_at_load_naming_the_repository() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "/repo".to_string(),
+            RepositoryEntryConfig {
+                // Enabled review with no ceiling and no allowed paths fails the
+                // same rules the global tree is held to.
+                review: Some(ReviewConfig {
+                    enabled: true,
+                    ..ReviewConfig::default()
+                }),
+                ..RepositoryEntryConfig::default()
+            },
+        );
+        let error = validate_repositories(&map, None).unwrap_err().to_string();
+        assert!(error.contains("repository '/repo': review"), "got: {error}");
+    }
+
+    /// Criterion 4: only the closed set is scopeable; anything else names itself.
+    #[test]
+    fn a_key_outside_the_closed_set_refuses_at_load_naming_that_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[repositories.\"/repo\"]\nprofile = \"canonical\"\ndriver = { max_prds = 3 }\n",
+        )
+        .unwrap();
+        let error = Config::load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("driver"), "got: {error}");
+    }
+
+    /// Criterion 7: a scoped ceiling binds that repository only.
+    #[test]
+    fn a_scoped_execution_context_ceiling_binds_only_its_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().canonicalize().unwrap();
+        let mut config = Config {
+            execution_context: ExecutionContextConfig {
+                hard_ceiling_tokens: Some(120_000),
+            },
+            ..Config::default()
+        };
+        config.repositories.insert(
+            worktree.to_string_lossy().into_owned(),
+            RepositoryEntryConfig {
+                execution_context: Some(ExecutionContextConfig {
+                    hard_ceiling_tokens: Some(60_000),
+                }),
+                ..RepositoryEntryConfig::default()
+            },
+        );
+        let resolved = config.resolved_for(&worktree);
+        assert_eq!(
+            resolved.config.execution_context.hard_ceiling_tokens,
+            Some(60_000)
+        );
+        assert_eq!(resolved.execution_context_scope, ConfigScope::Repository);
+        // Everything not repository-shaped is carried through untouched.
+        let elsewhere = config.resolved_for(Path::new("/elsewhere"));
+        assert_eq!(
+            elsewhere.config.execution_context.hard_ceiling_tokens,
+            Some(120_000)
+        );
+        assert_eq!(elsewhere.review_scope, ConfigScope::Global);
+    }
+
+    /// Criterion 5: resolution is deterministic under canonicalized paths,
+    /// including a symlinked worktree.
+    #[test]
+    fn scoped_resolution_follows_a_symlinked_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("repo");
+        std::fs::create_dir(&real).unwrap();
+        let link = temp.path().join("link");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let mut config = Config::default();
+            config.repositories.insert(
+                real.canonicalize().unwrap().to_string_lossy().into_owned(),
+                RepositoryEntryConfig {
+                    review: Some(scoped_review()),
+                    ..RepositoryEntryConfig::default()
+                },
+            );
+            // Reached by its symlinked spelling, it still resolves to its entry.
+            let (review, scope) = config.effective_review(&link);
+            assert_eq!(scope, ConfigScope::Repository);
+            assert_eq!(review.allowed_paths, vec!["internal/".to_string()]);
         }
     }
 
@@ -1445,7 +1724,7 @@ mod tests {
         let case = |key: &str, entry: RepositoryEntryConfig| {
             let mut map = BTreeMap::new();
             map.insert(key.to_string(), entry);
-            validate_repositories(&map)
+            validate_repositories(&map, None)
         };
         // Relative keys: binding is by absolute worktree path.
         assert!(case(
@@ -1505,7 +1784,7 @@ mod tests {
                 link.to_string_lossy().into_owned(),
                 entry(BacklogProfileName::Canonical, "docs/prds", "docs/prds/done"),
             );
-            let error = validate_repositories(&map).unwrap_err().to_string();
+            let error = validate_repositories(&map, None).unwrap_err().to_string();
             assert!(
                 error.contains("resolve to the same worktree"),
                 "unexpected: {error}"

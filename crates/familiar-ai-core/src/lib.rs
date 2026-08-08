@@ -19,12 +19,13 @@ pub use backlog::{
 pub use bootstrap::*;
 pub use config::{
     validate_repositories, AgentAdapterKind, AgentEffort, AgentEntryConfig, AgentPermissionMode,
-    AgentsConfig, BacklogProfileName, BudgetProfile, Config, DashboardConfig, DriverConfig,
-    ExecutionHistoryConfig, ExecutionPrice, InferenceConfig, InferenceMode, PackerConfig,
-    ProhibitedChangeConfig, ProviderKind, ReferenceRootConfig, ReferenceRootKind,
-    RepositoryEntryConfig, ResolvedProhibitedRule, ReviewScopeConfig, RollupConfig,
-    ScopeClassPolicyConfig, ScopeClassificationConfig, ScopeDeclarationModeConfig,
-    ScopeFileClassName, SummaryConfig, TrayConfig, TypedProhibitedChange, WatcherConfig,
+    AgentsConfig, BacklogProfileName, BudgetProfile, Config, ConfigScope, DashboardConfig,
+    DriverConfig, ExecutionContextConfig, ExecutionHistoryConfig, ExecutionPrice, InferenceConfig,
+    InferenceMode, PackerConfig, ProhibitedChangeConfig, ProviderKind, ReferenceRootConfig,
+    ReferenceRootKind, RepositoryEntryConfig, ResolvedProhibitedRule, ReviewConfig,
+    ReviewScopeConfig, RollupConfig, ScopeClassPolicyConfig, ScopeClassificationConfig,
+    ScopeDeclarationModeConfig, ScopeFileClassName, SummaryConfig, TrayConfig,
+    TypedProhibitedChange, WatcherConfig,
 };
 pub use error::{FamiliarError, Result};
 pub use paths::AppPaths;

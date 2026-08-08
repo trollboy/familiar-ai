@@ -212,3 +212,43 @@ generated_artifact = "human_review"
 #   { prefix = "docs/prd/", kind = "prd" },
 #   { prefix = "docs/runbooks/", kind = "supporting" },
 # ]
+
+# ---------------------------------------------------------------------------
+# Per-repository execution configuration (PRD-026)
+#
+# The repository-shaped parts of configuration — verification commands, allowed
+# paths, scope classifications, context ceilings — can be scoped to a repository
+# entry. Without this, review runs *this* workspace's cargo pipeline against
+# whatever repository you happen to be in, which either fails closed for
+# unrelated reasons or passes vacuously because no configured path matches.
+#
+# Authority never leaves your file. Verification argv is operator-trusted input
+# executed on your machine, so it lives here and is never read from the target
+# repository — a repository that could declare its own argv would execute
+# arbitrary commands merely by being cloned.
+#
+# Resolution is WHOLESALE per section, never merged. If an entry declares
+# `review`, that tree *is* the review configuration for that repository,
+# complete; the global [review] contributes no field. Absent, the global tree
+# applies whole. Field-level overlay is refused by design so you can state the
+# effective policy by reading one section of one file.
+#
+# Only `review` and `execution_context` are scopeable. Agents, the driver
+# warrant, database, logging, and daemon settings describe the installation, not
+# a repository, and any other key inside an entry is refused at load by name.
+#
+# [repositories."/home/you/Projects/spectra".execution_context]
+# hard_ceiling_tokens = 60000
+#
+# [repositories."/home/you/Projects/spectra".review]
+# enabled = true
+# allowed_paths = ["internal/", "api/", "tests/", "docs/prd/"]
+# max_total_cost_microusd = 5000000
+#
+# [[repositories."/home/you/Projects/spectra".review.verification]]
+# check_id = "lint"
+# argv = ["/usr/bin/docker", "compose", "run", "--rm", "tools", "make", "lint"]
+# working_directory = "."
+# timeout_ms = 1200000
+# required = true
+# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }

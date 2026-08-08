@@ -28,6 +28,10 @@ pub struct DriverAttempt {
     pub retained_reason: Option<String>,
     pub known_cost_microusd: Option<u64>,
     pub duration_ms: Option<u64>,
+    /// Which scope produced the review policy this attempt ran under.
+    pub review_scope: String,
+    /// Which scope produced the compiled-prompt ceiling.
+    pub execution_context_scope: String,
 }
 
 pub struct DriverRepository<'a> {
@@ -90,6 +94,7 @@ impl<'a> DriverRepository<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn record_attempt_finished(
         &self,
         session_id: &str,
@@ -98,12 +103,15 @@ impl<'a> DriverRepository<'a> {
         retained_reason: Option<&str>,
         known_cost_microusd: Option<u64>,
         duration_ms: Option<u64>,
+        review_scope: &str,
+        execution_context_scope: &str,
     ) -> familiar_ai_core::Result<()> {
         let changed = self
             .conn
             .execute(
                 "UPDATE driver_attempts SET ended_at=?1,outcome=?2,retained_reason=?3,\
-                 known_cost_microusd=?4,duration_ms=?5 WHERE session_id=?6 AND sequence=?7",
+                 known_cost_microusd=?4,duration_ms=?5,review_scope=?8,\
+                 execution_context_scope=?9 WHERE session_id=?6 AND sequence=?7",
                 params![
                     Utc::now().to_rfc3339(),
                     outcome,
@@ -111,7 +119,9 @@ impl<'a> DriverRepository<'a> {
                     known_cost_microusd.map(|v| v as i64),
                     duration_ms.map(|v| v as i64),
                     session_id,
-                    sequence
+                    sequence,
+                    review_scope,
+                    execution_context_scope
                 ],
             )
             .map_err(db)?;
@@ -173,7 +183,8 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                 retained_reason,known_cost_microusd,duration_ms FROM driver_attempts \
+                 retained_reason,known_cost_microusd,duration_ms,review_scope,\
+                 execution_context_scope FROM driver_attempts \
                  WHERE session_id=?1 ORDER BY sequence",
             )
             .map_err(db)?;
@@ -190,6 +201,8 @@ impl<'a> DriverRepository<'a> {
                     retained_reason: row.get(7)?,
                     known_cost_microusd: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
                     duration_ms: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+                    review_scope: row.get(10)?,
+                    execution_context_scope: row.get(11)?,
                 })
             })
             .map_err(db)?;
@@ -247,7 +260,16 @@ mod tests {
             .unwrap();
         assert_eq!((first, second), (1, 2));
         repository
-            .record_attempt_finished("session-1", first, "completed", None, Some(1_234), Some(50))
+            .record_attempt_finished(
+                "session-1",
+                first,
+                "completed",
+                None,
+                Some(1_234),
+                Some(50),
+                "global",
+                "global",
+            )
             .unwrap();
         repository
             .record_attempt_finished(
@@ -257,6 +279,8 @@ mod tests {
                 Some("scope_broadened"),
                 None,
                 Some(75),
+                "repository",
+                "repository",
             )
             .unwrap();
         repository
@@ -329,7 +353,16 @@ mod tests {
             .finish_session("absent", "backlog_empty")
             .is_err());
         assert!(repository
-            .record_attempt_finished("older", 99, "completed", None, None, None)
+            .record_attempt_finished(
+                "older",
+                99,
+                "completed",
+                None,
+                None,
+                None,
+                "global",
+                "global"
+            )
             .is_err());
     }
 }
