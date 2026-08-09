@@ -145,6 +145,21 @@ enum Selection {
     NothingEligible,
 }
 
+/// Collapse an error into one bounded line, so the morning report stays
+/// readable while stderr keeps the untruncated original.
+fn single_line(message: &str) -> String {
+    const MAX: usize = 300;
+    let mut collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        collapsed.push_str("attempt failed without a reported cause");
+    }
+    if collapsed.chars().count() > MAX {
+        collapsed = collapsed.chars().take(MAX - 1).collect::<String>();
+        collapsed.push('…');
+    }
+    collapsed
+}
+
 fn select_next(
     repository: &RepositoryIdentity,
     discovered: &[DiscoveredPrd],
@@ -157,9 +172,14 @@ fn select_next(
     let mut entries = familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
         .reconcile_and_snapshot(repository, discovered)
         .map_err(|error| DriveError::Storage(error.to_string()))?;
+    // Order by identity, not by (number, path). Sorting `0177-umbrella.md`
+    // against `0177a-child.md` by path bytes puts '-' before 'a' and therefore
+    // selects the epic umbrella first — executing a close-out document before
+    // the work it closes, which is exactly what the identity order exists to
+    // prevent.
     entries.sort_by(|a, b| {
-        (a.prd.number, a.prd.path.as_str().as_bytes())
-            .cmp(&(b.prd.number, b.prd.path.as_str().as_bytes()))
+        (&a.prd.id, a.prd.path.as_str().as_bytes())
+            .cmp(&(&b.prd.id, b.prd.path.as_str().as_bytes()))
     });
     let statuses: std::collections::BTreeMap<_, _> = entries
         .iter()
@@ -252,7 +272,10 @@ pub fn drive(
         attempted += 1;
         let sequence = match DriverRepository::new(db.conn()).record_attempt_started(
             &session_id,
-            &target.id.to_string(),
+            // The repository's own spelling, so an operator can grep their
+            // backlog with this output. Persisted, not just printed, because
+            // the morning report renders what was stored.
+            &target.display,
             target.path.as_str(),
             None,
         ) {
@@ -262,7 +285,10 @@ pub fn drive(
                 break DriveTermination::StorageFailure;
             }
         };
-        eprintln!("drive: attempt {sequence} {} {}", target.id, target.path);
+        eprintln!(
+            "drive: attempt {sequence} {} {}",
+            target.display, target.path
+        );
 
         let prd_path = Path::new(target.path.as_str());
         let attempt_timer = Instant::now();
@@ -276,12 +302,26 @@ pub fn drive(
         if let Some(value) = cost {
             known_cost = known_cost.saturating_add(value);
         }
+        // An attempt can fail before the review flow records a reason — at
+        // admission, context compilation, or agent launch. Falling back to the
+        // error itself is what keeps an unattended session able to explain
+        // itself; `reason=unrecorded` is never an acceptable answer.
+        let fallback_reason;
         let (outcome, retained_reason) = match &result {
             Ok(_) => {
                 completed += 1;
                 ("completed", None)
             }
-            Err(_) => ("retained", trace.retained_reason),
+            Err(error) => {
+                let reason = match trace.retained_reason {
+                    Some(recorded) => Some(recorded),
+                    None => {
+                        fallback_reason = single_line(&error.to_string());
+                        Some(fallback_reason.as_str())
+                    }
+                };
+                ("retained", reason)
+            }
         };
         if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
             &session_id,

@@ -25,10 +25,10 @@ use familiar_ai_core::{
 use familiar_ai_review::{
     compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
     AgentAssignment, AgentObservation, AgentRole, BlockingPolicy, BoundedDocument,
-    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, GitChangeKind,
-    GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator, ReviewCycle,
-    ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason, ReviewTask,
-    ScopeClassPolicy, ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass,
+    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, ExpectedFilesError,
+    GitChangeKind, GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator,
+    ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason,
+    ReviewTask, ScopeClassPolicy, ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass,
     ScopeFileClassPolicies, ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
     StructuredReviewAdapter, VerificationCheck, VerificationPlan, WorkflowLimits,
 };
@@ -504,11 +504,31 @@ fn compute_review_preflight(
             "cannot read PRD for scope policy compilation: {error}"
         ))
     })?;
-    let contract = parse_expected_files(&prd_bytes).map_err(|error| {
-        RunError::Config(format!(
-            "PRD {prd_repository_path} Expected Files contract is invalid: {error}"
-        ))
-    })?;
+    // The contract is mandatory only where the operator made it an authority
+    // source. Under `expected_or_configured` with no expansion it grants
+    // nothing, and demanding it would make every PRD in a grammar that treats
+    // bodies as opaque permanently unexecutable for a requirement the
+    // configuration already waived.
+    let contract_authority = contract_authority_source(config);
+    let contract = match parse_expected_files(&prd_bytes) {
+        Ok(entries) => entries,
+        Err(ExpectedFilesError::MissingHeading) => match contract_authority {
+            Some(source) => return Err(RunError::Config(format!(
+                "PRD {prd_repository_path} has no Expected Files contract, which {source} requires"
+            ))),
+            // Absent and non-authoritative: allowed_paths carries authority
+            // alone, exactly as the configuration declares.
+            None => Vec::new(),
+        },
+        // A contract offered is a contract honored: a malformed section is
+        // fatal under every configuration, because silently ignoring a broken
+        // one would let a typo widen scope.
+        Err(error) => {
+            return Err(RunError::Config(format!(
+                "PRD {prd_repository_path} Expected Files contract is invalid: {error}"
+            )))
+        }
+    };
     let baseline = capture_worktree_baseline(worktree, data_dir, execution_id)?;
     let snapshot = build_scope_policy(
         config,
@@ -522,6 +542,22 @@ fn compute_review_preflight(
         snapshot,
         prd_bytes,
     }))
+}
+
+/// Which configured setting, if any, makes the Expected Files contract an
+/// authority source. `None` means the contract grants nothing and its absence
+/// is therefore not an error.
+fn contract_authority_source(config: &Config) -> Option<&'static str> {
+    if config.review.scope.allow_prd_expected_file_expansion {
+        return Some("scope.allow_prd_expected_file_expansion");
+    }
+    if matches!(
+        config.review.scope.declaration_mode,
+        ScopeDeclarationModeConfig::ExpectedRequired
+    ) {
+        return Some("scope.declaration_mode = expected_required");
+    }
+    None
 }
 
 fn build_scope_policy(
