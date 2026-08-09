@@ -313,8 +313,14 @@ pub fn drive(
                 ("completed", None)
             }
             Err(error) => {
+                // A recorded label alone is a category, not an explanation:
+                // carry the error detail with it so the report answers "why"
+                // without a trip to stderr scrollback.
                 let reason = match trace.retained_reason {
-                    Some(recorded) => Some(recorded),
+                    Some(recorded) => {
+                        fallback_reason = single_line(&format!("{recorded}: {error}"));
+                        Some(fallback_reason.as_str())
+                    }
                     None => {
                         fallback_reason = single_line(&error.to_string());
                         Some(fallback_reason.as_str())

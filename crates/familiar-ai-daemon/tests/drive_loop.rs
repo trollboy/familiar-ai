@@ -212,7 +212,10 @@ fn loop_attempts_every_independent_prd_once_and_records_each() {
     assert_eq!(attempts[2].prd_path, "docs/prds/PRD-003.md");
     for attempt in &attempts {
         assert_eq!(attempt.outcome.as_deref(), Some("retained"));
-        assert_eq!(attempt.retained_reason.as_deref(), Some("review_disabled"));
+        assert_eq!(
+            attempt.retained_reason.as_deref(),
+            Some("review_disabled: review is disabled; backlog completion requires a clean review")
+        );
         assert!(attempt.ended_at.is_some());
         assert!(attempt.duration_ms.is_some());
         // No pricing configured: cost stays unknown, never zero.

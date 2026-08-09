@@ -297,7 +297,7 @@ fn execute_tracked_inner(
         .map_err(|e| RunError::Storage(e.to_string()))?;
     eprintln!(
         "backlog: {} {} pending -> in_progress actor={actor}",
-        target.id, target.path
+        target.display, target.path
     );
     let started_at = Utc::now().to_rfc3339();
     let timer = Instant::now();
@@ -446,7 +446,7 @@ fn execute_tracked_inner(
         })?;
     eprintln!(
         "backlog: {} {} in_progress -> completed actor={actor}",
-        target.id, target.path
+        target.display, target.path
     );
     Ok(RunWorkflowResult {
         implementation: result,
@@ -513,9 +513,11 @@ fn compute_review_preflight(
     let contract = match parse_expected_files(&prd_bytes) {
         Ok(entries) => entries,
         Err(ExpectedFilesError::MissingHeading) => match contract_authority {
-            Some(source) => return Err(RunError::Config(format!(
+            Some(source) => {
+                return Err(RunError::Config(format!(
                 "PRD {prd_repository_path} has no Expected Files contract, which {source} requires"
-            ))),
+            )))
+            }
             // Absent and non-authoritative: allowed_paths carries authority
             // alone, exactly as the configuration declares.
             None => Vec::new(),
@@ -710,9 +712,12 @@ fn retained(
     reason: &'static str,
     error: RunError,
 ) -> RunError {
+    // The label is the category; the error is the explanation. Print both —
+    // a session that retains work and cannot say why is the failure mode this
+    // tool exists to prevent.
     eprintln!(
-        "backlog: {} {} remains in_progress reason={reason}",
-        target.id, target.path
+        "backlog: {} {} remains in_progress reason={reason}: {error}",
+        target.display, target.path
     );
     error
 }
