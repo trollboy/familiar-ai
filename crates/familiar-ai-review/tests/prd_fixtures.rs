@@ -13,8 +13,19 @@ fn prd_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/prds")
 }
 
+/// The backlog is split by completion location (PRD-023): remaining work in
+/// `todo/`, archived work in `done/`. A fixture is looked up in both.
+fn prd_path(name: &str) -> PathBuf {
+    let todo = prd_dir().join("todo").join(name);
+    if todo.exists() {
+        todo
+    } else {
+        prd_dir().join("done").join(name)
+    }
+}
+
 fn parse(name: &str) -> Result<Vec<String>, ExpectedFilesError> {
-    let content = fs::read_to_string(prd_dir().join(name)).expect("PRD fixture readable");
+    let content = fs::read_to_string(prd_path(name)).expect("PRD fixture readable");
     parse_expected_files(&content)
         .map(|entries| entries.into_iter().map(|entry| entry.normalized).collect())
 }
@@ -224,8 +235,9 @@ fn prd_024_pins_as_a_valid_contract() {
 #[test]
 fn every_wave_two_prd_parses_deterministically() {
     let mut outcomes = Vec::new();
-    let mut names: Vec<_> = fs::read_dir(prd_dir())
-        .unwrap()
+    let mut names: Vec<_> = ["todo", "done"]
+        .iter()
+        .flat_map(|location| fs::read_dir(prd_dir().join(location)).unwrap())
         .filter_map(|entry| {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             (name.starts_with("PRD-") && name.ends_with(".md")).then_some(name)
@@ -263,7 +275,12 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-021.md",
             "PRD-022.md",
             "PRD-023.md",
-            "PRD-024.md"
+            "PRD-024.md",
+            "PRD-025.md",
+            "PRD-026.md",
+            "PRD-027.md",
+            "PRD-028.md",
+            "PRD-029.md"
         ]
     );
 }
