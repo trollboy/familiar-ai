@@ -14,7 +14,7 @@ use familiar_ai_agent::{
 };
 use familiar_ai_context::{
     ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
-    ContextRequest, ExecutionContext,
+    ContextProfile, ContextReferenceKind, ContextReferenceRoot, ContextRequest, ExecutionContext,
 };
 use familiar_ai_core::{
     admit_run_prd, resolve_run_prd, validate_graph, AgentAdapterKind, AgentEntryConfig, AppPaths,
@@ -179,11 +179,19 @@ fn execute_tracked_inner(
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
+    let discovery = FilesystemBacklogDiscovery;
+    let repository = discovery
+        .resolve(&current)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let repository_config = config.repository(&repository.worktree);
     let context = ContextCompiler::new()
-        .compile(ContextRequest {
-            repository: &current,
-            prd: prd_path,
-        })
+        .compile_profiled(
+            ContextRequest {
+                repository: &current,
+                prd: prd_path,
+            },
+            &context_profile(&repository_config),
+        )
         .map_err(RunError::Context)?;
     let context = match config.execution_context.hard_ceiling_tokens {
         Some(hard_ceiling_tokens) => {
@@ -220,12 +228,8 @@ fn execute_tracked_inner(
         &paths.data_dir,
         &id,
     )?;
-    let discovery = FilesystemBacklogDiscovery;
-    let repository = discovery
-        .resolve(&current)
-        .map_err(|e| RunError::Config(e.to_string()))?;
     let discovered = discovery
-        .discover(&repository)
+        .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| RunError::Config(e.to_string()))?;
     validate_graph(&discovered).map_err(|e| RunError::Config(e.to_string()))?;
     let target = resolve_run_prd(&repository, &discovered, prd_path)
@@ -235,7 +239,7 @@ fn execute_tracked_inner(
         .map_err(|e| RunError::Storage(e.to_string()))?;
     admit_run_prd(&snapshot, &target).map_err(|e| RunError::Config(e.to_string()))?;
     let claim_discovered = discovery
-        .discover(&repository)
+        .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| RunError::Config(e.to_string()))?;
     validate_graph(&claim_discovered).map_err(|e| RunError::Config(e.to_string()))?;
     let claim_target = resolve_run_prd(&repository, &claim_discovered, prd_path)
@@ -416,6 +420,25 @@ fn execute_tracked_inner(
     Ok(RunWorkflowResult {
         implementation: result,
     })
+}
+
+fn context_profile(config: &familiar_ai_core::RepositoryConfig) -> ContextProfile {
+    ContextProfile {
+        active_dir: config.active_dir.clone(),
+        reference_roots: config
+            .resolved_reference_roots()
+            .into_iter()
+            .map(|root| ContextReferenceRoot {
+                prefix: root.prefix,
+                kind: match root.kind {
+                    familiar_ai_core::ReferenceKind::Prd => ContextReferenceKind::Prd,
+                    familiar_ai_core::ReferenceKind::Adr => ContextReferenceKind::Adr,
+                    familiar_ai_core::ReferenceKind::Contract => ContextReferenceKind::Contract,
+                    familiar_ai_core::ReferenceKind::Supporting => ContextReferenceKind::Supporting,
+                },
+            })
+            .collect(),
+    }
 }
 
 fn review_retained_reason(cycle: &ReviewCycle) -> &'static str {

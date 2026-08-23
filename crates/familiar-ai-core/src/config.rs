@@ -10,6 +10,8 @@ use crate::FamiliarError;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub repositories: BTreeMap<String, RepositoryConfig>,
+    #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -41,6 +43,89 @@ pub struct Config {
     pub agents: Option<AgentsConfig>,
     #[serde(default)]
     pub driver: DriverConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryConfig {
+    #[serde(default = "default_profile_name")]
+    pub profile: String,
+    #[serde(default = "default_active_dir")]
+    pub active_dir: String,
+    #[serde(default = "default_archived_dir")]
+    pub archived_dir: String,
+    #[serde(default)]
+    pub reference_roots: Vec<ReferenceRootConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceRootConfig {
+    pub prefix: String,
+    pub kind: ReferenceKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReferenceKind {
+    Prd,
+    Adr,
+    Contract,
+    Supporting,
+}
+
+fn default_profile_name() -> String {
+    "canonical".into()
+}
+fn default_active_dir() -> String {
+    "docs/prds".into()
+}
+fn default_archived_dir() -> String {
+    "docs/prds/done".into()
+}
+
+impl Default for RepositoryConfig {
+    fn default() -> Self {
+        Self {
+            profile: default_profile_name(),
+            active_dir: default_active_dir(),
+            archived_dir: default_archived_dir(),
+            reference_roots: Vec::new(),
+        }
+    }
+}
+
+impl RepositoryConfig {
+    pub fn layout(&self) -> crate::BacklogLayout {
+        crate::BacklogLayout {
+            profile: crate::BacklogProfile::parse(&self.profile).expect("validated profile"),
+            active_dir: crate::RepositoryPath::new(self.active_dir.clone())
+                .expect("validated active_dir"),
+            archived_dir: crate::RepositoryPath::new(self.archived_dir.clone())
+                .expect("validated archived_dir"),
+        }
+    }
+    pub fn resolved_reference_roots(&self) -> Vec<ReferenceRootConfig> {
+        if self.reference_roots.is_empty() {
+            default_reference_roots()
+        } else {
+            self.reference_roots.clone()
+        }
+    }
+}
+
+fn default_reference_roots() -> Vec<ReferenceRootConfig> {
+    [
+        ("docs/adr/", ReferenceKind::Adr),
+        ("docs/contracts/", ReferenceKind::Contract),
+        ("docs/supporting/", ReferenceKind::Supporting),
+    ]
+    .into_iter()
+    .map(|(prefix, kind)| ReferenceRootConfig {
+        prefix: prefix.into(),
+        kind,
+    })
+    .collect()
 }
 
 /// The unattended driver's budget warrant. Every ceiling is optional
@@ -1202,6 +1287,76 @@ fn reject_stale_env() -> crate::Result<()> {
 }
 
 impl Config {
+    fn validate_repositories(&self) -> crate::Result<()> {
+        let mut resolved = BTreeMap::<PathBuf, String>::new();
+        for (worktree, entry) in &self.repositories {
+            crate::BacklogProfile::parse(&entry.profile).map_err(FamiliarError::Config)?;
+            for (label, value) in [
+                ("active_dir", &entry.active_dir),
+                ("archived_dir", &entry.archived_dir),
+            ] {
+                if value.contains('\\') || Path::new(value).is_absolute() {
+                    return Err(FamiliarError::Config(format!(
+                        "repositories.{worktree}.{label} must be repository-relative and traversal-free; offending value '{value}'"
+                    )));
+                }
+                crate::RepositoryPath::new(value.clone()).map_err(|_| FamiliarError::Config(format!("repositories.{worktree}.{label} must be repository-relative and traversal-free; offending value '{value}'")))?;
+            }
+            if entry.active_dir == entry.archived_dir {
+                return Err(FamiliarError::Config(format!(
+                    "repositories.{worktree} active_dir and archived_dir must be distinct: '{}'",
+                    entry.active_dir
+                )));
+            }
+            for root in &entry.reference_roots {
+                crate::RepositoryPath::new(root.prefix.trim_end_matches('/').to_owned()).map_err(
+                    |_| {
+                        FamiliarError::Config(format!(
+                            "repositories.{worktree}.reference_roots contains invalid prefix '{}'",
+                            root.prefix
+                        ))
+                    },
+                )?;
+                if !root.prefix.ends_with('/') {
+                    return Err(FamiliarError::Config(format!(
+                        "repositories.{worktree}.reference_roots prefix must end with '/': '{}'",
+                        root.prefix
+                    )));
+                }
+            }
+            let absolute = Path::new(worktree);
+            if !absolute.is_absolute() {
+                return Err(FamiliarError::Config(format!(
+                    "repository worktree key must be absolute: '{worktree}'"
+                )));
+            }
+            let canonical = absolute.canonicalize().map_err(|e| {
+                FamiliarError::Config(format!(
+                    "cannot canonicalize repository worktree '{worktree}': {e}"
+                ))
+            })?;
+            if let Some(first) = resolved.insert(canonical.clone(), worktree.clone()) {
+                return Err(FamiliarError::Config(format!(
+                    "repository entries '{first}' and '{worktree}' resolve to the same worktree {}",
+                    canonical.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn repository(&self, canonical_worktree: &Path) -> RepositoryConfig {
+        self.repositories
+            .iter()
+            .find_map(|(path, entry)| {
+                Path::new(path)
+                    .canonicalize()
+                    .ok()
+                    .filter(|p| p == canonical_worktree)
+                    .map(|_| entry.clone())
+            })
+            .unwrap_or_default()
+    }
     pub fn load(config_path: Option<&Path>) -> crate::Result<Self> {
         reject_stale_env()?;
         let mut figment = Figment::from(Serialized::defaults(Config::default()));
@@ -1214,9 +1369,11 @@ impl Config {
 
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
 
-        figment
+        let config: Self = figment
             .extract()
-            .map_err(|e| FamiliarError::Config(e.to_string()))
+            .map_err(|e| FamiliarError::Config(e.to_string()))?;
+        config.validate_repositories()?;
+        Ok(config)
     }
 
     pub fn load_with_overrides(
@@ -1235,9 +1392,11 @@ impl Config {
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
         figment = figment.merge(overrides);
 
-        figment
+        let config: Self = figment
             .extract()
-            .map_err(|e| FamiliarError::Config(e.to_string()))
+            .map_err(|e| FamiliarError::Config(e.to_string()))?;
+        config.validate_repositories()?;
+        Ok(config)
     }
 }
 
@@ -1261,6 +1420,76 @@ mod tests {
         assert_eq!(config.execution_context.hard_ceiling_tokens, None);
         assert!(!config.review.enabled);
         assert_eq!(config.review.max_review_attempts, 3);
+    }
+
+    #[test]
+    fn repository_profiles_validate_and_resolve_canonical_paths() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.repositories.insert(
+            repo.path().display().to_string(),
+            RepositoryConfig {
+                profile: "numbered-slug".into(),
+                active_dir: "docs/prd/todo".into(),
+                archived_dir: "docs/prd/done".into(),
+                reference_roots: vec![],
+            },
+        );
+        config.validate_repositories().unwrap();
+        let resolved = config.repository(&repo.path().canonicalize().unwrap());
+        assert_eq!(
+            resolved.layout().profile,
+            crate::BacklogProfile::NumberedSlug
+        );
+    }
+
+    #[test]
+    fn repository_profiles_fail_closed_on_invalid_shapes() {
+        let repo = tempfile::tempdir().unwrap();
+        for (profile, active, archived, expected) in [
+            ("unknown", "todo", "done", "unknown backlog profile"),
+            ("canonical", "../todo", "done", "traversal-free"),
+            ("canonical", "/todo", "done", "traversal-free"),
+            ("canonical", "same", "same", "must be distinct"),
+        ] {
+            let mut config = Config::default();
+            config.repositories.insert(
+                repo.path().display().to_string(),
+                RepositoryConfig {
+                    profile: profile.into(),
+                    active_dir: active.into(),
+                    archived_dir: archived.into(),
+                    reference_roots: vec![],
+                },
+            );
+            assert!(config
+                .validate_repositories()
+                .unwrap_err()
+                .to_string()
+                .contains(expected));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_profiles_refuse_duplicate_canonical_worktrees() {
+        let parent = tempfile::tempdir().unwrap();
+        let repo = parent.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let link = parent.path().join("link");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let mut config = Config::default();
+        config
+            .repositories
+            .insert(repo.display().to_string(), RepositoryConfig::default());
+        config
+            .repositories
+            .insert(link.display().to_string(), RepositoryConfig::default());
+        assert!(config
+            .validate_repositories()
+            .unwrap_err()
+            .to_string()
+            .contains("resolve to the same worktree"));
     }
 
     #[test]

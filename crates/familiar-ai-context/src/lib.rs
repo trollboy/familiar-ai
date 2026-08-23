@@ -15,16 +15,44 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use thiserror::Error;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextReferenceKind {
+    Prd,
+    Adr,
+    Contract,
+    Supporting,
+}
 
-const REFERENCE_ROOTS: [(&str, &str, DocumentKind); 3] = [
-    ("docs/adr/", "docs/adr", DocumentKind::Adr),
-    ("docs/contracts/", "docs/contracts", DocumentKind::Contract),
-    (
-        "docs/supporting/",
-        "docs/supporting",
-        DocumentKind::Supporting,
-    ),
-];
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextReferenceRoot {
+    pub prefix: String,
+    pub kind: ContextReferenceKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextProfile {
+    pub active_dir: String,
+    pub reference_roots: Vec<ContextReferenceRoot>,
+}
+
+impl Default for ContextProfile {
+    fn default() -> Self {
+        Self {
+            active_dir: "docs/prds".into(),
+            reference_roots: [
+                ("docs/adr/", ContextReferenceKind::Adr),
+                ("docs/contracts/", ContextReferenceKind::Contract),
+                ("docs/supporting/", ContextReferenceKind::Supporting),
+            ]
+            .into_iter()
+            .map(|(prefix, kind)| ContextReferenceRoot {
+                prefix: prefix.into(),
+                kind,
+            })
+            .collect(),
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ContextCompiler;
@@ -106,6 +134,14 @@ impl ContextCompiler {
         &self,
         request: ContextRequest<'_>,
     ) -> Result<ExecutionContext, ContextCompilationError> {
+        self.compile_profiled(request, &ContextProfile::default())
+    }
+
+    pub fn compile_profiled(
+        &self,
+        request: ContextRequest<'_>,
+        profile: &ContextProfile,
+    ) -> Result<ExecutionContext, ContextCompilationError> {
         let input = request.repository.canonicalize().map_err(|source| {
             ContextCompilationError::RepositoryInput {
                 path: request.repository.to_owned(),
@@ -141,7 +177,7 @@ impl ContextCompiler {
         })?;
         let git_commit = optional_git(&worktree, &["rev-parse", "--verify", "HEAD"]);
 
-        let prd_path = validate_prd(&worktree, &input, request.prd)?;
+        let prd_path = validate_prd(&worktree, &input, request.prd, &profile.active_dir)?;
         let prd_identity = identity(&worktree, &prd_path).map_err(|detail| {
             ContextCompilationError::InvalidPrd {
                 path: prd_path.clone(),
@@ -160,10 +196,10 @@ impl ContextCompiler {
             InclusionReason::RequestedPrd,
         )?;
 
-        let candidates = discover(&prd.content);
+        let candidates = discover_profiled(&prd.content, &profile.reference_roots);
         let mut validated = BTreeMap::new();
         for (relative, (root, kind)) in candidates {
-            let path = validate_reference(&worktree, &relative, root)?;
+            let path = validate_reference(&worktree, &relative, &root)?;
             let canonical_identity = identity(&worktree, &path).map_err(|detail| {
                 ContextCompilationError::InvalidReference {
                     path: relative.clone(),
@@ -283,6 +319,7 @@ fn validate_prd(
     worktree: &Path,
     input: &Path,
     supplied: &Path,
+    active_dir: &str,
 ) -> Result<PathBuf, ContextCompilationError> {
     if supplied.as_os_str().is_empty() {
         return Err(ContextCompilationError::InvalidPrd {
@@ -301,9 +338,9 @@ fn validate_prd(
             path: candidate.clone(),
             detail: format!("cannot resolve path: {error}"),
         })?;
-    let prd_root = worktree.join("docs/prds").canonicalize().map_err(|error| {
+    let prd_root = worktree.join(active_dir).canonicalize().map_err(|error| {
         ContextCompilationError::InvalidPrd {
-            path: worktree.join("docs/prds"),
+            path: worktree.join(active_dir),
             detail: format!("cannot resolve repository PRD directory: {error}"),
         }
     })?;
@@ -334,25 +371,47 @@ fn validate_prd(
     Ok(path)
 }
 
-fn discover(content: &str) -> BTreeMap<String, (&'static str, DocumentKind)> {
+fn discover_profiled(
+    content: &str,
+    roots: &[ContextReferenceRoot],
+) -> BTreeMap<String, (String, DocumentKind)> {
+    let mapped: Vec<_> = roots
+        .iter()
+        .map(|root| {
+            (
+                root.prefix.as_str(),
+                root.prefix.trim_end_matches('/').to_owned(),
+                match root.kind {
+                    ContextReferenceKind::Prd => DocumentKind::Prd,
+                    ContextReferenceKind::Adr => DocumentKind::Adr,
+                    ContextReferenceKind::Contract => DocumentKind::Contract,
+                    ContextReferenceKind::Supporting => DocumentKind::Supporting,
+                },
+            )
+        })
+        .collect();
+    discover_roots(content, &mapped)
+}
+
+fn discover_roots(
+    content: &str,
+    roots: &[(&str, String, DocumentKind)],
+) -> BTreeMap<String, (String, DocumentKind)> {
     let mut paths = BTreeMap::new();
-    for (prefix, root, kind) in REFERENCE_ROOTS {
+    for (prefix, root, kind) in roots {
         let mut rest = content;
         while let Some(index) = rest.find(prefix) {
             let preceding = rest[..index].chars().next_back();
             rest = &rest[index..];
             let end = rest
-                .find(|character: char| {
-                    !(character.is_ascii_alphanumeric()
-                        || matches!(character, '/' | '-' | '_' | '.'))
-                })
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')))
                 .unwrap_or(rest.len());
             let reference = rest[..end].trim_end_matches('.');
-            if preceding.map_or(true, |character| {
-                !(character.is_ascii_alphanumeric() || matches!(character, '/' | '-' | '_' | '.'))
+            if preceding.map_or(true, |c| {
+                !(c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
             }) && reference.ends_with(".md")
             {
-                paths.insert(reference.to_owned(), (root, kind));
+                paths.insert(reference.to_owned(), (root.clone(), *kind));
             }
             rest = &rest[end..];
         }
@@ -480,6 +539,37 @@ mod tests {
             temp.path().canonicalize().unwrap()
         );
         assert_eq!(first.repository.git_commit, None);
+    }
+
+    #[test]
+    fn profiled_compilation_uses_active_and_declared_reference_roots() {
+        let temp = repository();
+        fs::create_dir_all(temp.path().join("docs/prd/todo")).unwrap();
+        fs::create_dir_all(temp.path().join("docs/runbooks")).unwrap();
+        fs::write(temp.path().join("docs/runbooks/ops.md"), "operations").unwrap();
+        fs::write(
+            temp.path().join("docs/prd/todo/0139a-work.md"),
+            "docs/runbooks/ops.md",
+        )
+        .unwrap();
+        let profile = ContextProfile {
+            active_dir: "docs/prd/todo".into(),
+            reference_roots: vec![ContextReferenceRoot {
+                prefix: "docs/runbooks/".into(),
+                kind: ContextReferenceKind::Supporting,
+            }],
+        };
+        let compiled = ContextCompiler
+            .compile_profiled(
+                ContextRequest {
+                    repository: temp.path(),
+                    prd: Path::new("docs/prd/todo/0139a-work.md"),
+                },
+                &profile,
+            )
+            .unwrap();
+        assert_eq!(compiled.prd.path, "docs/prd/todo/0139a-work.md");
+        assert_eq!(compiled.documents[0].path, "docs/runbooks/ops.md");
     }
 
     #[test]

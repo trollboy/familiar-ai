@@ -1,25 +1,136 @@
 use ring::digest::{digest, SHA256};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PrdId(u64);
+#[derive(Debug, Clone)]
+pub struct PrdId {
+    number: u64,
+    suffix: Option<char>,
+    rendering: PrdRendering,
+}
+
+#[derive(Debug, Clone)]
+enum PrdRendering {
+    Canonical,
+    NumberedSlug { width: usize },
+}
 
 impl PrdId {
     pub fn new(number: u64) -> Self {
-        Self(number)
+        Self {
+            number,
+            suffix: None,
+            rendering: PrdRendering::Canonical,
+        }
+    }
+    pub fn with_suffix(number: u64, suffix: Option<char>) -> Self {
+        Self {
+            number,
+            suffix,
+            rendering: PrdRendering::Canonical,
+        }
+    }
+    pub fn numbered_slug(number: u64, suffix: Option<char>, width: usize) -> Self {
+        Self {
+            number,
+            suffix,
+            rendering: PrdRendering::NumberedSlug { width },
+        }
     }
     pub fn number(&self) -> u64 {
-        self.0
+        self.number
+    }
+    pub fn suffix(&self) -> Option<char> {
+        self.suffix
+    }
+}
+
+impl PartialEq for PrdId {
+    fn eq(&self, other: &Self) -> bool {
+        self.number == other.number && self.suffix == other.suffix
+    }
+}
+impl Eq for PrdId {}
+impl Hash for PrdId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.number.hash(state);
+        self.suffix.hash(state);
+    }
+}
+impl PartialOrd for PrdId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for PrdId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.number
+            .cmp(&other.number)
+            .then_with(|| match (self.suffix, other.suffix) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            })
     }
 }
 
 impl fmt::Display for PrdId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PRD-{}", self.0)
+        match self.rendering {
+            PrdRendering::Canonical => write!(f, "PRD-{}", self.number)?,
+            PrdRendering::NumberedSlug { width } => {
+                write!(f, "PRD {:0width$}", self.number, width = width)?
+            }
+        }
+        if let Some(suffix) = self.suffix {
+            write!(f, "{suffix}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklogProfile {
+    Canonical,
+    NumberedSlug,
+}
+
+impl BacklogProfile {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "canonical" => Ok(Self::Canonical),
+            "numbered-slug" => Ok(Self::NumberedSlug),
+            _ => Err(format!("unknown backlog profile '{value}'")),
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::NumberedSlug => "numbered-slug",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogLayout {
+    pub profile: BacklogProfile,
+    pub active_dir: RepositoryPath,
+    pub archived_dir: RepositoryPath,
+}
+
+impl Default for BacklogLayout {
+    fn default() -> Self {
+        Self {
+            profile: BacklogProfile::Canonical,
+            active_dir: RepositoryPath("docs/prds".into()),
+            archived_dir: RepositoryPath("docs/prds/done".into()),
+        }
     }
 }
 
@@ -401,8 +512,10 @@ where
             .store
             .reconcile_and_snapshot(&repository, &discovered)?;
         entries.sort_by(|a, b| {
-            (a.prd.number, a.prd.path.as_str().as_bytes())
-                .cmp(&(b.prd.number, b.prd.path.as_str().as_bytes()))
+            a.prd
+                .id
+                .cmp(&b.prd.id)
+                .then_with(|| a.prd.path.cmp(&b.prd.path))
         });
         let statuses: BTreeMap<_, _> = entries
             .iter()
@@ -465,6 +578,23 @@ fn reason_text(reason: &IneligibilityReason) -> String {
 #[derive(Default)]
 pub struct FilesystemBacklogDiscovery;
 
+#[derive(Debug, Clone)]
+pub struct ProfiledFilesystemBacklogDiscovery {
+    pub layout: BacklogLayout,
+}
+
+impl BacklogDiscovery for ProfiledFilesystemBacklogDiscovery {
+    fn resolve(&self, path: &Path) -> Result<RepositoryIdentity, BacklogError> {
+        FilesystemBacklogDiscovery.resolve(path)
+    }
+    fn discover(
+        &self,
+        repository: &RepositoryIdentity,
+    ) -> Result<Vec<DiscoveredPrd>, BacklogError> {
+        FilesystemBacklogDiscovery.discover_with_layout(repository, &self.layout)
+    }
+}
+
 impl BacklogDiscovery for FilesystemBacklogDiscovery {
     fn resolve(&self, path: &Path) -> Result<RepositoryIdentity, BacklogError> {
         let cwd = path.canonicalize().map_err(|e| {
@@ -505,9 +635,20 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
         &self,
         repository: &RepositoryIdentity,
     ) -> Result<Vec<DiscoveredPrd>, BacklogError> {
-        let root = repository.worktree.join("docs/prds");
-        let read = fs::read_dir(&root)
-            .map_err(|e| BacklogError::Discovery(format!("cannot read docs/prds: {e}")))?;
+        self.discover_with_layout(repository, &BacklogLayout::default())
+    }
+}
+
+impl FilesystemBacklogDiscovery {
+    pub fn discover_with_layout(
+        &self,
+        repository: &RepositoryIdentity,
+        layout: &BacklogLayout,
+    ) -> Result<Vec<DiscoveredPrd>, BacklogError> {
+        let root = repository.worktree.join(layout.active_dir.as_str());
+        let read = fs::read_dir(&root).map_err(|e| {
+            BacklogError::Discovery(format!("cannot read {}: {e}", layout.active_dir))
+        })?;
         let mut candidates = Vec::new();
         for item in read {
             let item = item
@@ -516,22 +657,25 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            if filename_number(&name).is_some() {
+            if filename_identity(&name, layout.profile).is_some() {
                 candidates.push((name, item.path(), PrdLocation::Active));
             }
         }
-        let archived_root = root.join("done");
+        let archived_root = repository.worktree.join(layout.archived_dir.as_str());
         match fs::read_dir(&archived_root) {
             Ok(read) => {
                 for item in read {
                     let item = item.map_err(|e| {
-                        BacklogError::Discovery(format!("cannot enumerate docs/prds/done: {e}"))
+                        BacklogError::Discovery(format!(
+                            "cannot enumerate {}: {e}",
+                            layout.archived_dir
+                        ))
                     })?;
                     let name = match item.file_name().into_string() {
                         Ok(value) => value,
                         Err(_) => continue,
                     };
-                    if filename_number(&name).is_some() {
+                    if filename_identity(&name, layout.profile).is_some() {
                         candidates.push((name, item.path(), PrdLocation::Archived));
                     }
                 }
@@ -539,7 +683,8 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(BacklogError::Discovery(format!(
-                    "cannot read docs/prds/done: {error}"
+                    "cannot read {}: {error}",
+                    layout.archived_dir
                 )))
             }
         }
@@ -551,20 +696,21 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
         let mut errors = Vec::new();
         for (name, path, location) in candidates {
             let rel = match location {
-                PrdLocation::Active => format!("docs/prds/{name}"),
-                PrdLocation::Archived => format!("docs/prds/done/{name}"),
+                PrdLocation::Active => format!("{}/{name}", layout.active_dir),
+                PrdLocation::Archived => format!("{}/{name}", layout.archived_dir),
             };
-            match parse_candidate(&path, &rel, &name, location) {
+            match parse_candidate(&path, &rel, &name, location, layout.profile) {
                 Ok(v) => parsed.push(v),
+                Err(_)
+                    if location == PrdLocation::Archived
+                        && layout.profile == BacklogProfile::NumberedSlug => {}
                 Err(e) => errors.push(e.to_string()),
             }
         }
         if !errors.is_empty() {
             return Err(BacklogError::Discovery(errors.join("; ")));
         }
-        parsed.sort_by(|a, b| {
-            (a.number, a.path.as_str().as_bytes()).cmp(&(b.number, b.path.as_str().as_bytes()))
-        });
+        parsed.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.path.cmp(&b.path)));
         for pair in parsed.windows(2) {
             if pair[0].id == pair[1].id {
                 return Err(BacklogError::DuplicateIdentity {
@@ -574,6 +720,46 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
             }
         }
         Ok(parsed)
+    }
+}
+
+type ParsedFilenameIdentity = Result<(u64, Option<char>, usize), String>;
+
+fn filename_identity(name: &str, profile: BacklogProfile) -> Option<ParsedFilenameIdentity> {
+    match profile {
+        BacklogProfile::Canonical => filename_number(name).map(|r| {
+            r.map(|n| (n, None, 0))
+                .map_err(|_| "filename number overflows u64".into())
+        }),
+        BacklogProfile::NumberedSlug => {
+            let stem = name.strip_suffix(".md")?;
+            let (identity, slug) = stem.split_once('-')?;
+            if slug.is_empty() {
+                return Some(Err("slug must not be empty".into()));
+            }
+            let digit_len = identity.bytes().take_while(u8::is_ascii_digit).count();
+            if digit_len == 0 || digit_len > 6 {
+                return Some(Err(
+                    "filename identity must contain one to six ASCII digits".into(),
+                ));
+            }
+            let suffix_text = &identity[digit_len..];
+            let suffix = match suffix_text.as_bytes() {
+                [] => None,
+                [b'a'..=b'z'] => Some(suffix_text.chars().next().unwrap()),
+                _ => {
+                    return Some(Err(
+                        "filename suffix must be one optional ASCII lowercase letter".into(),
+                    ))
+                }
+            };
+            Some(
+                identity[..digit_len]
+                    .parse::<u64>()
+                    .map(|n| (n, suffix, digit_len))
+                    .map_err(|_| "filename number overflows u64".into()),
+            )
+        }
     }
 }
 
@@ -590,6 +776,7 @@ fn parse_candidate(
     relative: &str,
     name: &str,
     location: PrdLocation,
+    profile: BacklogProfile,
 ) -> Result<DiscoveredPrd, BacklogError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|e| malformed(relative, format!("cannot inspect file: {e}")))?;
@@ -599,9 +786,9 @@ fn parse_candidate(
     if !metadata.is_file() {
         return Err(malformed(relative, "matching entry is not a regular file"));
     }
-    let number = filename_number(name)
+    let (number, suffix, width) = filename_identity(name, profile)
         .expect("candidate already matched")
-        .map_err(|_| malformed(relative, "filename number overflows u64"))?;
+        .map_err(|message| malformed(relative, message))?;
     let bytes =
         fs::read(path).map_err(|e| malformed(relative, format!("cannot read file: {e}")))?;
     let content = std::str::from_utf8(&bytes)
@@ -613,6 +800,11 @@ fn parse_candidate(
         .find(|line| !line.trim_matches([' ', '\t', '\r']).is_empty())
         .ok_or_else(|| malformed(relative, "missing level-one heading"))?;
     let heading = heading.strip_suffix('\r').unwrap_or(heading);
+    if profile == BacklogProfile::NumberedSlug {
+        return parse_numbered_slug_content(
+            relative, number, suffix, width, location, &bytes, heading,
+        );
+    }
     let body = heading.strip_prefix("# PRD-").ok_or_else(|| {
         malformed(
             relative,
@@ -700,6 +892,62 @@ fn parse_candidate(
         location,
         title: title.to_owned(),
         dependencies,
+        content_hash: hash,
+    })
+}
+
+fn parse_numbered_slug_content(
+    relative: &str,
+    number: u64,
+    suffix: Option<char>,
+    width: usize,
+    location: PrdLocation,
+    bytes: &[u8],
+    heading: &str,
+) -> Result<DiscoveredPrd, BacklogError> {
+    let body = heading.strip_prefix("# PRD ").ok_or_else(|| {
+        malformed(
+            relative,
+            "first nonblank content is not a numbered-slug PRD level-one heading",
+        )
+    })?;
+    let separator = body
+        .find(" — ")
+        .map(|i| (i, " — ".len()))
+        .or_else(|| body.find(": ").map(|i| (i, 2)))
+        .ok_or_else(|| malformed(relative, "heading separator must be an em-dash or colon"))?;
+    let identity = &body[..separator.0];
+    let title = &body[separator.0 + separator.1..];
+    let digit_len = identity.bytes().take_while(u8::is_ascii_digit).count();
+    let heading_suffix = match &identity.as_bytes()[digit_len..] {
+        [] => None,
+        [b'a'..=b'z'] => identity[digit_len..].chars().next(),
+        _ => return Err(malformed(relative, "heading has an invalid PRD identity")),
+    };
+    let heading_number = identity[..digit_len]
+        .parse::<u64>()
+        .map_err(|_| malformed(relative, "heading has an invalid PRD identity"))?;
+    if heading_number != number || heading_suffix != suffix {
+        return Err(malformed(
+            relative,
+            format!("heading identity PRD {identity} does not match filename identity"),
+        ));
+    }
+    if title.trim().is_empty() {
+        return Err(malformed(relative, "title must not be empty"));
+    }
+    let hash = digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok(DiscoveredPrd {
+        id: PrdId::numbered_slug(number, suffix, width),
+        number,
+        path: RepositoryPath::new(relative.to_owned())?,
+        location,
+        title: title.to_owned(),
+        dependencies: Vec::new(),
         content_hash: hash,
     })
 }
@@ -1108,7 +1356,8 @@ mod tests {
                 &path,
                 "docs/prds/PRD-001.md",
                 "PRD-001.md",
-                PrdLocation::Active
+                PrdLocation::Active,
+                BacklogProfile::Canonical
             )
             .is_err());
         }
@@ -1124,8 +1373,117 @@ mod tests {
             "docs/prds/PRD-001.md",
             "PRD-001.md",
             PrdLocation::Active,
+            BacklogProfile::Canonical,
         )
         .unwrap();
         assert!(parsed.dependencies.is_empty());
+    }
+}
+#[test]
+fn suffixed_identity_order_places_children_before_umbrella() {
+    let mut ids = vec![
+        PrdId::new(140),
+        PrdId::new(139),
+        PrdId::with_suffix(139, Some('d')),
+        PrdId::with_suffix(139, Some('a')),
+        PrdId::with_suffix(139, Some('b')),
+    ];
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            PrdId::with_suffix(139, Some('a')),
+            PrdId::with_suffix(139, Some('b')),
+            PrdId::with_suffix(139, Some('d')),
+            PrdId::new(139),
+            PrdId::new(140)
+        ]
+    );
+}
+
+#[test]
+fn numbered_slug_discovers_renders_and_ignores_dependencies() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("docs/prd/todo")).unwrap();
+    fs::create_dir_all(root.path().join("docs/prd/done")).unwrap();
+    fs::write(
+        root.path().join("docs/prd/todo/0139a-child.md"),
+        "# PRD 0139a — Child\n\n**Depends on:** PRD-999\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("docs/prd/todo/0139-epic.md"),
+        "# PRD 0139: Epic\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("docs/prd/todo/0140-next.md"),
+        "# PRD 0140 — Next\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("docs/prd/done/not-a-prd.md"),
+        "opaque wave-one document",
+    )
+    .unwrap();
+    let repo = RepositoryIdentity {
+        worktree: root.path().to_owned(),
+        key: "repo".into(),
+    };
+    let layout = BacklogLayout {
+        profile: BacklogProfile::NumberedSlug,
+        active_dir: RepositoryPath::new("docs/prd/todo").unwrap(),
+        archived_dir: RepositoryPath::new("docs/prd/done").unwrap(),
+    };
+    let found = FilesystemBacklogDiscovery
+        .discover_with_layout(&repo, &layout)
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|p| p.id.to_string()).collect::<Vec<_>>(),
+        ["PRD 0139a", "PRD 0139", "PRD 0140"]
+    );
+    assert!(found[0].dependencies.is_empty());
+}
+
+#[test]
+fn numbered_slug_grammar_failures_are_closed() {
+    let cases = [
+        ("0139a-x.md", "# PRD 0139b — X\n", "does not match filename"),
+        (
+            "0139a-x.md",
+            "# PRD 0139a - X\n",
+            "separator must be an em-dash or colon",
+        ),
+        ("0139a-x.md", "# PRD 0139a: \n", "title must not be empty"),
+        ("0139a-.md", "# PRD 0139a: X\n", "slug must not be empty"),
+        (
+            "1234567-x.md",
+            "# PRD 1234567: X\n",
+            "one to six ASCII digits",
+        ),
+        (
+            "0139ab-x.md",
+            "# PRD 0139ab: X\n",
+            "one optional ASCII lowercase letter",
+        ),
+    ];
+    for (name, body, expected) in cases {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("todo")).unwrap();
+        fs::write(root.path().join("todo").join(name), body).unwrap();
+        let repo = RepositoryIdentity {
+            worktree: root.path().to_owned(),
+            key: "repo".into(),
+        };
+        let layout = BacklogLayout {
+            profile: BacklogProfile::NumberedSlug,
+            active_dir: RepositoryPath::new("todo").unwrap(),
+            archived_dir: RepositoryPath::new("done").unwrap(),
+        };
+        let error = FilesystemBacklogDiscovery
+            .discover_with_layout(&repo, &layout)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{name}: {error}");
     }
 }

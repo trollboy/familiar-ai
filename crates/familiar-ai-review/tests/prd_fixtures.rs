@@ -14,7 +14,13 @@ fn prd_dir() -> PathBuf {
 }
 
 fn parse(name: &str) -> Result<Vec<String>, ExpectedFilesError> {
-    let content = fs::read_to_string(prd_dir().join(name)).expect("PRD fixture readable");
+    let active = prd_dir().join(name);
+    let path = if active.exists() {
+        active
+    } else {
+        prd_dir().join("done").join(name)
+    };
+    let content = fs::read_to_string(path).expect("PRD fixture readable");
     parse_expected_files(&content)
         .map(|entries| entries.into_iter().map(|entry| entry.normalized).collect())
 }
@@ -261,8 +267,9 @@ fn prds_025_and_026_pin_as_valid_contracts() {
 #[test]
 fn every_wave_two_prd_parses_deterministically() {
     let mut outcomes = Vec::new();
-    let mut names: Vec<_> = fs::read_dir(prd_dir())
-        .unwrap()
+    let mut names: Vec<_> = [prd_dir(), prd_dir().join("done")]
+        .into_iter()
+        .flat_map(|directory| fs::read_dir(directory).unwrap())
         .filter_map(|entry| {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             (name.starts_with("PRD-") && name.ends_with(".md")).then_some(name)

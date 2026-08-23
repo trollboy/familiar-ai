@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use familiar_ai_core::{
     load_manifest, resolve_run_prd, validate_graph, validate_recovery_attribution, AppPaths,
     BacklogDiscovery, BacklogManager, BacklogRecoveryAction, BacklogStatusStore,
-    BootstrapApplyResult, Config, FilesystemBacklogDiscovery,
+    BootstrapApplyResult, Config, FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
 };
 use familiar_ai_daemon::drive::{drive, DriveWarrant};
 use familiar_ai_daemon::run::{build_agent, execute_with_config, resolved_agent_entries, AgentSet};
@@ -222,6 +222,9 @@ fn report_command(session_id: Option<&str>) -> Result<(), String> {
 }
 
 fn next() -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let cwd =
         std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
     // Resolve Git before opening or migrating storage, preserving the domain's
@@ -229,8 +232,9 @@ fn next() -> Result<(), String> {
     let repository = FilesystemBacklogDiscovery
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
+    let repository_config = config.repository(&repository.worktree);
     let discovered = FilesystemBacklogDiscovery
-        .discover(&repository)
+        .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| e.to_string())?;
     if discovered.is_empty() {
         return Err("backlog is empty".into());
@@ -251,7 +255,12 @@ fn next() -> Result<(), String> {
         );
     }
     let store = SqliteBacklogRepository::new(db.conn_mut());
-    let mut manager = BacklogManager::new(FilesystemBacklogDiscovery, store);
+    let mut manager = BacklogManager::new(
+        ProfiledFilesystemBacklogDiscovery {
+            layout: repository_config.layout(),
+        },
+        store,
+    );
     let selected = manager.next(&cwd).map_err(|e| e.to_string())?;
     println!(
         "{}\t{}\t{}\t{}",
@@ -264,13 +273,17 @@ fn next() -> Result<(), String> {
 }
 
 fn backlog(command: BacklogCommand) -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let cwd =
         std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
     let repository = FilesystemBacklogDiscovery
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
+    let repository_config = config.repository(&repository.worktree);
     let discovered = FilesystemBacklogDiscovery
-        .discover(&repository)
+        .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| e.to_string())?;
     if discovered.is_empty() {
         return Err("backlog is empty".into());

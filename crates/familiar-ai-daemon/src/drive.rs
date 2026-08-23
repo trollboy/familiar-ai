@@ -158,8 +158,10 @@ fn select_next(
         .reconcile_and_snapshot(repository, discovered)
         .map_err(|error| DriveError::Storage(error.to_string()))?;
     entries.sort_by(|a, b| {
-        (a.prd.number, a.prd.path.as_str().as_bytes())
-            .cmp(&(b.prd.number, b.prd.path.as_str().as_bytes()))
+        a.prd
+            .id
+            .cmp(&b.prd.id)
+            .then_with(|| a.prd.path.cmp(&b.prd.path))
     });
     let statuses: std::collections::BTreeMap<_, _> = entries
         .iter()
@@ -198,6 +200,7 @@ pub fn drive(
     let repository = discovery
         .resolve(&current)
         .map_err(|error| DriveError::Config(error.to_string()))?;
+    let repository_config = config.repository(&repository.worktree);
 
     let database_path = config.database.resolve_path(&paths.data_dir);
     let mut db =
@@ -225,13 +228,14 @@ pub fn drive(
         if let Some(reason) = warrant.exhausted(attempted, known_cost, elapsed) {
             break reason;
         }
-        let discovered = match discovery.discover(&repository) {
-            Ok(discovered) => discovered,
-            Err(error) => {
-                eprintln!("drive: discovery failed: {error}");
-                break DriveTermination::StorageFailure;
-            }
-        };
+        let discovered =
+            match discovery.discover_with_layout(&repository, &repository_config.layout()) {
+                Ok(discovered) => discovered,
+                Err(error) => {
+                    eprintln!("drive: discovery failed: {error}");
+                    break DriveTermination::StorageFailure;
+                }
+            };
         if let Err(error) = validate_graph(&discovered) {
             eprintln!("drive: backlog graph invalid: {error}");
             break DriveTermination::StorageFailure;
