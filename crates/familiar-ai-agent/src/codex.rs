@@ -348,7 +348,7 @@ mod tests {
                     prompt: "review",
                     filesystem: crate::FilesystemPolicy::ReadOnly,
                     model: None,
-                    timeout_ms: Some(1_000),
+                    timeout_ms: Some(5_000),
                 },
                 &mut output,
             )

@@ -67,6 +67,12 @@ pub enum BacklogStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrdLocation {
+    Active,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BacklogRecoveryAction {
     Release,
     ManualCompleteOverride,
@@ -139,6 +145,7 @@ pub struct DiscoveredPrd {
     pub id: PrdId,
     pub number: u64,
     pub path: RepositoryPath,
+    pub location: PrdLocation,
     pub title: String,
     pub dependencies: Vec<PrdId>,
     pub content_hash: String,
@@ -232,6 +239,8 @@ pub enum BacklogError {
         path: RepositoryPath,
         status: &'static str,
     },
+    #[error("cannot run {path}: PRD is archived")]
+    RunArchived { path: RepositoryPath },
     #[error("cannot run {path}: incomplete dependencies [{dependencies}]")]
     RunDependencies {
         path: RepositoryPath,
@@ -286,6 +295,11 @@ pub fn resolve_run_prd(
                 supplied.display()
             ))
         })?;
+    if prd.location == PrdLocation::Archived {
+        return Err(BacklogError::RunArchived {
+            path: prd.path.clone(),
+        });
+    }
     let bytes = fs::read(&canonical)
         .map_err(|e| BacklogError::RunPath(format!("{}: {e}", supplied.display())))?;
     let hash: String = digest(&SHA256, &bytes)
@@ -303,6 +317,11 @@ pub fn resolve_run_prd(
 }
 
 pub fn admit_run_prd(entries: &[BacklogEntry], target: &DiscoveredPrd) -> Result<(), BacklogError> {
+    if target.location == PrdLocation::Archived {
+        return Err(BacklogError::RunArchived {
+            path: target.path.clone(),
+        });
+    }
     let entry = entries
         .iter()
         .find(|entry| entry.prd.path == target.path)
@@ -391,6 +410,9 @@ where
             .collect();
         let mut reasons = Vec::new();
         for entry in entries {
+            if entry.prd.location == PrdLocation::Archived {
+                continue;
+            }
             let incomplete: Vec<_> = entry
                 .prd
                 .dependencies
@@ -495,15 +517,44 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
                 Err(_) => continue,
             };
             if filename_number(&name).is_some() {
-                candidates.push((name, item.path()));
+                candidates.push((name, item.path(), PrdLocation::Active));
             }
         }
-        candidates.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let archived_root = root.join("done");
+        match fs::read_dir(&archived_root) {
+            Ok(read) => {
+                for item in read {
+                    let item = item.map_err(|e| {
+                        BacklogError::Discovery(format!("cannot enumerate docs/prds/done: {e}"))
+                    })?;
+                    let name = match item.file_name().into_string() {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    if filename_number(&name).is_some() {
+                        candidates.push((name, item.path(), PrdLocation::Archived));
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BacklogError::Discovery(format!(
+                    "cannot read docs/prds/done: {error}"
+                )))
+            }
+        }
+        candidates.sort_by(|a, b| {
+            (a.0.as_bytes(), a.2 == PrdLocation::Archived)
+                .cmp(&(b.0.as_bytes(), b.2 == PrdLocation::Archived))
+        });
         let mut parsed = Vec::new();
         let mut errors = Vec::new();
-        for (name, path) in candidates {
-            let rel = format!("docs/prds/{name}");
-            match parse_candidate(&path, &rel, &name) {
+        for (name, path, location) in candidates {
+            let rel = match location {
+                PrdLocation::Active => format!("docs/prds/{name}"),
+                PrdLocation::Archived => format!("docs/prds/done/{name}"),
+            };
+            match parse_candidate(&path, &rel, &name, location) {
                 Ok(v) => parsed.push(v),
                 Err(e) => errors.push(e.to_string()),
             }
@@ -534,7 +585,12 @@ fn filename_number(name: &str) -> Option<Result<u64, std::num::ParseIntError>> {
     Some(digits.parse())
 }
 
-fn parse_candidate(path: &Path, relative: &str, name: &str) -> Result<DiscoveredPrd, BacklogError> {
+fn parse_candidate(
+    path: &Path,
+    relative: &str,
+    name: &str,
+    location: PrdLocation,
+) -> Result<DiscoveredPrd, BacklogError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|e| malformed(relative, format!("cannot inspect file: {e}")))?;
     if metadata.file_type().is_symlink() {
@@ -641,6 +697,7 @@ fn parse_candidate(path: &Path, relative: &str, name: &str) -> Result<Discovered
         id: PrdId::new(number),
         number,
         path: RepositoryPath::new(relative.to_owned())?,
+        location,
         title: title.to_owned(),
         dependencies,
         content_hash: hash,
@@ -789,10 +846,14 @@ mod tests {
                 .iter()
                 .cloned()
                 .map(|prd| {
-                    let status = *self
-                        .statuses
-                        .entry(prd.path.to_string())
-                        .or_insert(BacklogStatus::Pending);
+                    let status = if prd.location == PrdLocation::Archived {
+                        BacklogStatus::Completed
+                    } else {
+                        *self
+                            .statuses
+                            .entry(prd.path.to_string())
+                            .or_insert(BacklogStatus::Pending)
+                    };
                     BacklogEntry { prd, status }
                 })
                 .collect())
@@ -817,6 +878,7 @@ mod tests {
             id: PrdId::new(2),
             number: 2,
             path: RepositoryPath::new("docs/prds/PRD-002.md").unwrap(),
+            location: PrdLocation::Active,
             title: "Two".into(),
             dependencies: vec![PrdId::new(1)],
             content_hash: "two".into(),
@@ -825,6 +887,7 @@ mod tests {
             id: PrdId::new(1),
             number: 1,
             path: RepositoryPath::new("docs/prds/PRD-001.md").unwrap(),
+            location: PrdLocation::Active,
             title: "One".into(),
             dependencies: vec![],
             content_hash: "one".into(),
@@ -874,9 +937,114 @@ mod tests {
         let found = FilesystemBacklogDiscovery.discover(&repo).unwrap();
         assert_eq!(
             found.iter().map(|p| p.number).collect::<Vec<_>>(),
-            vec![2, 9, 10]
+            vec![1, 2, 9, 10]
         );
-        assert_eq!(found[2].dependencies, vec![PrdId::new(2), PrdId::new(9)]);
+        assert_eq!(found[0].location, PrdLocation::Archived);
+        assert_eq!(found[3].dependencies, vec![PrdId::new(2), PrdId::new(9)]);
+    }
+    #[test]
+    fn archived_dependency_validates_and_is_not_selected_or_admitted() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("docs/prds/done/nested")).unwrap();
+        fs::write(
+            root.path().join("docs/prds/done/PRD-001.md"),
+            "# PRD-001: One\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("docs/prds/PRD-002.md"),
+            "# PRD-002: Two\n\n**Depends on:** PRD-001\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("docs/prds/done/nested/PRD-003.md"),
+            "# PRD-003: Nested\n",
+        )
+        .unwrap();
+        let repository = RepositoryIdentity {
+            worktree: root.path().into(),
+            key: "key".into(),
+        };
+        let discovered = FilesystemBacklogDiscovery.discover(&repository).unwrap();
+        assert_eq!(discovered.len(), 2);
+        validate_graph(&discovered).unwrap();
+        let archived = discovered.iter().find(|prd| prd.number == 1).unwrap();
+        assert_eq!(archived.location, PrdLocation::Archived);
+        assert_eq!(
+            admit_run_prd(
+                &discovered
+                    .iter()
+                    .cloned()
+                    .map(|prd| BacklogEntry {
+                        status: if prd.location == PrdLocation::Archived {
+                            BacklogStatus::Completed
+                        } else {
+                            BacklogStatus::Pending
+                        },
+                        prd,
+                    })
+                    .collect::<Vec<_>>(),
+                archived,
+            )
+            .unwrap_err()
+            .to_string(),
+            "cannot run docs/prds/done/PRD-001.md: PRD is archived"
+        );
+    }
+    #[test]
+    fn duplicate_identity_across_locations_names_both_paths() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("docs/prds/done")).unwrap();
+        write(root.path(), "PRD-001.md", "# PRD-001: Active\n");
+        fs::write(
+            root.path().join("docs/prds/done/PRD-1.md"),
+            "# PRD-1: Archived\n",
+        )
+        .unwrap();
+        let error = FilesystemBacklogDiscovery
+            .discover(&RepositoryIdentity {
+                worktree: root.path().into(),
+                key: "key".into(),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("docs/prds/PRD-001.md"));
+        assert!(error.contains("docs/prds/done/PRD-1.md"));
+    }
+    #[test]
+    fn fresh_store_selects_active_dependent_of_archived_prd() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("docs/prds/done")).unwrap();
+        fs::write(
+            root.path().join("docs/prds/done/PRD-001.md"),
+            "# PRD-001: One\n",
+        )
+        .unwrap();
+        write(
+            root.path(),
+            "PRD-002.md",
+            "# PRD-002: Two\n\n**Depends on:** PRD-001\n",
+        );
+        struct Discovery(RepositoryIdentity);
+        impl BacklogDiscovery for Discovery {
+            fn resolve(&self, _: &Path) -> Result<RepositoryIdentity, BacklogError> {
+                Ok(self.0.clone())
+            }
+            fn discover(
+                &self,
+                repository: &RepositoryIdentity,
+            ) -> Result<Vec<DiscoveredPrd>, BacklogError> {
+                FilesystemBacklogDiscovery.discover(repository)
+            }
+        }
+        let mut manager = BacklogManager::new(
+            Discovery(RepositoryIdentity {
+                worktree: root.path().into(),
+                key: "key".into(),
+            }),
+            MemoryStore::default(),
+        );
+        assert_eq!(manager.next(root.path()).unwrap().id, PrdId::new(2));
     }
     #[test]
     fn manager_selects_lowest_eligible_number() {
@@ -908,6 +1076,7 @@ mod tests {
             id: PrdId::new(n),
             number: n,
             path: RepositoryPath::new(format!("docs/prds/PRD-{n}.md")).unwrap(),
+            location: PrdLocation::Active,
             title: n.to_string(),
             dependencies: deps,
             content_hash: "x".into(),
@@ -935,7 +1104,13 @@ mod tests {
         for body in cases {
             let path = root.path().join("PRD-001.md");
             fs::write(&path, body).unwrap();
-            assert!(parse_candidate(&path, "docs/prds/PRD-001.md", "PRD-001.md").is_err());
+            assert!(parse_candidate(
+                &path,
+                "docs/prds/PRD-001.md",
+                "PRD-001.md",
+                PrdLocation::Active
+            )
+            .is_err());
         }
     }
 
@@ -944,7 +1119,13 @@ mod tests {
         let root = tempdir().unwrap();
         let path = root.path().join("PRD-001.md");
         fs::write(&path, "# PRD-1: One\n\nProse.\n**Depends on:** PRD-999\n").unwrap();
-        let parsed = parse_candidate(&path, "docs/prds/PRD-001.md", "PRD-001.md").unwrap();
+        let parsed = parse_candidate(
+            &path,
+            "docs/prds/PRD-001.md",
+            "PRD-001.md",
+            PrdLocation::Active,
+        )
+        .unwrap();
         assert!(parsed.dependencies.is_empty());
     }
 }

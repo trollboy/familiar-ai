@@ -266,6 +266,7 @@ mod tests {
             id: PrdId::new(1),
             number: 1,
             path: RepositoryPath::new("docs/prds/PRD-001.md").unwrap(),
+            location: crate::PrdLocation::Active,
             title: "One".into(),
             dependencies: vec![],
             content_hash: hash.clone(),

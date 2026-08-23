@@ -1,6 +1,6 @@
 use familiar_ai_core::{
     validate_recovery_attribution, BacklogEntry, BacklogRecoveryAction, BacklogStatus,
-    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, PrdId, RepositoryIdentity,
+    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, PrdId, PrdLocation, RepositoryIdentity,
     RepositoryPath,
 };
 use familiar_ai_review::{
@@ -589,7 +589,32 @@ fn reconcile(
 ) -> Result<(), BacklogStoreError> {
     tx.execute("UPDATE backlog_prds SET missing_since=COALESCE(missing_since,?2),updated_at=CASE WHEN missing_since IS NULL THEN ?2 ELSE updated_at END WHERE repository_key=?1",params![repository.key,now]).map_err(storage)?;
     for prd in discovered {
-        tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,'pending',?5,?5,NULL,?5,?5) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.content_hash,now]).map_err(storage)?;
+        reconcile_prd(tx, repository, prd, now)?;
+    }
+    Ok(())
+}
+
+const ARCHIVED_RECONCILIATION_ACTOR: &str = "system:archived-prd-location";
+
+fn reconcile_prd(
+    tx: &Transaction<'_>,
+    repository: &RepositoryIdentity,
+    prd: &DiscoveredPrd,
+    now: &str,
+) -> Result<(), BacklogStoreError> {
+    tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,?5,?6,?6,NULL,?6,?6) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.content_hash,if prd.location == PrdLocation::Archived { "completed" } else { "pending" },now]).map_err(storage)?;
+    if prd.location == PrdLocation::Archived {
+        let old_status: String = tx
+            .query_row(
+                "SELECT status FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
+                params![repository.key, prd.path.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if old_status != "completed" {
+            tx.execute("UPDATE backlog_prds SET status='completed',updated_at=?3 WHERE repository_key=?1 AND prd_path=?2", params![repository.key, prd.path.as_str(), now]).map_err(storage)?;
+            tx.execute("INSERT INTO backlog_status_events(repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(?1,?2,?3,'completed',?4,?5)", params![repository.key, prd.path.as_str(), old_status, ARCHIVED_RECONCILIATION_ACTOR, now]).map_err(storage)?;
+        }
     }
     Ok(())
 }
@@ -626,16 +651,7 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
             params![repository.key, now],
         ).map_err(storage)?;
         for prd in discovered {
-            tx.execute(
-                "INSERT INTO backlog_prds (repository_key, prd_path, prd_number, content_hash, status, discovered_at, last_seen_at, missing_since, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5, NULL, ?5, ?5)
-                 ON CONFLICT(repository_key, prd_path) DO UPDATE SET
-                    prd_number = excluded.prd_number,
-                    content_hash = excluded.content_hash,
-                    last_seen_at = excluded.last_seen_at,
-                    missing_since = NULL",
-                params![repository.key, prd.path.as_str(), prd.number.to_string(), prd.content_hash, now],
-            ).map_err(storage)?;
+            reconcile_prd(&tx, repository, prd, &now)?;
         }
         let snapshot = discovered
             .iter()
@@ -696,6 +712,7 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
                 id: PrdId::new(number),
                 number,
                 path: path.clone(),
+                location: PrdLocation::Active,
                 title: String::new(),
                 dependencies: Vec::new(),
                 content_hash,
@@ -720,6 +737,7 @@ mod tests {
             id: PrdId::new(9),
             number: 9,
             path: RepositoryPath::new("docs/prds/PRD-009.md").unwrap(),
+            location: PrdLocation::Active,
             title: "Nine".into(),
             dependencies: vec![],
             content_hash: "abc".into(),
@@ -844,6 +862,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(events, 1);
+    }
+    #[test]
+    fn archived_location_corrects_status_with_system_event() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut archived = prd();
+        archived.path = RepositoryPath::new("docs/prds/done/PRD-009.md").unwrap();
+        archived.location = PrdLocation::Archived;
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage
+            .connection
+            .execute(
+                "INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES(?1,?2,?3,?4,'pending','before','before','before','before')",
+                params![repo().key, archived.path.as_str(), archived.number, archived.content_hash],
+            )
+            .unwrap();
+        let snapshot = storage
+            .reconcile_and_snapshot(&repo(), &[archived])
+            .unwrap();
+        assert_eq!(snapshot[0].status, BacklogStatus::Completed);
+        let event: (String, String, String) = storage
+            .connection
+            .query_row(
+                "SELECT old_status,new_status,actor FROM backlog_status_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            event,
+            (
+                "pending".into(),
+                "completed".into(),
+                ARCHIVED_RECONCILIATION_ACTOR.into()
+            )
+        );
     }
     #[test]
     fn missing_and_reappearing_entry_retains_status() {
@@ -1020,6 +1074,7 @@ mod tests {
             id: PrdId::new(10),
             number: 10,
             path: RepositoryPath::new("docs/prds/PRD-010.md").unwrap(),
+            location: PrdLocation::Active,
             title: "Ten".into(),
             dependencies: vec![PrdId::new(9)],
             content_hash: "def".into(),
@@ -1134,6 +1189,7 @@ mod tests {
             id: PrdId::new(99),
             number: 99,
             path: RepositoryPath::new("docs/prds/PRD-099.md").unwrap(),
+            location: PrdLocation::Active,
             title: "Unknown".into(),
             dependencies: vec![],
             content_hash: "zzz".into(),
