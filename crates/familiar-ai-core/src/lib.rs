@@ -12,8 +12,8 @@ pub use backlog::{
     admit_run_prd, resolve_run_prd, validate_graph, validate_recovery_attribution,
     BacklogDiscovery, BacklogEntry, BacklogError, BacklogManager, BacklogRecoveryAction,
     BacklogStatus, BacklogStatusStore, BacklogStoreError, DiscoveredPrd,
-    FilesystemBacklogDiscovery, IneligibilityReason, NextPrd, PrdId, RepositoryIdentity,
-    RepositoryPath,
+    FilesystemBacklogDiscovery, IneligibilityReason, NextPrd, PrdId, PrdLocation,
+    RepositoryIdentity, RepositoryPath,
 };
 pub use bootstrap::*;
 pub use config::{

@@ -222,6 +222,43 @@ fn prd_024_pins_as_a_valid_contract() {
 }
 
 #[test]
+fn prds_025_and_026_pin_as_valid_contracts() {
+    assert_eq!(
+        parse("PRD-025.md").unwrap(),
+        vec![
+            "crates/familiar-ai-core/src/backlog.rs",
+            "crates/familiar-ai-core/src/bootstrap.rs",
+            "crates/familiar-ai-core/src/config.rs",
+            "crates/familiar-ai-core/src/lib.rs",
+            "crates/familiar-ai-context/src/lib.rs",
+            "crates/familiar-ai-storage/migrations/",
+            "crates/familiar-ai-storage/src/migrate.rs",
+            "crates/familiar-ai-storage/src/repos/backlog.rs",
+            "crates/familiar-ai-storage/src/repos/bootstrap.rs",
+            "crates/familiar-ai-daemon/src/cli.rs",
+            "crates/familiar-ai-daemon/src/run.rs",
+            "crates/familiar-ai-daemon/src/drive.rs",
+            "crates/familiar-ai-daemon/src/report.rs",
+            "crates/familiar-ai-daemon/tests/",
+            "config/default.toml",
+        ]
+    );
+    assert_eq!(
+        parse("PRD-026.md").unwrap(),
+        vec![
+            "crates/familiar-ai-core/src/config.rs",
+            "crates/familiar-ai-daemon/src/run.rs",
+            "crates/familiar-ai-daemon/src/drive.rs",
+            "crates/familiar-ai-daemon/src/report.rs",
+            "crates/familiar-ai-daemon/tests/",
+            "crates/familiar-ai-storage/migrations/",
+            "crates/familiar-ai-storage/src/repos/",
+            "config/default.toml",
+        ]
+    );
+}
+
+#[test]
 fn every_wave_two_prd_parses_deterministically() {
     let mut outcomes = Vec::new();
     let mut names: Vec<_> = fs::read_dir(prd_dir())
@@ -263,7 +300,9 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-021.md",
             "PRD-022.md",
             "PRD-023.md",
-            "PRD-024.md"
+            "PRD-024.md",
+            "PRD-025.md",
+            "PRD-026.md"
         ]
     );
 }

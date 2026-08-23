@@ -68,6 +68,44 @@ fn next_is_stable_read_only_and_prints_exact_line() {
 }
 
 #[test]
+fn fresh_database_selects_active_work_after_archived_dependency() {
+    let repo = git_repo();
+    let database = repo.path().join("state/familiar.db");
+    fs::create_dir_all(repo.path().join("docs/prds/done")).unwrap();
+    fs::write(
+        repo.path().join("docs/prds/done/PRD-001.md"),
+        "# PRD-001: Finished\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("docs/prds/PRD-002.md"),
+        "# PRD-002: Remaining\n\n**Depends on:** PRD-001\n",
+    )
+    .unwrap();
+
+    let output = next_command(&repo, &database).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"PRD-2\tdocs/prds/PRD-002.md\tpending\tRemaining\n"
+    );
+    let db = familiar_ai_storage::Database::open(&database).unwrap();
+    let archived: (String, i64) = db
+        .conn()
+        .query_row(
+            "SELECT status,(SELECT count(*) FROM backlog_status_events WHERE prd_path='docs/prds/done/PRD-001.md') FROM backlog_prds WHERE prd_path='docs/prds/done/PRD-001.md'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(archived, ("completed".into(), 0));
+}
+
+#[test]
 fn next_reports_categorized_backlog_failures_on_stderr_only() {
     let repo = git_repo();
     let database = repo.path().join("familiar.db");

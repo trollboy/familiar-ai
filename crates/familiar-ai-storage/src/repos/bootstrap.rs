@@ -331,6 +331,7 @@ mod tests {
             id: PrdId::new(n),
             number: n,
             path: RepositoryPath::new(format!("docs/prds/PRD-{n:03}.md")).unwrap(),
+            location: familiar_ai_core::PrdLocation::Active,
             title: n.to_string(),
             dependencies: vec![],
             content_hash: format!("{n:064x}"),

@@ -20,17 +20,15 @@ pub enum DaemonCommand {
 }
 
 #[cfg(feature = "tray")]
-impl From<TrayCommand> for Option<DaemonCommand> {
-    fn from(cmd: TrayCommand) -> Self {
-        match cmd {
-            TrayCommand::EnableLlm => Some(DaemonCommand::EnableLlm),
-            TrayCommand::DisableLlm => Some(DaemonCommand::DisableLlm),
-            TrayCommand::PauseHeavyTasks => Some(DaemonCommand::PauseHeavyTasks),
-            TrayCommand::ResumeHeavyTasks => Some(DaemonCommand::ResumeHeavyTasks),
-            TrayCommand::Quit => Some(DaemonCommand::Quit),
-            // OpenSettings and OpenProject are handled by the tray itself via opener.
-            TrayCommand::OpenSettings | TrayCommand::OpenProject(_) => None,
-        }
+pub fn daemon_command_from_tray(cmd: TrayCommand) -> Option<DaemonCommand> {
+    match cmd {
+        TrayCommand::EnableLlm => Some(DaemonCommand::EnableLlm),
+        TrayCommand::DisableLlm => Some(DaemonCommand::DisableLlm),
+        TrayCommand::PauseHeavyTasks => Some(DaemonCommand::PauseHeavyTasks),
+        TrayCommand::ResumeHeavyTasks => Some(DaemonCommand::ResumeHeavyTasks),
+        TrayCommand::Quit => Some(DaemonCommand::Quit),
+        // OpenSettings and OpenProject are handled by the tray itself via opener.
+        TrayCommand::OpenSettings | TrayCommand::OpenProject(_) => None,
     }
 }
 
@@ -133,6 +131,35 @@ mod tests {
 
     fn make_router() -> Arc<InferenceRouter> {
         Arc::new(InferenceRouter::new(&InferenceConfig::default()))
+    }
+
+    #[cfg(feature = "tray")]
+    #[test]
+    fn tray_commands_map_without_an_orphan_conversion_impl() {
+        assert!(matches!(
+            daemon_command_from_tray(TrayCommand::EnableLlm),
+            Some(DaemonCommand::EnableLlm)
+        ));
+        assert!(matches!(
+            daemon_command_from_tray(TrayCommand::DisableLlm),
+            Some(DaemonCommand::DisableLlm)
+        ));
+        assert!(matches!(
+            daemon_command_from_tray(TrayCommand::PauseHeavyTasks),
+            Some(DaemonCommand::PauseHeavyTasks)
+        ));
+        assert!(matches!(
+            daemon_command_from_tray(TrayCommand::ResumeHeavyTasks),
+            Some(DaemonCommand::ResumeHeavyTasks)
+        ));
+        assert!(matches!(
+            daemon_command_from_tray(TrayCommand::Quit),
+            Some(DaemonCommand::Quit)
+        ));
+        assert!(daemon_command_from_tray(TrayCommand::OpenSettings).is_none());
+        assert!(
+            daemon_command_from_tray(TrayCommand::OpenProject("/tmp/project".into())).is_none()
+        );
     }
 
     #[tokio::test]

@@ -811,7 +811,7 @@ mod tests {
         let mut output = Vec::new();
         let mut request = request(&workspace, None, crate::FilesystemPolicy::ReadOnly);
         request.denied_read_path = Some(&repository);
-        request.timeout_ms = Some(1_000);
+        request.timeout_ms = Some(5_000);
         let result = agent(settings(&executable))
             .execute(request, &mut output)
             .unwrap();

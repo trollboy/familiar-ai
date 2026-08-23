@@ -31,6 +31,9 @@ heartbeat_interval_secs = 1
 pid_file = "{pid}"
 socket_path = "{sock}"
 
+[tray]
+enabled = false
+
 [database]
 path = "{db}"
 
@@ -81,8 +84,20 @@ format = "json"
         libc::kill(child.id() as i32, libc::SIGTERM);
     }
 
-    // Wait for exit
-    let status = child.wait().expect("failed to wait on daemon");
+    // Wait for exit without allowing a signal-handling regression to hang the
+    // entire workspace test suite indefinitely.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("failed to poll daemon") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().expect("failed to kill unresponsive daemon");
+            let _ = child.wait();
+            panic!("daemon did not exit within 10 seconds of SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert!(status.success(), "daemon exited with error: {status}");
 
     // PID file should be cleaned up

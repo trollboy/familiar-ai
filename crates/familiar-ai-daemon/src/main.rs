@@ -28,6 +28,8 @@ use familiar_ai_watcher::{FileWatcher, WatcherEvent};
 use crate::summary_worker::{run_repository_scan, SummaryRequest, SummaryWorker};
 
 use crate::cli::Cli;
+#[cfg(feature = "tray")]
+use crate::command::daemon_command_from_tray;
 use crate::command::{handle_commands, CommandState, DaemonCommand};
 use crate::pid::{remove_pid_file, write_pid_file};
 use crate::shutdown::shutdown_signal;
@@ -390,7 +392,7 @@ fn main() -> ExitCode {
     let bridge_runtime = runtime.clone();
     bridge_runtime.spawn(async move {
         while let Some(tc) = tray_rx.recv().await {
-            let opt: Option<DaemonCommand> = tc.into();
+            let opt = daemon_command_from_tray(tc);
             if let Some(dc) = opt {
                 let _ = bridge_command_tx.send(dc).await;
             }
