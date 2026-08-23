@@ -150,3 +150,59 @@ fn next_fails_outside_a_git_repository() {
         .unwrap()
         .starts_with("error: repository resolution failed:"));
 }
+
+#[test]
+fn numbered_slug_profile_bootstraps_archived_and_selects_child_before_umbrella() {
+    let repo = git_repo();
+    let home = tempdir().unwrap();
+    let xdg = home.path().join("xdg");
+    let config_dirs = [
+        home.path().join("Library/Application Support/Familiar-AI"),
+        xdg.join("familiar-ai"),
+    ];
+    for config_dir in &config_dirs {
+        fs::create_dir_all(config_dir).unwrap();
+    }
+    fs::create_dir_all(repo.path().join("docs/prd/todo")).unwrap();
+    fs::create_dir_all(repo.path().join("docs/prd/done")).unwrap();
+    fs::write(
+        repo.path().join("docs/prd/done/0138-finished.md"),
+        "# PRD 0138 — Finished\n",
+    )
+    .unwrap();
+    for (name, heading) in [
+        ("0139-epic.md", "# PRD 0139 — Epic\n"),
+        ("0139b-child.md", "# PRD 0139b: Child B\n"),
+        ("0139a-child.md", "# PRD 0139a — Child A\n"),
+        ("0140-next.md", "# PRD 0140 — Next\n"),
+    ] {
+        fs::write(repo.path().join("docs/prd/todo").join(name), heading).unwrap();
+    }
+    for config_dir in &config_dirs {
+        fs::write(
+            config_dir.join("config.toml"),
+            format!("[repositories.\"{}\"]\nprofile = \"numbered-slug\"\nactive_dir = \"docs/prd/todo\"\narchived_dir = \"docs/prd/done\"\n", repo.path().display()),
+        ).unwrap();
+    }
+    let database = repo.path().join("state/profile.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
+        .current_dir(repo.path())
+        .arg("next")
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"PRD 0139a\tdocs/prd/todo/0139a-child.md\tpending\tChild A\n"
+    );
+    let db = familiar_ai_storage::Database::open(&database).unwrap();
+    let archived: (String, Option<String>) = db.conn().query_row("SELECT status,prd_suffix FROM backlog_prds WHERE prd_path='docs/prd/done/0138-finished.md'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(archived, ("completed".into(), None));
+}

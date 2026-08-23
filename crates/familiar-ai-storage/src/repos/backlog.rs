@@ -13,6 +13,8 @@ pub struct SqliteBacklogRepository<'a> {
     connection: &'a mut Connection,
 }
 
+type PersistedBacklogIdentityRow = (u64, Option<String>, String, String, Option<String>);
+
 impl<'a> SqliteBacklogRepository<'a> {
     pub fn new(connection: &'a mut Connection) -> Self {
         Self { connection }
@@ -31,18 +33,19 @@ impl<'a> SqliteBacklogRepository<'a> {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
-        let row: Option<(u64, String, String, Option<String>)> = tx
+        let row: Option<PersistedBacklogIdentityRow> = tx
             .query_row(
-                "SELECT prd_number,content_hash,status,missing_since FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
+                "SELECT prd_number,prd_suffix,content_hash,status,missing_since FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
                 params![repository.key, target.path.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()
             .map_err(storage)?;
-        let (number, hash, status, missing) =
+        let (number, suffix, hash, status, missing) =
             row.ok_or_else(|| BacklogStoreError::NotFound(target.path.clone()))?;
         if status != "in_progress"
             || number != target.number
+            || suffix.as_deref().and_then(|s| s.chars().next()) != target.id.suffix()
             || hash != target.content_hash
             || missing.is_some()
         {
@@ -117,18 +120,19 @@ impl<'a> SqliteBacklogRepository<'a> {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let now = chrono::Utc::now().to_rfc3339();
-        let row: Option<(u64, String, String, Option<String>)> = tx
+        let row: Option<PersistedBacklogIdentityRow> = tx
             .query_row(
-                "SELECT prd_number,content_hash,status,missing_since FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
+                "SELECT prd_number,prd_suffix,content_hash,status,missing_since FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
                 params![repository.key, target.path.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()
             .map_err(storage)?;
-        let (number, hash, status, missing) =
+        let (number, suffix, hash, status, missing) =
             row.ok_or_else(|| BacklogStoreError::NotFound(target.path.clone()))?;
         if status != "pending"
             || number != target.number
+            || suffix.as_deref().and_then(|s| s.chars().next()) != target.id.suffix()
             || hash != target.content_hash
             || missing.is_some()
         {
@@ -602,7 +606,7 @@ fn reconcile_prd(
     prd: &DiscoveredPrd,
     now: &str,
 ) -> Result<(), BacklogStoreError> {
-    tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,?5,?6,?6,NULL,?6,?6) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.content_hash,if prd.location == PrdLocation::Archived { "completed" } else { "pending" },now]).map_err(storage)?;
+    tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,prd_suffix,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?7,NULL,?7,?7) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,prd_suffix=excluded.prd_suffix,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.id.suffix().map(|c| c.to_string()),prd.content_hash,if prd.location == PrdLocation::Archived { "completed" } else { "pending" },now]).map_err(storage)?;
     if prd.location == PrdLocation::Archived {
         let old_status: String = tx
             .query_row(
@@ -673,12 +677,12 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
             return Err(BacklogStoreError::EmptyActor);
         }
         let tx = self.connection.transaction().map_err(storage)?;
-        let row: Option<(u64, String, String)> = tx.query_row(
-            "SELECT prd_number, content_hash, status FROM backlog_prds WHERE repository_key = ?1 AND prd_path = ?2",
+        let row: Option<(u64, Option<String>, String, String)> = tx.query_row(
+            "SELECT prd_number, prd_suffix, content_hash, status FROM backlog_prds WHERE repository_key = ?1 AND prd_path = ?2",
             params![repository.key, path.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).optional().map_err(storage)?;
-        let (number, content_hash, current_text) =
+        let (number, suffix, content_hash, current_text) =
             row.ok_or_else(|| BacklogStoreError::NotFound(path.clone()))?;
         let current = BacklogStatus::parse(&current_text)?;
         if current != expected {
@@ -709,7 +713,7 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
         tx.commit().map_err(storage)?;
         Ok(BacklogEntry {
             prd: DiscoveredPrd {
-                id: PrdId::new(number),
+                id: PrdId::with_suffix(number, suffix.and_then(|s| s.chars().next())),
                 number,
                 path: path.clone(),
                 location: PrdLocation::Active,
@@ -742,6 +746,69 @@ mod tests {
             dependencies: vec![],
             content_hash: "abc".into(),
         }
+    }
+
+    #[test]
+    fn suffixed_identities_round_trip_and_sql_order_matches_domain() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = RepositoryIdentity {
+            worktree: std::path::PathBuf::from("/repo"),
+            key: "repo".into(),
+        };
+        let identities = [
+            (139, None),
+            (140, None),
+            (139, Some('d')),
+            (139, Some('a')),
+            (139, Some('b')),
+        ];
+        let discovered: Vec<_> = identities
+            .into_iter()
+            .map(|(number, suffix)| {
+                let spelling = format!(
+                    "{number:04}{}",
+                    suffix.map(|c| c.to_string()).unwrap_or_default()
+                );
+                DiscoveredPrd {
+                    id: PrdId::numbered_slug(number, suffix, 4),
+                    number,
+                    path: RepositoryPath::new(format!("todo/{spelling}-work.md")).unwrap(),
+                    location: PrdLocation::Active,
+                    title: spelling,
+                    dependencies: vec![],
+                    content_hash: format!("hash-{number}-{}", suffix.unwrap_or('_')),
+                }
+            })
+            .collect();
+        let snapshot = SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&repository, &discovered)
+            .unwrap();
+        let mut domain: Vec<_> = snapshot.into_iter().map(|entry| entry.prd.id).collect();
+        domain.sort();
+        let sql: Vec<(u64, Option<String>)> = {
+            let mut stmt = db.conn().prepare("SELECT prd_number,prd_suffix FROM backlog_prds WHERE repository_key='repo' ORDER BY prd_number, CASE WHEN prd_suffix IS NULL THEN 1 ELSE 0 END, prd_suffix").unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            sql.iter()
+                .map(|(n, s)| PrdId::with_suffix(*n, s.as_deref().and_then(|v| v.chars().next())))
+                .collect::<Vec<_>>(),
+            domain
+        );
+        assert_eq!(
+            domain.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "PRD 0139a",
+                "PRD 0139b",
+                "PRD 0139d",
+                "PRD 0139",
+                "PRD 0140"
+            ]
+        );
     }
     fn repo() -> RepositoryIdentity {
         RepositoryIdentity {

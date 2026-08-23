@@ -132,7 +132,7 @@ impl SqliteBootstrapRepository<'_> {
             }
             tx.execute("INSERT INTO backlog_status_events(repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(?1,?2,'pending','completed',?3,?4)",params![repository.key,item.path.as_str(),BOOTSTRAP_ACTOR,now]).map_err(err)?;
             let event = tx.last_insert_rowid();
-            tx.execute("INSERT INTO backlog_bootstrap_items(run_id,ordinal,repository_key,prd_path,prd_number,declared_content_hash,observed_content_hash,old_status,new_status,status_event_id) VALUES(?1,?2,?3,?4,?5,?6,?7,'pending','completed',?8)",params![id,index+1,repository.key,item.path.as_str(),item.prd_number,item.declared_content_hash,item.observed_content_hash,event]).map_err(err)?;
+            tx.execute("INSERT INTO backlog_bootstrap_items(run_id,ordinal,repository_key,prd_path,prd_number,prd_suffix,declared_content_hash,observed_content_hash,old_status,new_status,status_event_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'pending','completed',?9)",params![id,index+1,repository.key,item.path.as_str(),item.prd_number,item.prd_suffix.map(|c| c.to_string()),item.declared_content_hash,item.observed_content_hash,event]).map_err(err)?;
         }
         tx.commit().map_err(err)?;
         Ok(BootstrapApplyResult::Applied(BootstrapApplied {
@@ -347,6 +347,7 @@ mod tests {
                 .map(|p| BootstrapItem {
                     path: p.path.clone(),
                     prd_number: p.number,
+                    prd_suffix: p.id.suffix(),
                     declared_content_hash: p.content_hash.clone(),
                     observed_content_hash: p.content_hash.clone(),
                 })

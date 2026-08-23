@@ -24,6 +24,17 @@
 [execution_context]
 # hard_ceiling_tokens = 12000  # Optional; disabled when absent
 
+# Repositories absent from this table use the canonical profile at docs/prds
+# and docs/prds/done with the existing ADR, contract, and supporting roots.
+# [repositories."/absolute/path/to/worktree"]
+# profile = "numbered-slug" # "canonical" | "numbered-slug"
+# active_dir = "docs/prd/todo"
+# archived_dir = "docs/prd/done"
+# reference_roots = [
+#   { prefix = "docs/prd/", kind = "prd" },
+#   { prefix = "docs/runbooks/", kind = "supporting" },
+# ]
+
 # Unattended driver warrant. `familiar-ai drive` refuses to start unless at
 # least one ceiling below is finite — an unbounded unattended loop is not a
 # warrant. Command-line flags may only tighten these values, never loosen them.

@@ -11,6 +11,7 @@ pub const BOOTSTRAP_ACTOR: &str = "system:historical-backlog-bootstrap";
 pub struct BootstrapItem {
     pub path: RepositoryPath,
     pub prd_number: u64,
+    pub prd_suffix: Option<char>,
     pub declared_content_hash: String,
     pub observed_content_hash: String,
 }
@@ -172,6 +173,7 @@ pub fn load_manifest(
         items.push(BootstrapItem {
             path: prd.path.clone(),
             prd_number: prd.number,
+            prd_suffix: prd.id.suffix(),
             declared_content_hash: item.sha256,
             observed_content_hash: prd.content_hash.clone(),
         });
