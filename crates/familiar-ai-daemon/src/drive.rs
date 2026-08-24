@@ -208,6 +208,13 @@ pub fn drive(
     db.run_migrations()
         .map_err(|error| DriveError::Storage(error.to_string()))?;
 
+    // A prior worker may have been killed while an agent was running. Close
+    // those rows before opening this session so `report` never presents an
+    // ambiguous "unrecorded" attempt after a restart.
+    DriverRepository::new(db.conn())
+        .recover_incomplete()
+        .map_err(|error| DriveError::Storage(error.to_string()))?;
+
     let session_id = format!("drive-{}", crate::run::new_id());
     DriverRepository::new(db.conn())
         .open_session(&session_id, &repository.key, &warrant.as_json())
@@ -279,7 +286,7 @@ pub fn drive(
                 completed += 1;
                 ("completed", None)
             }
-            Err(_) => ("retained", trace.retained_reason),
+            Err(_) => ("retained", trace.retained_reason.or(Some("run_failed"))),
         };
         if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
             &session_id,

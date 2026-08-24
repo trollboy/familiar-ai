@@ -56,6 +56,33 @@ impl<'a> DriverRepository<'a> {
         Ok(())
     }
 
+    /// Close sessions and attempts left open by a process crash or terminal
+    /// interruption. This runs before a new drive session is opened so an
+    /// overnight worker can be restarted without leaving ambiguous rows in
+    /// the morning report.
+    pub fn recover_incomplete(&self) -> familiar_ai_core::Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let attempts = self
+            .conn
+            .execute(
+                "UPDATE driver_attempts SET ended_at=COALESCE(ended_at,?1),\
+                 outcome=COALESCE(outcome,'retained'),\
+                 retained_reason=COALESCE(retained_reason,'interrupted')\
+                 WHERE ended_at IS NULL",
+                params![now],
+            )
+            .map_err(db)?;
+        self.conn
+            .execute(
+                "UPDATE driver_sessions SET ended_at=COALESCE(ended_at,?1),\
+                 termination_reason=COALESCE(termination_reason,'interrupted')\
+                 WHERE ended_at IS NULL",
+                params![now],
+            )
+            .map_err(db)?;
+        Ok(attempts)
+    }
+
     /// Record an attempt as started, returning its stable sequence number.
     pub fn record_attempt_started(
         &self,
@@ -306,6 +333,30 @@ mod tests {
         assert!(attempts[0].ended_at.is_none());
         assert!(attempts[0].outcome.is_none());
         assert_eq!(attempts[0].execution_id.as_deref(), Some("exec-9"));
+    }
+
+    #[test]
+    fn recovery_closes_open_session_and_attempt_with_explicit_reason() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        repository
+            .open_session("session-recover", "/repo/.git", "{}")
+            .unwrap();
+        repository
+            .record_attempt_started("session-recover", "PRD-17", "docs/prd.md", None)
+            .unwrap();
+
+        assert_eq!(repository.recover_incomplete().unwrap(), 1);
+        let session = repository.get_session("session-recover").unwrap().unwrap();
+        assert_eq!(session.termination_reason.as_deref(), Some("interrupted"));
+        assert!(session.ended_at.is_some());
+        let attempt = &repository.attempts("session-recover").unwrap()[0];
+        assert_eq!(attempt.outcome.as_deref(), Some("retained"));
+        assert_eq!(attempt.retained_reason.as_deref(), Some("interrupted"));
+        assert!(attempt.ended_at.is_some());
+
+        // Recovery is idempotent and does not rewrite completed records.
+        assert_eq!(repository.recover_incomplete().unwrap(), 0);
     }
 
     #[test]
