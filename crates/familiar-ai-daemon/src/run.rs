@@ -24,10 +24,10 @@ use familiar_ai_core::{
 use familiar_ai_review::{
     compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
     AgentAssignment, AgentObservation, AgentRole, BlockingPolicy, BoundedDocument,
-    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, GitChangeKind,
-    GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator, ReviewCycle,
-    ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason, ReviewTask,
-    ScopeClassPolicy, ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass,
+    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, ExpectedFilesError,
+    GitChangeKind, GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator,
+    ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason,
+    ReviewTask, ScopeClassPolicy, ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass,
     ScopeFileClassPolicies, ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
     StructuredReviewAdapter, VerificationCheck, VerificationPlan, WorkflowLimits,
 };
@@ -492,11 +492,20 @@ fn compute_review_preflight(
             "cannot read PRD for scope policy compilation: {error}"
         ))
     })?;
-    let contract = parse_expected_files(&prd_bytes).map_err(|error| {
-        RunError::Config(format!(
-            "PRD {prd_repository_path} Expected Files contract is invalid: {error}"
-        ))
-    })?;
+    let contract = match parse_expected_files(&prd_bytes) {
+        Ok(contract) => contract,
+        Err(ExpectedFilesError::MissingHeading)
+            if config.review.scope.declaration_mode
+                == ScopeDeclarationModeConfig::ExpectedOrConfigured =>
+        {
+            Vec::new()
+        }
+        Err(error) => {
+            return Err(RunError::Config(format!(
+                "PRD {prd_repository_path} Expected Files contract is invalid: {error}"
+            )))
+        }
+    };
     let baseline = capture_worktree_baseline(worktree, data_dir, execution_id)?;
     let snapshot = build_scope_policy(
         config,
@@ -2032,6 +2041,46 @@ mod tests {
             .unwrap();
         assert_eq!(stored.scope_evaluations, cycle.scope_evaluations);
         assert!(stored.scope_policy_snapshot.is_some());
+    }
+
+    #[test]
+    fn missing_expected_files_uses_configured_scope_only_when_mode_allows_it() {
+        let (_temp, _db, context, config, paths, _baseline, _agent, _finalization, _snapshot) =
+            production_review_fixture(false);
+        let prd_file = context.repository.worktree.join("docs-prd.md");
+        fs::write(
+            &prd_file,
+            "## Objective\nobjective\n\n## Acceptance Criteria\n1. criterion\n",
+        )
+        .unwrap();
+
+        let preflight = compute_review_preflight(
+            &config,
+            &prd_file,
+            "docs/prds/test.md",
+            &context.repository.worktree,
+            &paths.data_dir,
+            "preflight-configured-scope",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(preflight.snapshot.contract.is_empty());
+        assert!(!preflight.snapshot.allowed_paths.is_empty());
+
+        let mut required = config;
+        required.review.scope.declaration_mode = ScopeDeclarationModeConfig::ExpectedRequired;
+        let error = compute_review_preflight(
+            &required,
+            &prd_file,
+            "docs/prds/test.md",
+            &context.repository.worktree,
+            &paths.data_dir,
+            "preflight-required-scope",
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no authoritative `## Expected Files`"));
     }
 
     #[test]
