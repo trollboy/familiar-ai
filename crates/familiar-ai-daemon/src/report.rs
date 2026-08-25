@@ -98,11 +98,12 @@ fn render_built(out: &mut String, built: &[&DriverAttempt]) {
     for attempt in built.iter().take(MAX_LISTED_ATTEMPTS) {
         let _ = writeln!(
             out,
-            "  {}  {}  duration={}  cost={}",
+            "  {}  {}  duration={}  cost={}  phase={}",
             attempt.prd_id,
             attempt.prd_path,
             optional_ms(attempt.duration_ms),
-            optional_cost(attempt.known_cost_microusd)
+            optional_cost(attempt.known_cost_microusd),
+            attempt.last_durable_phase.as_deref().unwrap_or("unknown")
         );
     }
     render_omitted(out, built.len(), MAX_LISTED_ATTEMPTS);
@@ -238,6 +239,26 @@ fn render_judgment(out: &mut String, session: &DriverSession, stopped: &[&Driver
                 "  ! session ended on a storage failure; the account above may be incomplete."
             );
         }
+        Some("delivery_blocked") => {
+            let _ = writeln!(
+                out,
+                "  ! a clean implementation could not cross the delivery boundary; inspect its"
+            );
+            let _ = writeln!(
+                out,
+                "    adjacent .delivery.json journal for the exact publish, merge, staging, or rollback blocker."
+            );
+        }
+        Some("budget_deliveries_exhausted") => {
+            let _ = writeln!(
+                out,
+                "  ! the finite delivery warrant was exhausted; remaining reviewed worktrees stay"
+            );
+            let _ = writeln!(
+                out,
+                "    ready_for_delivery and require a later bounded delivery session."
+            );
+        }
         _ => {}
     }
     if stopped.is_empty() {
@@ -319,6 +340,18 @@ mod tests {
             .record_attempt_started("drive-1", "PRD-17", "docs/prds/PRD-017.md", Some("exec-1"))
             .unwrap();
         repository
+            .record_attempt_diagnostics(
+                "drive-1",
+                first,
+                Some("exec-1"),
+                None,
+                None,
+                None,
+                None,
+                "completed",
+            )
+            .unwrap();
+        repository
             .record_attempt_finished(
                 "drive-1",
                 first,
@@ -357,7 +390,7 @@ mod tests {
              warrant:     {{\"max_prds\":3}}\n\
              \n\
              BUILT (1)\n  \
-             PRD-17  docs/prds/PRD-017.md  duration=1200ms  cost=2500 micro-USD\n\
+             PRD-17  docs/prds/PRD-017.md  duration=1200ms  cost=2500 micro-USD  phase=completed\n\
              \n\
              STOPPED (1)\n  \
              PRD-18  docs/prds/PRD-018.md  reason=review_disabled\n\
@@ -418,10 +451,12 @@ mod tests {
     }
 
     #[test]
-    fn cost_unknown_and_storage_failure_terminations_are_called_out() {
+    fn safety_and_delivery_terminations_are_called_out() {
         for (reason, marker) in [
             ("cost_unknown", "cost could not be measured"),
             ("storage_failure", "storage failure"),
+            ("delivery_blocked", ".delivery.json"),
+            ("budget_deliveries_exhausted", "finite delivery warrant"),
         ] {
             let db = database();
             let repository = seed(&db, "drive-x", "{}");

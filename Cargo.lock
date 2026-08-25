@@ -664,6 +664,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "wait-timeout",
 ]
 
 [[package]]

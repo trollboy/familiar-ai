@@ -1,11 +1,14 @@
 //! Explicit, finite delivery boundary for reviewed isolated worktrees.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use familiar_ai_core::DeliveryConfig;
 use serde::{Deserialize, Serialize};
+use wait_timeout::ChildExt;
 
 use crate::worktree::WorktreeOwnership;
 
@@ -25,24 +28,88 @@ pub trait CommandRunner {
     fn run(&self, directory: &Path, argv: &[String]) -> Result<Output, String>;
 }
 
-pub struct ProcessRunner;
+pub struct ProcessRunner {
+    timeout: Duration,
+}
+
+impl ProcessRunner {
+    fn new(timeout_ms: u64) -> Self {
+        Self {
+            timeout: Duration::from_millis(timeout_ms),
+        }
+    }
+}
 
 impl CommandRunner for ProcessRunner {
     fn run(&self, directory: &Path, argv: &[String]) -> Result<Output, String> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| "delivery command argv is empty".to_owned())?;
-        Command::new(program)
+        let mut child = Command::new(program)
             .args(args)
             .current_dir(directory)
             .stdin(Stdio::null())
-            .output()
-            .map_err(|error| format!("cannot launch {program:?}: {error}"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("cannot launch {program:?}: {error}"))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("cannot capture {program:?} stdout"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("cannot capture {program:?} stderr"))?;
+        let stdout_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let status = match child
+            .wait_timeout(self.timeout)
+            .map_err(|error| format!("cannot wait for {program:?}: {error}"))?
+        {
+            Some(status) => status,
+            None => {
+                let _ = child.kill();
+                let status = child
+                    .wait()
+                    .map_err(|error| format!("cannot reap timed-out {program:?}: {error}"))?;
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!(
+                    "{program:?} exceeded delivery command timeout of {}ms (status {:?})",
+                    self.timeout.as_millis(),
+                    status.code()
+                ));
+            }
+        };
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| format!("{program:?} stdout reader panicked"))?
+            .map_err(|error| format!("cannot read {program:?} stdout: {error}"))?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| format!("{program:?} stderr reader panicked"))?
+            .map_err(|error| format!("cannot read {program:?} stderr: {error}"))?;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 
 pub fn deliver(ownership_path: &Path, policy: &DeliveryConfig) -> Result<DeliveryJournal, String> {
-    deliver_with(ownership_path, policy, &ProcessRunner)
+    deliver_with(
+        ownership_path,
+        policy,
+        &ProcessRunner::new(policy.command_timeout_ms),
+    )
 }
 
 pub fn deliver_with(
@@ -288,7 +355,10 @@ fn fail_journal(
 
 fn persist(path: &Path, journal: &DeliveryJournal) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(journal).map_err(|error| error.to_string())?;
-    fs::write(path, bytes).map_err(|error| format!("cannot persist delivery journal: {error}"))
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)
+        .and_then(|_| fs::rename(&temporary, path))
+        .map_err(|error| format!("cannot persist delivery journal: {error}"))
 }
 
 #[cfg(test)]
@@ -352,6 +422,7 @@ mod tests {
         let policy = DeliveryConfig {
             enabled: true,
             max_deliveries_per_session: 1,
+            command_timeout_ms: 1_000,
             remote: "origin".into(),
             base: "main".into(),
             auto_merge: true,
@@ -434,5 +505,15 @@ mod tests {
         let calls = runner.calls.lock().unwrap();
         assert!(!calls.iter().any(|call| call.contains(&"commit".into())));
         assert!(!calls.iter().any(|call| call.contains(&"push".into())));
+    }
+
+    #[test]
+    fn process_runner_kills_a_delivery_command_at_its_finite_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let runner = ProcessRunner::new(20);
+        let error = runner
+            .run(temp.path(), &["/bin/sleep".into(), "5".into()])
+            .unwrap_err();
+        assert!(error.contains("exceeded delivery command timeout"));
     }
 }

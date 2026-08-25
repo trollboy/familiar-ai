@@ -56,6 +56,8 @@ pub struct DeliveryConfig {
     pub enabled: bool,
     #[serde(default)]
     pub max_deliveries_per_session: u64,
+    #[serde(default = "default_delivery_command_timeout_ms")]
+    pub command_timeout_ms: u64,
     #[serde(default = "default_delivery_remote")]
     pub remote: String,
     #[serde(default = "default_delivery_base")]
@@ -82,6 +84,10 @@ fn default_delivery_base() -> String {
     "main".into()
 }
 
+fn default_delivery_command_timeout_ms() -> u64 {
+    1_800_000
+}
+
 impl DeliveryConfig {
     pub fn validate(&self) -> Result<(), String> {
         if !self.enabled {
@@ -89,6 +95,9 @@ impl DeliveryConfig {
         }
         if self.max_deliveries_per_session == 0 {
             return Err("delivery requires a finite max_deliveries_per_session".into());
+        }
+        if self.command_timeout_ms == 0 {
+            return Err("delivery requires a finite command_timeout_ms".into());
         }
         if self.remote.trim().is_empty() || self.base.trim().is_empty() {
             return Err("delivery remote and base must be non-empty".into());

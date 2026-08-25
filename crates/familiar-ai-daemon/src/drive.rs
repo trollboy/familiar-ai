@@ -34,6 +34,8 @@ pub enum DriveTermination {
     UnclassifiedResult,
     WorkerHeartbeatLost,
     PreflightFailed,
+    DeliveryBlocked,
+    BudgetDeliveriesExhausted,
 }
 
 impl DriveTermination {
@@ -50,6 +52,8 @@ impl DriveTermination {
             Self::UnclassifiedResult => "unclassified_result",
             Self::WorkerHeartbeatLost => "worker_heartbeat_lost",
             Self::PreflightFailed => "preflight_failed",
+            Self::DeliveryBlocked => "delivery_blocked",
+            Self::BudgetDeliveriesExhausted => "budget_deliveries_exhausted",
         }
     }
 
@@ -309,6 +313,11 @@ pub fn drive(
                 .into(),
         ));
     }
+    if config.delivery.enabled && !config.driver.isolated_worktrees {
+        return Err(DriveError::Config(
+            "delivery requires driver.isolated_worktrees=true".into(),
+        ));
+    }
     let _worker_lock = crate::worker_lock::WorkerLock::acquire(&paths.runtime_dir)
         .map_err(|error| DriveError::Config(format!("cannot acquire driver ownership: {error}")))?;
     let current = std::env::current_dir().map_err(|error| {
@@ -358,6 +367,7 @@ pub fn drive(
     let mut attempted = 0_u64;
     let mut completed = 0_u64;
     let mut known_cost = 0_u64;
+    let mut delivered = 0_u64;
 
     let session_preflight = crate::preflight::run(agents, config, &repository.worktree);
     let termination = if !session_preflight.is_valid() {
@@ -470,13 +480,25 @@ pub fn drive(
                     .as_ref()
                     .map(|lease| lease.path().to_path_buf())
                     .unwrap_or_else(|| repository.worktree.clone());
+                let worktree_heartbeat = worktree.as_ref().map(|lease| {
+                    lease.start_heartbeat(Duration::from_secs(
+                        config.daemon.heartbeat_interval_secs.max(1),
+                    ))
+                });
                 if worktree.is_some() {
                     execution_config.repositories.insert(
                         execution_root.display().to_string(),
                         repository_config.clone(),
                     );
                 }
-                jobs.push((target, sequence, execution_root, execution_config, worktree));
+                jobs.push((
+                    target,
+                    sequence,
+                    execution_root,
+                    execution_config,
+                    worktree,
+                    worktree_heartbeat,
+                ));
             }
             if preparation_failed {
                 break DriveTermination::StorageFailure;
@@ -484,7 +506,15 @@ pub fn drive(
 
             let mut results = std::thread::scope(|scope| {
                 let mut handles = Vec::new();
-                for (target, sequence, execution_root, execution_config, worktree) in jobs {
+                for (
+                    target,
+                    sequence,
+                    execution_root,
+                    execution_config,
+                    worktree,
+                    worktree_heartbeat,
+                ) in jobs
+                {
                     handles.push(scope.spawn(move || {
                         let attempt_timer = Instant::now();
                         let prd_path = execution_root.join(target.path.as_str());
@@ -498,7 +528,15 @@ pub fn drive(
                         );
                         let duration_ms =
                             attempt_timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                        (target, sequence, worktree, result, trace, duration_ms)
+                        (
+                            target,
+                            sequence,
+                            worktree,
+                            result,
+                            trace,
+                            duration_ms,
+                            worktree_heartbeat,
+                        )
                     }));
                 }
                 handles
@@ -512,7 +550,23 @@ pub fn drive(
             }
             let mut batch_stop = None;
             for joined in results.drain(..) {
-                let (target, sequence, mut worktree, result, trace, duration_ms) = joined.unwrap();
+                let (
+                    target,
+                    sequence,
+                    mut worktree,
+                    result,
+                    trace,
+                    duration_ms,
+                    worktree_heartbeat,
+                ) = joined.unwrap();
+                let heartbeat_failed = worktree_heartbeat
+                    .as_ref()
+                    .is_some_and(crate::worktree::WorktreeHeartbeatGuard::failed);
+                drop(worktree_heartbeat);
+                if heartbeat_failed {
+                    eprintln!("drive: worktree heartbeat failed for {}", target.id);
+                    batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
+                }
                 let terminal = match &result {
                     Ok(workflow) => Some(&workflow.implementation),
                     Err(crate::run::RunError::Agent(error)) => Some(error.result()),
@@ -574,6 +628,78 @@ pub fn drive(
                         eprintln!("drive: cannot persist worktree state: {error}");
                         batch_stop = Some(DriveTermination::StorageFailure);
                         continue;
+                    }
+                    if result.is_ok() && config.delivery.enabled {
+                        if delivered >= config.delivery.max_deliveries_per_session {
+                            batch_stop.get_or_insert(DriveTermination::BudgetDeliveriesExhausted);
+                        } else {
+                            let delivery_heartbeat = lease.start_heartbeat(Duration::from_secs(
+                                config.daemon.heartbeat_interval_secs.max(1),
+                            ));
+                            let delivery_result =
+                                crate::delivery::deliver(lease.ownership_path(), &config.delivery);
+                            let delivery_heartbeat_failed = delivery_heartbeat.failed();
+                            drop(delivery_heartbeat);
+                            if delivery_heartbeat_failed {
+                                eprintln!(
+                                    "drive: delivery worktree heartbeat failed for {}",
+                                    target.id
+                                );
+                                batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
+                            }
+                            match delivery_result {
+                                Ok(delivery) => {
+                                    delivered = delivered.saturating_add(1);
+                                    if let Err(error) = lease.mark_state(&delivery.phase) {
+                                        eprintln!(
+                                            "drive: cannot persist delivered worktree state: {error}"
+                                        );
+                                        batch_stop = Some(DriveTermination::StorageFailure);
+                                    }
+                                    if let Err(error) = DriverRepository::new(db.conn())
+                                        .record_attempt_diagnostics(
+                                            &session_id,
+                                            sequence,
+                                            trace.execution_id.as_deref(),
+                                            Some(adapter_id),
+                                            terminal
+                                                .and_then(|value| value.model.as_deref())
+                                                .or(configured_model),
+                                            terminal.and_then(|value| value.exit_code),
+                                            terminal.and_then(|value| value.signal),
+                                            &delivery.phase,
+                                        )
+                                    {
+                                        eprintln!("drive: cannot persist delivery phase: {error}");
+                                        batch_stop = Some(DriveTermination::StorageFailure);
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("drive: delivery blocked for {}: {error}", target.id);
+                                    if let Err(storage_error) = DriverRepository::new(db.conn())
+                                        .record_attempt_diagnostics(
+                                            &session_id,
+                                            sequence,
+                                            trace.execution_id.as_deref(),
+                                            Some(adapter_id),
+                                            terminal
+                                                .and_then(|value| value.model.as_deref())
+                                                .or(configured_model),
+                                            terminal.and_then(|value| value.exit_code),
+                                            terminal.and_then(|value| value.signal),
+                                            "delivery_blocked",
+                                        )
+                                    {
+                                        eprintln!(
+                                            "drive: cannot persist delivery blocker: {storage_error}"
+                                        );
+                                        batch_stop = Some(DriveTermination::StorageFailure);
+                                    } else {
+                                        batch_stop = Some(DriveTermination::DeliveryBlocked);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
@@ -787,6 +913,17 @@ mod tests {
             (DriveTermination::CostUnknown, "cost_unknown"),
             (DriveTermination::StorageFailure, "storage_failure"),
             (DriveTermination::Interrupted, "interrupted"),
+            (DriveTermination::UnclassifiedResult, "unclassified_result"),
+            (
+                DriveTermination::WorkerHeartbeatLost,
+                "worker_heartbeat_lost",
+            ),
+            (DriveTermination::PreflightFailed, "preflight_failed"),
+            (DriveTermination::DeliveryBlocked, "delivery_blocked"),
+            (
+                DriveTermination::BudgetDeliveriesExhausted,
+                "budget_deliveries_exhausted",
+            ),
         ] {
             assert_eq!(termination.as_str(), text);
         }
@@ -810,6 +947,8 @@ mod tests {
             DriveTermination::BudgetCostExhausted,
             DriveTermination::BudgetDurationExhausted,
             DriveTermination::CostUnknown,
+            DriveTermination::DeliveryBlocked,
+            DriveTermination::BudgetDeliveriesExhausted,
         ] {
             assert!(!termination.worker_should_restart(), "{termination:?}");
         }
