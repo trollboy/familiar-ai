@@ -13,6 +13,7 @@ pub struct DriverSession {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub termination_reason: Option<String>,
+    pub termination_detail: Option<String>,
     pub warrant_json: String,
 }
 
@@ -212,10 +213,27 @@ impl<'a> DriverRepository<'a> {
         Ok(())
     }
 
+    pub fn record_session_detail(
+        &self,
+        session_id: &str,
+        detail: &str,
+    ) -> familiar_ai_core::Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE driver_sessions SET termination_detail=?1 WHERE session_id=?2 AND ended_at IS NULL",
+            params![detail, session_id],
+        ).map_err(db)?;
+        if changed != 1 {
+            return Err(FamiliarError::Database(format!(
+                "open driver session {session_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn get_session(&self, session_id: &str) -> familiar_ai_core::Result<Option<DriverSession>> {
         self.conn
             .query_row(
-                "SELECT session_id,repository_key,started_at,ended_at,termination_reason,warrant_json \
+                "SELECT session_id,repository_key,started_at,ended_at,termination_reason,warrant_json,termination_detail \
                  FROM driver_sessions WHERE session_id=?1",
                 params![session_id],
                 map_session,
@@ -228,7 +246,7 @@ impl<'a> DriverRepository<'a> {
     pub fn latest_session(&self) -> familiar_ai_core::Result<Option<DriverSession>> {
         self.conn
             .query_row(
-                "SELECT session_id,repository_key,started_at,ended_at,termination_reason,warrant_json \
+                "SELECT session_id,repository_key,started_at,ended_at,termination_reason,warrant_json,termination_detail \
                  FROM driver_sessions ORDER BY started_at DESC, session_id DESC LIMIT 1",
                 [],
                 map_session,
@@ -279,6 +297,7 @@ fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<DriverSession> {
         ended_at: row.get(3)?,
         termination_reason: row.get(4)?,
         warrant_json: row.get(5)?,
+        termination_detail: row.get(6)?,
     })
 }
 

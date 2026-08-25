@@ -65,6 +65,34 @@ struct ConcurrencyAgent {
     preflights: AtomicUsize,
 }
 
+struct PanickingAgent;
+
+impl CodingAgent for PanickingAgent {
+    fn execute(
+        &self,
+        _request: ExecutionRequest<'_>,
+        _output: &mut dyn std::io::Write,
+    ) -> Result<ExecutionResult, AgentExecutionError> {
+        panic!("simulated adapter panic")
+    }
+}
+
+struct FailingPreflightAgent;
+
+impl CodingAgent for FailingPreflightAgent {
+    fn preflight(&self) -> Result<(), String> {
+        Err("reviewer executable unavailable".into())
+    }
+
+    fn execute(
+        &self,
+        _request: ExecutionRequest<'_>,
+        _output: &mut dyn std::io::Write,
+    ) -> Result<ExecutionResult, AgentExecutionError> {
+        panic!("preflight failure must prevent execution")
+    }
+}
+
 impl CodingAgent for ConcurrencyAgent {
     fn preflight(&self) -> Result<(), String> {
         self.preflights.fetch_add(1, Ordering::SeqCst);
@@ -403,6 +431,11 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     git(&repository, &["commit", "-qm", "independent scopes"]);
     config.driver.max_concurrency = 2;
     config.driver.isolated_worktrees = true;
+    config.driver.model_routes = vec![familiar_ai_core::config::DriverModelRouteConfig {
+        max_expected_files: 1,
+        model: "ollama/qwen3:8b".into(),
+    }];
+    config.agents = Some(familiar_ai_core::config::AgentsConfig::default());
     let agent = ConcurrencyAgent {
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
@@ -427,4 +460,81 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     assert_eq!(summary.attempted, 2);
     assert_eq!(agent.peak.load(Ordering::SeqCst), 2);
     assert_eq!(agent.preflights.load(Ordering::SeqCst), 1);
+    let db = Database::open(config.database.path.as_ref().unwrap()).unwrap();
+    let attempts = DriverRepository::new(db.conn())
+        .attempts(&summary.session_id)
+        .unwrap();
+    assert!(attempts
+        .iter()
+        .all(|attempt| attempt.model.as_deref() == Some("ollama/qwen3:8b")));
+}
+
+#[test]
+fn panicked_worker_is_terminalized_before_the_session_stops() {
+    let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let (temp, paths, mut config) = fixture(1, false);
+    config.driver.isolated_worktrees = true;
+    let agent = PanickingAgent;
+    let agents = AgentSet {
+        implementation: &agent,
+        reviewer: &agent,
+    };
+    let summary = with_working_directory(&temp.path().join("repo"), || {
+        drive(
+            &agents,
+            &config,
+            &paths,
+            DriveWarrant {
+                max_prds: 1,
+                ..DriveWarrant::default()
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(summary.termination, DriveTermination::UnclassifiedResult);
+    let db = Database::open(config.database.path.as_ref().unwrap()).unwrap();
+    let attempts = DriverRepository::new(db.conn())
+        .attempts(&summary.session_id)
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert!(attempts[0].ended_at.is_some());
+    assert_eq!(attempts[0].outcome.as_deref(), Some("retained"));
+    assert_eq!(
+        attempts[0].retained_reason.as_deref(),
+        Some("unclassified_result")
+    );
+}
+
+#[test]
+fn preflight_failure_detail_is_durable_without_claiming() {
+    let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let (temp, paths, config) = fixture(1, false);
+    let agent = FailingPreflightAgent;
+    let agents = AgentSet {
+        implementation: &agent,
+        reviewer: &agent,
+    };
+    let summary = with_working_directory(&temp.path().join("repo"), || {
+        drive(
+            &agents,
+            &config,
+            &paths,
+            DriveWarrant {
+                max_prds: 1,
+                ..DriveWarrant::default()
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(summary.termination, DriveTermination::PreflightFailed);
+    assert_eq!(summary.attempted, 0);
+    let db = Database::open(config.database.path.as_ref().unwrap()).unwrap();
+    let session = DriverRepository::new(db.conn())
+        .get_session(&summary.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(session
+        .termination_detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("reviewer executable unavailable")));
 }

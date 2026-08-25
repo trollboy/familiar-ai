@@ -345,6 +345,9 @@ pub fn drive(
     DriverRepository::new(db.conn())
         .recover_incomplete()
         .map_err(|error| DriveError::Storage(error.to_string()))?;
+    crate::worktree::recover_incomplete(&paths.state_dir).map_err(|error| {
+        DriveError::Storage(format!("cannot recover worktree evidence: {error}"))
+    })?;
     let session_id = format!("drive-{}", crate::run::new_id());
     DriverRepository::new(db.conn())
         .open_session(&session_id, &repository.key, &warrant.as_json())
@@ -371,10 +374,11 @@ pub fn drive(
 
     let session_preflight = crate::preflight::run(agents, config, &repository.worktree);
     let termination = if !session_preflight.is_valid() {
-        eprintln!(
-            "drive: session preflight failed: {}",
-            session_preflight.failure_summary()
-        );
+        let detail = session_preflight.failure_summary();
+        DriverRepository::new(db.conn())
+            .record_session_detail(&session_id, &detail)
+            .map_err(|error| DriveError::Storage(error.to_string()))?;
+        eprintln!("drive: session preflight failed: {}", detail);
         DriveTermination::PreflightFailed
     } else {
         loop {
@@ -491,11 +495,16 @@ pub fn drive(
                         repository_config.clone(),
                     );
                 }
+                let routed_model = execution_config
+                    .agents
+                    .as_ref()
+                    .and_then(|entries| entries.implementation.model.clone());
                 jobs.push((
                     target,
                     sequence,
                     execution_root,
                     execution_config,
+                    routed_model,
                     worktree,
                     worktree_heartbeat,
                 ));
@@ -511,6 +520,7 @@ pub fn drive(
                     sequence,
                     execution_root,
                     execution_config,
+                    routed_model,
                     worktree,
                     worktree_heartbeat,
                 ) in jobs
@@ -518,22 +528,25 @@ pub fn drive(
                     handles.push(scope.spawn(move || {
                         let attempt_timer = Instant::now();
                         let prd_path = execution_root.join(target.path.as_str());
-                        let (result, trace) = execute_with_config_tracked_from_preflighted(
-                            &execution_root,
-                            &prd_path,
-                            agents,
-                            &execution_config,
-                            paths,
-                            true,
-                        );
+                        let execution =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                execute_with_config_tracked_from_preflighted(
+                                    &execution_root,
+                                    &prd_path,
+                                    agents,
+                                    &execution_config,
+                                    paths,
+                                    true,
+                                )
+                            }));
                         let duration_ms =
                             attempt_timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
                         (
                             target,
                             sequence,
+                            routed_model,
                             worktree,
-                            result,
-                            trace,
+                            execution,
                             duration_ms,
                             worktree_heartbeat,
                         )
@@ -544,18 +557,14 @@ pub fn drive(
                     .map(|handle| handle.join())
                     .collect::<Vec<_>>()
             });
-            if results.iter().any(Result::is_err) {
-                eprintln!("drive: attempt worker panicked");
-                break DriveTermination::UnclassifiedResult;
-            }
             let mut batch_stop = None;
             for joined in results.drain(..) {
                 let (
                     target,
                     sequence,
+                    routed_model,
                     mut worktree,
-                    result,
-                    trace,
+                    execution,
                     duration_ms,
                     worktree_heartbeat,
                 ) = joined.unwrap();
@@ -563,6 +572,46 @@ pub fn drive(
                     .as_ref()
                     .is_some_and(crate::worktree::WorktreeHeartbeatGuard::failed);
                 drop(worktree_heartbeat);
+                let (result, trace) = match execution {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!("drive: attempt worker panicked for {}", target.id);
+                        if let Some(lease) = &mut worktree {
+                            if let Err(error) = lease.mark_state("retained_unclassified") {
+                                eprintln!("drive: cannot persist panicked worktree state: {error}");
+                                batch_stop = Some(DriveTermination::StorageFailure);
+                            }
+                        }
+                        if let Err(error) = DriverRepository::new(db.conn())
+                            .record_attempt_diagnostics(
+                                &session_id,
+                                sequence,
+                                None,
+                                Some(adapter_id),
+                                routed_model.as_deref().or(configured_model),
+                                None,
+                                None,
+                                "retained",
+                            )
+                            .and_then(|()| {
+                                DriverRepository::new(db.conn()).record_attempt_finished(
+                                    &session_id,
+                                    sequence,
+                                    "retained",
+                                    Some("unclassified_result"),
+                                    None,
+                                    Some(duration_ms),
+                                )
+                            })
+                        {
+                            eprintln!("drive: cannot terminalize panicked attempt: {error}");
+                            batch_stop = Some(DriveTermination::StorageFailure);
+                        } else {
+                            batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                        }
+                        continue;
+                    }
+                };
                 if heartbeat_failed {
                     eprintln!("drive: worktree heartbeat failed for {}", target.id);
                     batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
@@ -583,6 +632,7 @@ pub fn drive(
                     Some(adapter_id),
                     terminal
                         .and_then(|value| value.model.as_deref())
+                        .or(routed_model.as_deref())
                         .or(configured_model),
                     terminal.and_then(|value| value.exit_code),
                     terminal.and_then(|value| value.signal),
@@ -664,6 +714,7 @@ pub fn drive(
                                             Some(adapter_id),
                                             terminal
                                                 .and_then(|value| value.model.as_deref())
+                                                .or(routed_model.as_deref())
                                                 .or(configured_model),
                                             terminal.and_then(|value| value.exit_code),
                                             terminal.and_then(|value| value.signal),
@@ -684,6 +735,7 @@ pub fn drive(
                                             Some(adapter_id),
                                             terminal
                                                 .and_then(|value| value.model.as_deref())
+                                                .or(routed_model.as_deref())
                                                 .or(configured_model),
                                             terminal.and_then(|value| value.exit_code),
                                             terminal.and_then(|value| value.signal),

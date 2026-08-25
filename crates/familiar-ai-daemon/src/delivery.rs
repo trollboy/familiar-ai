@@ -263,7 +263,14 @@ pub fn deliver_with(
     journal.phase = "merged".into();
     persist(&journal_path, &journal)?;
 
-    checked_owned(runner, &journal.worktree, &policy.deploy_argv)?;
+    if let Err(deploy_error) = checked_owned(runner, &journal.worktree, &policy.deploy_argv) {
+        let rollback = checked_owned(runner, &journal.worktree, &policy.rollback_argv)
+            .map(|_| "rollback passed".to_owned())
+            .unwrap_or_else(|error| format!("rollback failed: {error}"));
+        let detail = format!("staging deploy failed: {deploy_error}; {rollback}");
+        comment_blocker(runner, policy, &journal.worktree, pr, &detail);
+        return fail_journal(&journal_path, journal, "staging_rolled_back", detail);
+    }
     journal.phase = "staging_deployed".into();
     persist(&journal_path, &journal)?;
     if let Err(smoke_error) = checked_owned(runner, &journal.worktree, &policy.smoke_argv) {
@@ -369,6 +376,7 @@ mod tests {
 
     struct FakeRunner {
         calls: Mutex<Vec<Vec<String>>>,
+        fail_deploy: bool,
         fail_smoke: bool,
         staged: &'static str,
     }
@@ -377,14 +385,17 @@ mod tests {
         fn run(&self, _directory: &Path, argv: &[String]) -> Result<Output, String> {
             self.calls.lock().unwrap().push(argv.to_vec());
             let is_smoke = argv.first().is_some_and(|value| value == "smoke");
+            let is_deploy = argv.first().is_some_and(|value| value == "deploy");
             let is_view = argv.get(2).is_some_and(|value| value == "view");
             let is_staged = argv.get(1).is_some_and(|value| value == "diff");
             Ok(Output {
-                status: std::process::ExitStatus::from_raw(if self.fail_smoke && is_smoke {
-                    1 << 8
-                } else {
-                    0
-                }),
+                status: std::process::ExitStatus::from_raw(
+                    if (self.fail_smoke && is_smoke) || (self.fail_deploy && is_deploy) {
+                        1 << 8
+                    } else {
+                        0
+                    },
+                ),
                 stdout: if is_view {
                     b"42\n".to_vec()
                 } else if is_staged {
@@ -394,6 +405,8 @@ mod tests {
                 },
                 stderr: if self.fail_smoke && is_smoke {
                     b"unhealthy".to_vec()
+                } else if self.fail_deploy && is_deploy {
+                    b"partial deploy".to_vec()
                 } else {
                     Vec::new()
                 },
@@ -440,6 +453,7 @@ mod tests {
         let (_temp, ownership, policy) = fixture();
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
+            fail_deploy: false,
             fail_smoke: false,
             staged: "src/lib.rs\n",
         };
@@ -463,6 +477,7 @@ mod tests {
         let (_temp, ownership, policy) = fixture();
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
+            fail_deploy: false,
             fail_smoke: true,
             staged: "src/lib.rs\n",
         };
@@ -477,11 +492,29 @@ mod tests {
     }
 
     #[test]
+    fn failed_deploy_rolls_back_and_comments_blocker() {
+        let (_temp, ownership, policy) = fixture();
+        let runner = FakeRunner {
+            calls: Mutex::new(Vec::new()),
+            fail_deploy: true,
+            fail_smoke: false,
+            staged: "src/lib.rs\n",
+        };
+        let error = deliver_with(&ownership, &policy, &runner).unwrap_err();
+        assert!(error.contains("staging deploy failed"));
+        assert!(error.contains("rollback passed"));
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls.iter().any(|call| call[0] == "rollback"));
+        assert!(calls.iter().any(|call| call.contains(&"comment".into())));
+    }
+
+    #[test]
     fn production_commands_are_rejected_before_side_effects() {
         let (_temp, ownership, mut policy) = fixture();
         policy.deploy_argv = vec!["deploy".into(), "production".into()];
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
+            fail_deploy: false,
             fail_smoke: false,
             staged: "src/lib.rs\n",
         };
@@ -496,6 +529,7 @@ mod tests {
         let (_temp, ownership, policy) = fixture();
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
+            fail_deploy: false,
             fail_smoke: false,
             staged: "internal/store/migrations/001.sql\n",
         };

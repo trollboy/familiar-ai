@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-host="root@138.197.0.151"
+host="${SPECTRA_STAGING_SSH_TARGET:?SPECTRA_STAGING_SSH_TARGET must name the approved staging SSH identity and host}"
+directory="${SPECTRA_STAGING_DIRECTORY:?SPECTRA_STAGING_DIRECTORY must name the approved staging checkout}"
 compose="docker compose -f docker-compose.staging.yml --env-file .env"
 
 case "${1:-}" in
@@ -13,7 +14,7 @@ case "${1:-}" in
     docker save spectra-api:staging spectra-web:staging | gzip | \
       ssh -o BatchMode=yes "$host" 'gunzip | docker load'
     ssh -o BatchMode=yes "$host" \
-      "cd /root/spectra && $compose up -d"
+      "cd '$directory' && $compose up -d"
     ;;
   smoke)
     test "$(curl -fsS -o /dev/null -w '%{http_code}' https://spectra.hyborianlabs.net/healthz)" = "200"
@@ -23,7 +24,7 @@ case "${1:-}" in
     ;;
   rollback)
     ssh -o BatchMode=yes "$host" \
-      "docker image inspect spectra-api:rollback >/dev/null && docker tag spectra-api:rollback spectra-api:staging; docker image inspect spectra-web:rollback >/dev/null && docker tag spectra-web:rollback spectra-web:staging; cd /root/spectra && $compose up -d"
+      "docker image inspect spectra-api:rollback >/dev/null && docker tag spectra-api:rollback spectra-api:staging; docker image inspect spectra-web:rollback >/dev/null && docker tag spectra-web:rollback spectra-web:staging; cd '$directory' && $compose up -d"
     ;;
   *)
     echo "usage: $0 deploy|smoke|rollback" >&2

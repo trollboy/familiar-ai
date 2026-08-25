@@ -19,6 +19,73 @@ pub struct WorktreeOwnership {
     pub state: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeRecoveryResult {
+    pub session_id: String,
+    pub prd_id: String,
+    pub outcome: String,
+    pub reason: String,
+    pub recovered_at: String,
+}
+
+/// Terminalize filesystem evidence left by a killed worker. Worktrees are
+/// deliberately retained; recovery only changes ownership from active to an
+/// explicit interrupted result and never deletes user or agent changes.
+pub fn recover_incomplete(state_dir: &Path) -> io::Result<usize> {
+    let root = state_dir.join("worktrees");
+    let sessions = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut recovered = 0;
+    for session in sessions {
+        let session = session?;
+        if !session.file_type()?.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(session.path())? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".ownership.json"))
+            {
+                continue;
+            }
+            let mut ownership: WorktreeOwnership =
+                serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?;
+            if ownership.state != "owned" {
+                continue;
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            ownership.state = "retained_interrupted".into();
+            ownership.heartbeat_at = now.clone();
+            persist(&path, &ownership)?;
+            let result = WorktreeRecoveryResult {
+                session_id: ownership.session_id.clone(),
+                prd_id: ownership.prd_id.clone(),
+                outcome: "retained".into(),
+                reason: "interrupted".into(),
+                recovered_at: now,
+            };
+            let result_path = path.with_file_name(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("worktree.ownership.json")
+                    .replace(".ownership.json", ".result.json"),
+            );
+            let bytes = serde_json::to_vec_pretty(&result).map_err(io::Error::other)?;
+            let temporary = result_path.with_extension("json.tmp");
+            fs::write(&temporary, bytes)?;
+            fs::rename(temporary, result_path)?;
+            recovered += 1;
+        }
+    }
+    Ok(recovered)
+}
+
 /// A durable isolated worktree. Drop deliberately does not remove it: agent
 /// changes are evidence and survive interruption until explicit retirement.
 pub struct WorktreeLease {
@@ -249,5 +316,33 @@ mod tests {
         let guard = WorktreeHeartbeatGuard::start(ownership_path, Duration::from_millis(5));
         thread::sleep(Duration::from_millis(20));
         assert!(guard.failed());
+    }
+
+    #[test]
+    fn recovery_terminalizes_owned_worktree_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("worktrees/session");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("PRD-9.ownership.json");
+        persist(
+            &path,
+            &WorktreeOwnership {
+                session_id: "session".into(),
+                prd_id: "PRD-9".into(),
+                worktree: root.join("PRD-9"),
+                created_at: "before".into(),
+                heartbeat_at: "before".into(),
+                state: "owned".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(recover_incomplete(temp.path()).unwrap(), 1);
+        assert_eq!(recover_incomplete(temp.path()).unwrap(), 0);
+        let ownership: WorktreeOwnership =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(ownership.state, "retained_interrupted");
+        let result: WorktreeRecoveryResult =
+            serde_json::from_slice(&fs::read(root.join("PRD-9.result.json")).unwrap()).unwrap();
+        assert_eq!(result.reason, "interrupted");
     }
 }

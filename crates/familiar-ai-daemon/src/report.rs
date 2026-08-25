@@ -87,6 +87,9 @@ fn render_header(out: &mut String, session: &DriverSession) {
         }
     }
     let _ = writeln!(out, "warrant:     {}", session.warrant_json);
+    if let Some(detail) = &session.termination_detail {
+        let _ = writeln!(out, "detail:      {detail}");
+    }
 }
 
 fn render_built(out: &mut String, built: &[&DriverAttempt]) {
