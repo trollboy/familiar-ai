@@ -52,6 +52,14 @@ enum Command {
     /// why, what it cost, and what needs human judgment. Defaults to the most
     /// recent session.
     Report { session_id: Option<String> },
+    /// Publish, check, merge, deploy to staging, and smoke-test one reviewed
+    /// worktree under the configured finite delivery policy.
+    Deliver { ownership_record: PathBuf },
+    /// Generate or execute a bounded launchd-supervised worker.
+    Worker {
+        #[command(subcommand)]
+        command: WorkerCommand,
+    },
     /// Inspect or roll back the historical backlog bootstrap.
     Backlog {
         #[command(subcommand)]
@@ -95,6 +103,20 @@ enum BacklogCommand {
         #[arg(long)]
         reason: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkerCommand {
+    /// Generate a launchd plist using this exact executable.
+    Plist {
+        repository: PathBuf,
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// launchd entry point: run one configured warrant and emit its report.
+    Run { repository: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -149,11 +171,70 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+        Command::Deliver { ownership_record } => match deliver_command(&ownership_record) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Worker { command } => match worker_command(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Backlog { command } => match backlog(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
     }
+}
+
+fn worker_command(command: WorkerCommand) -> Result<(), String> {
+    match command {
+        WorkerCommand::Plist {
+            repository,
+            label,
+            output,
+        } => {
+            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+            let repository = repository
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
+            std::fs::create_dir_all(&paths.log_dir).map_err(|error| error.to_string())?;
+            let rendered = familiar_ai_daemon::launchd::plist(
+                &label,
+                &executable,
+                &repository,
+                &paths.log_dir.join(format!("{label}.stdout.log")),
+                &paths.log_dir.join(format!("{label}.stderr.log")),
+            )?;
+            std::fs::write(&output, rendered).map_err(|error| error.to_string())?;
+            println!("plist={}", output.display());
+            Ok(())
+        }
+        WorkerCommand::Run { repository } => {
+            std::env::set_current_dir(&repository).map_err(|error| error.to_string())?;
+            let drive_result = drive_command(None, None, None);
+            let report_result = report_command(None);
+            drive_result.and(report_result)
+        }
+    }
+}
+
+fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let result = familiar_ai_daemon::delivery::deliver(ownership_record, &config.delivery)?;
+    println!(
+        "delivery_session={} prd={} phase={} pr={}",
+        result.session_id,
+        result.prd_id,
+        result.phase,
+        result
+            .pr_number
+            .map(|number| number.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    );
+    Ok(())
 }
 
 fn preflight_command() -> Result<(), String> {

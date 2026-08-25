@@ -45,6 +45,65 @@ pub struct Config {
     pub driver: DriverConfig,
     #[serde(default)]
     pub preflight: PreflightConfig,
+    #[serde(default)]
+    pub delivery: DeliveryConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub max_deliveries_per_session: u64,
+    #[serde(default = "default_delivery_remote")]
+    pub remote: String,
+    #[serde(default = "default_delivery_base")]
+    pub base: String,
+    #[serde(default)]
+    pub auto_merge: bool,
+    #[serde(default)]
+    pub staging_environment: String,
+    #[serde(default)]
+    pub deploy_argv: Vec<String>,
+    #[serde(default)]
+    pub smoke_argv: Vec<String>,
+    #[serde(default)]
+    pub rollback_argv: Vec<String>,
+    #[serde(default)]
+    pub comment_blockers: bool,
+}
+
+fn default_delivery_remote() -> String {
+    "origin".into()
+}
+
+fn default_delivery_base() -> String {
+    "main".into()
+}
+
+impl DeliveryConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.max_deliveries_per_session == 0 {
+            return Err("delivery requires a finite max_deliveries_per_session".into());
+        }
+        if self.remote.trim().is_empty() || self.base.trim().is_empty() {
+            return Err("delivery remote and base must be non-empty".into());
+        }
+        if self.staging_environment != "staging" {
+            return Err("delivery staging_environment must be exactly 'staging'".into());
+        }
+        if self.deploy_argv.is_empty()
+            || self.smoke_argv.is_empty()
+            || self.rollback_argv.is_empty()
+        {
+            return Err("delivery requires deploy, smoke, and rollback argv for staging".into());
+        }
+        Ok(())
+    }
 }
 
 /// Deterministic prerequisites checked before any PRD is claimed.
@@ -166,6 +225,20 @@ pub struct DriverConfig {
     pub max_concurrency: usize,
     #[serde(default)]
     pub isolated_worktrees: bool,
+    /// Ordered deterministic implementation routes. The first route whose
+    /// maximum scope count covers a PRD wins; no inference call selects it.
+    #[serde(default)]
+    pub model_routes: Vec<DriverModelRouteConfig>,
+    /// Finite implementation-stage token ceiling. Zero disables this ceiling.
+    #[serde(default)]
+    pub max_implementation_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DriverModelRouteConfig {
+    pub max_expected_files: usize,
+    pub model: String,
 }
 
 fn default_driver_concurrency() -> usize {
@@ -180,6 +253,8 @@ impl Default for DriverConfig {
             max_session_duration_ms: 0,
             max_concurrency: default_driver_concurrency(),
             isolated_worktrees: false,
+            model_routes: Vec::new(),
+            max_implementation_tokens: 0,
         }
     }
 }
@@ -204,6 +279,20 @@ impl DriverConfig {
                 "driver.isolated_worktrees must be true when max_concurrency is greater than one"
                     .into(),
             );
+        }
+        let mut prior = 0;
+        for (index, route) in self.model_routes.iter().enumerate() {
+            if route.max_expected_files == 0 || route.model.trim().is_empty() {
+                return Err(format!(
+                    "driver.model_routes[{index}] requires a positive max_expected_files and non-empty model"
+                ));
+            }
+            if index > 0 && route.max_expected_files <= prior {
+                return Err(
+                    "driver.model_routes must be ordered by increasing max_expected_files".into(),
+                );
+            }
+            prior = route.max_expected_files;
         }
         Ok(())
     }
@@ -1469,6 +1558,7 @@ impl Config {
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
         config.validate_preflight()?;
+        config.delivery.validate().map_err(FamiliarError::Config)?;
         Ok(config)
     }
 
@@ -1493,6 +1583,7 @@ impl Config {
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
         config.validate_preflight()?;
+        config.delivery.validate().map_err(FamiliarError::Config)?;
         Ok(config)
     }
 }

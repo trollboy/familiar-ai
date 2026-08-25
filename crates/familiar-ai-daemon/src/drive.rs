@@ -18,7 +18,7 @@ use familiar_ai_core::{
 };
 use familiar_ai_storage::{Database, DriverRepository, ExecutionHistoryRepository};
 
-use crate::run::{execute_with_config_tracked_from, AgentSet};
+use crate::run::{execute_with_config_tracked_from_preflighted, AgentSet};
 
 /// Why a driver session stopped. Closed set; persisted verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,7 @@ pub enum DriveTermination {
     Interrupted,
     UnclassifiedResult,
     WorkerHeartbeatLost,
+    PreflightFailed,
 }
 
 impl DriveTermination {
@@ -48,6 +49,7 @@ impl DriveTermination {
             Self::Interrupted => "interrupted",
             Self::UnclassifiedResult => "unclassified_result",
             Self::WorkerHeartbeatLost => "worker_heartbeat_lost",
+            Self::PreflightFailed => "preflight_failed",
         }
     }
 }
@@ -258,6 +260,21 @@ fn path_scopes_overlap(left: &str, right: &str) -> bool {
         || (right.ends_with('/') && left.starts_with(right))
 }
 
+fn routed_model(config: &Config, scope_count: usize) -> Option<String> {
+    config
+        .driver
+        .model_routes
+        .iter()
+        .find(|route| scope_count <= route.max_expected_files)
+        .map(|route| route.model.clone())
+        .or_else(|| {
+            config
+                .agents
+                .as_ref()
+                .and_then(|agents| agents.implementation.model.clone())
+        })
+}
+
 /// Execute eligible backlog PRDs until a closed termination condition is met.
 pub fn drive(
     agents: &AgentSet<'_>,
@@ -327,239 +344,257 @@ pub fn drive(
     let mut completed = 0_u64;
     let mut known_cost = 0_u64;
 
-    let termination = loop {
-        if heartbeat.failed() {
-            break DriveTermination::WorkerHeartbeatLost;
-        }
-        let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        if let Some(reason) = warrant.exhausted(attempted, known_cost, elapsed) {
-            break reason;
-        }
-        let discovered =
-            match discovery.discover_with_layout(&repository, &repository_config.layout()) {
-                Ok(discovered) => discovered,
-                Err(error) => {
-                    eprintln!("drive: discovery failed: {error}");
-                    break DriveTermination::StorageFailure;
-                }
-            };
-        if let Err(error) = validate_graph(&discovered) {
-            eprintln!("drive: backlog graph invalid: {error}");
-            break DriveTermination::StorageFailure;
-        }
-        let remaining = if warrant.max_prds == 0 {
-            config.driver.max_concurrency
-        } else {
-            usize::try_from(warrant.max_prds.saturating_sub(attempted))
-                .unwrap_or(usize::MAX)
-                .min(config.driver.max_concurrency)
-        };
-        let targets =
-            match select_batch(&repository, &discovered, &mut db, &attempted_ids, remaining)? {
-                Selection::Eligible(prds) => prds,
-                Selection::BacklogEmpty => break DriveTermination::BacklogEmpty,
-                Selection::NothingEligible => break DriveTermination::NothingEligible,
-            };
-        let mut jobs = Vec::new();
-        let mut preparation_failed = false;
-        for target in targets {
-            attempted_ids.insert(target.id.clone());
-            attempted += 1;
-            let sequence = match DriverRepository::new(db.conn()).record_attempt_started(
-                &session_id,
-                &target.id.to_string(),
-                target.path.as_str(),
-                None,
-            ) {
-                Ok(sequence) => sequence,
-                Err(error) => {
-                    eprintln!("drive: cannot record attempt: {error}");
-                    preparation_failed = true;
-                    break;
-                }
-            };
-            eprintln!("drive: attempt {sequence} {} {}", target.id, target.path);
-            if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
-                &session_id,
-                sequence,
-                None,
-                Some(adapter_id),
-                configured_model,
-                None,
-                None,
-                "preflight",
-            ) {
-                eprintln!("drive: cannot record attempt phase: {error}");
-                preparation_failed = true;
-                break;
+    let session_preflight = crate::preflight::run(agents, config, &repository.worktree);
+    let termination = if !session_preflight.is_valid() {
+        eprintln!(
+            "drive: session preflight failed: {}",
+            session_preflight.failure_summary()
+        );
+        DriveTermination::PreflightFailed
+    } else {
+        loop {
+            if heartbeat.failed() {
+                break DriveTermination::WorkerHeartbeatLost;
             }
-            let mut execution_config = config.clone();
-            let worktree = if config.driver.isolated_worktrees {
-                match crate::worktree::WorktreeLease::create(
-                    &repository.worktree,
-                    &paths.state_dir,
+            let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            if let Some(reason) = warrant.exhausted(attempted, known_cost, elapsed) {
+                break reason;
+            }
+            let discovered =
+                match discovery.discover_with_layout(&repository, &repository_config.layout()) {
+                    Ok(discovered) => discovered,
+                    Err(error) => {
+                        eprintln!("drive: discovery failed: {error}");
+                        break DriveTermination::StorageFailure;
+                    }
+                };
+            if let Err(error) = validate_graph(&discovered) {
+                eprintln!("drive: backlog graph invalid: {error}");
+                break DriveTermination::StorageFailure;
+            }
+            let remaining = if warrant.max_prds == 0 {
+                config.driver.max_concurrency
+            } else {
+                usize::try_from(warrant.max_prds.saturating_sub(attempted))
+                    .unwrap_or(usize::MAX)
+                    .min(config.driver.max_concurrency)
+            };
+            let targets =
+                match select_batch(&repository, &discovered, &mut db, &attempted_ids, remaining)? {
+                    Selection::Eligible(prds) => prds,
+                    Selection::BacklogEmpty => break DriveTermination::BacklogEmpty,
+                    Selection::NothingEligible => break DriveTermination::NothingEligible,
+                };
+            let mut jobs = Vec::new();
+            let mut preparation_failed = false;
+            for target in targets {
+                attempted_ids.insert(target.id.clone());
+                attempted += 1;
+                let sequence = match DriverRepository::new(db.conn()).record_attempt_started(
                     &session_id,
                     &target.id.to_string(),
+                    target.path.as_str(),
+                    None,
                 ) {
-                    Ok(lease) => Some(lease),
+                    Ok(sequence) => sequence,
                     Err(error) => {
-                        let _ = DriverRepository::new(db.conn()).record_attempt_finished(
-                            &session_id,
-                            sequence,
-                            "retained",
-                            Some("worktree_failed"),
-                            None,
-                            None,
-                        );
-                        eprintln!("drive: isolated worktree creation failed: {error}");
+                        eprintln!("drive: cannot record attempt: {error}");
                         preparation_failed = true;
                         break;
                     }
-                }
-            } else {
-                None
-            };
-            let execution_root = worktree
-                .as_ref()
-                .map(|lease| lease.path().to_path_buf())
-                .unwrap_or_else(|| repository.worktree.clone());
-            if worktree.is_some() {
-                execution_config.repositories.insert(
-                    execution_root.display().to_string(),
-                    repository_config.clone(),
-                );
-            }
-            jobs.push((target, sequence, execution_root, execution_config, worktree));
-        }
-        if preparation_failed {
-            break DriveTermination::StorageFailure;
-        }
-
-        let mut results = std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for (target, sequence, execution_root, execution_config, worktree) in jobs {
-                handles.push(scope.spawn(move || {
-                    let attempt_timer = Instant::now();
-                    let prd_path = execution_root.join(target.path.as_str());
-                    let (result, trace) = execute_with_config_tracked_from(
-                        &execution_root,
-                        &prd_path,
-                        agents,
-                        &execution_config,
-                        paths,
-                    );
-                    let duration_ms =
-                        attempt_timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                    (target, sequence, worktree, result, trace, duration_ms)
-                }));
-            }
-            handles
-                .into_iter()
-                .map(|handle| handle.join())
-                .collect::<Vec<_>>()
-        });
-        if results.iter().any(Result::is_err) {
-            eprintln!("drive: attempt worker panicked");
-            break DriveTermination::UnclassifiedResult;
-        }
-        let mut batch_stop = None;
-        for joined in results.drain(..) {
-            let (target, sequence, mut worktree, result, trace, duration_ms) = joined.unwrap();
-            let terminal = match &result {
-                Ok(workflow) => Some(&workflow.implementation),
-                Err(crate::run::RunError::Agent(error)) => Some(error.result()),
-                Err(crate::run::RunError::Workflow {
-                    result: Some(result),
-                    ..
-                }) => Some(result.as_ref()),
-                _ => None,
-            };
-            if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
-                &session_id,
-                sequence,
-                trace.execution_id.as_deref(),
-                Some(adapter_id),
-                terminal
-                    .and_then(|value| value.model.as_deref())
-                    .or(configured_model),
-                terminal.and_then(|value| value.exit_code),
-                terminal.and_then(|value| value.signal),
-                if result.is_ok() {
-                    "completed"
-                } else {
-                    "retained"
-                },
-            ) {
-                eprintln!("drive: cannot record terminal diagnostics: {error}");
-                batch_stop = Some(DriveTermination::StorageFailure);
-                continue;
-            }
-
-            let cost = trace
-                .execution_id
-                .as_deref()
-                .and_then(|id| attempt_cost(&db, id));
-            if let Some(value) = cost {
-                known_cost = known_cost.saturating_add(value);
-            }
-            let unclassified = result.is_err() && trace.retained_reason.is_none();
-            if let Err(error) = &result {
-                eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
-            }
-            let (outcome, retained_reason) = match &result {
-                Ok(_) => {
-                    completed += 1;
-                    ("completed", None)
-                }
-                Err(_) => (
-                    "retained",
-                    trace.retained_reason.or(Some("unclassified_result")),
-                ),
-            };
-            if let Some(lease) = &mut worktree {
-                let state = if result.is_ok() {
-                    "ready_for_delivery"
-                } else {
-                    "retained"
                 };
-                if let Err(error) = lease.mark_state(state) {
-                    eprintln!("drive: cannot persist worktree state: {error}");
+                eprintln!("drive: attempt {sequence} {} {}", target.id, target.path);
+                if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
+                    &session_id,
+                    sequence,
+                    None,
+                    Some(adapter_id),
+                    configured_model,
+                    None,
+                    None,
+                    "preflight",
+                ) {
+                    eprintln!("drive: cannot record attempt phase: {error}");
+                    preparation_failed = true;
+                    break;
+                }
+                let mut execution_config = config.clone();
+                let scope_count = conflict_scopes(&repository.worktree, &target)?.len();
+                if let Some(model) = routed_model(config, scope_count) {
+                    if let Some(entries) = &mut execution_config.agents {
+                        entries.implementation.model = Some(model.clone());
+                        execution_config.review.implementation_agent.model = Some(model);
+                    }
+                }
+                let worktree = if config.driver.isolated_worktrees {
+                    match crate::worktree::WorktreeLease::create(
+                        &repository.worktree,
+                        &paths.state_dir,
+                        &session_id,
+                        &target.id.to_string(),
+                    ) {
+                        Ok(lease) => Some(lease),
+                        Err(error) => {
+                            let _ = DriverRepository::new(db.conn()).record_attempt_finished(
+                                &session_id,
+                                sequence,
+                                "retained",
+                                Some("worktree_failed"),
+                                None,
+                                None,
+                            );
+                            eprintln!("drive: isolated worktree creation failed: {error}");
+                            preparation_failed = true;
+                            break;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let execution_root = worktree
+                    .as_ref()
+                    .map(|lease| lease.path().to_path_buf())
+                    .unwrap_or_else(|| repository.worktree.clone());
+                if worktree.is_some() {
+                    execution_config.repositories.insert(
+                        execution_root.display().to_string(),
+                        repository_config.clone(),
+                    );
+                }
+                jobs.push((target, sequence, execution_root, execution_config, worktree));
+            }
+            if preparation_failed {
+                break DriveTermination::StorageFailure;
+            }
+
+            let mut results = std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for (target, sequence, execution_root, execution_config, worktree) in jobs {
+                    handles.push(scope.spawn(move || {
+                        let attempt_timer = Instant::now();
+                        let prd_path = execution_root.join(target.path.as_str());
+                        let (result, trace) = execute_with_config_tracked_from_preflighted(
+                            &execution_root,
+                            &prd_path,
+                            agents,
+                            &execution_config,
+                            paths,
+                            true,
+                        );
+                        let duration_ms =
+                            attempt_timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                        (target, sequence, worktree, result, trace, duration_ms)
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join())
+                    .collect::<Vec<_>>()
+            });
+            if results.iter().any(Result::is_err) {
+                eprintln!("drive: attempt worker panicked");
+                break DriveTermination::UnclassifiedResult;
+            }
+            let mut batch_stop = None;
+            for joined in results.drain(..) {
+                let (target, sequence, mut worktree, result, trace, duration_ms) = joined.unwrap();
+                let terminal = match &result {
+                    Ok(workflow) => Some(&workflow.implementation),
+                    Err(crate::run::RunError::Agent(error)) => Some(error.result()),
+                    Err(crate::run::RunError::Workflow {
+                        result: Some(result),
+                        ..
+                    }) => Some(result.as_ref()),
+                    _ => None,
+                };
+                if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
+                    &session_id,
+                    sequence,
+                    trace.execution_id.as_deref(),
+                    Some(adapter_id),
+                    terminal
+                        .and_then(|value| value.model.as_deref())
+                        .or(configured_model),
+                    terminal.and_then(|value| value.exit_code),
+                    terminal.and_then(|value| value.signal),
+                    if result.is_ok() {
+                        "completed"
+                    } else {
+                        "retained"
+                    },
+                ) {
+                    eprintln!("drive: cannot record terminal diagnostics: {error}");
                     batch_stop = Some(DriveTermination::StorageFailure);
                     continue;
                 }
+
+                let cost = trace
+                    .execution_id
+                    .as_deref()
+                    .and_then(|id| attempt_cost(&db, id));
+                if let Some(value) = cost {
+                    known_cost = known_cost.saturating_add(value);
+                }
+                let unclassified = result.is_err() && trace.retained_reason.is_none();
+                if let Err(error) = &result {
+                    eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
+                }
+                let (outcome, retained_reason) = match &result {
+                    Ok(_) => {
+                        completed += 1;
+                        ("completed", None)
+                    }
+                    Err(_) => (
+                        "retained",
+                        trace.retained_reason.or(Some("unclassified_result")),
+                    ),
+                };
+                if let Some(lease) = &mut worktree {
+                    let state = if result.is_ok() {
+                        "ready_for_delivery"
+                    } else {
+                        "retained"
+                    };
+                    if let Err(error) = lease.mark_state(state) {
+                        eprintln!("drive: cannot persist worktree state: {error}");
+                        batch_stop = Some(DriveTermination::StorageFailure);
+                        continue;
+                    }
+                }
+                if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
+                    &session_id,
+                    sequence,
+                    outcome,
+                    retained_reason,
+                    cost,
+                    Some(duration_ms),
+                ) {
+                    eprintln!("drive: cannot record attempt outcome: {error}");
+                    batch_stop = Some(DriveTermination::StorageFailure);
+                    continue;
+                }
+                eprintln!(
+                    "drive: attempt {sequence} {} outcome={outcome}{}",
+                    target.id,
+                    retained_reason
+                        .map(|reason| format!(" reason={reason}"))
+                        .unwrap_or_default()
+                );
+                if unclassified {
+                    batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                }
+                if warrant.max_cost_microusd > 0 && cost.is_none() {
+                    batch_stop.get_or_insert(DriveTermination::CostUnknown);
+                }
             }
-            if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
-                &session_id,
-                sequence,
-                outcome,
-                retained_reason,
-                cost,
-                Some(duration_ms),
-            ) {
-                eprintln!("drive: cannot record attempt outcome: {error}");
-                batch_stop = Some(DriveTermination::StorageFailure);
-                continue;
+            if let Some(reason) = batch_stop {
+                break reason;
             }
-            eprintln!(
-                "drive: attempt {sequence} {} outcome={outcome}{}",
-                target.id,
-                retained_reason
-                    .map(|reason| format!(" reason={reason}"))
-                    .unwrap_or_default()
-            );
-            if unclassified {
-                batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+            if let Err(error) = DriverRepository::new(db.conn()).heartbeat(&session_id, &session_id)
+            {
+                eprintln!("drive: heartbeat persistence failed: {error}");
+                break DriveTermination::StorageFailure;
             }
-            if warrant.max_cost_microusd > 0 && cost.is_none() {
-                batch_stop.get_or_insert(DriveTermination::CostUnknown);
-            }
-        }
-        if let Some(reason) = batch_stop {
-            break reason;
-        }
-        if let Err(error) = DriverRepository::new(db.conn()).heartbeat(&session_id, &session_id) {
-            eprintln!("drive: heartbeat persistence failed: {error}");
-            break DriveTermination::StorageFailure;
         }
     };
 
@@ -770,5 +805,30 @@ mod tests {
             &["crates/a/src/".into()],
             &["crates/b/src/".into()]
         ));
+    }
+
+    #[test]
+    fn model_routes_are_deterministic_and_fall_back_to_configured_model() {
+        let mut config = Config::default();
+        config.driver.model_routes = vec![
+            familiar_ai_core::DriverModelRouteConfig {
+                max_expected_files: 2,
+                model: "local-narrow".into(),
+            },
+            familiar_ai_core::DriverModelRouteConfig {
+                max_expected_files: 8,
+                model: "strong-medium".into(),
+            },
+        ];
+        config.agents = Some(familiar_ai_core::AgentsConfig {
+            implementation: familiar_ai_core::AgentEntryConfig {
+                model: Some("strong-broad".into()),
+                ..Default::default()
+            },
+            reviewer: Default::default(),
+        });
+        assert_eq!(routed_model(&config, 1).as_deref(), Some("local-narrow"));
+        assert_eq!(routed_model(&config, 5).as_deref(), Some("strong-medium"));
+        assert_eq!(routed_model(&config, 20).as_deref(), Some("strong-broad"));
     }
 }

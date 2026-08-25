@@ -180,8 +180,29 @@ pub fn execute_with_config_tracked_from(
     config: &Config,
     paths: &AppPaths,
 ) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
+    execute_with_config_tracked_from_preflighted(current, prd_path, agents, config, paths, false)
+}
+
+/// Driver-only entry point after an identical session-level prerequisite
+/// report has passed. Context and admission remain per-attempt and fresh.
+pub fn execute_with_config_tracked_from_preflighted(
+    current: &Path,
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+    prerequisites_preflighted: bool,
+) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
     let mut trace = AttemptTrace::default();
-    let result = execute_tracked_inner(current, prd_path, agents, config, paths, &mut trace);
+    let result = execute_tracked_inner(
+        current,
+        prd_path,
+        agents,
+        config,
+        paths,
+        prerequisites_preflighted,
+        &mut trace,
+    );
     (result, trace)
 }
 
@@ -198,6 +219,7 @@ fn execute_tracked_inner(
     agents: &AgentSet<'_>,
     config: &Config,
     paths: &AppPaths,
+    prerequisites_preflighted: bool,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let discovery = FilesystemBacklogDiscovery;
@@ -259,9 +281,11 @@ fn execute_tracked_inner(
         .reconcile_and_snapshot(&repository, &discovered)
         .map_err(|e| RunError::Storage(e.to_string()))?;
     admit_run_prd(&snapshot, &target).map_err(|e| RunError::Config(e.to_string()))?;
-    preflight_execution_prerequisites(agents, config, &context.repository.worktree).map_err(
-        |detail| retained_traced(trace, &target, "preflight_failed", RunError::Config(detail)),
-    )?;
+    if !prerequisites_preflighted {
+        preflight_execution_prerequisites(agents, config, &context.repository.worktree).map_err(
+            |detail| retained_traced(trace, &target, "preflight_failed", RunError::Config(detail)),
+        )?;
+    }
     let claim_discovered = discovery
         .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| RunError::Config(e.to_string()))?;
@@ -368,6 +392,42 @@ fn execute_tracked_inner(
         .map_err(|e| retained_traced(trace, &target, "history_failed", e))?;
     let result = execution
         .map_err(|e| retained_traced(trace, &target, agent_reason(&e), RunError::Agent(e)))?;
+    if config.driver.max_implementation_tokens > 0 {
+        let total = result
+            .input_tokens
+            .zip(result.output_tokens)
+            .map(|(input, output)| input.saturating_add(output));
+        match total {
+            None => {
+                return Err(retained_traced(
+                    trace,
+                    &target,
+                    "implementation_token_usage_unknown",
+                    RunError::Workflow {
+                        result: Some(Box::new(result.clone())),
+                        detail:
+                            "implementation token usage is unknown under a token-bounded policy"
+                                .into(),
+                    },
+                ));
+            }
+            Some(tokens) if tokens > config.driver.max_implementation_tokens => {
+                return Err(retained_traced(
+                    trace,
+                    &target,
+                    "implementation_token_budget_exceeded",
+                    RunError::Workflow {
+                        result: Some(Box::new(result.clone())),
+                        detail: format!(
+                            "implementation used {tokens} tokens, exceeding stage ceiling {}",
+                            config.driver.max_implementation_tokens
+                        ),
+                    },
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     if result.exit_code != Some(0) || result.signal.is_some() {
         return Err(retained_traced(
             trace,

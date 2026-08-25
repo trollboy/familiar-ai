@@ -62,9 +62,15 @@ impl CodingAgent for RecordingAgent {
 struct ConcurrencyAgent {
     active: AtomicUsize,
     peak: AtomicUsize,
+    preflights: AtomicUsize,
 }
 
 impl CodingAgent for ConcurrencyAgent {
+    fn preflight(&self) -> Result<(), String> {
+        self.preflights.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn isolation_capability(&self) -> IsolationCapability {
         IsolationCapability::FreshProcessPerExecution
     }
@@ -400,6 +406,7 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     let agent = ConcurrencyAgent {
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
+        preflights: AtomicUsize::new(0),
     };
     let agents = AgentSet {
         implementation: &agent,
@@ -419,4 +426,5 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     });
     assert_eq!(summary.attempted, 2);
     assert_eq!(agent.peak.load(Ordering::SeqCst), 2);
+    assert_eq!(agent.preflights.load(Ordering::SeqCst), 1);
 }
