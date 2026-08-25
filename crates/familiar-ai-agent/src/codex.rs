@@ -78,7 +78,17 @@ impl CodingAgent for CodexAgent {
             crate::FilesystemPolicy::Normal => {}
         }
         if let Some(model) = request.model {
-            command.args(["--model", model]);
+            if let Some(local_model) = model.strip_prefix("ollama/") {
+                command.args([
+                    "--oss",
+                    "--local-provider",
+                    "ollama",
+                    "--model",
+                    local_model,
+                ]);
+            } else {
+                command.args(["--model", model]);
+            }
         }
         #[cfg(unix)]
         if request.timeout_ms.is_some() {

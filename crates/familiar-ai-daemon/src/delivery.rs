@@ -93,6 +93,25 @@ pub fn deliver_with(
 
     checked(runner, &journal.worktree, &["git", "switch", "-c", &branch])?;
     checked(runner, &journal.worktree, &["git", "add", "-A"])?;
+    let staged = checked(
+        runner,
+        &journal.worktree,
+        &["git", "diff", "--cached", "--name-only"],
+    )?;
+    let staged_paths = String::from_utf8_lossy(&staged.stdout);
+    let migration = staged_paths
+        .lines()
+        .find(|path| path.to_ascii_lowercase().contains("migration"));
+    if let Some(path) = migration {
+        return fail_journal(
+            &journal_path,
+            journal,
+            "deployment_blocked",
+            format!(
+                "migration change {path} has no automatic database rollback; human staging authority required"
+            ),
+        );
+    }
     checked(
         runner,
         &journal.worktree,
@@ -281,6 +300,7 @@ mod tests {
     struct FakeRunner {
         calls: Mutex<Vec<Vec<String>>>,
         fail_smoke: bool,
+        staged: &'static str,
     }
 
     impl CommandRunner for FakeRunner {
@@ -288,6 +308,7 @@ mod tests {
             self.calls.lock().unwrap().push(argv.to_vec());
             let is_smoke = argv.first().is_some_and(|value| value == "smoke");
             let is_view = argv.get(2).is_some_and(|value| value == "view");
+            let is_staged = argv.get(1).is_some_and(|value| value == "diff");
             Ok(Output {
                 status: std::process::ExitStatus::from_raw(if self.fail_smoke && is_smoke {
                     1 << 8
@@ -296,6 +317,8 @@ mod tests {
                 }),
                 stdout: if is_view {
                     b"42\n".to_vec()
+                } else if is_staged {
+                    self.staged.as_bytes().to_vec()
                 } else {
                     Vec::new()
                 },
@@ -347,6 +370,7 @@ mod tests {
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
             fail_smoke: false,
+            staged: "src/lib.rs\n",
         };
         let result = deliver_with(&ownership, &policy, &runner).unwrap();
         assert_eq!(result.phase, "staging_verified");
@@ -369,6 +393,7 @@ mod tests {
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
             fail_smoke: true,
+            staged: "src/lib.rs\n",
         };
         assert!(deliver_with(&ownership, &policy, &runner).is_err());
         let calls = runner.calls.lock().unwrap();
@@ -387,10 +412,27 @@ mod tests {
         let runner = FakeRunner {
             calls: Mutex::new(Vec::new()),
             fail_smoke: false,
+            staged: "src/lib.rs\n",
         };
         assert!(deliver_with(&ownership, &policy, &runner)
             .unwrap_err()
             .contains("production"));
         assert!(runner.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migration_batches_stop_before_commit_or_publication() {
+        let (_temp, ownership, policy) = fixture();
+        let runner = FakeRunner {
+            calls: Mutex::new(Vec::new()),
+            fail_smoke: false,
+            staged: "internal/store/migrations/001.sql\n",
+        };
+        assert!(deliver_with(&ownership, &policy, &runner)
+            .unwrap_err()
+            .contains("no automatic database rollback"));
+        let calls = runner.calls.lock().unwrap();
+        assert!(!calls.iter().any(|call| call.contains(&"commit".into())));
+        assert!(!calls.iter().any(|call| call.contains(&"push".into())));
     }
 }
