@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-pub trait CodingAgent {
+pub trait CodingAgent: Send + Sync {
     fn execute(
         &self,
         request: ExecutionRequest<'_>,

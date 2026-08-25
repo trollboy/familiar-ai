@@ -8,7 +8,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use familiar_ai_agent::{
     AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult, IsolationCapability,
@@ -53,6 +55,32 @@ impl CodingAgent for RecordingAgent {
             signal: None,
             session_id: None,
             reported_cost_microusd: None,
+        })
+    }
+}
+
+struct ConcurrencyAgent {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl CodingAgent for ConcurrencyAgent {
+    fn isolation_capability(&self) -> IsolationCapability {
+        IsolationCapability::FreshProcessPerExecution
+    }
+
+    fn execute(
+        &self,
+        _request: ExecutionRequest<'_>,
+        _output: &mut dyn std::io::Write,
+    ) -> Result<ExecutionResult, AgentExecutionError> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(150));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(ExecutionResult {
+            exit_code: Some(0),
+            ..ExecutionResult::default()
         })
     }
 }
@@ -345,4 +373,50 @@ fn a_cost_ceiling_with_unknown_cost_ends_the_session_after_one_attempt() {
     assert_eq!(summary.attempted, 1);
     assert_eq!(summary.termination, DriveTermination::CostUnknown);
     assert_eq!(summary.known_cost_microusd, 0);
+}
+
+#[test]
+fn independent_scopes_execute_with_bounded_parallelism() {
+    let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let (temp, paths, mut config) = fixture(2, false);
+    let repository = temp.path().join("repo");
+    for number in 1..=2 {
+        fs::create_dir_all(repository.join(format!("component-{number}"))).unwrap();
+        fs::write(
+            repository.join(format!("component-{number}/fixture.txt")),
+            "fixture\n",
+        )
+        .unwrap();
+        let path = repository.join(format!("docs/prds/PRD-{number:03}.md"));
+        let content = fs::read_to_string(&path)
+            .unwrap()
+            .replace("- `src/`", &format!("- `component-{number}/`"));
+        fs::write(path, content).unwrap();
+    }
+    git(&repository, &["add", "-A"]);
+    git(&repository, &["commit", "-qm", "independent scopes"]);
+    config.driver.max_concurrency = 2;
+    config.driver.isolated_worktrees = true;
+    let agent = ConcurrencyAgent {
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+    };
+    let agents = AgentSet {
+        implementation: &agent,
+        reviewer: &agent,
+    };
+    let summary = with_working_directory(&repository, || {
+        drive(
+            &agents,
+            &config,
+            &paths,
+            DriveWarrant {
+                max_prds: 2,
+                ..DriveWarrant::default()
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(summary.attempted, 2);
+    assert_eq!(agent.peak.load(Ordering::SeqCst), 2);
 }

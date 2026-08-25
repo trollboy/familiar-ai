@@ -199,6 +199,12 @@ impl DriverConfig {
         if self.max_concurrency == 0 {
             return Err("driver.max_concurrency must be positive".into());
         }
+        if self.max_concurrency > 1 && !self.isolated_worktrees {
+            return Err(
+                "driver.isolated_worktrees must be true when max_concurrency is greater than one"
+                    .into(),
+            );
+        }
         Ok(())
     }
 }
