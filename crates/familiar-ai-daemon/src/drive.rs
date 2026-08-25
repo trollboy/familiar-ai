@@ -18,7 +18,7 @@ use familiar_ai_core::{
 };
 use familiar_ai_storage::{Database, DriverRepository, ExecutionHistoryRepository};
 
-use crate::run::{execute_with_config_tracked, AgentSet};
+use crate::run::{execute_with_config_tracked_from, AgentSet};
 
 /// Why a driver session stopped. Closed set; persisted verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,8 +304,49 @@ pub fn drive(
         }
 
         let prd_path = Path::new(target.path.as_str());
+        let mut execution_config = config.clone();
+        let mut worktree = if config.driver.isolated_worktrees {
+            match crate::worktree::WorktreeLease::create(
+                &repository.worktree,
+                &paths.state_dir,
+                &session_id,
+                &target.id.to_string(),
+            ) {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    let _ = DriverRepository::new(db.conn()).record_attempt_finished(
+                        &session_id,
+                        sequence,
+                        "retained",
+                        Some("worktree_failed"),
+                        None,
+                        None,
+                    );
+                    eprintln!("drive: isolated worktree creation failed: {error}");
+                    break DriveTermination::StorageFailure;
+                }
+            }
+        } else {
+            None
+        };
+        let execution_root = worktree
+            .as_ref()
+            .map(|lease| lease.path())
+            .unwrap_or(&repository.worktree);
+        if worktree.is_some() {
+            execution_config.repositories.insert(
+                execution_root.display().to_string(),
+                repository_config.clone(),
+            );
+        }
         let attempt_timer = Instant::now();
-        let (result, trace) = execute_with_config_tracked(prd_path, agents, config, paths);
+        let (result, trace) = execute_with_config_tracked_from(
+            execution_root,
+            prd_path,
+            agents,
+            &execution_config,
+            paths,
+        );
         let duration_ms = attempt_timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let terminal = match &result {
             Ok(workflow) => Some(&workflow.implementation),
@@ -354,6 +395,17 @@ pub fn drive(
                 trace.retained_reason.or(Some("unclassified_result")),
             ),
         };
+        if let Some(lease) = &mut worktree {
+            let state = if result.is_ok() {
+                "ready_for_delivery"
+            } else {
+                "retained"
+            };
+            if let Err(error) = lease.mark_state(state) {
+                eprintln!("drive: cannot persist worktree state: {error}");
+                break DriveTermination::StorageFailure;
+            }
+        }
         if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
             &session_id,
             sequence,

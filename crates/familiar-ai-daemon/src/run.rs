@@ -159,8 +159,29 @@ pub fn execute_with_config_tracked(
     config: &Config,
     paths: &AppPaths,
 ) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
+    let current = match env::current_dir() {
+        Ok(current) => current,
+        Err(error) => {
+            return (
+                Err(RunError::CurrentDirectory(error)),
+                AttemptTrace::default(),
+            )
+        }
+    };
+    execute_with_config_tracked_from(&current, prd_path, agents, config, paths)
+}
+
+/// Repository-explicit execution used by isolated worktree workers. Unlike
+/// the CLI wrapper, this never reads or mutates process-wide current_dir.
+pub fn execute_with_config_tracked_from(
+    current: &Path,
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
     let mut trace = AttemptTrace::default();
-    let result = execute_tracked_inner(prd_path, agents, config, paths, &mut trace);
+    let result = execute_tracked_inner(current, prd_path, agents, config, paths, &mut trace);
     (result, trace)
 }
 
@@ -172,22 +193,22 @@ pub struct AttemptTrace {
 }
 
 fn execute_tracked_inner(
+    current: &Path,
     prd_path: &Path,
     agents: &AgentSet<'_>,
     config: &Config,
     paths: &AppPaths,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
-    let current = env::current_dir().map_err(RunError::CurrentDirectory)?;
     let discovery = FilesystemBacklogDiscovery;
     let repository = discovery
-        .resolve(&current)
+        .resolve(current)
         .map_err(|e| RunError::Config(e.to_string()))?;
     let repository_config = config.repository(&repository.worktree);
     let context = ContextCompiler::new()
         .compile_profiled(
             ContextRequest {
-                repository: &current,
+                repository: current,
                 prd: prd_path,
             },
             &context_profile(&repository_config),

@@ -3,3 +3,4 @@ pub mod preflight;
 pub mod report;
 pub mod run;
 pub mod worker_lock;
+pub mod worktree;

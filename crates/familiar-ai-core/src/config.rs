@@ -154,7 +154,7 @@ fn default_reference_roots() -> Vec<ReferenceRootConfig> {
 /// The unattended driver's budget warrant. Every ceiling is optional
 /// individually (0 means unlimited), but `drive` refuses to start unless at
 /// least one is finite: an unbounded unattended loop is not a warrant.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DriverConfig {
     #[serde(default)]
     pub max_prds_per_session: u64,
@@ -162,6 +162,26 @@ pub struct DriverConfig {
     pub max_session_cost_microusd: u64,
     #[serde(default)]
     pub max_session_duration_ms: u64,
+    #[serde(default = "default_driver_concurrency")]
+    pub max_concurrency: usize,
+    #[serde(default)]
+    pub isolated_worktrees: bool,
+}
+
+fn default_driver_concurrency() -> usize {
+    1
+}
+
+impl Default for DriverConfig {
+    fn default() -> Self {
+        Self {
+            max_prds_per_session: 0,
+            max_session_cost_microusd: 0,
+            max_session_duration_ms: 0,
+            max_concurrency: default_driver_concurrency(),
+            isolated_worktrees: false,
+        }
+    }
 }
 
 impl DriverConfig {
@@ -175,6 +195,9 @@ impl DriverConfig {
                  max_prds_per_session, max_session_cost_microusd, or max_session_duration_ms"
                     .into(),
             );
+        }
+        if self.max_concurrency == 0 {
+            return Err("driver.max_concurrency must be positive".into());
         }
         Ok(())
     }

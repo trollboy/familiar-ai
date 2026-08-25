@@ -46,6 +46,8 @@
 max_prds_per_session = 0      # 0 = unlimited
 max_session_cost_microusd = 0 # 0 = no cost ceiling
 max_session_duration_ms = 0   # 0 = no duration ceiling
+max_concurrency = 1
+isolated_worktrees = false
 
 # Commands run as exact argv before any PRD claim; no shell is involved.
 # [[preflight.commands]]
