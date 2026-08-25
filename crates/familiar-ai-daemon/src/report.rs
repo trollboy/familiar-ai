@@ -129,6 +129,23 @@ fn render_stopped(db: &Database, out: &mut String, stopped: &[&DriverAttempt]) {
             "  {}  {}  reason={reason}",
             attempt.prd_id, attempt.prd_path
         );
+        if attempt.adapter_id.is_some()
+            || attempt.model.is_some()
+            || attempt.exit_code.is_some()
+            || attempt.signal.is_some()
+            || attempt.last_durable_phase.is_some()
+        {
+            let _ = writeln!(
+                out,
+                "      attempt={} adapter={} model={} exit={:?} signal={:?} phase={}",
+                attempt.sequence,
+                attempt.adapter_id.as_deref().unwrap_or("unknown"),
+                attempt.model.as_deref().unwrap_or("unknown"),
+                attempt.exit_code,
+                attempt.signal,
+                attempt.last_durable_phase.as_deref().unwrap_or("unknown")
+            );
+        }
         render_scope_detail(db, out, attempt);
     }
     render_omitted(out, stopped.len(), MAX_LISTED_ATTEMPTS);

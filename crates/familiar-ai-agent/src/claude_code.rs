@@ -178,9 +178,18 @@ impl CodingAgent for ClaudeCodeAgent {
                 result: Box::new(result),
             });
         }
+        if !status.success() {
+            return Ok(result);
+        }
         if !stream.terminal_seen {
             return Err(AgentExecutionError::MalformedOutput {
                 detail: "EOF before result event".into(),
+                result: Box::new(result),
+            });
+        }
+        if stream.malformed_seen {
+            return Err(AgentExecutionError::MalformedOutput {
+                detail: "stream contained malformed JSON or duplicate terminal events".into(),
                 result: Box::new(result),
             });
         }
@@ -222,6 +231,7 @@ struct ClaudeStream {
     output_tokens: Option<u64>,
     total_cost_usd: Option<f64>,
     terminal_seen: bool,
+    malformed_seen: bool,
 }
 
 impl ClaudeStream {
@@ -274,6 +284,7 @@ fn string(value: Option<&Value>) -> Option<String> {
 
 fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
+        stream.malformed_seen = true;
         return StreamAction::Forward;
     };
     let Some(event_type) = value.get("type").and_then(Value::as_str) else {
@@ -315,6 +326,7 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
             if stream.terminal_seen {
                 // Malformed stream: keep the first terminal capture and
                 // forward subsequent anomalies as unclassified lines.
+                stream.malformed_seen = true;
                 return StreamAction::Forward;
             }
             stream.terminal_seen = true;
@@ -616,7 +628,7 @@ mod tests {
         write_executable(
             &executable,
             &format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Claude Code 2.1'; exit 0; fi\nprintf '%s\\n' \"$@\" > {argv}\ncat > {stdin}\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-sonnet-4-5\",\"session_id\":\"sess-9\"}}'\nprintf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"progress line\"}}]}}}}'\nprintf '%s\\n' 'plain diagnostic'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"sess-9\",\"total_cost_usd\":0.031415,\"usage\":{{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30,\"output_tokens\":40}}}}'\nexit 0\n",
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Claude Code 2.1'; exit 0; fi\nprintf '%s\\n' \"$@\" > {argv}\ncat > {stdin}\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-sonnet-4-5\",\"session_id\":\"sess-9\"}}'\nprintf '%s\\n' '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"progress line\"}}]}}}}'\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"sess-9\",\"total_cost_usd\":0.031415,\"usage\":{{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30,\"output_tokens\":40}}}}'\nexit 0\n",
                 argv = argv_capture.display(),
                 stdin = capture.display(),
             ),
@@ -628,7 +640,7 @@ mod tests {
                 &mut output,
             )
             .unwrap();
-        assert_eq!(output, b"progress line\nplain diagnostic\n");
+        assert_eq!(output, b"progress line\n");
         assert_eq!(fs::read_to_string(&capture).unwrap(), "prompt bytes");
         let argv = fs::read_to_string(&argv_capture).unwrap();
         assert_eq!(

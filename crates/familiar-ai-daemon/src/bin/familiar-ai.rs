@@ -22,6 +22,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Validate prerequisites without claiming a PRD or invoking a model.
+    Preflight,
     /// Select the next eligible repository PRD without executing it.
     Next,
     /// Execute a repository PRD with the configured coding agent.
@@ -110,6 +112,10 @@ enum BootstrapCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Preflight => match preflight_command() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Next => match next() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
@@ -147,6 +153,39 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+    }
+}
+
+fn preflight_command() -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let current = std::env::current_dir().map_err(|error| error.to_string())?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&current)
+        .map_err(|error| error.to_string())?;
+    let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
+    let implementation = build_agent(&implementation_entry);
+    let reviewer = build_agent(&reviewer_entry);
+    let report = familiar_ai_daemon::preflight::run(
+        &AgentSet {
+            implementation: implementation.as_ref(),
+            reviewer: reviewer.as_ref(),
+        },
+        &config,
+        &repository.worktree,
+    );
+    for check in &report.checks {
+        let status = match check.status {
+            familiar_ai_daemon::preflight::PreflightStatus::Passed => "passed",
+            familiar_ai_daemon::preflight::PreflightStatus::Failed => "failed",
+        };
+        println!("{status}\t{}\t{}", check.check_id, check.detail);
+    }
+    if report.is_valid() {
+        Ok(())
+    } else {
+        Err(format!("preflight failed: {}", report.failure_summary()))
     }
 }
 

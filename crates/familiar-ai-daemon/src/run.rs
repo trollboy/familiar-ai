@@ -435,40 +435,12 @@ fn preflight_execution_prerequisites(
     config: &Config,
     repository: &Path,
 ) -> Result<(), String> {
-    agents
-        .implementation
-        .preflight()
-        .map_err(|detail| format!("implementation agent preflight failed: {detail}"))?;
-    if config.review.enabled {
-        agents
-            .reviewer
-            .preflight()
-            .map_err(|detail| format!("reviewer agent preflight failed: {detail}"))?;
-        for check in config
-            .review
-            .verification
-            .iter()
-            .filter(|check| check.required)
-        {
-            let executable = check.argv.first().ok_or_else(|| {
-                format!("verification check {:?} has no executable", check.check_id)
-            })?;
-            Command::new(executable)
-                .arg("--version")
-                .current_dir(repository.join(&check.working_directory))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map_err(|error| {
-                    format!(
-                        "verification check {:?} executable {:?} is unavailable: {error}",
-                        check.check_id, executable
-                    )
-                })?;
-        }
+    let report = crate::preflight::run(agents, config, repository);
+    if report.is_valid() {
+        Ok(())
+    } else {
+        Err(report.failure_summary())
     }
-    Ok(())
 }
 
 fn context_profile(config: &familiar_ai_core::RepositoryConfig) -> ContextProfile {
@@ -2229,10 +2201,7 @@ mod tests {
         };
         let error = preflight_execution_prerequisites(&agents, &Config::default(), temp.path())
             .unwrap_err();
-        assert_eq!(
-            error,
-            "implementation agent preflight failed: fixture executable missing"
-        );
+        assert_eq!(error, "agent.implementation: fixture executable missing");
     }
 
     #[test]

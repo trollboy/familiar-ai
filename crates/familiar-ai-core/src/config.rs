@@ -43,6 +43,29 @@ pub struct Config {
     pub agents: Option<AgentsConfig>,
     #[serde(default)]
     pub driver: DriverConfig,
+    #[serde(default)]
+    pub preflight: PreflightConfig,
+}
+
+/// Deterministic prerequisites checked before any PRD is claimed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightConfig {
+    #[serde(default)]
+    pub commands: Vec<PreflightCommandConfig>,
+    /// Environment variable names whose values must exist and be non-empty.
+    /// Values are never persisted or printed.
+    #[serde(default)]
+    pub required_environment: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightCommandConfig {
+    pub check_id: String,
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub working_directory: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1287,6 +1310,49 @@ fn reject_stale_env() -> crate::Result<()> {
 }
 
 impl Config {
+    fn validate_preflight(&self) -> crate::Result<()> {
+        let mut ids = std::collections::BTreeSet::new();
+        for check in &self.preflight.commands {
+            if check.check_id.trim().is_empty() || check.argv.is_empty() {
+                return Err(FamiliarError::Config(
+                    "preflight commands require a non-empty check_id and argv".into(),
+                ));
+            }
+            if !ids.insert(check.check_id.as_str()) {
+                return Err(FamiliarError::Config(format!(
+                    "duplicate preflight check_id {:?}",
+                    check.check_id
+                )));
+            }
+            if check.argv.iter().any(|arg| arg.is_empty()) {
+                return Err(FamiliarError::Config(format!(
+                    "preflight check {:?} contains an empty argv element",
+                    check.check_id
+                )));
+            }
+            if Path::new(&check.working_directory).is_absolute()
+                || check.working_directory.split('/').any(|part| part == "..")
+            {
+                return Err(FamiliarError::Config(format!(
+                    "preflight check {:?} working_directory must be repository-relative",
+                    check.check_id
+                )));
+            }
+        }
+        for name in &self.preflight.required_environment {
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|character| character == '_' || character.is_ascii_alphanumeric())
+            {
+                return Err(FamiliarError::Config(format!(
+                    "invalid preflight environment variable name {name:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_repositories(&self) -> crate::Result<()> {
         let mut resolved = BTreeMap::<PathBuf, String>::new();
         for (worktree, entry) in &self.repositories {
@@ -1373,6 +1439,7 @@ impl Config {
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
+        config.validate_preflight()?;
         Ok(config)
     }
 
@@ -1396,6 +1463,7 @@ impl Config {
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
+        config.validate_preflight()?;
         Ok(config)
     }
 }

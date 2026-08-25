@@ -105,11 +105,13 @@ impl CodingAgent for CodexAgent {
         #[cfg(unix)]
         let watchdog = crate::isolation::spawn_watchdog(child.id(), request.timeout_ms);
         let mut terminal_seen = false;
+        let mut malformed_seen = false;
         let output_result = stream_json(
             child.stdout.take().expect("piped stdout"),
             output,
             &mut result,
             &mut terminal_seen,
+            &mut malformed_seen,
         );
         let status = child.wait().map_err(|source| AgentExecutionError::Wait {
             source: Box::new(source),
@@ -135,9 +137,21 @@ impl CodingAgent for CodexAgent {
                 result: Box::new(result),
             });
         }
+        // A crashing adapter has an OS-authenticated terminal result even if
+        // its structured stream ended abruptly. Preserve exit/signal rather
+        // than misclassifying the crash as malformed JSON.
+        if !status.success() {
+            return Ok(result);
+        }
         if !terminal_seen {
             return Err(AgentExecutionError::MalformedOutput {
                 detail: "EOF before turn.completed".into(),
+                result: Box::new(result),
+            });
+        }
+        if malformed_seen {
+            return Err(AgentExecutionError::MalformedOutput {
+                detail: "stream contained malformed JSON".into(),
                 result: Box::new(result),
             });
         }
@@ -197,11 +211,15 @@ fn stream_json(
     output: &mut dyn Write,
     result: &mut ExecutionResult,
     terminal_seen: &mut bool,
+    malformed_seen: &mut bool,
 ) -> io::Result<()> {
     stream_lines(reader, output, |line| {
         match parse_event(line, result, terminal_seen) {
             Some(text) => StreamAction::Text(text),
-            None if serde_json::from_str::<Value>(line).is_err() => StreamAction::Forward,
+            None if serde_json::from_str::<Value>(line).is_err() => {
+                *malformed_seen = true;
+                StreamAction::Forward
+            }
             None => StreamAction::Silent,
         }
     })
@@ -252,16 +270,19 @@ mod tests {
     fn malformed_lines_are_forwarded_without_fabricating_metrics() {
         let mut result = ExecutionResult::default();
         let mut terminal_seen = false;
+        let mut malformed_seen = false;
         let mut output = Vec::new();
         stream_json(
             b"not json\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":-1}}\n".as_slice(),
             &mut output,
             &mut result,
             &mut terminal_seen,
+            &mut malformed_seen,
         )
         .unwrap();
         assert_eq!(output, b"not json\n");
         assert_eq!(result.input_tokens, None);
+        assert!(malformed_seen);
     }
 
     #[cfg(unix)]
@@ -290,6 +311,81 @@ mod tests {
         );
         assert!(matches!(result, Err(AgentExecutionError::Timeout { .. })));
         assert!(started.elapsed().as_secs() < 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_signal_is_preserved_as_terminal_process_evidence() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("codex");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi\ncat >/dev/null\nkill -TERM $$\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let result = CodexAgent::new(executable.to_string_lossy())
+            .execute(
+                ExecutionRequest {
+                    working_directory: temp.path(),
+                    denied_read_path: None,
+                    prompt: "work",
+                    filesystem: crate::FilesystemPolicy::Normal,
+                    model: None,
+                    timeout_ms: Some(5_000),
+                },
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(result.signal, Some(libc::SIGTERM));
+        assert_eq!(result.exit_code, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_and_malformed_streams_have_distinct_durable_errors() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("codex");
+        let write = |script: &str| {
+            fs::write(&executable, script).unwrap();
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).unwrap();
+        };
+        let request = || ExecutionRequest {
+            working_directory: temp.path(),
+            denied_read_path: None,
+            prompt: "work",
+            filesystem: crate::FilesystemPolicy::Normal,
+            model: None,
+            timeout_ms: Some(5_000),
+        };
+
+        write("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"partial\"}}'\n");
+        let mut output = Vec::new();
+        let partial = CodexAgent::new(executable.to_string_lossy())
+            .execute(request(), &mut output)
+            .unwrap_err();
+        assert!(matches!(
+            partial,
+            AgentExecutionError::MalformedOutput { .. }
+        ));
+        assert_eq!(output, b"partial\n");
+
+        write("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' 'not-json' '{\"type\":\"turn.completed\"}'\n");
+        let malformed = CodexAgent::new(executable.to_string_lossy())
+            .execute(request(), &mut Vec::new())
+            .unwrap_err();
+        assert!(matches!(
+            malformed,
+            AgentExecutionError::MalformedOutput { .. }
+        ));
     }
 
     #[cfg(target_os = "linux")]

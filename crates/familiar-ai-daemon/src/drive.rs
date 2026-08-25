@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 use std::time::Instant;
 
 use familiar_ai_core::{
@@ -30,6 +31,8 @@ pub enum DriveTermination {
     CostUnknown,
     StorageFailure,
     Interrupted,
+    UnclassifiedResult,
+    WorkerHeartbeatLost,
 }
 
 impl DriveTermination {
@@ -43,6 +46,8 @@ impl DriveTermination {
             Self::CostUnknown => "cost_unknown",
             Self::StorageFailure => "storage_failure",
             Self::Interrupted => "interrupted",
+            Self::UnclassifiedResult => "unclassified_result",
+            Self::WorkerHeartbeatLost => "worker_heartbeat_lost",
         }
     }
 }
@@ -193,6 +198,8 @@ pub fn drive(
     warrant: DriveWarrant,
 ) -> Result<DriveSummary, DriveError> {
     warrant.validate().map_err(DriveError::Config)?;
+    let _worker_lock = crate::worker_lock::WorkerLock::acquire(&paths.runtime_dir)
+        .map_err(|error| DriveError::Config(format!("cannot acquire driver ownership: {error}")))?;
     let current = std::env::current_dir().map_err(|error| {
         DriveError::Config(format!("cannot resolve current directory: {error}"))
     })?;
@@ -201,6 +208,10 @@ pub fn drive(
         .resolve(&current)
         .map_err(|error| DriveError::Config(error.to_string()))?;
     let repository_config = config.repository(&repository.worktree);
+    let (implementation_entry, _) =
+        crate::run::resolved_agent_entries(config).map_err(DriveError::Config)?;
+    let adapter_id = implementation_entry.adapter.as_str();
+    let configured_model = implementation_entry.model.as_deref();
 
     let database_path = config.database.resolve_path(&paths.data_dir);
     let mut db =
@@ -214,7 +225,6 @@ pub fn drive(
     DriverRepository::new(db.conn())
         .recover_incomplete()
         .map_err(|error| DriveError::Storage(error.to_string()))?;
-
     let session_id = format!("drive-{}", crate::run::new_id());
     DriverRepository::new(db.conn())
         .open_session(&session_id, &repository.key, &warrant.as_json())
@@ -222,6 +232,14 @@ pub fn drive(
     eprintln!(
         "drive: session {session_id} started warrant={}",
         warrant.as_json()
+    );
+    DriverRepository::new(db.conn())
+        .heartbeat(&session_id, &session_id)
+        .map_err(|error| DriveError::Storage(error.to_string()))?;
+    let heartbeat = HeartbeatGuard::start(
+        database_path.clone(),
+        session_id.clone(),
+        Duration::from_secs(config.daemon.heartbeat_interval_secs.max(1)),
     );
 
     let timer = Instant::now();
@@ -231,6 +249,9 @@ pub fn drive(
     let mut known_cost = 0_u64;
 
     let termination = loop {
+        if heartbeat.failed() {
+            break DriveTermination::WorkerHeartbeatLost;
+        }
         let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
         if let Some(reason) = warrant.exhausted(attempted, known_cost, elapsed) {
             break reason;
@@ -268,11 +289,52 @@ pub fn drive(
             }
         };
         eprintln!("drive: attempt {sequence} {} {}", target.id, target.path);
+        if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
+            &session_id,
+            sequence,
+            None,
+            Some(adapter_id),
+            configured_model,
+            None,
+            None,
+            "preflight",
+        ) {
+            eprintln!("drive: cannot record attempt phase: {error}");
+            break DriveTermination::StorageFailure;
+        }
 
         let prd_path = Path::new(target.path.as_str());
         let attempt_timer = Instant::now();
         let (result, trace) = execute_with_config_tracked(prd_path, agents, config, paths);
         let duration_ms = attempt_timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let terminal = match &result {
+            Ok(workflow) => Some(&workflow.implementation),
+            Err(crate::run::RunError::Agent(error)) => Some(error.result()),
+            Err(crate::run::RunError::Workflow {
+                result: Some(result),
+                ..
+            }) => Some(result.as_ref()),
+            _ => None,
+        };
+        if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
+            &session_id,
+            sequence,
+            trace.execution_id.as_deref(),
+            Some(adapter_id),
+            terminal
+                .and_then(|value| value.model.as_deref())
+                .or(configured_model),
+            terminal.and_then(|value| value.exit_code),
+            terminal.and_then(|value| value.signal),
+            if result.is_ok() {
+                "completed"
+            } else {
+                "retained"
+            },
+        ) {
+            eprintln!("drive: cannot record terminal diagnostics: {error}");
+            break DriveTermination::StorageFailure;
+        }
 
         let cost = trace
             .execution_id
@@ -281,12 +343,16 @@ pub fn drive(
         if let Some(value) = cost {
             known_cost = known_cost.saturating_add(value);
         }
+        let unclassified = result.is_err() && trace.retained_reason.is_none();
         let (outcome, retained_reason) = match &result {
             Ok(_) => {
                 completed += 1;
                 ("completed", None)
             }
-            Err(_) => ("retained", trace.retained_reason.or(Some("run_failed"))),
+            Err(_) => (
+                "retained",
+                trace.retained_reason.or(Some("unclassified_result")),
+            ),
         };
         if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
             &session_id,
@@ -306,6 +372,13 @@ pub fn drive(
                 .map(|reason| format!(" reason={reason}"))
                 .unwrap_or_default()
         );
+        if unclassified {
+            break DriveTermination::UnclassifiedResult;
+        }
+        if let Err(error) = DriverRepository::new(db.conn()).heartbeat(&session_id, &session_id) {
+            eprintln!("drive: heartbeat persistence failed: {error}");
+            break DriveTermination::StorageFailure;
+        }
 
         // Unknown cost is never treated as zero: with a cost ceiling in force,
         // an unmeasurable attempt ends the session rather than silently
@@ -329,6 +402,51 @@ pub fn drive(
         completed,
         known_cost_microusd: known_cost,
     })
+}
+
+struct HeartbeatGuard {
+    stop: std::sync::mpsc::Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HeartbeatGuard {
+    fn start(database_path: std::path::PathBuf, session_id: String, interval: Duration) -> Self {
+        let (stop, receiver) = std::sync::mpsc::channel();
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_failed = std::sync::Arc::clone(&failed);
+        let worker_id = session_id.clone();
+        let handle = std::thread::spawn(move || {
+            while receiver.recv_timeout(interval).is_err() {
+                let result = Database::open(&database_path).and_then(|database| {
+                    database.run_migrations()?;
+                    DriverRepository::new(database.conn()).heartbeat(&session_id, &worker_id)
+                });
+                if result.is_err() {
+                    thread_failed.store(true, std::sync::atomic::Ordering::Release);
+                    break;
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+            failed,
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// The recorded cost of one execution, when pricing made it knowable.

@@ -47,6 +47,16 @@ max_prds_per_session = 0      # 0 = unlimited
 max_session_cost_microusd = 0 # 0 = no cost ceiling
 max_session_duration_ms = 0   # 0 = no duration ceiling
 
+# Commands run as exact argv before any PRD claim; no shell is involved.
+# [[preflight.commands]]
+# check_id = "go"
+# argv = ["go", "version"]
+# [[preflight.commands]]
+# check_id = "github-auth"
+# argv = ["gh", "auth", "status"]
+# [preflight]
+# required_environment = ["DIGITALOCEAN_ACCESS_TOKEN"]
+
 [review]
 enabled = false
 max_review_attempts = 3

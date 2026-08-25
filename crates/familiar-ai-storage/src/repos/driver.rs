@@ -28,6 +28,11 @@ pub struct DriverAttempt {
     pub retained_reason: Option<String>,
     pub known_cost_microusd: Option<u64>,
     pub duration_ms: Option<u64>,
+    pub adapter_id: Option<String>,
+    pub model: Option<String>,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub last_durable_phase: Option<String>,
 }
 
 pub struct DriverRepository<'a> {
@@ -53,6 +58,43 @@ impl<'a> DriverRepository<'a> {
                 params![session_id, repository_key, now, warrant_json, now],
             )
             .map_err(db)?;
+        Ok(())
+    }
+
+    pub fn heartbeat(&self, session_id: &str, worker_id: &str) -> familiar_ai_core::Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE driver_sessions SET heartbeat_at=?1,worker_id=COALESCE(worker_id,?2) WHERE session_id=?3 AND ended_at IS NULL",
+            params![Utc::now().to_rfc3339(), worker_id, session_id],
+        ).map_err(db)?;
+        if changed != 1 {
+            return Err(FamiliarError::Database(format!(
+                "open driver session {session_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_attempt_diagnostics(
+        &self,
+        session_id: &str,
+        sequence: i64,
+        execution_id: Option<&str>,
+        adapter_id: Option<&str>,
+        model: Option<&str>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        phase: &str,
+    ) -> familiar_ai_core::Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE driver_attempts SET execution_id=COALESCE(?1,execution_id),adapter_id=COALESCE(?2,adapter_id),model=COALESCE(?3,model),exit_code=COALESCE(?4,exit_code),signal=COALESCE(?5,signal),last_durable_phase=?6 WHERE session_id=?7 AND sequence=?8",
+            params![execution_id, adapter_id, model, exit_code, signal, phase, session_id, sequence],
+        ).map_err(db)?;
+        if changed != 1 {
+            return Err(FamiliarError::Database(format!(
+                "driver attempt {session_id}/{sequence} not found"
+            )));
+        }
         Ok(())
     }
 
@@ -200,7 +242,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                 retained_reason,known_cost_microusd,duration_ms FROM driver_attempts \
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase FROM driver_attempts \
                  WHERE session_id=?1 ORDER BY sequence",
             )
             .map_err(db)?;
@@ -217,6 +259,11 @@ impl<'a> DriverRepository<'a> {
                     retained_reason: row.get(7)?,
                     known_cost_microusd: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
                     duration_ms: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+                    adapter_id: row.get(10)?,
+                    model: row.get(11)?,
+                    exit_code: row.get(12)?,
+                    signal: row.get(13)?,
+                    last_durable_phase: row.get(14)?,
                 })
             })
             .map_err(db)?;
