@@ -39,6 +39,8 @@ pub fn plist(
     <string>worker</string>
     <string>run</string>
     <string>{}</string>
+    <string>--max-prds</string>
+    <string>1</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>

@@ -116,7 +116,11 @@ enum WorkerCommand {
         output: PathBuf,
     },
     /// launchd entry point: run one configured warrant and emit its report.
-    Run { repository: PathBuf },
+    Run {
+        repository: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        max_prds: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -210,11 +214,13 @@ fn worker_command(command: WorkerCommand) -> Result<(), String> {
             println!("plist={}", output.display());
             Ok(())
         }
-        WorkerCommand::Run { repository } => {
+        WorkerCommand::Run {
+            repository,
+            max_prds,
+        } => {
             std::env::set_current_dir(&repository).map_err(|error| error.to_string())?;
-            let drive_result = drive_command(None, None, None);
-            let report_result = report_command(None);
-            drive_result.and(report_result)
+            drive_command(Some(max_prds), None, None)?;
+            report_command(None)
         }
     }
 }
