@@ -9,6 +9,7 @@ pub fn plist(
     repository: &Path,
     stdout_log: &Path,
     stderr_log: &Path,
+    toolchain_path: &str,
 ) -> Result<String, String> {
     if label.trim().is_empty()
         || !label
@@ -26,6 +27,9 @@ pub fn plist(
         if !path.is_absolute() {
             return Err(format!("launchd {name} path must be absolute"));
         }
+    }
+    if toolchain_path.trim().is_empty() || toolchain_path.contains('\0') {
+        return Err("launchd toolchain PATH must be non-empty and contain no NUL bytes".into());
     }
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -46,6 +50,8 @@ pub fn plist(
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>ProcessType</key><string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>{}</string></dict>
   <key>StandardOutPath</key><string>{}</string>
   <key>StandardErrorPath</key><string>{}</string>
 </dict>
@@ -54,6 +60,7 @@ pub fn plist(
         xml(label),
         xml(&executable.display().to_string()),
         xml(&repository.display().to_string()),
+        xml(toolchain_path),
         xml(&stdout_log.display().to_string()),
         xml(&stderr_log.display().to_string()),
     ))
@@ -80,11 +87,15 @@ mod tests {
             Path::new("/tmp/repo&fixture"),
             Path::new("/tmp/out.log"),
             Path::new("/tmp/err.log"),
+            "/opt/homebrew/bin:/usr/bin:/bin",
         )
         .unwrap();
         assert!(rendered.contains("<key>SuccessfulExit</key><false/>"));
         assert!(rendered.contains("<string>worker</string>"));
         assert!(rendered.contains("/tmp/repo&amp;fixture"));
+        assert!(
+            rendered.contains("<key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string>")
+        );
     }
 
     #[test]
@@ -95,6 +106,16 @@ mod tests {
             Path::new("/tmp/repo"),
             Path::new("/tmp/out"),
             Path::new("/tmp/err"),
+            "/usr/bin:/bin",
+        )
+        .is_err());
+        assert!(plist(
+            "com.example.familiar",
+            Path::new("/opt/familiar-ai"),
+            Path::new("/tmp/repo"),
+            Path::new("/tmp/out"),
+            Path::new("/tmp/err"),
+            "",
         )
         .is_err());
     }

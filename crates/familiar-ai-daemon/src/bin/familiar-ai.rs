@@ -203,12 +203,15 @@ fn worker_command(command: WorkerCommand) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
             let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
             std::fs::create_dir_all(&paths.log_dir).map_err(|error| error.to_string())?;
+            let toolchain_path = std::env::var("PATH")
+                .map_err(|_| "PATH is required to generate a launchd worker plist".to_owned())?;
             let rendered = familiar_ai_daemon::launchd::plist(
                 &label,
                 &executable,
                 &repository,
                 &paths.log_dir.join(format!("{label}.stdout.log")),
                 &paths.log_dir.join(format!("{label}.stderr.log")),
+                &toolchain_path,
             )?;
             std::fs::write(&output, rendered).map_err(|error| error.to_string())?;
             println!("plist={}", output.display());
