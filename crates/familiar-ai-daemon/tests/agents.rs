@@ -75,14 +75,14 @@ fn build_agent_maps_each_adapter_to_its_invocation_shape() {
     write_executable(
         &codex_exe,
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\ncat >/dev/null\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"turn.completed\"}}'\nexit 0\n",
             codex_argv.display()
         ),
     );
     write_executable(
         &claude_exe,
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo claude-test; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\ncat >/dev/null\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo claude-test; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'\nexit 0\n",
             claude_argv.display()
         ),
     );

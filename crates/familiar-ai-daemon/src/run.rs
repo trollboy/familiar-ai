@@ -238,6 +238,9 @@ fn execute_tracked_inner(
         .reconcile_and_snapshot(&repository, &discovered)
         .map_err(|e| RunError::Storage(e.to_string()))?;
     admit_run_prd(&snapshot, &target).map_err(|e| RunError::Config(e.to_string()))?;
+    preflight_execution_prerequisites(agents, config, &context.repository.worktree).map_err(
+        |detail| retained_traced(trace, &target, "preflight_failed", RunError::Config(detail)),
+    )?;
     let claim_discovered = discovery
         .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| RunError::Config(e.to_string()))?;
@@ -327,7 +330,10 @@ fn execute_tracked_inner(
         Err(AgentExecutionError::Launch { result, .. }) => (result.as_ref(), "launch_failed"),
         Err(AgentExecutionError::Input { result, .. }) => (result.as_ref(), "input_failed"),
         Err(AgentExecutionError::Wait { result, .. }) => (result.as_ref(), "failed"),
-        Err(AgentExecutionError::Output { result, .. }) => (result.as_ref(), outcome(result)),
+        Err(AgentExecutionError::Output { result, .. }) => (result.as_ref(), "output_failed"),
+        Err(AgentExecutionError::MalformedOutput { result, .. }) => {
+            (result.as_ref(), "malformed_output")
+        }
         Err(AgentExecutionError::Timeout { result }) => (result.as_ref(), "timed_out"),
         Err(AgentExecutionError::BudgetExceeded { result, .. }) => {
             (result.as_ref(), "budget_exceeded")
@@ -420,6 +426,49 @@ fn execute_tracked_inner(
     Ok(RunWorkflowResult {
         implementation: result,
     })
+}
+
+/// Probe every executable that this run is configured to invoke. This is
+/// deliberately before backlog admission/claim and performs no model call.
+fn preflight_execution_prerequisites(
+    agents: &AgentSet<'_>,
+    config: &Config,
+    repository: &Path,
+) -> Result<(), String> {
+    agents
+        .implementation
+        .preflight()
+        .map_err(|detail| format!("implementation agent preflight failed: {detail}"))?;
+    if config.review.enabled {
+        agents
+            .reviewer
+            .preflight()
+            .map_err(|detail| format!("reviewer agent preflight failed: {detail}"))?;
+        for check in config
+            .review
+            .verification
+            .iter()
+            .filter(|check| check.required)
+        {
+            let executable = check.argv.first().ok_or_else(|| {
+                format!("verification check {:?} has no executable", check.check_id)
+            })?;
+            Command::new(executable)
+                .arg("--version")
+                .current_dir(repository.join(&check.working_directory))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map_err(|error| {
+                    format!(
+                        "verification check {:?} executable {:?} is unavailable: {error}",
+                        check.check_id, executable
+                    )
+                })?;
+        }
+    }
+    Ok(())
 }
 
 fn context_profile(config: &familiar_ai_core::RepositoryConfig) -> ContextProfile {
@@ -681,6 +730,7 @@ fn agent_reason(error: &AgentExecutionError) -> &'static str {
     match error {
         AgentExecutionError::Timeout { .. } => "interrupted",
         AgentExecutionError::BudgetExceeded { .. } => "budget_exceeded",
+        AgentExecutionError::MalformedOutput { .. } => "malformed_output",
         _ => "implementation_failed",
     }
 }
@@ -2130,5 +2180,37 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    struct UnavailableAgent;
+
+    impl CodingAgent for UnavailableAgent {
+        fn preflight(&self) -> Result<(), String> {
+            Err("fixture executable missing".into())
+        }
+
+        fn execute(
+            &self,
+            _request: ExecutionRequest<'_>,
+            _output: &mut dyn io::Write,
+        ) -> Result<ExecutionResult, AgentExecutionError> {
+            panic!("preflight failure must prevent execution")
+        }
+    }
+
+    #[test]
+    fn unavailable_implementation_agent_fails_deterministically() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = UnavailableAgent;
+        let agents = AgentSet {
+            implementation: &agent,
+            reviewer: &agent,
+        };
+        let error = preflight_execution_prerequisites(&agents, &Config::default(), temp.path())
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "implementation agent preflight failed: fixture executable missing"
+        );
     }
 }

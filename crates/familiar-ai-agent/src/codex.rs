@@ -39,6 +39,14 @@ impl CodexAgent {
 }
 
 impl CodingAgent for CodexAgent {
+    fn preflight(&self) -> Result<(), String> {
+        self.probe_version().map(|_| ()).ok_or_else(|| {
+            format!(
+                "Codex executable {:?} is unavailable or invalid",
+                self.executable
+            )
+        })
+    }
     fn isolation_capability(&self) -> crate::IsolationCapability {
         crate::IsolationCapability::FreshProcessPerExecution
     }
@@ -96,10 +104,12 @@ impl CodingAgent for CodexAgent {
             .write_all(request.prompt.as_bytes());
         #[cfg(unix)]
         let watchdog = crate::isolation::spawn_watchdog(child.id(), request.timeout_ms);
+        let mut terminal_seen = false;
         let output_result = stream_json(
             child.stdout.take().expect("piped stdout"),
             output,
             &mut result,
+            &mut terminal_seen,
         );
         let status = child.wait().map_err(|source| AgentExecutionError::Wait {
             source: Box::new(source),
@@ -125,6 +135,12 @@ impl CodingAgent for CodexAgent {
                 result: Box::new(result),
             });
         }
+        if !terminal_seen {
+            return Err(AgentExecutionError::MalformedOutput {
+                detail: "EOF before turn.completed".into(),
+                result: Box::new(result),
+            });
+        }
         match input {
             Ok(()) => Ok(result),
             Err(_) if !status.success() => Ok(result),
@@ -136,11 +152,16 @@ impl CodingAgent for CodexAgent {
     }
 }
 
-fn parse_event(line: &str, result: &mut ExecutionResult) -> Option<String> {
+fn parse_event(
+    line: &str,
+    result: &mut ExecutionResult,
+    terminal_seen: &mut bool,
+) -> Option<String> {
     let value: Value = serde_json::from_str(line).ok()?;
     match value.get("type").and_then(Value::as_str)? {
         "turn.started" => None,
         "turn.completed" => {
+            *terminal_seen = true;
             if let Some(usage) = value.get("usage").and_then(Value::as_object) {
                 result.input_tokens = uint(usage.get("input_tokens"));
                 result.output_tokens = uint(usage.get("output_tokens"));
@@ -175,11 +196,14 @@ fn stream_json(
     reader: impl io::Read,
     output: &mut dyn Write,
     result: &mut ExecutionResult,
+    terminal_seen: &mut bool,
 ) -> io::Result<()> {
-    stream_lines(reader, output, |line| match parse_event(line, result) {
-        Some(text) => StreamAction::Text(text),
-        None if serde_json::from_str::<Value>(line).is_err() => StreamAction::Forward,
-        None => StreamAction::Silent,
+    stream_lines(reader, output, |line| {
+        match parse_event(line, result, terminal_seen) {
+            Some(text) => StreamAction::Text(text),
+            None if serde_json::from_str::<Value>(line).is_err() => StreamAction::Forward,
+            None => StreamAction::Silent,
+        }
     })
 }
 
@@ -196,32 +220,44 @@ mod tests {
     #[test]
     fn parses_only_supported_typed_events() {
         let mut result = ExecutionResult::default();
+        let mut terminal_seen = false;
         assert_eq!(
             parse_event(
                 r#"{"type":"item.completed","item":{"type":"agent_message","text":"hello"}}"#,
-                &mut result
+                &mut result,
+                &mut terminal_seen
             ),
             Some("hello".into())
         );
         parse_event(
             r#"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":4}}"#,
             &mut result,
+            &mut terminal_seen,
         );
         assert_eq!(result.input_tokens, Some(10));
         assert_eq!(result.cached_tokens, Some(3));
         assert_eq!(result.output_tokens, Some(4));
         assert_eq!(result.model, None);
-        assert_eq!(parse_event(r#"{"type":"future.event"}"#, &mut result), None);
+        assert_eq!(
+            parse_event(
+                r#"{"type":"future.event"}"#,
+                &mut result,
+                &mut terminal_seen
+            ),
+            None
+        );
     }
 
     #[test]
     fn malformed_lines_are_forwarded_without_fabricating_metrics() {
         let mut result = ExecutionResult::default();
+        let mut terminal_seen = false;
         let mut output = Vec::new();
         stream_json(
             b"not json\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":-1}}\n".as_slice(),
             &mut output,
             &mut result,
+            &mut terminal_seen,
         )
         .unwrap();
         assert_eq!(output, b"not json\n");
@@ -277,7 +313,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nif ls '{}' >/dev/null 2>&1; then anc=LISTED; else anc=HIDDEN; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s/%s/%s\"}}}}\\n' \"$inner\" \"$outer\" \"$anc\"\n",
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nif ls '{}' >/dev/null 2>&1; then anc=LISTED; else anc=HIDDEN; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s/%s/%s\"}}}}\\n' \"$inner\" \"$outer\" \"$anc\"\nprintf '%s\\n' '{{\"type\":\"turn.completed\"}}'\n",
                 secret.display(),
                 outside.display(),
                 repository.display()
@@ -330,7 +366,7 @@ mod tests {
         fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then text=READ; else text=DENIED; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s\"}}}}\\n' \"$text\"\n",
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then text=READ; else text=DENIED; fi\nprintf '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"%s\"}}}}\\n' \"$text\"\nprintf '%s\\n' '{{\"type\":\"turn.completed\"}}'\n",
                 secret.display()
             ),
         )

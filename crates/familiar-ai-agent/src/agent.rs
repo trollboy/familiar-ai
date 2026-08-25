@@ -12,6 +12,12 @@ pub trait CodingAgent {
     fn isolation_capability(&self) -> IsolationCapability {
         IsolationCapability::Unavailable
     }
+
+    /// Deterministic availability probe used before a backlog item is claimed.
+    /// Test and in-process agents need no external prerequisite by default.
+    fn preflight(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +82,10 @@ pub enum AgentExecutionError {
         source: Box<io::Error>,
         result: Box<ExecutionResult>,
     },
+    MalformedOutput {
+        detail: String,
+        result: Box<ExecutionResult>,
+    },
     Timeout {
         result: Box<ExecutionResult>,
     },
@@ -95,6 +105,7 @@ impl AgentExecutionError {
             | Self::Input { result, .. }
             | Self::Wait { result, .. }
             | Self::Output { result, .. }
+            | Self::MalformedOutput { result, .. }
             | Self::Timeout { result }
             | Self::BudgetExceeded { result, .. } => result.as_ref(),
         }
@@ -114,6 +125,9 @@ impl fmt::Display for AgentExecutionError {
             Self::Output { source, .. } => {
                 write!(f, "cannot read agent structured output: {source}")
             }
+            Self::MalformedOutput { detail, .. } => {
+                write!(f, "agent did not produce a valid terminal result: {detail}")
+            }
             Self::Timeout { .. } => {
                 write!(f, "agent execution exceeded its configured timeout")
             }
@@ -132,7 +146,9 @@ impl fmt::Display for AgentExecutionError {
 impl std::error::Error for AgentExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Timeout { .. } | Self::BudgetExceeded { .. } => None,
+            Self::Timeout { .. } | Self::BudgetExceeded { .. } | Self::MalformedOutput { .. } => {
+                None
+            }
             Self::Launch { source, .. }
             | Self::Input { source, .. }
             | Self::Wait { source, .. }

@@ -96,6 +96,14 @@ impl ClaudeCodeAgent {
 }
 
 impl CodingAgent for ClaudeCodeAgent {
+    fn preflight(&self) -> Result<(), String> {
+        self.probe_version().map(|_| ()).ok_or_else(|| {
+            format!(
+                "Claude executable {:?} is unavailable or invalid",
+                self.settings.executable
+            )
+        })
+    }
     fn isolation_capability(&self) -> crate::IsolationCapability {
         crate::IsolationCapability::FreshProcessPerExecution
     }
@@ -167,6 +175,12 @@ impl CodingAgent for ClaudeCodeAgent {
         #[cfg(unix)]
         if timed_out {
             return Err(AgentExecutionError::Timeout {
+                result: Box::new(result),
+            });
+        }
+        if !stream.terminal_seen {
+            return Err(AgentExecutionError::MalformedOutput {
+                detail: "EOF before result event".into(),
                 result: Box::new(result),
             });
         }
@@ -634,7 +648,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn missing_result_event_leaves_usage_unknown() {
+    fn missing_result_event_is_malformed_terminal_output() {
         let temp = tempfile::tempdir().unwrap();
         let executable = temp.path().join("claude");
         write_executable(
@@ -647,13 +661,12 @@ mod tests {
                 request(temp.path(), None, crate::FilesystemPolicy::Normal),
                 &mut output,
             )
-            .unwrap();
+            .unwrap_err();
         assert_eq!(output, b"only text\n");
-        assert_eq!(result.input_tokens, None);
-        assert_eq!(result.output_tokens, None);
-        assert_eq!(result.cached_tokens, None);
-        assert_eq!(result.reported_cost_microusd, None);
-        assert_eq!(result.session_id, None);
+        assert!(matches!(
+            result,
+            AgentExecutionError::MalformedOutput { .. }
+        ));
     }
 
     #[cfg(unix)]
@@ -663,7 +676,7 @@ mod tests {
         let executable = temp.path().join("claude");
         write_executable(
             &executable,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'other-tool 3.0'; exit 0; fi\ncat >/dev/null\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'other-tool 3.0'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\"}'\nexit 0\n",
         );
         let result = agent(settings(&executable))
             .execute(
@@ -767,7 +780,7 @@ mod tests {
         write_executable(
             &executable,
             &format!(
-                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nif ls '{}' >/dev/null 2>&1; then anc=LISTED; else anc=HIDDEN; fi\nprintf '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"%s/%s/%s\"}}]}}}}\\n' \"$inner\" \"$outer\" \"$anc\"\n",
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then inner=READ; else inner=DENIED; fi\nif cat '{}' >/dev/null 2>&1; then outer=OK; else outer=BLOCKED; fi\nif ls '{}' >/dev/null 2>&1; then anc=LISTED; else anc=HIDDEN; fi\nprintf '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"%s/%s/%s\"}}]}}}}\\n' \"$inner\" \"$outer\" \"$anc\"\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'\n",
                 secret.display(),
                 outside.display(),
                 repository.display()
@@ -804,7 +817,7 @@ mod tests {
         write_executable(
             &executable,
             &format!(
-                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then text=READ; else text=DENIED; fi\nprintf '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"%s\"}}]}}}}\\n' \"$text\"\n",
+                "#!/bin/sh\nif cat '{}' >/dev/null 2>&1; then text=READ; else text=DENIED; fi\nprintf '{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"%s\"}}]}}}}\\n' \"$text\"\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'\n",
                 secret.display()
             ),
         );
