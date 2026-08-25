@@ -52,6 +52,21 @@ impl DriveTermination {
             Self::PreflightFailed => "preflight_failed",
         }
     }
+
+    /// Whether a supervised worker should exit unsuccessfully so launchd can
+    /// retry after a transient or crash-like terminal condition. Policy and
+    /// budget stops are deliberate finite outcomes and must not create a
+    /// restart loop.
+    pub fn worker_should_restart(&self) -> bool {
+        matches!(
+            self,
+            Self::StorageFailure
+                | Self::Interrupted
+                | Self::UnclassifiedResult
+                | Self::WorkerHeartbeatLost
+                | Self::PreflightFailed
+        )
+    }
 }
 
 /// The session's budget ceilings. Zero means "no ceiling of this kind"; at
@@ -774,6 +789,29 @@ mod tests {
             (DriveTermination::Interrupted, "interrupted"),
         ] {
             assert_eq!(termination.as_str(), text);
+        }
+    }
+
+    #[test]
+    fn only_transient_or_crash_like_worker_terminations_request_restart() {
+        for termination in [
+            DriveTermination::StorageFailure,
+            DriveTermination::Interrupted,
+            DriveTermination::UnclassifiedResult,
+            DriveTermination::WorkerHeartbeatLost,
+            DriveTermination::PreflightFailed,
+        ] {
+            assert!(termination.worker_should_restart(), "{termination:?}");
+        }
+        for termination in [
+            DriveTermination::BacklogEmpty,
+            DriveTermination::NothingEligible,
+            DriveTermination::BudgetPrdsExhausted,
+            DriveTermination::BudgetCostExhausted,
+            DriveTermination::BudgetDurationExhausted,
+            DriveTermination::CostUnknown,
+        ] {
+            assert!(!termination.worker_should_restart(), "{termination:?}");
         }
     }
 

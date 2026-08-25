@@ -7,7 +7,7 @@ use familiar_ai_core::{
     BacklogDiscovery, BacklogManager, BacklogRecoveryAction, BacklogStatusStore,
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
 };
-use familiar_ai_daemon::drive::{drive, DriveWarrant};
+use familiar_ai_daemon::drive::{drive, DriveSummary, DriveWarrant};
 use familiar_ai_daemon::run::{build_agent, execute_with_config, resolved_agent_entries, AgentSet};
 use familiar_ai_storage::{
     Database, ExecutionHistoryRepository, SqliteBacklogRepository, SqliteBootstrapRepository,
@@ -160,7 +160,7 @@ fn main() -> ExitCode {
             max_cost_microusd,
             max_duration_ms,
         } => match drive_command(max_prds, max_cost_microusd, max_duration_ms) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(_) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
         Command::History { limit, verbose } => match history(limit, verbose) {
@@ -219,8 +219,16 @@ fn worker_command(command: WorkerCommand) -> Result<(), String> {
             max_prds,
         } => {
             std::env::set_current_dir(&repository).map_err(|error| error.to_string())?;
-            drive_command(Some(max_prds), None, None)?;
-            report_command(None)
+            let summary = drive_command(Some(max_prds), None, None)?;
+            report_command(Some(&summary.session_id))?;
+            if summary.termination.worker_should_restart() {
+                return Err(format!(
+                    "worker session {} requires supervisor restart after {}",
+                    summary.session_id,
+                    summary.termination.as_str()
+                ));
+            }
+            Ok(())
         }
     }
 }
@@ -305,7 +313,7 @@ fn drive_command(
     max_prds: Option<u64>,
     max_cost_microusd: Option<u64>,
     max_duration_ms: Option<u64>,
-) -> Result<(), String> {
+) -> Result<DriveSummary, String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
     let config =
         Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
@@ -335,7 +343,7 @@ fn drive_command(
         summary.completed,
         summary.known_cost_microusd
     );
-    Ok(())
+    Ok(summary)
 }
 
 /// Read-only: renders recorded rows and constructs no agents.
