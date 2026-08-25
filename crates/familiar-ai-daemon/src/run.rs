@@ -1010,21 +1010,42 @@ fn markdown_section(document: &str, heading: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 fn acceptance_criteria(document: &str) -> Vec<String> {
-    markdown_section(document, "Acceptance Criteria")
-        .map(|section| {
-            section
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    let (_, criterion) = line.split_once(". ")?;
-                    line.chars()
-                        .next()
-                        .is_some_and(|value| value.is_ascii_digit())
-                        .then(|| criterion.to_owned())
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    let lines: Vec<_> = document.lines().collect();
+    let Some(start) = lines.iter().position(|line| {
+        let Some(heading) = line.trim().strip_prefix("## ") else {
+            return false;
+        };
+        let heading = heading.trim().to_ascii_lowercase();
+        heading == "acceptance criteria" || heading.ends_with(" acceptance criteria")
+    }) else {
+        return Vec::new();
+    };
+
+    let mut criteria = Vec::new();
+    for raw in lines
+        .into_iter()
+        .skip(start + 1)
+        .take_while(|line| !line.starts_with("## "))
+    {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let numbered = line.split_once(". ").and_then(|(number, value)| {
+            number
+                .chars()
+                .all(|character| character.is_ascii_digit())
+                .then_some(value)
+        });
+        let bullet = line.strip_prefix("- ").or_else(|| line.strip_prefix("* "));
+        if let Some(criterion) = numbered.or(bullet) {
+            criteria.push(criterion.to_owned());
+        } else if let Some(criterion) = criteria.last_mut() {
+            criterion.push(' ');
+            criterion.push_str(line);
+        }
+    }
+    criteria
 }
 
 fn capture_worktree_baseline(
@@ -2211,6 +2232,23 @@ mod tests {
         assert_eq!(
             error,
             "implementation agent preflight failed: fixture executable missing"
+        );
+    }
+
+    #[test]
+    fn acceptance_criteria_accepts_case_and_qualified_spectra_heading() {
+        let document = "# PRD\n\n## Measurable acceptance criteria\n\n- First criterion wraps\n  onto another line.\n- Second criterion.\n\n## Tests\nignored\n";
+        assert_eq!(
+            acceptance_criteria(document),
+            vec![
+                "First criterion wraps onto another line.".to_owned(),
+                "Second criterion.".to_owned(),
+            ]
+        );
+
+        assert_eq!(
+            acceptance_criteria("## Acceptance criteria\n1. Numbered criterion\n"),
+            vec!["Numbered criterion".to_owned()]
         );
     }
 }
