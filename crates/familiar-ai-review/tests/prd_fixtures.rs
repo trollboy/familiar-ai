@@ -309,7 +309,18 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-023.md",
             "PRD-024.md",
             "PRD-025.md",
-            "PRD-026.md"
+            "PRD-026.md",
+            "PRD-028.md",
+            "PRD-029.md",
+            "PRD-030.md",
+            "PRD-031.md",
+            "PRD-032.md",
+            "PRD-033.md",
+            "PRD-034.md",
+            "PRD-035.md",
+            "PRD-036.md",
+            "PRD-037.md",
+            "PRD-038.md"
         ]
     );
 }

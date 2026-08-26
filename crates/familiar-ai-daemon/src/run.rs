@@ -1438,7 +1438,7 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
-        let prd = repository.join("docs/prds/PRD-003.md");
+        let prd = repository.join("docs/prds/done/PRD-003.md");
         assert_eq!(
             build_prompt(&repository, &prd).unwrap().as_bytes(),
             legacy_prompt(&repository, &prd).as_bytes()
@@ -1513,7 +1513,7 @@ mod tests {
         };
 
         let error = execute_with_config(
-            &repository.join("docs/prds/PRD-004.md"),
+            &repository.join("docs/prds/PRD-024.md"),
             &same_agent(&agent),
             &config,
             &paths,
@@ -1525,7 +1525,7 @@ mod tests {
         assert_eq!(working_directory, &repository);
         assert_eq!(
             prompt,
-            &build_prompt(&repository, &repository.join("docs/prds/PRD-004.md")).unwrap()
+            &build_prompt(&repository, &repository.join("docs/prds/PRD-024.md"),).unwrap()
         );
 
         let database = Database::open(&database_path).unwrap();
@@ -1548,7 +1548,7 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
-        let prd = repository.join("docs/prds/PRD-003.md");
+        let prd = repository.join("docs/prds/PRD-024.md");
         let expected = build_prompt(&repository, &prd).unwrap();
         let mut config = Config::default();
         config.execution_context.hard_ceiling_tokens = Some(u64::MAX);
@@ -1572,7 +1572,7 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
-        let prd = repository.join("docs/prds/PRD-003.md");
+        let prd = repository.join("docs/prds/PRD-024.md");
         let complete = ContextCompiler
             .compile(ContextRequest {
                 repository: &repository,
@@ -1622,7 +1622,7 @@ mod tests {
         let agent = successful_fake_agent();
 
         let error = execute_with_config(
-            &repository.join("docs/prds/PRD-007.md"),
+            &repository.join("docs/prds/done/PRD-007.md"),
             &same_agent(&agent),
             &config,
             &paths,

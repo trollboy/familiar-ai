@@ -106,7 +106,25 @@ off-mission — a sharper creep test than any principles document.
   API keys. "Which subscription has headroom" is a routing input alongside
   "which model is cheapest."
 
-## Current State (2026-08-03)
+## Implementation Update (2026-08-26)
+
+The execution foundation described below has advanced substantially: agent-neutral
+Codex and Claude adapters, macOS and Linux review isolation, deterministic scope
+authorization, backlog admission and recovery, bounded unattended drive sessions,
+morning reports, concurrent isolated worktrees, preflight, durable terminal
+results, model routes, and a policy-controlled delivery boundary now exist.
+
+The remaining repository-agnostic product path is maintained in
+[`docs/prds/ROADMAP.md`](prds/ROADMAP.md). Its critical missing organ remains the
+planner and human batch-approval gate, now preceded by a structured cross-profile
+PRD contract and a capability registry. Product completion also requires generic
+repository onboarding, explicit delivery authority, portable supervision,
+security burn-in, and multi-repository acceptance.
+
+The dated snapshot below is retained as historical context. Where it conflicts
+with the reconciled roadmap or completed-PRD locations, the newer evidence wins.
+
+## Current State (2026-08-03 historical snapshot)
 
 ### Built and working
 
