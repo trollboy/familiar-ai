@@ -76,6 +76,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 17,
         sql: include_str!("../migrations/017_execution_checkpoints.sql"),
     },
+    Migration {
+        version: 18,
+        sql: include_str!("../migrations/018_driver_components.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_ai_core::Result<usize> {

@@ -46,6 +46,10 @@ enum Command {
         max_cost_microusd: Option<u64>,
         #[arg(long)]
         max_duration_ms: Option<u64>,
+        #[arg(long)]
+        max_parallel_components: Option<usize>,
+        #[arg(long)]
+        worktree_root: Option<PathBuf>,
     },
     /// List recent standalone executions.
     History {
@@ -183,7 +187,15 @@ fn main() -> ExitCode {
             max_prds,
             max_cost_microusd,
             max_duration_ms,
-        } => match drive_command(max_prds, max_cost_microusd, max_duration_ms) {
+            max_parallel_components,
+            worktree_root,
+        } => match drive_command(
+            max_prds,
+            max_cost_microusd,
+            max_duration_ms,
+            max_parallel_components,
+            worktree_root,
+        ) {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -497,7 +509,7 @@ fn worker_command(command: WorkerCommand) -> Result<(), String> {
             max_prds,
         } => {
             std::env::set_current_dir(&repository).map_err(|error| error.to_string())?;
-            let summary = drive_command(Some(max_prds), None, None)?;
+            let summary = drive_command(Some(max_prds), None, None, None, None)?;
             report_command(Some(&summary.session_id))?;
             if summary.termination.worker_should_restart() {
                 return Err(format!(
@@ -634,10 +646,21 @@ fn drive_command(
     max_prds: Option<u64>,
     max_cost_microusd: Option<u64>,
     max_duration_ms: Option<u64>,
+    max_parallel_components: Option<usize>,
+    worktree_root: Option<PathBuf>,
 ) -> Result<DriveSummary, String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let config =
+    let mut config =
         Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    if let Some(value) = max_parallel_components {
+        if value == 0 {
+            return Err("--max-parallel-components must be positive".into());
+        }
+        config.driver.max_parallel_components = value;
+    }
+    if let Some(value) = worktree_root {
+        config.driver.worktree_root = value.to_string_lossy().into_owned();
+    }
     let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
     let implementation = build_agent(&implementation_entry);
     let reviewer = build_agent(&reviewer_entry);

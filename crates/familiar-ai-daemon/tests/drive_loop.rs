@@ -430,6 +430,7 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     git(&repository, &["add", "-A"]);
     git(&repository, &["commit", "-qm", "independent scopes"]);
     config.driver.max_concurrency = 2;
+    config.driver.max_parallel_components = 2;
     config.driver.isolated_worktrees = true;
     config.driver.model_routes = vec![familiar_ai_core::config::DriverModelRouteConfig {
         max_expected_files: 1,

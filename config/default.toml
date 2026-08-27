@@ -85,6 +85,8 @@ max_session_tokens = 0        # 0 = no cumulative token ceiling
 max_session_duration_ms = 0   # 0 = no duration ceiling
 max_concurrency = 1
 isolated_worktrees = false
+max_parallel_components = 1 # 1 = original serial behavior; >1 schedules dependency components
+worktree_root = ""           # empty = driver-owned directory under the state directory
 
 # Persistent worker supervision (launchd on macOS, systemd user service on Linux).
 # The generated definition preserves PATH, writes durable logs, restarts only

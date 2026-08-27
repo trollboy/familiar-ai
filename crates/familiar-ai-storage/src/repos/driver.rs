@@ -36,6 +36,9 @@ pub struct DriverAttempt {
     pub last_durable_phase: Option<String>,
     pub review_configuration_source: String,
     pub execution_context_configuration_source: String,
+    pub component_id: Option<String>,
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
 }
 
 pub struct DriverRepository<'a> {
@@ -101,6 +104,26 @@ impl<'a> DriverRepository<'a> {
         Ok(())
     }
 
+    pub fn record_attempt_workspace(
+        &self,
+        session_id: &str,
+        sequence: i64,
+        component_id: &str,
+        worktree_path: &str,
+        branch: &str,
+    ) -> familiar_ai_core::Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE driver_attempts SET component_id=?1,worktree_path=?2,branch=?3 WHERE session_id=?4 AND sequence=?5",
+            params![component_id, worktree_path, branch, session_id, sequence],
+        ).map_err(db)?;
+        if changed != 1 {
+            return Err(FamiliarError::Database(format!(
+                "driver attempt {session_id}/{sequence} not found"
+            )));
+        }
+        Ok(())
+    }
+
     /// Close sessions and attempts left open by a process crash or terminal
     /// interruption. This runs before a new drive session is opened so an
     /// overnight worker can be restarted without leaving ambiguous rows in
@@ -155,6 +178,32 @@ impl<'a> DriverRepository<'a> {
         review_configuration_source: &str,
         execution_context_configuration_source: &str,
     ) -> familiar_ai_core::Result<i64> {
+        self.record_component_attempt_started_with_sources(
+            session_id,
+            prd_id,
+            prd_path,
+            execution_id,
+            review_configuration_source,
+            execution_context_configuration_source,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_component_attempt_started_with_sources(
+        &self,
+        session_id: &str,
+        prd_id: &str,
+        prd_path: &str,
+        execution_id: Option<&str>,
+        review_configuration_source: &str,
+        execution_context_configuration_source: &str,
+        component_id: Option<&str>,
+        worktree_path: Option<&str>,
+        branch: Option<&str>,
+    ) -> familiar_ai_core::Result<i64> {
         let next: i64 = self
             .conn
             .query_row(
@@ -165,8 +214,8 @@ impl<'a> DriverRepository<'a> {
             .map_err(db)?;
         self.conn
             .execute(
-                "INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at,review_configuration_source,execution_context_configuration_source) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                "INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 params![
                     session_id,
                     next,
@@ -176,6 +225,9 @@ impl<'a> DriverRepository<'a> {
                     Utc::now().to_rfc3339(),
                     review_configuration_source,
                     execution_context_configuration_source,
+                    component_id,
+                    worktree_path,
+                    branch,
                 ],
             )
             .map_err(db)?;
@@ -283,7 +335,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source FROM driver_attempts \
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch FROM driver_attempts \
                  WHERE session_id=?1 ORDER BY sequence",
             )
             .map_err(db)?;
@@ -307,6 +359,9 @@ impl<'a> DriverRepository<'a> {
                     last_durable_phase: row.get(14)?,
                     review_configuration_source: row.get(15)?,
                     execution_context_configuration_source: row.get(16)?,
+                    component_id: row.get(17)?,
+                    worktree_path: row.get(18)?,
+                    branch: row.get(19)?,
                 })
             })
             .map_err(db)?;
@@ -369,11 +424,16 @@ mod tests {
             .open_session("session-1", "/repo/.git", r#"{"max_prds":2}"#)
             .unwrap();
         let first = repository
-            .record_attempt_started(
+            .record_component_attempt_started_with_sources(
                 "session-1",
                 "PRD-17",
                 "docs/prds/PRD-017.md",
                 Some("exec-1"),
+                "global",
+                "global",
+                Some("component-PRD-017"),
+                Some("/state/worktrees/session-1/component-PRD-017"),
+                Some("familiar/session-1/component-PRD-017"),
             )
             .unwrap();
         let second = repository
@@ -411,6 +471,18 @@ mod tests {
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].outcome.as_deref(), Some("completed"));
         assert_eq!(attempts[0].known_cost_microusd, Some(1_234));
+        assert_eq!(
+            attempts[0].component_id.as_deref(),
+            Some("component-PRD-017")
+        );
+        assert_eq!(
+            attempts[0].worktree_path.as_deref(),
+            Some("/state/worktrees/session-1/component-PRD-017")
+        );
+        assert_eq!(
+            attempts[0].branch.as_deref(),
+            Some("familiar/session-1/component-PRD-017")
+        );
         assert_eq!(
             attempts[1].retained_reason.as_deref(),
             Some("scope_broadened")

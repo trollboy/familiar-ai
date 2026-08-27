@@ -7,7 +7,7 @@
 //! verification, review, and fail-closed completion all remain exactly as
 //! `familiar-ai run` performs them.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
@@ -195,6 +195,8 @@ fn select_batch(
     discovered: &[DiscoveredPrd],
     db: &mut Database,
     attempted: &BTreeSet<PrdId>,
+    components: &BTreeMap<PrdId, String>,
+    stopped_components: &BTreeSet<String>,
     limit: usize,
 ) -> Result<Selection, DriveError> {
     if discovered.is_empty() {
@@ -214,7 +216,7 @@ fn select_batch(
         .map(|entry| (entry.prd.id.clone(), entry.status))
         .collect();
     let mut selected = Vec::new();
-    let mut selected_scopes: Vec<Vec<String>> = Vec::new();
+    let mut selected_components = BTreeSet::new();
     for entry in entries {
         // An attempt that failed before claim leaves the PRD pending; without
         // this exclusion the session would select it forever.
@@ -227,13 +229,11 @@ fn select_batch(
             .iter()
             .all(|id| statuses.get(id) == Some(&BacklogStatus::Completed));
         if entry.status == BacklogStatus::Pending && dependencies_met {
-            let scopes = conflict_scopes(&repository.worktree, &entry.prd)?;
-            if selected_scopes
-                .iter()
-                .all(|existing| !scopes_conflict(existing, &scopes))
+            let component = &components[&entry.prd.id];
+            if !stopped_components.contains(component)
+                && selected_components.insert(component.clone())
             {
                 selected.push(entry.prd);
-                selected_scopes.push(scopes);
                 if selected.len() == limit.max(1) {
                     break;
                 }
@@ -245,6 +245,51 @@ fn select_batch(
     } else {
         Ok(Selection::Eligible(selected))
     }
+}
+
+/// Deterministically partition the validated, profile-neutral dependency graph
+/// into weakly connected components. Component identity is its least PRD id.
+pub fn dependency_components(prds: &[DiscoveredPrd]) -> BTreeMap<PrdId, String> {
+    let mut neighbors = BTreeMap::<PrdId, BTreeSet<PrdId>>::new();
+    for prd in prds {
+        neighbors.entry(prd.id.clone()).or_default();
+        for dependency in &prd.dependencies {
+            neighbors
+                .entry(prd.id.clone())
+                .or_default()
+                .insert(dependency.clone());
+            neighbors
+                .entry(dependency.clone())
+                .or_default()
+                .insert(prd.id.clone());
+        }
+    }
+    let mut result = BTreeMap::new();
+    for root in neighbors.keys() {
+        if result.contains_key(root) {
+            continue;
+        }
+        let mut pending = vec![root.clone()];
+        let mut members = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if members.insert(id.clone()) {
+                pending.extend(neighbors[&id].iter().cloned());
+            }
+        }
+        let first = members.first().expect("component is nonempty");
+        let component = format!(
+            "component-PRD-{:03}{}",
+            first.number(),
+            first
+                .suffix()
+                .map(|value| value.to_string())
+                .unwrap_or_default()
+        );
+        for id in members {
+            result.insert(id, component.clone());
+        }
+    }
+    result
 }
 
 fn conflict_scopes(repository: &Path, prd: &DiscoveredPrd) -> Result<Vec<String>, DriveError> {
@@ -275,40 +320,6 @@ fn conflict_scopes(repository: &Path, prd: &DiscoveredPrd) -> Result<Vec<String>
     Ok(entries.into_iter().map(|entry| entry.normalized).collect())
 }
 
-fn scopes_conflict(left: &[String], right: &[String]) -> bool {
-    left.iter().any(|a| {
-        right
-            .iter()
-            .any(|b| shared_global_path(a) || shared_global_path(b) || path_scopes_overlap(a, b))
-    })
-}
-
-fn shared_global_path(path: &str) -> bool {
-    let name = Path::new(path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(path);
-    path.contains("migration")
-        || path.contains("schema")
-        || matches!(
-            name,
-            "Cargo.toml"
-                | "Cargo.lock"
-                | "go.mod"
-                | "go.sum"
-                | "package.json"
-                | "package-lock.json"
-                | "pnpm-lock.yaml"
-                | "yarn.lock"
-        )
-}
-
-fn path_scopes_overlap(left: &str, right: &str) -> bool {
-    left == right
-        || (left.ends_with('/') && right.starts_with(left))
-        || (right.ends_with('/') && left.starts_with(right))
-}
-
 fn routed_model(config: &Config, scope_count: usize) -> Option<String> {
     config
         .driver
@@ -332,18 +343,17 @@ pub fn drive(
     warrant: DriveWarrant,
 ) -> Result<DriveSummary, DriveError> {
     warrant.validate().map_err(DriveError::Config)?;
-    if config.driver.max_concurrency == 0 {
+    // Component concurrency is an explicit opt-in independent of the legacy
+    // PRD worker ceiling. A value of one preserves PRD-017's serial path.
+    // Finite cost/token session ceilings cannot be safely reserved from
+    // unknown future usage, so they deliberately retain serial admission.
+    let parallelism = component_parallelism(config, &warrant);
+    if parallelism == 0 {
         return Err(DriveError::Config(
             "driver.max_concurrency must be positive".into(),
         ));
     }
-    if config.driver.max_concurrency > 1 && !config.driver.isolated_worktrees {
-        return Err(DriveError::Config(
-            "driver.isolated_worktrees must be true when max_concurrency is greater than one"
-                .into(),
-        ));
-    }
-    if config.delivery.enabled && !config.driver.isolated_worktrees {
+    if config.delivery.enabled && parallelism == 1 && !config.driver.isolated_worktrees {
         return Err(DriveError::Config(
             "delivery requires driver.isolated_worktrees=true".into(),
         ));
@@ -415,6 +425,8 @@ pub fn drive(
     let mut known_cost = 0_u64;
     let mut known_tokens = 0_u64;
     let mut delivered = 0_u64;
+    let mut stopped_components = BTreeSet::new();
+    let mut component_worktrees = BTreeMap::<String, crate::worktree::WorktreeLease>::new();
 
     let session_preflight = crate::preflight::run(agents, config, &repository.worktree);
     let termination = if !session_preflight.is_valid() {
@@ -445,32 +457,57 @@ pub fn drive(
                 eprintln!("drive: backlog graph invalid: {error}");
                 break DriveTermination::StorageFailure;
             }
+            let components = dependency_components(&discovered);
             let remaining = if warrant.max_prds == 0 {
-                config.driver.max_concurrency
+                parallelism
             } else {
                 usize::try_from(warrant.max_prds.saturating_sub(attempted))
                     .unwrap_or(usize::MAX)
-                    .min(config.driver.max_concurrency)
+                    .min(parallelism)
             };
-            let targets =
-                match select_batch(&repository, &discovered, &mut db, &attempted_ids, remaining)? {
-                    Selection::Eligible(prds) => prds,
-                    Selection::BacklogEmpty => break DriveTermination::BacklogEmpty,
-                    Selection::NothingEligible => break DriveTermination::NothingEligible,
-                };
+            let targets = match select_batch(
+                &repository,
+                &discovered,
+                &mut db,
+                &attempted_ids,
+                &components,
+                &stopped_components,
+                remaining,
+            )? {
+                Selection::Eligible(prds) => prds,
+                Selection::BacklogEmpty => break DriveTermination::BacklogEmpty,
+                Selection::NothingEligible => break DriveTermination::NothingEligible,
+            };
             let mut jobs = Vec::new();
             let mut preparation_failed = false;
             for target in targets {
+                let component_id = components[&target.id].clone();
                 attempted_ids.insert(target.id.clone());
                 attempted += 1;
                 let sequence = match DriverRepository::new(db.conn())
-                    .record_attempt_started_with_sources(
+                    .record_component_attempt_started_with_sources(
                         &session_id,
                         &target.id.to_string(),
                         target.path.as_str(),
                         None,
                         review_configuration_source,
                         execution_context_configuration_source,
+                        (parallelism > 1).then_some(component_id.as_str()),
+                        (parallelism > 1)
+                            .then(|| {
+                                component_worktrees
+                                    .get(&component_id)
+                                    .map(|lease| lease.path().to_string_lossy())
+                            })
+                            .flatten()
+                            .as_deref(),
+                        (parallelism > 1)
+                            .then(|| {
+                                component_worktrees
+                                    .get(&component_id)
+                                    .map(crate::worktree::WorktreeLease::branch)
+                            })
+                            .flatten(),
                     ) {
                     Ok(sequence) => sequence,
                     Err(error) => {
@@ -502,26 +539,61 @@ pub fn drive(
                         execution_config.review.implementation_agent.model = Some(model);
                     }
                 }
-                let worktree = if config.driver.isolated_worktrees {
-                    match crate::worktree::WorktreeLease::create(
-                        &repository.worktree,
-                        &paths.state_dir,
-                        &session_id,
-                        &target.id.to_string(),
-                    ) {
-                        Ok(lease) => Some(lease),
-                        Err(error) => {
-                            let _ = DriverRepository::new(db.conn()).record_attempt_finished(
-                                &session_id,
-                                sequence,
-                                "retained",
-                                Some("worktree_failed"),
-                                None,
-                                None,
-                            );
-                            eprintln!("drive: isolated worktree creation failed: {error}");
-                            preparation_failed = true;
-                            break;
+                let use_worktree = parallelism > 1;
+                let worktree = if use_worktree {
+                    if let Some(lease) = component_worktrees.remove(&component_id) {
+                        Some(lease)
+                    } else {
+                        match crate::worktree::WorktreeLease::create_component(
+                            &repository.worktree,
+                            &paths.state_dir,
+                            &session_id,
+                            &component_id,
+                            (!config.driver.worktree_root.is_empty())
+                                .then(|| Path::new(&config.driver.worktree_root)),
+                        ) {
+                            Ok(lease) => {
+                                let path = lease.path().to_string_lossy().into_owned();
+                                let branch = lease.branch().to_owned();
+                                match DriverRepository::new(db.conn()).record_attempt_workspace(
+                                    &session_id,
+                                    sequence,
+                                    &component_id,
+                                    &path,
+                                    &branch,
+                                ) {
+                                    Ok(()) => Some(lease),
+                                    Err(error) => {
+                                        let _ = DriverRepository::new(db.conn())
+                                            .record_attempt_finished(
+                                                &session_id,
+                                                sequence,
+                                                "retained",
+                                                Some("workspace_evidence_failed"),
+                                                None,
+                                                None,
+                                            );
+                                        eprintln!(
+                                            "drive: cannot persist component workspace evidence: {error}"
+                                        );
+                                        stopped_components.insert(component_id.clone());
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let _ = DriverRepository::new(db.conn()).record_attempt_finished(
+                                    &session_id,
+                                    sequence,
+                                    "retained",
+                                    Some("worktree_failed"),
+                                    None,
+                                    None,
+                                );
+                                eprintln!("drive: isolated worktree creation failed: {error}");
+                                stopped_components.insert(component_id.clone());
+                                continue;
+                            }
                         }
                     }
                 } else {
@@ -554,6 +626,7 @@ pub fn drive(
                     routed_model,
                     worktree,
                     worktree_heartbeat,
+                    component_id,
                 ));
             }
             if preparation_failed {
@@ -570,6 +643,7 @@ pub fn drive(
                     routed_model,
                     worktree,
                     worktree_heartbeat,
+                    component_id,
                 ) in jobs
                 {
                     handles.push(scope.spawn(move || {
@@ -596,6 +670,7 @@ pub fn drive(
                             execution,
                             duration_ms,
                             worktree_heartbeat,
+                            component_id,
                         )
                     }));
                 }
@@ -614,6 +689,7 @@ pub fn drive(
                     execution,
                     duration_ms,
                     worktree_heartbeat,
+                    component_id,
                 ) = joined.unwrap();
                 let heartbeat_failed = worktree_heartbeat
                     .as_ref()
@@ -722,6 +798,9 @@ pub fn drive(
                         trace.retained_reason.or(Some("unclassified_result")),
                     ),
                 };
+                if result.is_err() {
+                    stopped_components.insert(component_id.clone());
+                }
                 if let Some(lease) = &mut worktree {
                     let state = if result.is_ok() {
                         "ready_for_delivery"
@@ -808,6 +887,9 @@ pub fn drive(
                         }
                     }
                 }
+                if let Some(lease) = worktree {
+                    component_worktrees.insert(component_id, lease);
+                }
                 if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
                     &session_id,
                     sequence,
@@ -863,6 +945,14 @@ pub fn drive(
         known_cost_microusd: known_cost,
         known_tokens,
     })
+}
+
+fn component_parallelism(config: &Config, warrant: &DriveWarrant) -> usize {
+    if warrant.max_cost_microusd > 0 || warrant.max_tokens > 0 {
+        1
+    } else {
+        config.driver.max_parallel_components
+    }
 }
 
 struct HeartbeatGuard {
@@ -1090,20 +1180,58 @@ mod tests {
     }
 
     #[test]
-    fn conflict_scopes_serialize_shared_and_nested_paths() {
-        assert!(path_scopes_overlap("src/", "src/lib.rs"));
-        assert!(scopes_conflict(
-            &["db/migrations/001.sql".into()],
-            &["cmd/server.go".into()]
-        ));
-        assert!(scopes_conflict(
-            &["crates/a/Cargo.toml".into()],
-            &["crates/b/src/".into()]
-        ));
-        assert!(!scopes_conflict(
-            &["crates/a/src/".into()],
-            &["crates/b/src/".into()]
-        ));
+    fn dependency_partition_is_weakly_connected_and_stable() {
+        fn prd(number: u64, dependencies: &[u64]) -> DiscoveredPrd {
+            DiscoveredPrd {
+                id: PrdId::numbered_slug(number, None, 3),
+                number,
+                path: familiar_ai_core::RepositoryPath::new(format!(
+                    "docs/prds/PRD-{number:03}.md"
+                ))
+                .unwrap(),
+                location: familiar_ai_core::PrdLocation::Active,
+                title: format!("PRD {number}"),
+                dependencies: dependencies
+                    .iter()
+                    .copied()
+                    .map(|number| PrdId::numbered_slug(number, None, 3))
+                    .collect(),
+                metadata: Default::default(),
+                content_hash: format!("hash-{number}"),
+            }
+        }
+        let components = dependency_components(&[
+            prd(1, &[]),
+            prd(2, &[1]),
+            prd(3, &[2]),
+            prd(10, &[]),
+            prd(11, &[10]),
+        ]);
+        assert_eq!(components[&PrdId::new(1)], "component-PRD-001");
+        assert_eq!(components[&PrdId::new(3)], "component-PRD-001");
+        assert_eq!(components[&PrdId::new(10)], "component-PRD-010");
+        assert_eq!(components[&PrdId::new(11)], "component-PRD-010");
+    }
+
+    #[test]
+    fn component_parallelism_preserves_serial_and_bounded_budget_modes() {
+        let mut config = Config::default();
+        config.driver.max_concurrency = 15;
+        config.driver.max_parallel_components = 1;
+        let mut warrant = DriveWarrant {
+            max_prds: 15,
+            max_cost_microusd: 0,
+            max_tokens: 0,
+            max_duration_ms: 60_000,
+        };
+        assert_eq!(component_parallelism(&config, &warrant), 1);
+        config.driver.max_parallel_components = 7;
+        assert_eq!(component_parallelism(&config, &warrant), 7);
+        warrant.max_tokens = 1;
+        assert_eq!(component_parallelism(&config, &warrant), 1);
+        warrant.max_tokens = 0;
+        warrant.max_cost_microusd = 1;
+        assert_eq!(component_parallelism(&config, &warrant), 1);
     }
 
     #[test]

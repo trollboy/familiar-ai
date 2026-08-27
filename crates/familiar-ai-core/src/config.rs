@@ -308,6 +308,13 @@ pub struct DriverConfig {
     pub max_concurrency: usize,
     #[serde(default)]
     pub isolated_worktrees: bool,
+    /// Maximum number of independent dependency components that may execute.
+    /// One preserves the original serial driver and primary worktree exactly.
+    #[serde(default = "default_driver_concurrency")]
+    pub max_parallel_components: usize,
+    /// Optional worktree parent. Empty uses the driver-owned state directory.
+    #[serde(default)]
+    pub worktree_root: String,
     /// Ordered deterministic implementation routes. The first route whose
     /// maximum scope count covers a PRD wins; no inference call selects it.
     #[serde(default)]
@@ -337,6 +344,8 @@ impl Default for DriverConfig {
             max_session_duration_ms: 0,
             max_concurrency: default_driver_concurrency(),
             isolated_worktrees: false,
+            max_parallel_components: default_driver_concurrency(),
+            worktree_root: String::new(),
             model_routes: Vec::new(),
             max_implementation_tokens: 0,
         }
@@ -358,6 +367,9 @@ impl DriverConfig {
         }
         if self.max_concurrency == 0 {
             return Err("driver.max_concurrency must be positive".into());
+        }
+        if self.max_parallel_components == 0 {
+            return Err("driver.max_parallel_components must be positive".into());
         }
         if self.max_concurrency > 1 && !self.isolated_worktrees {
             return Err(

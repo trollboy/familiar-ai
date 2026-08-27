@@ -159,6 +159,7 @@ fn render_built(out: &mut String, built: &[&DriverAttempt]) {
             "      configuration: review={} execution_context={}",
             attempt.review_configuration_source, attempt.execution_context_configuration_source
         );
+        render_workspace(out, attempt);
     }
     render_omitted(out, built.len(), MAX_LISTED_ATTEMPTS);
 }
@@ -184,6 +185,7 @@ fn render_stopped(db: &Database, out: &mut String, stopped: &[&DriverAttempt]) {
             "  {}  {}  reason={reason}",
             attempt.prd_id, attempt.prd_path
         );
+        render_workspace(out, attempt);
         let _ = writeln!(
             out,
             "      configuration: review={} execution_context={}",
@@ -209,6 +211,19 @@ fn render_stopped(db: &Database, out: &mut String, stopped: &[&DriverAttempt]) {
         render_scope_detail(db, out, attempt);
     }
     render_omitted(out, stopped.len(), MAX_LISTED_ATTEMPTS);
+}
+
+fn render_workspace(out: &mut String, attempt: &DriverAttempt) {
+    if attempt.component_id.is_some() || attempt.worktree_path.is_some() || attempt.branch.is_some()
+    {
+        let _ = writeln!(
+            out,
+            "      component={} worktree={} branch={}",
+            attempt.component_id.as_deref().unwrap_or("serial"),
+            attempt.worktree_path.as_deref().unwrap_or("primary"),
+            attempt.branch.as_deref().unwrap_or("primary")
+        );
+    }
 }
 
 /// The exact file and rule that stopped a scope-broadened attempt, as

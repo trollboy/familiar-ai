@@ -91,6 +91,7 @@ pub fn recover_incomplete(state_dir: &Path) -> io::Result<usize> {
 pub struct WorktreeLease {
     ownership_path: PathBuf,
     ownership: WorktreeOwnership,
+    branch: String,
 }
 
 impl WorktreeLease {
@@ -100,16 +101,34 @@ impl WorktreeLease {
         session_id: &str,
         prd_id: &str,
     ) -> io::Result<Self> {
-        let safe_id: String = prd_id
+        Self::create_component(repository, state_dir, session_id, prd_id, None)
+    }
+
+    pub fn create_component(
+        repository: &Path,
+        state_dir: &Path,
+        session_id: &str,
+        component_id: &str,
+        configured_root: Option<&Path>,
+    ) -> io::Result<Self> {
+        let safe_id: String = component_id
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
-        let root = state_dir.join("worktrees").join(session_id);
+        let root = configured_root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| state_dir.join("worktrees"))
+            .join(session_id);
         fs::create_dir_all(&root)?;
         let worktree = root.join(&safe_id);
         let ownership_path = root.join(format!("{safe_id}.ownership.json"));
+        let safe_session: String = session_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let branch = format!("familiar/{safe_session}/{safe_id}");
         let output = Command::new("git")
-            .args(["worktree", "add", "--detach"])
+            .args(["worktree", "add", "-b", &branch])
             .arg(&worktree)
             .arg("HEAD")
             .current_dir(repository)
@@ -124,7 +143,7 @@ impl WorktreeLease {
         let now = chrono::Utc::now().to_rfc3339();
         let ownership = WorktreeOwnership {
             session_id: session_id.into(),
-            prd_id: prd_id.into(),
+            prd_id: component_id.into(),
             worktree,
             created_at: now.clone(),
             heartbeat_at: now,
@@ -134,6 +153,7 @@ impl WorktreeLease {
         Ok(Self {
             ownership_path,
             ownership,
+            branch,
         })
     }
 
@@ -143,6 +163,10 @@ impl WorktreeLease {
 
     pub fn ownership_path(&self) -> &Path {
         &self.ownership_path
+    }
+
+    pub fn branch(&self) -> &str {
+        &self.branch
     }
 
     pub fn heartbeat(&mut self) -> io::Result<()> {
