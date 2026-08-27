@@ -28,6 +28,13 @@ enum Command {
     Next,
     /// Execute a repository PRD with the configured coding agent.
     Run { prd_path: PathBuf },
+    /// Continue one durable partial, or inspect/schedule all durable partials.
+    Resume {
+        /// PRD identifier (for example PRD-039), or `all`.
+        prd: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Execute eligible backlog PRDs unattended until the backlog is empty,
     /// nothing is eligible, or the budget warrant is exhausted. Flags may only
     /// tighten the configured warrant, never loosen it.
@@ -167,6 +174,10 @@ fn main() -> ExitCode {
                     .map_or(ExitCode::FAILURE, ExitCode::from)
             }
         },
+        Command::Resume { prd, dry_run } => match resume_command(&prd, dry_run) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Drive {
             max_prds,
             max_cost_microusd,
@@ -199,6 +210,74 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+    }
+}
+
+fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let current = std::env::current_dir().map_err(|e| e.to_string())?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&current)
+        .map_err(|e| e.to_string())?;
+    let db_path = config.database.resolve_path(&paths.data_dir);
+    let _ownership = if dry_run {
+        None
+    } else {
+        Some(
+            familiar_ai_daemon::worker_lock::WorkerLock::acquire_repository(
+                &paths.runtime_dir,
+                &repository.key,
+            )
+            .map_err(|e| format!("cannot acquire mutating orchestrator ownership: {e}"))?,
+        )
+    };
+    let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+    if !dry_run {
+        db.run_migrations().map_err(|e| e.to_string())?;
+    }
+    let candidates = if prd == "all" {
+        familiar_ai_daemon::resume::discover(&db, &repository.key)?
+    } else {
+        vec![familiar_ai_daemon::resume::one(&db, &repository.key, prd)?]
+    };
+    print!("{}", familiar_ai_daemon::resume::render(&candidates));
+    if dry_run {
+        return Ok(());
+    }
+    if let Some(invalid) = candidates.iter().find(|c| !c.valid) {
+        if prd != "all" {
+            return Err(format!(
+                "{}: {}",
+                invalid.prd_id,
+                invalid.reason.as_deref().unwrap_or("invalid_checkpoint")
+            ));
+        }
+    }
+    let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
+    let implementation = build_agent(&implementation_entry);
+    let reviewer = build_agent(&reviewer_entry);
+    let agents = AgentSet {
+        implementation: implementation.as_ref(),
+        reviewer: reviewer.as_ref(),
+    };
+    let mut failures = Vec::new();
+    for candidate in candidates.iter().filter(|c| c.valid) {
+        if let Err(error) = familiar_ai_daemon::run::resume_implemented_checkpoint(
+            &candidate.worktree,
+            &candidate.prd_id,
+            &agents,
+            &config,
+            &paths,
+        ) {
+            failures.push(format!("{}: {error}", candidate.prd_id));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
     }
 }
 
@@ -343,6 +422,15 @@ fn worker_spec(
 
 fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {
     let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
+    let current = std::env::current_dir().map_err(|e| e.to_string())?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&current)
+        .map_err(|e| e.to_string())?;
+    let _ownership = familiar_ai_daemon::worker_lock::WorkerLock::acquire_repository(
+        &paths.runtime_dir,
+        &repository.key,
+    )
+    .map_err(|e| format!("cannot acquire mutating orchestrator ownership: {e}"))?;
     let config =
         Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let result = familiar_ai_daemon::delivery::deliver(ownership_record, &config.delivery)?;
@@ -397,6 +485,19 @@ fn preflight_command() -> Result<(), String> {
 fn run(prd_path: &std::path::Path) -> Result<(), familiar_ai_daemon::run::RunError> {
     use familiar_ai_daemon::run::RunError;
     let paths = AppPaths::resolve().map_err(|e| RunError::Config(e.to_string()))?;
+    let current = std::env::current_dir().map_err(RunError::CurrentDirectory)?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&current)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let _ownership = familiar_ai_daemon::worker_lock::WorkerLock::acquire_repository(
+        &paths.runtime_dir,
+        &repository.key,
+    )
+    .map_err(|e| {
+        RunError::Config(format!(
+            "cannot acquire mutating orchestrator ownership: {e}"
+        ))
+    })?;
     let config = Config::load(Some(&paths.config_dir.join("config.toml")))
         .map_err(|e| RunError::Config(e.to_string()))?;
     let (implementation_entry, reviewer_entry) =

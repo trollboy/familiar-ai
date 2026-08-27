@@ -1,4 +1,5 @@
 use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -10,8 +11,14 @@ pub struct WorkerLock {
 
 impl WorkerLock {
     pub fn acquire(runtime_dir: &Path) -> io::Result<Self> {
+        Self::acquire_repository(runtime_dir, "default")
+    }
+
+    pub fn acquire_repository(runtime_dir: &Path, repository_key: &str) -> io::Result<Self> {
         fs::create_dir_all(runtime_dir)?;
-        let path = runtime_dir.join("drive.lock");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        repository_key.hash(&mut hasher);
+        let path = runtime_dir.join(format!("drive-{:016x}.lock", hasher.finish()));
         match create(&path) {
             Ok(()) => Ok(Self { path }),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -71,10 +78,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let first = WorkerLock::acquire(temp.path()).unwrap();
         assert!(WorkerLock::acquire(temp.path()).is_err());
+        let default_path = first.path.clone();
         drop(first);
-        fs::write(temp.path().join("drive.lock"), "4294967295\n").unwrap();
+        fs::write(&default_path, "4294967295\n").unwrap();
         let recovered = WorkerLock::acquire(temp.path()).unwrap();
         drop(recovered);
-        assert!(!temp.path().join("drive.lock").exists());
+        assert!(!default_path.exists());
     }
 }

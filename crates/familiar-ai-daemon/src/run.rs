@@ -206,6 +206,148 @@ pub fn execute_with_config_tracked_from_preflighted(
     (result, trace)
 }
 
+/// Continue a validated implementation checkpoint at review. The implementation
+/// adapter is never invoked on this path.
+pub fn resume_implemented_checkpoint(
+    current: &Path,
+    prd_id: &str,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+) -> Result<RunWorkflowResult, RunError> {
+    let discovery = FilesystemBacklogDiscovery;
+    let repository = discovery
+        .resolve(current)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let database_path = config.database.resolve_path(&paths.data_dir);
+    let mut db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
+    db.run_migrations()
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    let checkpoint = familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .get(&repository.key, prd_id)
+        .map_err(|e| RunError::Storage(e.to_string()))?
+        .ok_or_else(|| RunError::Config(format!("no durable checkpoint for {prd_id}")))?;
+    let candidate = crate::resume::one(&db, &repository.key, prd_id).map_err(RunError::Config)?;
+    if !candidate.valid {
+        return Err(RunError::Config(
+            candidate
+                .reason
+                .unwrap_or_else(|| "invalid checkpoint".into()),
+        ));
+    }
+    if !matches!(
+        checkpoint.phase.as_str(),
+        "implemented" | "implemented_pending_review"
+    ) {
+        return Err(RunError::Config(format!(
+            "checkpoint phase {} cannot start review",
+            checkpoint.phase
+        )));
+    }
+    let repository_config = config.repository(&repository.worktree);
+    let discovered = discovery
+        .discover_with_layout(&repository, &repository_config.layout())
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    validate_graph(&discovered).map_err(|e| RunError::Config(e.to_string()))?;
+    let target = discovered
+        .into_iter()
+        .find(|p| p.id.to_string() == prd_id)
+        .ok_or_else(|| {
+            RunError::Config(format!("checkpoint PRD {prd_id} is no longer discoverable"))
+        })?;
+    let prd_path = candidate.worktree.join(target.path.as_str());
+    let profile = context_profile(&repository_config);
+    let context = ContextCompiler::new()
+        .compile_profiled(
+            ContextRequest {
+                repository: &candidate.worktree,
+                prd: &prd_path,
+            },
+            &profile,
+        )
+        .map_err(RunError::Context)?;
+    let execution_id = checkpoint
+        .execution_id
+        .as_deref()
+        .ok_or_else(|| RunError::Config("checkpoint execution identity is unknown".into()))?;
+    let record = ExecutionHistoryRepository::new(db.conn())
+        .get(execution_id)
+        .map_err(|e| RunError::Storage(e.to_string()))?
+        .ok_or_else(|| {
+            RunError::Config(format!("checkpoint execution {execution_id} is missing"))
+        })?;
+    let result = ExecutionResult {
+        agent_version: record.agent_version.clone(),
+        model: record.model.clone(),
+        input_tokens: record.input_tokens,
+        output_tokens: record.output_tokens,
+        cached_tokens: record.cached_tokens,
+        exit_code: record.exit_code,
+        signal: record.signal,
+        session_id: None,
+        reported_cost_microusd: None,
+    };
+    let finalization = ExecutionFinalization {
+        ended_at: record.ended_at.unwrap_or_default(),
+        duration_ms: record.duration_ms.unwrap_or_default(),
+        agent_version: record.agent_version,
+        model: record.model,
+        input_tokens: record.input_tokens,
+        output_tokens: record.output_tokens,
+        cached_tokens: record.cached_tokens,
+        total_tokens: record.total_tokens,
+        estimated_cost_microusd: record.estimated_cost_microusd,
+        input_rate: record.input_rate,
+        cached_input_rate: record.cached_input_rate,
+        output_rate: record.output_rate,
+        outcome: record.outcome,
+        exit_code: record.exit_code,
+        signal: record.signal,
+        unavailable_fields: record.unavailable_fields,
+    };
+    let mut preflight = compute_review_preflight(
+        config,
+        &prd_path,
+        target.path.as_str(),
+        &candidate.worktree,
+        &paths.data_dir,
+        execution_id,
+    )?
+    .ok_or_else(|| RunError::Config("review is disabled".into()))?;
+    preflight.baseline = checkpoint.base_revision.clone();
+    preflight.snapshot = build_scope_policy(
+        config,
+        target.path.as_str(),
+        preflight.snapshot.contract.clone(),
+        content_hash(preflight.prd_bytes.as_bytes()),
+        &checkpoint.base_revision,
+    )?;
+    let actor = format!("system:familiar-ai-resume:{}", new_id());
+    let mut trace = AttemptTrace {
+        execution_id: Some(execution_id.into()),
+        retained_reason: None,
+    };
+    let completed = finish_implementation(
+        &mut db,
+        &repository,
+        &target,
+        execution_id,
+        &actor,
+        result,
+        &finalization,
+        Some(&preflight),
+        &context,
+        agents,
+        config,
+        paths,
+        &mut trace,
+    )?;
+    familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .set_phase(&checkpoint.checkpoint_id, "completed")
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    Ok(completed)
+}
+
 /// What the driver observes about one attempt beyond success or failure.
 #[derive(Debug, Default, Clone)]
 pub struct AttemptTrace {
@@ -452,6 +594,40 @@ fn execute_tracked_inner(
         .map_err(|e| retained_traced(trace, &target, "history_failed", e))?;
     let result = execution
         .map_err(|e| retained_traced(trace, &target, agent_reason(&e), RunError::Agent(e)))?;
+    if result.exit_code == Some(0) && result.signal.is_none() {
+        let total = result
+            .input_tokens
+            .zip(result.output_tokens)
+            .map(|(input, output)| input.saturating_add(output));
+        let pending_review = config.driver.max_implementation_tokens > 0
+            && total.is_some_and(|tokens| tokens > config.driver.max_implementation_tokens);
+        let usage = serde_json::json!({
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "cached_tokens": result.cached_tokens,
+            "total_tokens": total,
+            "estimated_cost_microusd": finalization.estimated_cost_microusd,
+        });
+        crate::resume::freeze_implementation(
+            &db,
+            &repository.key,
+            &target.id.to_string(),
+            target.path.as_str(),
+            &id,
+            &context.repository.worktree,
+            implementation_entry.adapter.as_str(),
+            usage.to_string(),
+            pending_review,
+        )
+        .map_err(|detail| {
+            retained_traced(
+                trace,
+                &target,
+                "checkpoint_failed",
+                RunError::Storage(detail),
+            )
+        })?;
+    }
     if config.driver.max_implementation_tokens > 0 {
         let total = result
             .input_tokens
@@ -499,10 +675,43 @@ fn execute_tracked_inner(
             },
         ));
     }
+    finish_implementation(
+        &mut db,
+        &repository,
+        &target,
+        &id,
+        &actor,
+        result,
+        &finalization,
+        review_preflight.as_ref(),
+        &context,
+        agents,
+        config,
+        paths,
+        trace,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_implementation(
+    db: &mut Database,
+    repository: &familiar_ai_core::RepositoryIdentity,
+    target: &familiar_ai_core::DiscoveredPrd,
+    id: &str,
+    actor: &str,
+    result: ExecutionResult,
+    finalization: &ExecutionFinalization,
+    review_preflight: Option<&ReviewPreflight>,
+    context: &ExecutionContext,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+    trace: &mut AttemptTrace,
+) -> Result<RunWorkflowResult, RunError> {
     if !config.review.enabled {
         return Err(retained_traced(
             trace,
-            &target,
+            target,
             "review_disabled",
             RunError::Workflow {
                 result: Some(Box::new(result)),
@@ -510,13 +719,13 @@ fn execute_tracked_inner(
             },
         ));
     }
-    let preflight = review_preflight.as_ref().expect("enabled review preflight");
+    let preflight = review_preflight.expect("enabled review preflight");
     let cycle = run_review(ReviewRunInput {
-        db: &db,
-        context: &context,
-        execution_id: &id,
+        db,
+        context,
+        execution_id: id,
         implementation_result: &result,
-        implementation_finalization: &finalization,
+        implementation_finalization: finalization,
         implementation_agent: agents.implementation,
         reviewer_agent: agents.reviewer,
         config,
@@ -524,7 +733,7 @@ fn execute_tracked_inner(
         base_revision: &preflight.baseline,
         scope_policy: &preflight.snapshot,
     })
-    .map_err(|e| retained_traced(trace, &target, "review_failed", e))?;
+    .map_err(|e| retained_traced(trace, target, "review_failed", e))?;
     if cycle.state != ReviewCycleState::Completed
         || cycle.disposition != ReviewDisposition::ReadyForHumanApproval
         || cycle.stop_reasons != [ReviewStopReason::CleanReview]
@@ -532,7 +741,7 @@ fn execute_tracked_inner(
         let reason = review_retained_reason(&cycle);
         return Err(retained_traced(
             trace,
-            &target,
+            target,
             reason,
             RunError::Workflow {
                 result: Some(Box::new(result)),
@@ -548,11 +757,11 @@ fn execute_tracked_inner(
         .map(|c| c.check_id.clone())
         .collect::<Vec<_>>();
     SqliteBacklogRepository::new(db.conn_mut())
-        .complete_run(&repository, &target, &id, &actor, &required_checks)
+        .complete_run(repository, target, id, actor, &required_checks)
         .map_err(|e| {
             retained_traced(
                 trace,
-                &target,
+                target,
                 "completion_conflict",
                 RunError::Workflow {
                     result: Some(Box::new(result.clone())),
@@ -560,6 +769,14 @@ fn execute_tracked_inner(
                 },
             )
         })?;
+    if let Some(checkpoint) = familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .get(&repository.key, &target.id.to_string())
+        .map_err(|e| RunError::Storage(e.to_string()))?
+    {
+        familiar_ai_storage::CheckpointRepository::new(db.conn())
+            .set_phase(&checkpoint.checkpoint_id, "completed")
+            .map_err(|e| RunError::Storage(e.to_string()))?;
+    }
     eprintln!(
         "backlog: {} {} in_progress -> completed actor={actor}",
         target.id, target.path

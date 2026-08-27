@@ -348,8 +348,6 @@ pub fn drive(
             "delivery requires driver.isolated_worktrees=true".into(),
         ));
     }
-    let _worker_lock = crate::worker_lock::WorkerLock::acquire(&paths.runtime_dir)
-        .map_err(|error| DriveError::Config(format!("cannot acquire driver ownership: {error}")))?;
     let current = std::env::current_dir().map_err(|error| {
         DriveError::Config(format!("cannot resolve current directory: {error}"))
     })?;
@@ -357,6 +355,11 @@ pub fn drive(
     let repository = discovery
         .resolve(&current)
         .map_err(|error| DriveError::Config(error.to_string()))?;
+    let _worker_lock =
+        crate::worker_lock::WorkerLock::acquire_repository(&paths.runtime_dir, &repository.key)
+            .map_err(|error| {
+                DriveError::Config(format!("cannot acquire driver ownership: {error}"))
+            })?;
     let repository_config = config.repository(&repository.worktree);
     let effective = config.effective_execution(&repository.worktree);
     let review_configuration_source = effective.review_source.as_str();

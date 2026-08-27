@@ -1,5 +1,6 @@
 pub mod backlog;
 pub mod bootstrap;
+pub mod checkpoint;
 pub mod decision;
 pub mod driver;
 pub mod execution_history;

@@ -3,6 +3,7 @@ pub mod drive;
 pub mod launchd;
 pub mod preflight;
 pub mod report;
+pub mod resume;
 pub mod run;
 pub mod supervisor;
 pub mod systemd;
