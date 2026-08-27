@@ -1886,6 +1886,7 @@ mod tests {
                 review: Some(scoped_review.clone()),
                 execution_context: Some(ExecutionContextConfig {
                     hard_ceiling_tokens: Some(20),
+                    ..ExecutionContextConfig::default()
                 }),
                 ..RepositoryConfig::default()
             },
