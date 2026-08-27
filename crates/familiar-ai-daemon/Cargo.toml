@@ -20,6 +20,7 @@ tray = ["dep:familiar-ai-tray"]
 [dependencies]
 familiar-ai-agent = { path = "../familiar-ai-agent" }
 familiar-ai-context = { path = "../familiar-ai-context" }
+familiar-ai-tokens = { path = "../familiar-ai-tokens" }
 familiar-ai-core = { path = "../familiar-ai-core" }
 familiar-ai-logging = { path = "../familiar-ai-logging" }
 familiar-ai-storage = { path = "../familiar-ai-storage" }

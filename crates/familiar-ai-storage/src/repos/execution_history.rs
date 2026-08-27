@@ -48,6 +48,9 @@ pub struct ExecutionRecord {
     pub cached_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub estimated_cost_microusd: Option<u64>,
+    pub input_rate: Option<u64>,
+    pub cached_input_rate: Option<u64>,
+    pub output_rate: Option<u64>,
     pub outcome: String,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
@@ -70,6 +73,12 @@ pub struct UsageSummary {
     pub known_cost_executions: u64,
     pub unknown_cost_executions: u64,
     pub known_cost_microusd: u64,
+    pub cache_measured_executions: u64,
+    pub cache_unmeasured_executions: u64,
+    pub cache_measured_input_tokens: u64,
+    pub known_cache_savings_microusd: u64,
+    pub cache_savings_priced_executions: u64,
+    pub cache_savings_unpriced_executions: u64,
 }
 
 pub struct ExecutionHistoryRepository<'a> {
@@ -109,11 +118,11 @@ impl<'a> ExecutionHistoryRepository<'a> {
     }
 
     pub fn get(&self, id: &str) -> familiar_ai_core::Result<Option<ExecutionRecord>> {
-        self.conn.query_row("SELECT execution_id,started_at,ended_at,duration_ms,agent,agent_version,model,input_tokens,output_tokens,cached_tokens,total_tokens,estimated_cost_microusd,outcome,exit_code,signal,repository,worktree,git_commit,prd_path,unavailable_fields FROM execution_history WHERE execution_id=?1", [id], row).optional().map_err(db)
+        self.conn.query_row("SELECT execution_id,started_at,ended_at,duration_ms,agent,agent_version,model,input_tokens,output_tokens,cached_tokens,total_tokens,estimated_cost_microusd,input_rate_microusd_per_million,cached_input_rate_microusd_per_million,output_rate_microusd_per_million,outcome,exit_code,signal,repository,worktree,git_commit,prd_path,unavailable_fields FROM execution_history WHERE execution_id=?1", [id], row).optional().map_err(db)
     }
 
     pub fn recent(&self, limit: u8) -> familiar_ai_core::Result<Vec<ExecutionRecord>> {
-        let mut stmt = self.conn.prepare("SELECT execution_id,started_at,ended_at,duration_ms,agent,agent_version,model,input_tokens,output_tokens,cached_tokens,total_tokens,estimated_cost_microusd,outcome,exit_code,signal,repository,worktree,git_commit,prd_path,unavailable_fields FROM execution_history ORDER BY started_at DESC, execution_id DESC LIMIT ?1").map_err(db)?;
+        let mut stmt = self.conn.prepare("SELECT execution_id,started_at,ended_at,duration_ms,agent,agent_version,model,input_tokens,output_tokens,cached_tokens,total_tokens,estimated_cost_microusd,input_rate_microusd_per_million,cached_input_rate_microusd_per_million,output_rate_microusd_per_million,outcome,exit_code,signal,repository,worktree,git_commit,prd_path,unavailable_fields FROM execution_history ORDER BY started_at DESC, execution_id DESC LIMIT ?1").map_err(db)?;
         let records = stmt
             .query_map([limit], row)
             .map_err(db)?
@@ -124,7 +133,7 @@ impl<'a> ExecutionHistoryRepository<'a> {
 
     pub fn usage(&self) -> familiar_ai_core::Result<UsageSummary> {
         let mut out = UsageSummary::default();
-        let mut stmt = self.conn.prepare("SELECT input_tokens,output_tokens,cached_tokens,total_tokens,estimated_cost_microusd FROM execution_history").map_err(db)?;
+        let mut stmt = self.conn.prepare("SELECT input_tokens,output_tokens,cached_tokens,total_tokens,estimated_cost_microusd,input_rate_microusd_per_million,cached_input_rate_microusd_per_million FROM execution_history").map_err(db)?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((
@@ -133,11 +142,13 @@ impl<'a> ExecutionHistoryRepository<'a> {
                     r.get::<_, Option<u64>>(2)?,
                     r.get::<_, Option<u64>>(3)?,
                     r.get::<_, Option<u64>>(4)?,
+                    r.get::<_, Option<u64>>(5)?,
+                    r.get::<_, Option<u64>>(6)?,
                 ))
             })
             .map_err(db)?;
         for item in rows {
-            let (input, output, cached, total, cost) = item.map_err(db)?;
+            let (input, output, cached, total, cost, input_rate, cached_rate) = item.map_err(db)?;
             out.execution_count = checked(out.execution_count, 1)?;
             if input.is_some() && output.is_some() && cached.is_some() {
                 out.complete_usage += 1;
@@ -148,6 +159,34 @@ impl<'a> ExecutionHistoryRepository<'a> {
             out.known_output_tokens = checked(out.known_output_tokens, output.unwrap_or(0))?;
             out.known_cached_tokens = checked(out.known_cached_tokens, cached.unwrap_or(0))?;
             out.known_total_tokens = checked(out.known_total_tokens, total.unwrap_or(0))?;
+            match (input, cached) {
+                (Some(input), Some(cached)) if cached <= input => {
+                    out.cache_measured_executions += 1;
+                    out.cache_measured_input_tokens =
+                        checked(out.cache_measured_input_tokens, input)?;
+                    match (input_rate, cached_rate) {
+                        (Some(uncached), Some(cached_price)) if cached_price <= uncached => {
+                            out.cache_savings_priced_executions += 1;
+                            let numerator =
+                                cached.checked_mul(uncached - cached_price).ok_or_else(|| {
+                                    FamiliarError::Database(
+                                        "cache savings arithmetic overflow".into(),
+                                    )
+                                })?;
+                            out.known_cache_savings_microusd = checked(
+                                out.known_cache_savings_microusd,
+                                numerator.checked_add(500_000).ok_or_else(|| {
+                                    FamiliarError::Database(
+                                        "cache savings arithmetic overflow".into(),
+                                    )
+                                })? / 1_000_000,
+                            )?;
+                        }
+                        _ => out.cache_savings_unpriced_executions += 1,
+                    }
+                }
+                _ => out.cache_unmeasured_executions += 1,
+            }
             if let Some(value) = cost {
                 out.known_cost_executions += 1;
                 out.known_cost_microusd = checked(out.known_cost_microusd, value)?;
@@ -160,7 +199,7 @@ impl<'a> ExecutionHistoryRepository<'a> {
 }
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionRecord> {
-    let unavailable: String = r.get(19)?;
+    let unavailable: String = r.get(22)?;
     Ok(ExecutionRecord {
         execution_id: r.get(0)?,
         started_at: r.get(1)?,
@@ -174,13 +213,16 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionRecord> {
         cached_tokens: r.get(9)?,
         total_tokens: r.get(10)?,
         estimated_cost_microusd: r.get(11)?,
-        outcome: r.get(12)?,
-        exit_code: r.get(13)?,
-        signal: r.get(14)?,
-        repository: r.get(15)?,
-        worktree: r.get(16)?,
-        git_commit: r.get(17)?,
-        prd_path: r.get(18)?,
+        input_rate: r.get(12)?,
+        cached_input_rate: r.get(13)?,
+        output_rate: r.get(14)?,
+        outcome: r.get(15)?,
+        exit_code: r.get(16)?,
+        signal: r.get(17)?,
+        repository: r.get(18)?,
+        worktree: r.get(19)?,
+        git_commit: r.get(20)?,
+        prd_path: r.get(21)?,
         unavailable_fields: serde_json::from_str(&unavailable).unwrap_or_default(),
     })
 }
@@ -269,6 +311,9 @@ mod tests {
                 known_cost_executions: 0,
                 unknown_cost_executions: 1,
                 known_cost_microusd: 0,
+                cache_unmeasured_executions: 1,
+                cache_savings_unpriced_executions: 0,
+                ..UsageSummary::default()
             }
         );
     }

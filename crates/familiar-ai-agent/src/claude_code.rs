@@ -504,6 +504,7 @@ mod tests {
             working_directory,
             denied_read_path: None,
             prompt: "prompt bytes",
+            prompt_cache_key: None,
             filesystem,
             model,
             timeout_ms: None,

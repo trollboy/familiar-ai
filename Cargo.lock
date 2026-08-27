@@ -650,6 +650,7 @@ dependencies = [
  "familiar-ai-storage",
  "familiar-ai-summary",
  "familiar-ai-testutil",
+ "familiar-ai-tokens",
  "familiar-ai-tray",
  "familiar-ai-watcher",
  "figment",

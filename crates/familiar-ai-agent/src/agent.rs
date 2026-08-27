@@ -104,6 +104,9 @@ pub struct ExecutionRequest<'a> {
     /// Used only for isolated review execution.
     pub denied_read_path: Option<&'a Path>,
     pub prompt: &'a str,
+    /// Stable, non-secret provider cache identity. Adapters that do not
+    /// support an explicit cache key must ignore it.
+    pub prompt_cache_key: Option<&'a str>,
     pub filesystem: FilesystemPolicy,
     pub model: Option<&'a str>,
     pub timeout_ms: Option<u64>,

@@ -75,6 +75,9 @@ impl CodingAgent for CodexAgent {
         };
         let mut command = isolated_command(&self.executable, request.denied_read_path)?;
         command.arg("exec");
+        if let Some(key) = request.prompt_cache_key {
+            command.args(["--config", &format!("prompt_cache_key={key:?}")]);
+        }
         match request.filesystem {
             crate::FilesystemPolicy::ReadOnly => {
                 command.args(["--sandbox", "read-only"]);
@@ -320,6 +323,7 @@ mod tests {
                 working_directory: temp.path(),
                 denied_read_path: None,
                 prompt: "review",
+                prompt_cache_key: None,
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(50),
@@ -352,6 +356,7 @@ mod tests {
                     working_directory: temp.path(),
                     denied_read_path: None,
                     prompt: "work",
+                    prompt_cache_key: None,
                     filesystem: crate::FilesystemPolicy::Normal,
                     model: None,
                     timeout_ms: Some(5_000),
@@ -381,6 +386,7 @@ mod tests {
             working_directory: temp.path(),
             denied_read_path: None,
             prompt: "work",
+            prompt_cache_key: None,
             filesystem: crate::FilesystemPolicy::Normal,
             model: None,
             timeout_ms: Some(5_000),
@@ -446,6 +452,7 @@ mod tests {
                 working_directory: &workspace,
                 denied_read_path: Some(&repository),
                 prompt: "review",
+                prompt_cache_key: None,
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(5_000),
@@ -498,6 +505,7 @@ mod tests {
                     working_directory: &workspace,
                     denied_read_path: Some(&repository),
                     prompt: "review",
+                    prompt_cache_key: None,
                     filesystem: crate::FilesystemPolicy::ReadOnly,
                     model: None,
                     timeout_ms: Some(5_000),

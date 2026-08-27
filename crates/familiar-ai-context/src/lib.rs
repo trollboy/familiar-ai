@@ -71,6 +71,46 @@ pub struct ExecutionContext {
     pub estimated_tokens: u64,
 }
 
+/// Byte-stable provider-cache prefix. Volatile task data is deliberately not
+/// accepted by this renderer.
+pub fn render_stable_prefix(
+    context: &ExecutionContext,
+    profile: &ContextProfile,
+    policy: &str,
+) -> String {
+    let mut out = String::from(
+        "# Familiar execution request\n\nImplement the PRD below in this repository.\n\n## Stable repository context\n\n",
+    );
+    out.push_str("Git revision: ");
+    out.push_str(context.repository.git_commit.as_deref().unwrap_or("unborn"));
+    out.push_str("\nActive PRD directory: ");
+    out.push_str(&profile.active_dir);
+    out.push_str("\nReference roots:\n");
+    for root in &profile.reference_roots {
+        out.push_str("- ");
+        out.push_str(&root.prefix);
+        out.push_str(" (");
+        out.push_str(match root.kind {
+            ContextReferenceKind::Prd => "prd",
+            ContextReferenceKind::Adr => "adr",
+            ContextReferenceKind::Contract => "contract",
+            ContextReferenceKind::Supporting => "supporting",
+        });
+        out.push_str(")\n");
+    }
+    out.push_str("\n## Fixed execution constraints\n\n");
+    out.push_str(policy);
+    for document in &context.documents {
+        out.push_str("\n\n## Authoritative reference: ");
+        out.push_str(&document.path);
+        out.push_str("\n\n");
+        out.push_str(&document.content);
+        out.push('\n');
+    }
+    out.push_str("\n## Volatile execution data\n\n");
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryContext {
     pub repository: PathBuf,
@@ -468,6 +508,54 @@ fn identity(worktree: &Path, path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_prefix_excludes_volatile_prd_and_binds_authoritative_inputs() {
+        let document = |content: &str| ContextDocument {
+            path: "docs/contracts/api.md".into(),
+            kind: DocumentKind::Contract,
+            content: content.into(),
+            inclusion: InclusionReason::DirectReference {
+                referenced_by: "docs/prds/work.md".into(),
+            },
+            estimated_tokens: 1,
+        };
+        let mut context = ExecutionContext {
+            repository: RepositoryContext {
+                repository: "/repo/.git".into(),
+                worktree: "/repo".into(),
+                git_commit: Some("abc".into()),
+            },
+            prd: ContextDocument {
+                path: "docs/prds/work.md".into(),
+                kind: DocumentKind::Prd,
+                content: "first volatile body".into(),
+                inclusion: InclusionReason::RequestedPrd,
+                estimated_tokens: 4,
+            },
+            documents: vec![document("contract v1")],
+            estimated_tokens: 5,
+        };
+        let profile = ContextProfile::default();
+        let original = render_stable_prefix(&context, &profile, "policy");
+        context.prd.content = "different volatile body".into();
+        assert_eq!(render_stable_prefix(&context, &profile, "policy"), original);
+        context.repository.git_commit = Some("def".into());
+        assert_ne!(render_stable_prefix(&context, &profile, "policy"), original);
+        context.repository.git_commit = Some("abc".into());
+        context.documents[0] = document("contract v2");
+        assert_ne!(render_stable_prefix(&context, &profile, "policy"), original);
+        assert_ne!(
+            render_stable_prefix(&context, &profile, "new policy"),
+            original
+        );
+        let mut changed_profile = profile.clone();
+        changed_profile.active_dir = "docs/work".into();
+        assert_ne!(
+            render_stable_prefix(&context, &changed_profile, "policy"),
+            original
+        );
+    }
     use std::process::Command;
 
     fn repository() -> tempfile::TempDir {

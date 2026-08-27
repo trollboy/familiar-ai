@@ -41,11 +41,13 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
     assert!(stderr.contains("pending -> in_progress actor=system:familiar-ai-run:"));
     assert!(stderr.contains("fake stderr\n"));
     assert!(stderr.contains("remains in_progress reason=implementation_failed"));
-    assert_eq!(fs::read_to_string(args).unwrap(), "exec\n--json\n-\n");
+    let args = fs::read_to_string(args).unwrap();
+    assert!(args.starts_with("exec\n--config\nprompt_cache_key=\"sha256:"));
+    assert!(args.ends_with("\"\n--json\n-\n"));
 
     let prompt = fs::read_to_string(capture).unwrap();
     assert!(prompt.contains("# PRD-024: Enforceable Budgets for Agent Execution"));
-    assert!(prompt.contains("## Directly referenced document: docs/contracts/event-model.md"));
+    assert!(prompt.contains("## Authoritative reference: docs/contracts/event-model.md"));
 
     let db = familiar_ai_storage::Database::open(&database).unwrap();
     let rows = familiar_ai_storage::ExecutionHistoryRepository::new(db.conn())

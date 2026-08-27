@@ -13,8 +13,9 @@ use familiar_ai_agent::{
     ExecutionBudget, ExecutionRequest, ExecutionResult,
 };
 use familiar_ai_context::{
-    ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
-    ContextProfile, ContextReferenceKind, ContextReferenceRoot, ContextRequest, ExecutionContext,
+    render_stable_prefix, ContextBudget, ContextBudgetError, ContextBudgeter,
+    ContextCompilationError, ContextCompiler, ContextProfile, ContextReferenceKind,
+    ContextReferenceRoot, ContextRequest, ExecutionContext,
 };
 use familiar_ai_core::{
     admit_run_prd, resolve_run_prd, validate_graph, AgentAdapterKind, AgentEntryConfig, AppPaths,
@@ -231,22 +232,39 @@ fn execute_tracked_inner(
     effective_config.review = effective.review;
     effective_config.execution_context = effective.execution_context;
     let config = &effective_config;
+    let profile = context_profile(&repository_config);
     let context = ContextCompiler::new()
         .compile_profiled(
             ContextRequest {
                 repository: current,
                 prd: prd_path,
             },
-            &context_profile(&repository_config),
+            &profile,
         )
         .map_err(RunError::Context)?;
     let context = match config.execution_context.hard_ceiling_tokens {
         Some(hard_ceiling_tokens) => {
+            if hard_ceiling_tokens < context.prd.estimated_tokens {
+                return Err(RunError::ContextBudget(
+                    ContextBudgetError::PrdExceedsHardCeiling {
+                        path: context.prd.path.clone(),
+                        estimated_tokens: context.prd.estimated_tokens,
+                        hard_ceiling_tokens,
+                    },
+                ));
+            }
+            let complete = render_prompt(&context, &profile);
+            let complete_tokens = u64::try_from(familiar_ai_tokens::estimate_tokens(&complete))
+                .map_err(|_| RunError::Config("complete prompt token estimate overflow".into()))?;
+            let framing_tokens = complete_tokens.saturating_sub(context.estimated_tokens);
+            let document_ceiling = hard_ceiling_tokens.checked_sub(framing_tokens).ok_or_else(|| {
+                RunError::Config(format!("stable prompt framing requires {framing_tokens} estimated tokens, exceeding hard ceiling {hard_ceiling_tokens}"))
+            })?;
             ContextBudgeter::new()
                 .budget(
                     context,
                     ContextBudget {
-                        hard_ceiling_tokens,
+                        hard_ceiling_tokens: document_ceiling,
                     },
                 )
                 .map_err(RunError::ContextBudget)?
@@ -254,7 +272,9 @@ fn execute_tracked_inner(
         }
         None => context,
     };
-    let prompt = render_prompt(&context);
+    let stable_prefix = render_stable_prefix(&context, &profile, EXECUTION_CONSTRAINTS);
+    let prompt_cache_key = familiar_ai_review::content_hash(stable_prefix.as_bytes());
+    let prompt = render_prompt_with_prefix(&context, &stable_prefix);
     let database_path = config.database.resolve_path(&paths.data_dir);
     let mut db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
     db.run_migrations()
@@ -391,6 +411,10 @@ fn execute_tracked_inner(
             working_directory: &context.repository.worktree,
             denied_read_path: None,
             prompt: &prompt,
+            prompt_cache_key: config
+                .execution_context
+                .prompt_cache_enabled
+                .then_some(prompt_cache_key.as_str()),
             filesystem: familiar_ai_agent::FilesystemPolicy::Normal,
             model: config
                 .review
@@ -1390,25 +1414,21 @@ pub fn build_prompt(repository_root: &Path, supplied_path: &Path) -> Result<Stri
             prd: &supplied,
         })
         .map_err(RunError::Context)?;
-    Ok(render_prompt(&context))
+    Ok(render_prompt(&context, &ContextProfile::default()))
 }
 
-fn render_prompt(context: &ExecutionContext) -> String {
-    let mut prompt = String::new();
-    prompt.push_str("# Familiar execution request\n\nImplement the PRD below in this repository.\n\n## Fixed execution constraints\n\n");
-    prompt.push_str(EXECUTION_CONSTRAINTS);
-    prompt.push_str("\n\n## PRD: ");
+fn render_prompt(context: &ExecutionContext, profile: &ContextProfile) -> String {
+    let prefix = render_stable_prefix(context, profile, EXECUTION_CONSTRAINTS);
+    render_prompt_with_prefix(context, &prefix)
+}
+
+fn render_prompt_with_prefix(context: &ExecutionContext, prefix: &str) -> String {
+    let mut prompt = prefix.to_owned();
+    prompt.push_str("## PRD: ");
     prompt.push_str(&context.prd.path);
     prompt.push_str("\n\n");
     prompt.push_str(&context.prd.content);
     prompt.push('\n');
-    for document in &context.documents {
-        prompt.push_str("\n## Directly referenced document: ");
-        prompt.push_str(&document.path);
-        prompt.push_str("\n\n");
-        prompt.push_str(&document.content);
-        prompt.push('\n');
-    }
     prompt
 }
 
@@ -1420,7 +1440,6 @@ mod tests {
         FindingCategory, FindingEvidence, FindingSeverity, FindingStatus, ReviewDisposition,
         ReviewFinding, ReviewRequest, ReviewResult,
     };
-    use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -1444,41 +1463,8 @@ mod tests {
         }
     }
 
-    fn legacy_prompt(repository: &Path, prd_path: &Path) -> String {
-        let prd = fs::read_to_string(prd_path).unwrap();
-        let mut references = BTreeSet::new();
-        for prefix in ["docs/adr/", "docs/contracts/"] {
-            let mut rest = prd.as_str();
-            while let Some(index) = rest.find(prefix) {
-                rest = &rest[index..];
-                let end = rest
-                    .find(|character: char| {
-                        !(character.is_ascii_alphanumeric()
-                            || matches!(character, '/' | '-' | '_' | '.'))
-                    })
-                    .unwrap_or(rest.len());
-                let reference = rest[..end].trim_end_matches('.');
-                if reference.ends_with(".md") {
-                    references.insert(reference.to_owned());
-                }
-                rest = &rest[end..];
-            }
-        }
-        let identity = prd_path.strip_prefix(repository).unwrap().to_string_lossy();
-        let mut prompt = format!(
-            "# Familiar execution request\n\nImplement the PRD below in this repository.\n\n## Fixed execution constraints\n\n{EXECUTION_CONSTRAINTS}\n\n## PRD: {identity}\n\n{prd}\n"
-        );
-        for reference in references {
-            prompt.push_str(&format!(
-                "\n## Directly referenced document: {reference}\n\n{}\n",
-                fs::read_to_string(repository.join(&reference)).unwrap()
-            ));
-        }
-        prompt
-    }
-
     #[test]
-    fn prompt_bytes_match_legacy_renderer() {
+    fn prompt_places_stable_context_before_volatile_prd() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -1487,10 +1473,12 @@ mod tests {
             .canonicalize()
             .unwrap();
         let prd = repository.join("docs/prds/done/PRD-003.md");
-        assert_eq!(
-            build_prompt(&repository, &prd).unwrap().as_bytes(),
-            legacy_prompt(&repository, &prd).as_bytes()
-        );
+        let prompt = build_prompt(&repository, &prd).unwrap();
+        let stable = prompt.find("## Stable repository context").unwrap();
+        let reference = prompt.find("## Authoritative reference:").unwrap();
+        let volatile = prompt.find("## Volatile execution data").unwrap();
+        let prd = prompt.find("## PRD:").unwrap();
+        assert!(stable < reference && reference < volatile && volatile < prd);
     }
 
     #[test]
@@ -1519,8 +1507,8 @@ mod tests {
             }],
             estimated_tokens: 3,
         };
-        assert!(render_prompt(&context)
-            .contains("\n## Directly referenced document: docs/supporting/input.md\n\nsupport\n"));
+        assert!(render_prompt(&context, &ContextProfile::default())
+            .contains("\n## Authoritative reference: docs/supporting/input.md\n\nsupport\n"));
     }
 
     #[test]
@@ -1627,19 +1615,23 @@ mod tests {
                 prd: &prd,
             })
             .unwrap();
-        let ceiling = complete.prd.estimated_tokens;
+        let complete_prompt = render_prompt(&complete, &ContextProfile::default());
+        let framing = u64::try_from(familiar_ai_tokens::estimate_tokens(&complete_prompt)).unwrap()
+            - complete.estimated_tokens;
+        let document_ceiling = complete.prd.estimated_tokens;
+        let ceiling = framing + document_ceiling;
         let expected = ContextBudgeter
             .budget(
                 complete,
                 ContextBudget {
-                    hard_ceiling_tokens: ceiling,
+                    hard_ceiling_tokens: document_ceiling,
                 },
             )
             .unwrap();
         assert!(expected.context.documents.is_empty());
         assert!(expected.report.decisions.len() > 1);
         assert!(expected.report.excluded_estimated_tokens > 0);
-        let expected_prompt = render_prompt(&expected.context);
+        let expected_prompt = render_prompt(&expected.context, &ContextProfile::default());
         let mut config = Config::default();
         config.execution_context.hard_ceiling_tokens = Some(ceiling);
         config.database.path = Some(temp.path().join("history.db"));

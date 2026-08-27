@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 
 use familiar_ai_review::ScopeDecision;
-use familiar_ai_storage::{Database, DriverAttempt, ReviewRepository};
+use familiar_ai_storage::{Database, DriverAttempt, ExecutionHistoryRepository, ReviewRepository};
 use familiar_ai_storage::{DriverRepository, DriverSession};
 
 /// Attempts listed per section before the remainder is summarized.
@@ -61,7 +61,7 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
         .partition(|attempt| attempt.outcome.as_deref() == Some("completed"));
     render_built(&mut out, &built);
     render_stopped(db, &mut out, &stopped);
-    render_cost(&mut out, &attempts);
+    render_cost(db, &mut out, &attempts)?;
     render_judgment(&mut out, &session, &stopped);
     Ok(out)
 }
@@ -211,7 +211,11 @@ fn render_scope_detail(db: &Database, out: &mut String, attempt: &DriverAttempt)
 
 /// Known cost and unknown-cost attempts are reported separately: an
 /// unmeasurable attempt is never summed as zero.
-fn render_cost(out: &mut String, attempts: &[DriverAttempt]) {
+fn render_cost(
+    db: &Database,
+    out: &mut String,
+    attempts: &[DriverAttempt],
+) -> Result<(), ReportError> {
     let known: u64 = attempts
         .iter()
         .filter_map(|attempt| attempt.known_cost_microusd)
@@ -230,6 +234,58 @@ fn render_cost(out: &mut String, attempts: &[DriverAttempt]) {
         out,
         "  unknown: {unknown_count} attempt(s) with no measurable cost"
     );
+    let history = ExecutionHistoryRepository::new(db.conn());
+    let mut measured_input = 0_u64;
+    let mut cached = 0_u64;
+    let mut measured = 0_u64;
+    let mut unmeasured = 0_u64;
+    let mut savings = 0_u64;
+    let mut priced = 0_u64;
+    let mut unpriced = 0_u64;
+    for attempt in attempts {
+        let record = match attempt.execution_id.as_deref() {
+            Some(id) => history.get(id).map_err(storage)?,
+            None => None,
+        };
+        match record {
+            Some(record) => match (record.input_tokens, record.cached_tokens) {
+                (Some(input), Some(hit)) if hit <= input => {
+                    measured = measured.saturating_add(1);
+                    measured_input = measured_input.saturating_add(input);
+                    cached = cached.saturating_add(hit);
+                    match (record.input_rate, record.cached_input_rate) {
+                        (Some(full), Some(cache)) if cache <= full => {
+                            priced = priced.saturating_add(1);
+                            savings = savings.saturating_add(
+                                hit.saturating_mul(full - cache).saturating_add(500_000)
+                                    / 1_000_000,
+                            );
+                        }
+                        _ => unpriced = unpriced.saturating_add(1),
+                    }
+                }
+                _ => unmeasured = unmeasured.saturating_add(1),
+            },
+            None => unmeasured = unmeasured.saturating_add(1),
+        }
+    }
+    let _ = writeln!(out, "\nCACHE");
+    if measured_input == 0 {
+        let _ = writeln!(out, "  cached share: — (no measured input/cache pairs)");
+    } else {
+        let _ = writeln!(
+            out,
+            "  cached share: {:.2}% ({measured} measured attempt(s))",
+            cached as f64 * 100.0 / measured_input as f64
+        );
+    }
+    let _ = writeln!(out, "  unmeasured:   {unmeasured} attempt(s)");
+    let _ = writeln!(out, "  known savings: {savings} micro-USD across {priced} attempt(s) (persisted execution-history pricing)");
+    let _ = writeln!(
+        out,
+        "  savings without pricing provenance: {unpriced} attempt(s)"
+    );
+    Ok(())
 }
 
 fn render_judgment(out: &mut String, session: &DriverSession, stopped: &[&DriverAttempt]) {
@@ -426,6 +482,12 @@ mod tests {
              COST\n  \
              known:   2500 micro-USD across 1 attempt(s)\n  \
              unknown: 1 attempt(s) with no measurable cost\n\
+             \n\
+             CACHE\n  \
+             cached share: — (no measured input/cache pairs)\n  \
+             unmeasured:   2 attempt(s)\n  \
+             known savings: 0 micro-USD across 0 attempt(s) (persisted execution-history pricing)\n  \
+             savings without pricing provenance: 0 attempt(s)\n\
              \n\
              NEEDS HUMAN JUDGMENT (1)\n  \
              PRD-18 docs/prds/PRD-018.md\n    \

@@ -636,6 +636,27 @@ fn usage() -> Result<(), String> {
     println!("Known input tokens: {}", u.known_input_tokens);
     println!("Known output tokens: {}", u.known_output_tokens);
     println!("Known cached tokens: {}", u.known_cached_tokens);
+    if u.cache_measured_input_tokens > 0 {
+        println!(
+            "Cached input share: {:.2}% ({} measured execution(s))",
+            u.known_cached_tokens as f64 * 100.0 / u.cache_measured_input_tokens as f64,
+            u.cache_measured_executions
+        );
+    } else {
+        println!("Cached input share: — (no measured input/cache pairs)");
+    }
+    println!(
+        "Cache-unmeasured executions: {}",
+        u.cache_unmeasured_executions
+    );
+    println!(
+        "Known cache savings: {} micro-USD ({} execution(s), persisted execution-history pricing)",
+        u.known_cache_savings_microusd, u.cache_savings_priced_executions
+    );
+    println!(
+        "Cache-savings attempts without pricing provenance: {}",
+        u.cache_savings_unpriced_executions
+    );
     println!("Known total tokens: {}", u.known_total_tokens);
     println!("Executions with known cost: {}", u.known_cost_executions);
     println!(
