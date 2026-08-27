@@ -75,6 +75,13 @@ impl CodingAgent for CodexAgent {
         };
         let mut command = isolated_command(&self.executable, request.denied_read_path)?;
         command.arg("exec");
+        // Review packages intentionally live in fresh, non-repository
+        // directories. Their contents are bounded by Familiar and the real
+        // repository is denied by the isolation boundary, so Codex's Git
+        // trust check is inapplicable on this path.
+        if request.denied_read_path.is_some() {
+            command.arg("--skip-git-repo-check");
+        }
         if let Some(key) = request.prompt_cache_key {
             command.args(["--config", &format!("prompt_cache_key={key:?}")]);
         }
