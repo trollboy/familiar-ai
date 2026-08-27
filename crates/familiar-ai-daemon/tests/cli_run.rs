@@ -26,7 +26,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
         .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .args(["run", "docs/prds/PRD-024.md"])
+        .args(["run", "docs/prds/PRD-020.md"])
         .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
         .env("FAKE_CODEX_ARGS", &args)
@@ -46,7 +46,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
     assert!(args.ends_with("\"\n--json\n-\n"));
 
     let prompt = fs::read_to_string(capture).unwrap();
-    assert!(prompt.contains("# PRD-024: Enforceable Budgets for Agent Execution"));
+    assert!(prompt.contains("# PRD-020: Parallel Worktree Execution"));
     assert!(prompt.contains("## Authoritative reference: docs/contracts/event-model.md"));
 
     let db = familiar_ai_storage::Database::open(&database).unwrap();
@@ -74,7 +74,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .unwrap();
     assert!(history.status.success());
     let history = String::from_utf8(history.stdout).unwrap();
-    assert!(history.contains("docs/prds/PRD-024.md"));
+    assert!(history.contains("docs/prds/PRD-020.md"));
     assert!(history.contains("model: — (agent_not_reported)"));
 
     let usage = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
@@ -106,7 +106,7 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
     let started = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
         .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .args(["run", "docs/prds/PRD-024.md"])
+        .args(["run", "docs/prds/PRD-020.md"])
         .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
         .env(

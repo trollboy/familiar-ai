@@ -1562,7 +1562,7 @@ mod tests {
         };
 
         let error = execute_with_config(
-            &repository.join("docs/prds/PRD-024.md"),
+            &repository.join("docs/prds/PRD-020.md"),
             &same_agent(&agent),
             &config,
             &paths,
@@ -1574,7 +1574,7 @@ mod tests {
         assert_eq!(working_directory, &repository);
         assert_eq!(
             prompt,
-            &build_prompt(&repository, &repository.join("docs/prds/PRD-024.md"),).unwrap()
+            &build_prompt(&repository, &repository.join("docs/prds/PRD-020.md"),).unwrap()
         );
 
         let database = Database::open(&database_path).unwrap();
@@ -1597,7 +1597,7 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
-        let prd = repository.join("docs/prds/PRD-024.md");
+        let prd = repository.join("docs/prds/PRD-020.md");
         let expected = build_prompt(&repository, &prd).unwrap();
         let mut config = Config::default();
         config.execution_context.hard_ceiling_tokens = Some(u64::MAX);
@@ -1621,7 +1621,7 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
-        let prd = repository.join("docs/prds/PRD-024.md");
+        let prd = repository.join("docs/prds/PRD-020.md");
         let complete = ContextCompiler
             .compile(ContextRequest {
                 repository: &repository,
