@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -30,7 +31,7 @@ enum Command {
     Run { prd_path: PathBuf },
     /// Continue one durable partial, or inspect/schedule all durable partials.
     Resume {
-        /// PRD identifier (for example PRD-039), or `all`.
+        /// PRD identifier (for example PRD-123), or `all`.
         prd: String,
         #[arg(long)]
         dry_run: bool,
@@ -237,12 +238,71 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
     if !dry_run {
         db.run_migrations().map_err(|e| e.to_string())?;
     }
+    let repository_config = config.repository(&repository.worktree);
+    let discovered = FilesystemBacklogDiscovery
+        .discover_with_layout(&repository, &repository_config.layout())
+        .map_err(|e| e.to_string())?;
+    validate_graph(&discovered).map_err(|e| e.to_string())?;
+    let dependencies = discovered
+        .iter()
+        .map(|entry| {
+            (
+                entry.id.to_string(),
+                entry.dependencies.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let completed = discovered
+        .iter()
+        .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Archived)
+        .map(|entry| entry.id.to_string())
+        .collect::<BTreeSet<_>>();
+    let active_prds = discovered
+        .iter()
+        .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Active)
+        .map(|entry| (entry.id.to_string(), entry.path.to_string()))
+        .collect::<BTreeMap<_, _>>();
     let candidates = if prd == "all" {
-        familiar_ai_daemon::resume::discover(&db, &repository.key)?
+        familiar_ai_daemon::resume::discover_with_legacy(
+            &db,
+            &repository.key,
+            &paths.state_dir,
+            &active_prds,
+            !dry_run,
+        )?
     } else {
         vec![familiar_ai_daemon::resume::one(&db, &repository.key, prd)?]
     };
     print!("{}", familiar_ai_daemon::resume::render(&candidates));
+    let (waves, blocked) = if prd == "all" {
+        familiar_ai_daemon::resume::plan_waves(
+            &candidates,
+            &dependencies,
+            &completed,
+            config.driver.max_concurrency,
+        )
+    } else if candidates[0].valid {
+        (vec![vec![0]], Vec::new())
+    } else {
+        (
+            Vec::new(),
+            vec![(0, candidates[0].reason.clone().unwrap_or_default())],
+        )
+    };
+    for (wave, indexes) in waves.iter().enumerate() {
+        println!(
+            "wave={}\t{}",
+            wave + 1,
+            indexes
+                .iter()
+                .map(|index| candidates[*index].prd_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+    for (index, reason) in &blocked {
+        println!("blocked\t{}\treason={reason}", candidates[*index].prd_id);
+    }
     if dry_run {
         return Ok(());
     }
@@ -262,16 +322,68 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
         implementation: implementation.as_ref(),
         reviewer: reviewer.as_ref(),
     };
-    let mut failures = Vec::new();
-    for candidate in candidates.iter().filter(|c| c.valid) {
-        if let Err(error) = familiar_ai_daemon::run::resume_implemented_checkpoint(
-            &candidate.worktree,
-            &candidate.prd_id,
-            &agents,
-            &config,
-            &paths,
-        ) {
-            failures.push(format!("{}: {error}", candidate.prd_id));
+    let mut failures = blocked
+        .into_iter()
+        .map(|(index, reason)| format!("{}: {reason}", candidates[index].prd_id))
+        .collect::<Vec<_>>();
+    let mut failed_prds = BTreeSet::new();
+    for wave in waves {
+        let runnable = wave
+            .into_iter()
+            .filter(|index| {
+                let failed_dependencies = dependencies
+                    .get(&candidates[*index].prd_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|dependency| failed_prds.contains(*dependency))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if failed_dependencies.is_empty() {
+                    true
+                } else {
+                    failures.push(format!(
+                        "{}: dependency_failed: {}",
+                        candidates[*index].prd_id,
+                        failed_dependencies.join(",")
+                    ));
+                    failed_prds.insert(candidates[*index].prd_id.clone());
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+        let results = std::thread::scope(|scope| {
+            let handles = runnable
+                .iter()
+                .map(|index| {
+                    let candidate = &candidates[*index];
+                    scope.spawn(|| {
+                        (
+                            candidate.prd_id.clone(),
+                            familiar_ai_daemon::run::resume_implemented_checkpoint(
+                                &candidate.worktree,
+                                &candidate.prd_id,
+                                &agents,
+                                &config,
+                                &paths,
+                            ),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            match result {
+                Ok((_, Ok(_))) => {}
+                Ok((id, Err(error))) => {
+                    failed_prds.insert(id.clone());
+                    failures.push(format!("{id}: {error}"));
+                }
+                Err(_) => failures.push("resume_worker_panicked".into()),
+            }
         }
     }
     if failures.is_empty() {

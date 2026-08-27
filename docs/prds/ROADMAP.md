@@ -10,7 +10,7 @@ structured layout contract.
 
 ## Critical path: “have at it”
 
-1. PRD-039 — checkpointed execution and concurrent `resume all`. **Next.**
+1. PRD-039 — checkpointed execution and concurrent `resume all`. **Completed.**
 2. PRD-030 — structured PRD contract and profile-neutral dependencies. **Completed.**
 3. PRD-031 — worker capability registry and deterministic routing.
 4. PRD-019 — planner and one human batch-approval gate.
@@ -47,10 +47,10 @@ query consistently.
 
 ## Reconciliation record
 
-- PRDs 001–018, 021–027, 029, 030, and 034 are implemented and archived.
+- PRDs 001–018, 021–027, 029, 030, 034, and 039 are implemented and archived.
 - PRD-020 is partial and remains active.
-- PRDs 019, 020, 028, 031–033, and 035–039 are active; PRD-039 gates all
-  other active work until resumable recovery is implemented.
+- PRDs 019, 020, 028, 031–033, and 035–038 are active; checkpointed recovery
+  is now available for their execution.
 - PRDs 028 and 029, and the completion intent for PRD-027, were recovered from
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.

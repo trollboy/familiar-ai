@@ -4,16 +4,46 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use tempfile::tempdir;
 
+static CLI_RUN: Mutex<()> = Mutex::new(());
+
+fn fixture_repository(root: &std::path::Path) -> std::path::PathBuf {
+    let repository = root.join("repository");
+    fs::create_dir_all(repository.join("docs/prds")).unwrap();
+    fs::write(
+        repository.join("docs/prds/PRD-001.md"),
+        "# PRD-001: CLI fixture\n\n**Status:** Ready for implementation\n\n## Acceptance Criteria\n\n1. The fixture runs.\n\n## Expected Files\n\n- `src/fixture.rs`\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "user.name", "Test"],
+        vec!["add", "."],
+        vec!["commit", "-qm", "fixture"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&repository)
+            .status()
+            .unwrap()
+            .success());
+    }
+    repository
+}
+
 #[test]
 fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
+    let _guard = CLI_RUN.lock().unwrap();
     let temp = tempdir().unwrap();
     let fake = temp.path().join("codex");
     let capture = temp.path().join("prompt.txt");
     let database = temp.path().join("familiar.db");
+    let repository = fixture_repository(temp.path());
     fs::write(
         &fake,
         "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-cli 1.2.3\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\ncat > \"$FAKE_CODEX_PROMPT\"\nprintf '%s\\n' '{\"type\":\"turn.started\",\"model\":\"fake-model\"}'\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fake stdout\"}}'\nprintf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"cached_input_tokens\":3,\"output_tokens\":4}}'\nprintf 'fake stderr\\n' >&2\nexit 23\n",
@@ -25,8 +55,8 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
     let args = temp.path().join("args.txt");
 
     let output = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .args(["run", "docs/prds/PRD-039.md"])
+        .current_dir(&repository)
+        .args(["run", "docs/prds/PRD-001.md"])
         .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
         .env("FAKE_CODEX_ARGS", &args)
@@ -46,8 +76,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
     assert!(args.ends_with("\"\n--json\n-\n"));
 
     let prompt = fs::read_to_string(capture).unwrap();
-    assert!(prompt.contains("# PRD-039: Checkpointed Execution and Concurrent Resume"));
-    assert!(prompt.contains("## Authoritative reference: docs/contracts/event-model.md"));
+    assert!(prompt.contains("# PRD-001: CLI fixture"));
 
     let db = familiar_ai_storage::Database::open(&database).unwrap();
     let rows = familiar_ai_storage::ExecutionHistoryRepository::new(db.conn())
@@ -74,7 +103,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .unwrap();
     assert!(history.status.success());
     let history = String::from_utf8(history.stdout).unwrap();
-    assert!(history.contains("docs/prds/PRD-039.md"));
+    assert!(history.contains("docs/prds/PRD-001.md"));
     assert!(history.contains("model: — (agent_not_reported)"));
 
     let usage = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
@@ -92,8 +121,10 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
 
 #[test]
 fn structured_output_is_forwarded_before_fake_codex_exits() {
+    let _guard = CLI_RUN.lock().unwrap();
     let temp = tempdir().unwrap();
     let fake = temp.path().join("codex");
+    let repository = fixture_repository(temp.path());
     fs::write(
         &fake,
         "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-cli 1.2.3\\n'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"visible early\"}}'\nsleep 2\nexit 0\n",
@@ -105,8 +136,8 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
 
     let started = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .args(["run", "docs/prds/PRD-039.md"])
+        .current_dir(&repository)
+        .args(["run", "docs/prds/PRD-001.md"])
         .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
         .env(

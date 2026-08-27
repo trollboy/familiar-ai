@@ -10,7 +10,9 @@
 use std::fmt::Write as _;
 
 use familiar_ai_review::ScopeDecision;
-use familiar_ai_storage::{Database, DriverAttempt, ExecutionHistoryRepository, ReviewRepository};
+use familiar_ai_storage::{
+    CheckpointRepository, Database, DriverAttempt, ExecutionHistoryRepository, ReviewRepository,
+};
 use familiar_ai_storage::{DriverRepository, DriverSession};
 
 /// Attempts listed per section before the remainder is summarized.
@@ -61,9 +63,53 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
         .partition(|attempt| attempt.outcome.as_deref() == Some("completed"));
     render_built(&mut out, &built);
     render_stopped(db, &mut out, &stopped);
+    render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
     render_judgment(&mut out, &session, &stopped);
     Ok(out)
+}
+
+fn render_recovery(
+    db: &Database,
+    out: &mut String,
+    repository_key: &str,
+) -> Result<(), ReportError> {
+    let checkpoints = CheckpointRepository::new(db.conn())
+        .all(repository_key)
+        .map_err(storage)?;
+    let mut resumed = 0;
+    let mut completed = 0;
+    let mut blocked = 0;
+    let mut invalid = 0;
+    for checkpoint in &checkpoints {
+        match checkpoint.phase.as_str() {
+            "completed" | "integrated" => completed += 1,
+            "blocked" => blocked += 1,
+            "invalid_checkpoint" => invalid += 1,
+            _ => resumed += 1,
+        }
+    }
+    let _ = writeln!(out, "\nRECOVERY");
+    let _ = writeln!(
+        out,
+        "  resumable={resumed} completed={completed} blocked={blocked} skipped=0 invalid={invalid}"
+    );
+    for checkpoint in checkpoints.iter().take(MAX_LISTED_ATTEMPTS) {
+        let _ = writeln!(
+            out,
+            "  {}  phase={}  checkpoint={}{}",
+            checkpoint.prd_id,
+            checkpoint.phase,
+            checkpoint.checkpoint_id,
+            checkpoint
+                .invalid_reason
+                .as_ref()
+                .map(|reason| format!("  reason={reason}"))
+                .unwrap_or_default()
+        );
+    }
+    render_omitted(out, checkpoints.len(), MAX_LISTED_ATTEMPTS);
+    Ok(())
 }
 
 fn storage(error: impl std::fmt::Display) -> ReportError {
@@ -478,6 +524,9 @@ mod tests {
              STOPPED (1)\n  \
              PRD-18  docs/prds/PRD-018.md  reason=review_disabled\n\
              \x20\x20\x20\x20\x20\x20configuration: review=global execution_context=global\n\
+             \n\
+             RECOVERY\n  \
+             resumable=0 completed=0 blocked=0 skipped=0 invalid=0\n\
              \n\
              COST\n  \
              known:   2500 micro-USD across 1 attempt(s)\n  \

@@ -30,12 +30,28 @@ impl<'a> CheckpointRepository<'a> {
         Self { conn }
     }
 
+    pub fn schema_available(&self) -> familiar_ai_core::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_checkpoints')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db)
+    }
+
     pub fn put(&self, value: &ExecutionCheckpoint) -> familiar_ai_core::Result<()> {
         let now = Utc::now().to_rfc3339();
-        self.conn.execute(
+        let transaction = self.conn.unchecked_transaction().map_err(db)?;
+        transaction.execute(
             "INSERT INTO execution_checkpoints(checkpoint_id,repository_key,prd_id,prd_path,execution_id,phase,base_revision,worktree_path,branch_name,diff_hash,changed_files_json,agent_identity,usage_json,test_evidence_json,invalid_reason,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16) ON CONFLICT(repository_key,prd_id) DO UPDATE SET execution_id=excluded.execution_id,phase=excluded.phase,base_revision=excluded.base_revision,worktree_path=excluded.worktree_path,branch_name=excluded.branch_name,diff_hash=excluded.diff_hash,changed_files_json=excluded.changed_files_json,agent_identity=excluded.agent_identity,usage_json=excluded.usage_json,test_evidence_json=excluded.test_evidence_json,invalid_reason=excluded.invalid_reason,updated_at=excluded.updated_at",
             params![value.checkpoint_id,value.repository_key,value.prd_id,value.prd_path,value.execution_id,value.phase,value.base_revision,value.worktree_path,value.branch_name,value.diff_hash,value.changed_files_json,value.agent_identity,value.usage_json,value.test_evidence_json,value.invalid_reason,now]
         ).map_err(db)?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'checkpoint_created',NULL,?3,'implementation_checkpoint',?4)",
+            params![format!("{}:created", value.checkpoint_id), value.checkpoint_id, value.phase, now],
+        ).map_err(db)?;
+        transaction.commit().map_err(db)?;
         Ok(())
     }
 
@@ -60,17 +76,71 @@ impl<'a> CheckpointRepository<'a> {
         result
     }
 
+    pub fn all(&self, repository: &str) -> familiar_ai_core::Result<Vec<ExecutionCheckpoint>> {
+        let mut stmt=self.conn.prepare("SELECT checkpoint_id,repository_key,prd_id,prd_path,execution_id,phase,base_revision,worktree_path,branch_name,diff_hash,changed_files_json,agent_identity,usage_json,test_evidence_json,invalid_reason FROM execution_checkpoints WHERE repository_key=?1 ORDER BY prd_id,checkpoint_id").map_err(db)?;
+        let rows = stmt
+            .query_map([repository], map)
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        Ok(rows)
+    }
+
     pub fn set_phase(&self, checkpoint_id: &str, phase: &str) -> familiar_ai_core::Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE execution_checkpoints SET phase=?1,invalid_reason=NULL,updated_at=?2 WHERE checkpoint_id=?3",
-            params![phase, Utc::now().to_rfc3339(), checkpoint_id],
-        ).map_err(db)?;
-        if changed != 1 {
+        self.transition(checkpoint_id, phase, "phase_completed")
+    }
+
+    pub fn transition(
+        &self,
+        checkpoint_id: &str,
+        phase: &str,
+        detail: &str,
+    ) -> familiar_ai_core::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let transaction = self.conn.unchecked_transaction().map_err(db)?;
+        let prior: Option<String> = transaction
+            .query_row(
+                "SELECT phase FROM execution_checkpoints WHERE checkpoint_id=?1",
+                [checkpoint_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let Some(prior) = prior else {
             return Err(FamiliarError::Database(format!(
                 "checkpoint {checkpoint_id} not found"
             )));
+        };
+        if prior == phase {
+            return Ok(());
         }
+        let changed = transaction.execute(
+            "UPDATE execution_checkpoints SET phase=?1,invalid_reason=NULL,updated_at=?2 WHERE checkpoint_id=?3 AND phase=?4",
+            params![phase, now, checkpoint_id, prior],
+        ).map_err(db)?;
+        if changed != 1 {
+            return Err(FamiliarError::Database(format!(
+                "checkpoint {checkpoint_id} changed during transition"
+            )));
+        }
+        transaction.execute(
+            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,?4,?5,?6)",
+            params![format!("{checkpoint_id}:{phase}"), checkpoint_id, prior, phase, detail, now],
+        ).map_err(db)?;
+        transaction.commit().map_err(db)?;
         Ok(())
+    }
+
+    pub fn events(&self, checkpoint_id: &str) -> familiar_ai_core::Result<Vec<(String, String)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT resulting_phase,detail FROM execution_checkpoint_events WHERE checkpoint_id=?1 ORDER BY recorded_at,event_id",
+        ).map_err(db)?;
+        let events = statement
+            .query_map([checkpoint_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        Ok(events)
     }
 }
 

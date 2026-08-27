@@ -342,9 +342,18 @@ pub fn resume_implemented_checkpoint(
         paths,
         &mut trace,
     )?;
-    familiar_ai_storage::CheckpointRepository::new(db.conn())
-        .set_phase(&checkpoint.checkpoint_id, "completed")
-        .map_err(|e| RunError::Storage(e.to_string()))?;
+    let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+    for (phase, detail) in [
+        ("verified", "required_verification_passed"),
+        ("reviewed", "independent_review_clean"),
+        ("approved", "review_disposition_ready"),
+        ("integrated", "backlog_completion_committed"),
+        ("completed", "resume_completed"),
+    ] {
+        checkpoints
+            .transition(&checkpoint.checkpoint_id, phase, detail)
+            .map_err(|e| RunError::Storage(e.to_string()))?;
+    }
     Ok(completed)
 }
 
@@ -773,9 +782,18 @@ fn finish_implementation(
         .get(&repository.key, &target.id.to_string())
         .map_err(|e| RunError::Storage(e.to_string()))?
     {
-        familiar_ai_storage::CheckpointRepository::new(db.conn())
-            .set_phase(&checkpoint.checkpoint_id, "completed")
-            .map_err(|e| RunError::Storage(e.to_string()))?;
+        let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+        for (phase, detail) in [
+            ("verified", "required_verification_passed"),
+            ("reviewed", "independent_review_clean"),
+            ("approved", "review_disposition_ready"),
+            ("integrated", "backlog_completion_committed"),
+            ("completed", "execution_completed"),
+        ] {
+            checkpoints
+                .transition(&checkpoint.checkpoint_id, phase, detail)
+                .map_err(|e| RunError::Storage(e.to_string()))?;
+        }
     }
     eprintln!(
         "backlog: {} {} in_progress -> completed actor={actor}",
@@ -1679,6 +1697,53 @@ mod tests {
         result: ExecutionResult,
     }
 
+    fn execution_fixture_repository(root: &Path) -> PathBuf {
+        let repository = root.join("repository");
+        fs::create_dir_all(repository.join("docs/prds")).unwrap();
+        fs::create_dir_all(repository.join("docs/contracts")).unwrap();
+        fs::write(
+            repository.join("docs/prds/PRD-001.md"),
+            "# PRD-001: execution fixture\n\n**Status:** Ready for implementation\n\n## Acceptance Criteria\n\n1. The fixture executes.\n\n## Expected Files\n\n- `src/fixture.rs`\n\n## Reference Context\n\n- `docs/contracts/input.md`\n",
+        )
+        .unwrap();
+        fs::write(
+            repository.join("docs/contracts/input.md"),
+            "# Fixture contract\n\nAuthoritative fixture content.\n",
+        )
+        .unwrap();
+        for arguments in [
+            &["init", "-q"][..],
+            &["add", "."][..],
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ][..],
+        ] {
+            assert!(Command::new("git")
+                .args(arguments)
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success());
+        }
+        repository.canonicalize().unwrap()
+    }
+
+    fn execute_fixture(
+        repository: &Path,
+        prd: &Path,
+        agents: &AgentSet<'_>,
+        config: &Config,
+        paths: &AppPaths,
+    ) -> Result<RunWorkflowResult, RunError> {
+        execute_with_config_tracked_from(repository, prd, agents, config, paths).0
+    }
+
     impl CodingAgent for FakeAgent {
         fn execute(
             &self,
@@ -1744,13 +1809,7 @@ mod tests {
     #[test]
     fn orchestration_uses_neutral_agent_and_preserves_history_mapping() {
         let temp = tempfile::tempdir().unwrap();
-        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .canonicalize()
-            .unwrap();
+        let repository = execution_fixture_repository(temp.path());
         let mut config = Config::default();
         let database_path = temp.path().join("history.db");
         config.database.path = Some(database_path.clone());
@@ -1778,20 +1837,21 @@ mod tests {
             },
         };
 
-        let error = execute_with_config(
-            &repository.join("docs/prds/PRD-039.md"),
+        let error = execute_fixture(
+            &repository,
+            &repository.join("docs/prds/PRD-001.md"),
             &same_agent(&agent),
             &config,
             &paths,
         )
         .unwrap_err();
-        assert_eq!(error.exit_code(), Some(23));
+        assert_eq!(error.exit_code(), Some(23), "{error:?}");
         let captured = agent.request.lock().unwrap();
         let (working_directory, prompt) = captured.as_ref().unwrap();
         assert_eq!(working_directory, &repository);
         assert_eq!(
             prompt,
-            &build_prompt(&repository, &repository.join("docs/prds/PRD-039.md"),).unwrap()
+            &build_prompt(&repository, &repository.join("docs/prds/PRD-001.md"),).unwrap()
         );
 
         let database = Database::open(&database_path).unwrap();
@@ -1807,14 +1867,8 @@ mod tests {
     #[test]
     fn all_fit_budget_preserves_prompt_bytes() {
         let temp = tempfile::tempdir().unwrap();
-        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .canonicalize()
-            .unwrap();
-        let prd = repository.join("docs/prds/PRD-039.md");
+        let repository = execution_fixture_repository(temp.path());
+        let prd = repository.join("docs/prds/PRD-001.md");
         let expected = build_prompt(&repository, &prd).unwrap();
         let mut config = Config::default();
         config.execution_context.hard_ceiling_tokens = Some(u64::MAX);
@@ -1822,23 +1876,25 @@ mod tests {
         let paths = test_paths(temp.path());
         let agent = successful_fake_agent();
 
-        execute_with_config(&prd, &same_agent(&agent), &config, &paths).unwrap_err();
+        let error =
+            execute_fixture(&repository, &prd, &same_agent(&agent), &config, &paths).unwrap_err();
 
         let captured = agent.request.lock().unwrap();
-        assert_eq!(captured.as_ref().unwrap().1.as_bytes(), expected.as_bytes());
+        assert_eq!(
+            captured
+                .as_ref()
+                .unwrap_or_else(|| panic!("{error:?}"))
+                .1
+                .as_bytes(),
+            expected.as_bytes()
+        );
     }
 
     #[test]
     fn selective_budget_renders_only_selected_whole_documents() {
         let temp = tempfile::tempdir().unwrap();
-        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .canonicalize()
-            .unwrap();
-        let prd = repository.join("docs/prds/PRD-039.md");
+        let repository = execution_fixture_repository(temp.path());
+        let prd = repository.join("docs/prds/PRD-001.md");
         let complete = ContextCompiler
             .compile(ContextRequest {
                 repository: &repository,
@@ -1868,7 +1924,7 @@ mod tests {
         let paths = test_paths(temp.path());
         let agent = successful_fake_agent();
 
-        execute_with_config(&prd, &same_agent(&agent), &config, &paths).unwrap_err();
+        execute_fixture(&repository, &prd, &same_agent(&agent), &config, &paths).unwrap_err();
 
         let captured = agent.request.lock().unwrap();
         assert_eq!(captured.as_ref().unwrap().1, expected_prompt);
