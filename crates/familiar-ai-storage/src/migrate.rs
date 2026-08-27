@@ -88,6 +88,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 20,
         sql: include_str!("../migrations/020_worker_selections.sql"),
     },
+    Migration {
+        version: 21,
+        sql: include_str!("../migrations/021_delivery_policy.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_ai_core::Result<usize> {
@@ -200,7 +204,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 20);
+        assert_eq!(first, 21);
         assert_eq!(second, 0);
     }
 
@@ -219,7 +223,7 @@ mod tests {
         };
         assert_eq!(
             versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
         );
     }
 
@@ -262,7 +266,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 18);
+        assert_eq!(db.run_migrations().unwrap(), 19);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -318,7 +322,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 14);
+        assert_eq!(db.run_migrations().unwrap(), 15);
         let project: (String, String) = db
             .conn()
             .query_row(
@@ -349,7 +353,7 @@ mod tests {
                 .unwrap();
         }
         db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
-        assert_eq!(db.run_migrations().unwrap(), 13);
+        assert_eq!(db.run_migrations().unwrap(), 14);
         let preserved: String = db
             .conn()
             .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
@@ -383,7 +387,7 @@ mod tests {
         db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(3,'repo','docs/prds/PRD-009.md','pending','completed','human:alice','before')",[]).unwrap();
         db.conn().execute("INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(3,'manual_complete_override','accepted outside normal review')",[]).unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 10);
+        assert_eq!(db.run_migrations().unwrap(), 11);
 
         let rows: Vec<(i64, String, String)> = {
             let mut stmt = db

@@ -16,7 +16,9 @@ use familiar_ai_core::{
     validate_graph, AppPaths, BacklogDiscovery, BacklogStatus, BacklogStatusStore, Config,
     DiscoveredPrd, FilesystemBacklogDiscovery, PrdId, RepositoryIdentity,
 };
-use familiar_ai_storage::{Database, DriverRepository, ExecutionHistoryRepository};
+use familiar_ai_storage::{
+    Database, DeliveryRepository, DriverRepository, ExecutionHistoryRepository,
+};
 
 use crate::run::{execute_with_config_tracked_from_preflighted, AgentSet};
 
@@ -353,11 +355,6 @@ pub fn drive(
             "driver.max_concurrency must be positive".into(),
         ));
     }
-    if config.delivery.enabled && parallelism == 1 && !config.driver.isolated_worktrees {
-        return Err(DriveError::Config(
-            "delivery requires driver.isolated_worktrees=true".into(),
-        ));
-    }
     let current = std::env::current_dir().map_err(|error| {
         DriveError::Config(format!("cannot resolve current directory: {error}"))
     })?;
@@ -371,6 +368,15 @@ pub fn drive(
                 DriveError::Config(format!("cannot acquire driver ownership: {error}"))
             })?;
     let repository_config = config.repository(&repository.worktree);
+    let delivery_policy = repository_config.delivery.as_ref();
+    if delivery_policy.is_some_and(|policy| policy.mode != familiar_ai_core::DeliveryMode::Disabled)
+        && parallelism == 1
+        && !config.driver.isolated_worktrees
+    {
+        return Err(DriveError::Config(
+            "delivery requires driver.isolated_worktrees=true".into(),
+        ));
+    }
     let effective = config.effective_execution(&repository.worktree);
     let review_configuration_source = effective.review_source.as_str();
     let execution_context_configuration_source = effective.execution_context_source.as_str();
@@ -425,6 +431,7 @@ pub fn drive(
     let mut known_cost = 0_u64;
     let mut known_tokens = 0_u64;
     let mut delivered = 0_u64;
+    let mut poc_risks_accepted = 0_u64;
     let mut stopped_components = BTreeSet::new();
     let mut component_worktrees = BTreeMap::<String, crate::worktree::WorktreeLease>::new();
 
@@ -695,7 +702,7 @@ pub fn drive(
                     .as_ref()
                     .is_some_and(crate::worktree::WorktreeHeartbeatGuard::failed);
                 drop(worktree_heartbeat);
-                let (result, trace) = match execution {
+                let (mut result, trace) = match execution {
                     Ok(value) => value,
                     Err(_) => {
                         eprintln!("drive: attempt worker panicked for {}", target.id);
@@ -735,6 +742,64 @@ pub fn drive(
                         continue;
                     }
                 };
+                if let Err(crate::run::RunError::HumanReviewRequired {
+                    result: implementation,
+                    cycle,
+                    prd_id,
+                }) = &result
+                {
+                    if let Some(policy) = delivery_policy.filter(|policy| {
+                        policy.mode == familiar_ai_core::DeliveryMode::PocSelfApproval
+                    }) {
+                        let warrant = policy.poc_warrant.as_ref().expect("validated PoC warrant");
+                        let unexpired = chrono::DateTime::parse_from_rfc3339(&warrant.expires_at)
+                            .is_ok_and(|expiry| expiry > chrono::Utc::now());
+                        if unexpired && poc_risks_accepted < warrant.max_prds {
+                            let accepted_implementation = implementation.as_ref().clone();
+                            let findings=serde_json::json!({"review":cycle.review_result.as_ref().map(|review| &review.findings),"scope":cycle.scope_evaluations.iter().flat_map(|evaluation| &evaluation.findings).collect::<Vec<_>>()}).to_string();
+                            let stops = serde_json::to_string(&cycle.stop_reasons)
+                                .unwrap_or_else(|_| "[]".into());
+                            let acceptance_root = worktree
+                                .as_ref()
+                                .map_or(repository.worktree.as_path(), |lease| lease.path());
+                            match crate::run::accept_review_risk(
+                                acceptance_root,
+                                prd_id,
+                                &warrant.actor,
+                                cycle,
+                                config,
+                                paths,
+                            ) {
+                                Ok(()) => {
+                                    poc_risks_accepted = poc_risks_accepted.saturating_add(1);
+                                    let warrant_json = serde_json::to_string(warrant)
+                                        .unwrap_or_else(|_| "{}".into());
+                                    let _ = DeliveryRepository::new(db.conn())
+                                        .record_authority_decision(
+                                            &format!("poc-risk:{}:{prd_id}", session_id),
+                                            &repository.key,
+                                            &session_id,
+                                            prd_id,
+                                            "poc_self_approval",
+                                            &warrant.actor,
+                                            "accepted_reviewed_risk",
+                                            Some(&warrant.assurance_label),
+                                            &findings,
+                                            &stops,
+                                            Some(&warrant_json),
+                                            poc_risks_accepted,
+                                        );
+                                    result = Ok(crate::run::RunWorkflowResult {
+                                        implementation: accepted_implementation,
+                                    });
+                                }
+                                Err(error) => eprintln!(
+                                    "drive: PoC risk acceptance failed for {prd_id}: {error}"
+                                ),
+                            }
+                        }
+                    }
+                }
                 if heartbeat_failed {
                     eprintln!("drive: worktree heartbeat failed for {}", target.id);
                     batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
@@ -812,15 +877,20 @@ pub fn drive(
                         batch_stop = Some(DriveTermination::StorageFailure);
                         continue;
                     }
-                    if result.is_ok() && config.delivery.enabled {
-                        if delivered >= config.delivery.max_deliveries_per_session {
+                    if result.is_ok()
+                        && delivery_policy.is_some_and(|policy| {
+                            policy.mode != familiar_ai_core::DeliveryMode::Disabled
+                        })
+                    {
+                        let policy = delivery_policy.expect("checked delivery policy");
+                        if delivered >= policy.max_deliveries_per_session {
                             batch_stop.get_or_insert(DriveTermination::BudgetDeliveriesExhausted);
                         } else {
                             let delivery_heartbeat = lease.start_heartbeat(Duration::from_secs(
                                 config.daemon.heartbeat_interval_secs.max(1),
                             ));
                             let delivery_result =
-                                crate::delivery::deliver(lease.ownership_path(), &config.delivery);
+                                crate::delivery::deliver(lease.ownership_path(), policy);
                             let delivery_heartbeat_failed = delivery_heartbeat.failed();
                             drop(delivery_heartbeat);
                             if delivery_heartbeat_failed {

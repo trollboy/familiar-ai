@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -373,15 +374,17 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
                 .map(|index| {
                     let candidate = &candidates[*index];
                     scope.spawn(|| {
+                        let resumed = familiar_ai_daemon::run::resume_implemented_checkpoint(
+                            &candidate.worktree,
+                            &candidate.prd_id,
+                            &agents,
+                            &config,
+                            &paths,
+                        );
                         (
                             candidate.prd_id.clone(),
-                            familiar_ai_daemon::run::resume_implemented_checkpoint(
-                                &candidate.worktree,
-                                &candidate.prd_id,
-                                &agents,
-                                &config,
-                                &paths,
-                            ),
+                            candidate.worktree.clone(),
+                            resumed,
                         )
                     })
                 })
@@ -393,10 +396,15 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
         });
         for result in results {
             match result {
-                Ok((_, Ok(_))) => {}
-                Ok((id, Err(error))) => {
-                    failed_prds.insert(id.clone());
-                    failures.push(format!("{id}: {error}"));
+                Ok((_, _, Ok(_))) => {}
+                Ok((id, worktree, Err(error))) => {
+                    match handle_attached_review(Err(error), &worktree, &config, &paths, &agents) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            failed_prds.insert(id.clone());
+                            failures.push(format!("{id}: {error}"));
+                        }
+                    }
                 }
                 Err(_) => failures.push("resume_worker_panicked".into()),
             }
@@ -561,7 +569,9 @@ fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {
     .map_err(|e| format!("cannot acquire mutating orchestrator ownership: {e}"))?;
     let config =
         Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
-    let result = familiar_ai_daemon::delivery::deliver(ownership_record, &config.delivery)?;
+    let repository_config = config.repository(&repository.worktree);
+    let policy = repository_config.delivery_policy()?;
+    let result = familiar_ai_daemon::delivery::deliver(ownership_record, policy)?;
     println!(
         "delivery_session={} prd={} phase={} pr={}",
         result.session_id,
@@ -635,7 +645,7 @@ fn run(prd_path: &std::path::Path) -> Result<(), familiar_ai_daemon::run::RunErr
     let implementation = build_agent(&implementation_entry);
     let reviewer = build_agent(&reviewer_entry);
     let remediation = build_agent(&resolved_remediation_entry(&config).map_err(RunError::Config)?);
-    execute_with_config(
+    let result = execute_with_config(
         prd_path,
         &AgentSet {
             implementation: implementation.as_ref(),
@@ -644,8 +654,127 @@ fn run(prd_path: &std::path::Path) -> Result<(), familiar_ai_daemon::run::RunErr
         },
         &config,
         &paths,
+    );
+    handle_attached_review(
+        result,
+        &repository.worktree,
+        &config,
+        &paths,
+        &AgentSet {
+            implementation: implementation.as_ref(),
+            reviewer: reviewer.as_ref(),
+            remediation: remediation.as_ref(),
+        },
     )
-    .map(|_| ())
+}
+
+fn handle_attached_review(
+    mut result: Result<
+        familiar_ai_daemon::run::RunWorkflowResult,
+        familiar_ai_daemon::run::RunError,
+    >,
+    worktree: &std::path::Path,
+    config: &Config,
+    paths: &AppPaths,
+    agents: &AgentSet<'_>,
+) -> Result<(), familiar_ai_daemon::run::RunError> {
+    loop {
+        match result {
+            Ok(_) => return Ok(()),
+            Err(familiar_ai_daemon::run::RunError::HumanReviewRequired {
+                result: implementation,
+                cycle,
+                prd_id,
+            }) => {
+                eprintln!("HumanReviewRequired prd={prd_id}");
+                eprintln!(
+                    "stop_reasons={}",
+                    serde_json::to_string(&cycle.stop_reasons).unwrap_or_else(|_| "[]".into())
+                );
+                if let Some(review) = &cycle.review_result {
+                    for finding in &review.findings {
+                        eprintln!(
+                            "finding {} {:?}: {}",
+                            finding.finding_id, finding.severity, finding.title
+                        );
+                    }
+                }
+                for finding in cycle
+                    .scope_evaluations
+                    .iter()
+                    .flat_map(|evaluation| &evaluation.findings)
+                {
+                    eprintln!("scope_finding {}: {}", finding.rule_id, finding.rule_detail);
+                }
+                if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+                    eprintln!("non-interactive input: preserving checkpoint");
+                    return Err(familiar_ai_daemon::run::RunError::HumanReviewRequired {
+                        result: implementation,
+                        cycle,
+                        prd_id,
+                    });
+                }
+                eprint!("Choose [r]etry remediation, [a]ccept reviewed risk, or [p]reserve checkpoint: ");
+                let _ = io::stderr().flush();
+                let mut choice = String::new();
+                if io::stdin().read_line(&mut choice).unwrap_or(0) == 0 {
+                    eprintln!("EOF: preserving checkpoint");
+                    return Err(familiar_ai_daemon::run::RunError::HumanReviewRequired {
+                        result: implementation,
+                        cycle,
+                        prd_id,
+                    });
+                }
+                match choice.trim().to_ascii_lowercase().as_str() {
+                    "r" | "retry" => {
+                        result = familiar_ai_daemon::run::resume_implemented_checkpoint(
+                            worktree, &prd_id, agents, config, paths,
+                        );
+                    }
+                    "a" | "accept" | "accept-risk" => {
+                        eprint!("Actor accepting this exact risk (human:<identity>): ");
+                        let _ = io::stderr().flush();
+                        let mut actor = String::new();
+                        if io::stdin().read_line(&mut actor).unwrap_or(0) == 0
+                            || actor.trim().is_empty()
+                        {
+                            eprintln!("missing actor: preserving checkpoint");
+                            return Err(familiar_ai_daemon::run::RunError::HumanReviewRequired {
+                                result: implementation,
+                                cycle,
+                                prd_id,
+                            });
+                        }
+                        familiar_ai_daemon::run::accept_review_risk(
+                            worktree,
+                            &prd_id,
+                            actor.trim(),
+                            &cycle,
+                            config,
+                            paths,
+                        )?;
+                        return Ok(());
+                    }
+                    "p" | "preserve" => {
+                        return Err(familiar_ai_daemon::run::RunError::HumanReviewRequired {
+                            result: implementation,
+                            cycle,
+                            prd_id,
+                        })
+                    }
+                    _ => {
+                        eprintln!("unknown choice: preserving checkpoint");
+                        return Err(familiar_ai_daemon::run::RunError::HumanReviewRequired {
+                            result: implementation,
+                            cycle,
+                            prd_id,
+                        });
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Composition root for the unattended driver: same agent construction as

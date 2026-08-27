@@ -13,7 +13,7 @@ structured layout contract.
 1. PRD-039 — checkpointed execution and concurrent `resume all`. **Completed.**
 2. PRD-030 — structured PRD contract and profile-neutral dependencies. **Completed.**
 3. PRD-031 — worker capability registry and deterministic routing. **Completed.**
-4. PRD-033 — actionable review decisions and repository delivery policy.
+4. PRD-033 — actionable review decisions and repository delivery policy. **Completed.**
 5. PRD-019 — planner and one human batch-approval gate.
 6. PRD-020 — reconcile parallel scheduling with the canonical graph. **Completed.**
 7. PRD-034 — portable persistent worker. **Completed.**
@@ -47,8 +47,8 @@ query consistently.
 
 ## Reconciliation record
 
-- PRDs 001–018, 020–031, 034, and 039 are implemented and archived.
-- PRDs 019, 032–033, and 035–038 are active; checkpointed recovery
+- PRDs 001–018, 020–031, 033–034, and 039 are implemented and archived.
+- PRDs 019, 032, and 035–038 are active; checkpointed recovery
   is now available for their execution.
 - PRDs 028 and 029, and the completion intent for PRD-027, were recovered from
   `origin/prd-023-location-is-truth`; divergent old implementation commits were

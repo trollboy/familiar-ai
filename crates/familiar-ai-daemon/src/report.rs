@@ -11,7 +11,8 @@ use std::fmt::Write as _;
 
 use familiar_ai_review::ScopeDecision;
 use familiar_ai_storage::{
-    CheckpointRepository, Database, DriverAttempt, ExecutionHistoryRepository, ReviewRepository,
+    CheckpointRepository, Database, DeliveryRepository, DriverAttempt, ExecutionHistoryRepository,
+    ReviewRepository,
 };
 use familiar_ai_storage::{DriverRepository, DriverSession};
 
@@ -63,10 +64,36 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
         .partition(|attempt| attempt.outcome.as_deref() == Some("completed"));
     render_built(db, &mut out, &built);
     render_stopped(db, &mut out, &stopped);
+    render_authority(db, &mut out, &session.session_id)?;
     render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
     render_judgment(&mut out, &session, &stopped);
     Ok(out)
+}
+
+fn render_authority(db: &Database, out: &mut String, session_id: &str) -> Result<(), ReportError> {
+    let decisions = DeliveryRepository::new(db.conn())
+        .decisions_for_session(session_id)
+        .map_err(storage)?;
+    if decisions.is_empty() {
+        return Ok(());
+    }
+    let _ = writeln!(out, "\nAUTHORITY DECISIONS ({})", decisions.len());
+    for decision in decisions {
+        let _ = writeln!(
+            out,
+            "  {} mode={} actor={} decision={} assurance={} warrant_consumed={}",
+            decision.prd_id,
+            decision.mode,
+            decision.actor,
+            decision.decision,
+            decision.assurance_label.as_deref().unwrap_or("standard"),
+            decision.warrant_consumed
+        );
+        let _ = writeln!(out, "      stop_reasons={}", decision.stop_reasons_json);
+        let _ = writeln!(out, "      findings={}", decision.findings_json);
+    }
+    Ok(())
 }
 
 fn render_recovery(

@@ -109,9 +109,12 @@ impl WorkerConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryConfig {
+    #[serde(default = "default_delivery_mode")]
+    pub mode: DeliveryMode,
+    /// Legacy compatibility input; it never grants automatic authority.
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -122,6 +125,11 @@ pub struct DeliveryConfig {
     pub remote: String,
     #[serde(default = "default_delivery_base")]
     pub base: String,
+    /// Provider adapter executable and arguments; no repository or account
+    /// identity is embedded.
+    #[serde(default)]
+    pub provider_argv: Vec<String>,
+    /// Legacy compatibility input; repository mode remains authoritative.
     #[serde(default)]
     pub auto_merge: bool,
     #[serde(default)]
@@ -134,14 +142,84 @@ pub struct DeliveryConfig {
     pub rollback_argv: Vec<String>,
     #[serde(default)]
     pub comment_blockers: bool,
+    #[serde(default)]
+    pub required_checks: Vec<String>,
+    #[serde(default)]
+    pub migration_gate_argv: Vec<String>,
+    #[serde(default)]
+    pub credential_references: Vec<String>,
+    #[serde(default)]
+    pub poc_warrant: Option<PocSelfApprovalWarrant>,
+    #[serde(default)]
+    pub review_gate: Option<ReviewGateConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    Disabled,
+    ReviewedPrManual,
+    PocSelfApproval,
+    ReviewGatedAutomatic,
+}
+
+fn default_delivery_mode() -> DeliveryMode {
+    DeliveryMode::ReviewedPrManual
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            mode: DeliveryMode::Disabled,
+            enabled: false,
+            max_deliveries_per_session: 0,
+            command_timeout_ms: default_delivery_command_timeout_ms(),
+            remote: default_delivery_remote(),
+            base: default_delivery_base(),
+            provider_argv: Vec::new(),
+            auto_merge: false,
+            staging_environment: String::new(),
+            deploy_argv: Vec::new(),
+            smoke_argv: Vec::new(),
+            rollback_argv: Vec::new(),
+            comment_blockers: false,
+            required_checks: Vec::new(),
+            migration_gate_argv: Vec::new(),
+            credential_references: Vec::new(),
+            poc_warrant: None,
+            review_gate: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PocSelfApprovalWarrant {
+    pub actor: String,
+    pub max_prds: u64,
+    pub expires_at: String,
+    #[serde(default = "low_assurance_label")]
+    pub assurance_label: String,
+}
+
+fn low_assurance_label() -> String {
+    "LOW_ASSURANCE_POC_SELF_APPROVAL".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewGateConfig {
+    pub implementer: String,
+    pub reviewer: String,
+    pub approver: String,
 }
 
 fn default_delivery_remote() -> String {
-    "origin".into()
+    String::new()
 }
 
 fn default_delivery_base() -> String {
-    "main".into()
+    String::new()
 }
 
 fn default_delivery_command_timeout_ms() -> u64 {
@@ -150,7 +228,7 @@ fn default_delivery_command_timeout_ms() -> u64 {
 
 impl DeliveryConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if !self.enabled {
+        if self.mode == DeliveryMode::Disabled {
             return Ok(());
         }
         if self.max_deliveries_per_session == 0 {
@@ -162,16 +240,79 @@ impl DeliveryConfig {
         if self.remote.trim().is_empty() || self.base.trim().is_empty() {
             return Err("delivery remote and base must be non-empty".into());
         }
-        if self.staging_environment != "staging" {
-            return Err("delivery staging_environment must be exactly 'staging'".into());
+        if self.provider_argv.is_empty() {
+            return Err("delivery requires a configured provider_argv adapter".into());
         }
-        if self.deploy_argv.is_empty()
-            || self.smoke_argv.is_empty()
-            || self.rollback_argv.is_empty()
+        if self.automatically_authorized() {
+            if self.staging_environment.trim().is_empty() {
+                return Err("automatic delivery staging_environment must be configured".into());
+            }
+            if self.deploy_argv.is_empty()
+                || self.smoke_argv.is_empty()
+                || self.rollback_argv.is_empty()
+            {
+                return Err("automatic delivery requires deploy, smoke, and rollback argv".into());
+            }
+        }
+        if self
+            .credential_references
+            .iter()
+            .any(|value| value.trim().is_empty())
         {
-            return Err("delivery requires deploy, smoke, and rollback argv for staging".into());
+            return Err("delivery credential references must be non-empty names".into());
+        }
+        match self.mode {
+            DeliveryMode::PocSelfApproval => {
+                let warrant = self
+                    .poc_warrant
+                    .as_ref()
+                    .ok_or_else(|| "PoC self-approval requires an explicit warrant".to_owned())?;
+                if !warrant.actor.starts_with("human:")
+                    || warrant.max_prds == 0
+                    || warrant.expires_at.trim().is_empty()
+                {
+                    return Err(
+                        "PoC self-approval warrant requires a human: actor, finite max_prds, and expires_at"
+                            .into(),
+                    );
+                }
+                if warrant.assurance_label != low_assurance_label() {
+                    return Err("PoC self-approval must use the visible LOW_ASSURANCE_POC_SELF_APPROVAL label".into());
+                }
+                if chrono::DateTime::parse_from_rfc3339(&warrant.expires_at).is_err() {
+                    return Err("PoC self-approval warrant expires_at must be RFC3339".into());
+                }
+                if self.max_deliveries_per_session > warrant.max_prds {
+                    return Err("PoC delivery session cannot exceed the warrant max_prds".into());
+                }
+                if self.staging_environment.eq_ignore_ascii_case("production")
+                    || self.staging_environment.eq_ignore_ascii_case("prod")
+                {
+                    return Err("PoC self-approval prohibits production delivery".into());
+                }
+            }
+            DeliveryMode::ReviewGatedAutomatic => {
+                let gate = self.review_gate.as_ref().ok_or_else(|| "review-gated automatic delivery requires implementer, reviewer, and approver identities".to_owned())?;
+                if gate.implementer.trim().is_empty()
+                    || gate.reviewer.trim().is_empty()
+                    || gate.approver.trim().is_empty()
+                    || gate.implementer == gate.reviewer
+                    || gate.implementer == gate.approver
+                    || gate.reviewer == gate.approver
+                {
+                    return Err("review-gated delivery requires three distinct non-empty implementer, reviewer, and approver identities".into());
+                }
+            }
+            DeliveryMode::Disabled | DeliveryMode::ReviewedPrManual => {}
         }
         Ok(())
+    }
+
+    pub fn automatically_authorized(&self) -> bool {
+        matches!(
+            self.mode,
+            DeliveryMode::PocSelfApproval | DeliveryMode::ReviewGatedAutomatic
+        )
     }
 }
 
@@ -215,6 +356,10 @@ pub struct RepositoryConfig {
     pub review: Option<ReviewConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_context: Option<ExecutionContextConfig>,
+    /// Repository-owned delivery authority. Absence is fail-closed at the
+    /// publication boundary; the global legacy delivery section grants none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -256,11 +401,17 @@ impl Default for RepositoryConfig {
             reference_roots: Vec::new(),
             review: None,
             execution_context: None,
+            delivery: None,
         }
     }
 }
 
 impl RepositoryConfig {
+    pub fn delivery_policy(&self) -> Result<&DeliveryConfig, String> {
+        self.delivery.as_ref().ok_or_else(|| {
+            "repository delivery policy is missing; merge and deploy are not authorized".into()
+        })
+    }
     pub fn layout(&self) -> crate::BacklogLayout {
         crate::BacklogLayout {
             profile: crate::BacklogProfile::parse(&self.profile).expect("validated profile"),
@@ -1924,6 +2075,11 @@ impl Config {
                     })?;
                 }
             }
+            if let Some(delivery) = &entry.delivery {
+                delivery.validate().map_err(|error| {
+                    FamiliarError::Config(format!("repositories.{worktree}.delivery: {error}"))
+                })?;
+            }
             let absolute = Path::new(worktree);
             if !absolute.is_absolute() {
                 return Err(FamiliarError::Config(format!(
@@ -2079,6 +2235,31 @@ mod tests {
         assert_eq!(config.worker.max_prds_per_run, 1);
         assert_eq!(config.worker.restart_throttle_secs, 10);
         assert_eq!(config.review.max_review_attempts, 3);
+    }
+
+    #[test]
+    fn delivery_modes_are_explicit_and_fail_closed() {
+        let repository = RepositoryConfig::default();
+        assert!(repository
+            .delivery_policy()
+            .unwrap_err()
+            .contains("missing"));
+        let mut policy = DeliveryConfig {
+            mode: DeliveryMode::PocSelfApproval,
+            enabled: true,
+            max_deliveries_per_session: 1,
+            remote: "configured-remote".into(),
+            base: "configured-base".into(),
+            staging_environment: "staging".into(),
+            provider_argv: vec!["adapter".into()],
+            deploy_argv: vec!["deploy".into()],
+            smoke_argv: vec!["health".into()],
+            rollback_argv: vec!["rollback".into()],
+            ..DeliveryConfig::default()
+        };
+        assert!(policy.validate().unwrap_err().contains("explicit warrant"));
+        policy.mode = DeliveryMode::ReviewGatedAutomatic;
+        assert!(policy.validate().unwrap_err().contains("implementer"));
     }
 
     #[test]

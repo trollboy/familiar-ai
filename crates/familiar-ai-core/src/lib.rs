@@ -19,10 +19,11 @@ pub use backlog::{
 pub use bootstrap::*;
 pub use config::{
     AgentAdapterKind, AgentEffort, AgentEntryConfig, AgentPermissionMode, AgentsConfig,
-    BudgetProfile, Config, DashboardConfig, DeliveryConfig, DriverConfig, DriverModelRouteConfig,
-    ExecutionHistoryConfig, ExecutionPrice, InferenceConfig, InferenceMode, PackerConfig,
-    PreflightCommandConfig, PreflightConfig, ProhibitedChangeConfig, ProviderKind, ReferenceKind,
-    ReferenceRootConfig, RepositoryConfig, ResolvedProhibitedRule, ReviewScopeConfig, RollupConfig,
+    BudgetProfile, Config, DashboardConfig, DeliveryConfig, DeliveryMode, DriverConfig,
+    DriverModelRouteConfig, ExecutionHistoryConfig, ExecutionPrice, InferenceConfig, InferenceMode,
+    PackerConfig, PocSelfApprovalWarrant, PreflightCommandConfig, PreflightConfig,
+    ProhibitedChangeConfig, ProviderKind, ReferenceKind, ReferenceRootConfig, RepositoryConfig,
+    ResolvedProhibitedRule, ReviewGateConfig, ReviewScopeConfig, RollupConfig,
     ScopeClassPolicyConfig, ScopeClassificationConfig, ScopeDeclarationModeConfig,
     ScopeFileClassName, SummaryConfig, TrayConfig, TypedProhibitedChange, WatcherConfig,
 };

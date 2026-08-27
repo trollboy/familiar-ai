@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use familiar_ai_core::DeliveryConfig;
+use familiar_ai_core::{DeliveryConfig, DeliveryMode};
 use serde::{Deserialize, Serialize};
 use wait_timeout::ChildExt;
 
@@ -118,8 +118,19 @@ pub fn deliver_with(
     runner: &dyn CommandRunner,
 ) -> Result<DeliveryJournal, String> {
     policy.validate()?;
-    if !policy.enabled {
+    if policy.mode == DeliveryMode::Disabled {
         return Err("delivery policy is disabled".into());
+    }
+    if policy.mode == DeliveryMode::PocSelfApproval {
+        let warrant = policy
+            .poc_warrant
+            .as_ref()
+            .ok_or_else(|| "PoC self-approval warrant is missing".to_owned())?;
+        let expiry = chrono::DateTime::parse_from_rfc3339(&warrant.expires_at)
+            .map_err(|_| "PoC self-approval warrant expiry is invalid".to_owned())?;
+        if expiry <= chrono::Utc::now() {
+            return Err("PoC self-approval warrant has expired".into());
+        }
     }
     reject_production_commands(policy)?;
     let ownership: WorktreeOwnership = serde_json::from_slice(
@@ -146,140 +157,167 @@ pub fn deliver_with(
         .collect();
     let branch = format!("familiar/{}/{safe_prd}", ownership.session_id);
     let journal_path = ownership_path.with_extension("delivery.json");
-    let mut journal = DeliveryJournal {
-        session_id: ownership.session_id,
-        prd_id: ownership.prd_id,
-        worktree: ownership.worktree,
-        branch: branch.clone(),
-        pr_number: None,
-        phase: "admitted".into(),
-        detail: None,
-        updated_at: chrono::Utc::now().to_rfc3339(),
+    let mut journal = if journal_path.exists() {
+        serde_json::from_slice(
+            &fs::read(&journal_path)
+                .map_err(|error| format!("cannot resume delivery journal: {error}"))?,
+        )
+        .map_err(|error| format!("invalid delivery journal: {error}"))?
+    } else {
+        DeliveryJournal {
+            session_id: ownership.session_id,
+            prd_id: ownership.prd_id,
+            worktree: ownership.worktree,
+            branch: branch.clone(),
+            pr_number: None,
+            phase: "admitted".into(),
+            detail: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
     };
     persist(&journal_path, &journal)?;
 
-    checked(runner, &journal.worktree, &["git", "switch", "-c", &branch])?;
-    checked(runner, &journal.worktree, &["git", "add", "-A"])?;
-    let staged = checked(
-        runner,
-        &journal.worktree,
-        &["git", "diff", "--cached", "--name-only"],
-    )?;
-    let staged_paths = String::from_utf8_lossy(&staged.stdout);
-    let migration = staged_paths
-        .lines()
-        .find(|path| path.to_ascii_lowercase().contains("migration"));
-    if let Some(path) = migration {
-        return fail_journal(
-            &journal_path,
-            journal,
-            "deployment_blocked",
-            format!(
-                "migration change {path} has no automatic database rollback; human staging authority required"
-            ),
-        );
+    if phase_before(&journal.phase, "committed") {
+        checked(runner, &journal.worktree, &["git", "switch", "-C", &branch])?;
+        checked(runner, &journal.worktree, &["git", "add", "-A"])?;
+        let staged = checked(
+            runner,
+            &journal.worktree,
+            &["git", "diff", "--cached", "--name-only"],
+        )?;
+        let staged_paths = String::from_utf8_lossy(&staged.stdout);
+        let migration = staged_paths
+            .lines()
+            .find(|path| path.to_ascii_lowercase().contains("migration"));
+        if let Some(path) = migration {
+            if policy.migration_gate_argv.is_empty() {
+                return fail_journal(
+                &journal_path,
+                journal,
+                "deployment_blocked",
+                format!("migration change {path} has no automatic database rollback and no configured migration gate; human staging authority required"),
+            );
+            }
+            checked_owned(runner, &journal.worktree, &policy.migration_gate_argv)?;
+        }
+        checked(
+            runner,
+            &journal.worktree,
+            &[
+                "git",
+                "commit",
+                "-m",
+                &format!("feat: implement {}", journal.prd_id),
+            ],
+        )?;
+        journal.phase = "committed".into();
+        persist(&journal_path, &journal)?;
     }
-    checked(
-        runner,
-        &journal.worktree,
-        &[
-            "git",
-            "commit",
-            "-m",
-            &format!("feat: implement {}", journal.prd_id),
-        ],
-    )?;
-    journal.phase = "committed".into();
-    persist(&journal_path, &journal)?;
-    checked(
-        runner,
-        &journal.worktree,
-        &["git", "push", "-u", &policy.remote, &branch],
-    )?;
-    journal.phase = "pushed".into();
-    persist(&journal_path, &journal)?;
+    if phase_before(&journal.phase, "pushed") {
+        checked(
+            runner,
+            &journal.worktree,
+            &["git", "push", "-u", &policy.remote, &branch],
+        )?;
+        journal.phase = "pushed".into();
+        persist(&journal_path, &journal)?;
+    }
 
-    let create = argv(&[
-        "gh",
-        "pr",
-        "create",
-        "--fill",
-        "--base",
-        &policy.base,
-        "--head",
-        &branch,
-    ]);
-    if let Err(error) = checked_owned(runner, &journal.worktree, &create) {
-        journal.detail = Some(format!(
-            "PR create returned: {error}; checking for existing PR"
-        ));
+    if phase_before(&journal.phase, "published") {
+        let create = provider_argv(
+            policy,
+            &[
+                "pr",
+                "create",
+                "--fill",
+                "--base",
+                &policy.base,
+                "--head",
+                &branch,
+            ],
+        );
+        if let Err(error) = checked_owned(runner, &journal.worktree, &create) {
+            journal.detail = Some(format!(
+                "PR create returned: {error}; checking for existing PR"
+            ));
+        }
+        let view = checked_owned(
+            runner,
+            &journal.worktree,
+            &provider_argv(
+                policy,
+                &["pr", "view", &branch, "--json", "number", "--jq", ".number"],
+            ),
+        )?;
+        journal.pr_number = String::from_utf8_lossy(&view.stdout).trim().parse().ok();
+        journal.phase = "published".into();
+        persist(&journal_path, &journal)?;
     }
-    let view = checked_owned(
-        runner,
-        &journal.worktree,
-        &argv(&[
-            "gh", "pr", "view", &branch, "--json", "number", "--jq", ".number",
-        ]),
-    )?;
-    journal.pr_number = String::from_utf8_lossy(&view.stdout).trim().parse().ok();
     let pr = journal
         .pr_number
-        .ok_or_else(|| "GitHub did not return a pull request number".to_owned())?;
-    journal.phase = "published".into();
-    persist(&journal_path, &journal)?;
+        .ok_or_else(|| "provider adapter did not return a pull request number".to_owned())?;
 
-    if !policy.auto_merge {
+    if policy.mode == DeliveryMode::ReviewedPrManual {
         journal.phase = "awaiting_merge_authority".into();
         persist(&journal_path, &journal)?;
         return Ok(journal);
     }
-    if let Err(error) = checked(
-        runner,
-        &journal.worktree,
-        &[
-            "gh",
-            "pr",
-            "checks",
-            &pr.to_string(),
-            "--watch",
-            "--fail-fast",
-        ],
-    ) {
-        comment_blocker(runner, policy, &journal.worktree, pr, &error);
-        return fail_journal(&journal_path, journal, "checks_failed", error);
+    if phase_before(&journal.phase, "merged") {
+        if let Err(error) = checked_owned(
+            runner,
+            &journal.worktree,
+            &provider_argv(
+                policy,
+                &["pr", "checks", &pr.to_string(), "--watch", "--fail-fast"],
+            ),
+        ) {
+            comment_blocker(runner, policy, &journal.worktree, pr, &error);
+            return fail_journal(&journal_path, journal, "checks_failed", error);
+        }
+        for check in &policy.required_checks {
+            checked_owned(
+                runner,
+                &journal.worktree,
+                &provider_argv(policy, &["pr", "check", &pr.to_string(), check]),
+            )?;
+        }
     }
-    checked(
-        runner,
-        &journal.worktree,
-        &[
-            "gh",
-            "pr",
-            "merge",
-            &pr.to_string(),
-            "--merge",
-            "--delete-branch",
-        ],
-    )?;
-    journal.phase = "merged".into();
-    persist(&journal_path, &journal)?;
+    if phase_before(&journal.phase, "merged") {
+        checked_owned(
+            runner,
+            &journal.worktree,
+            &provider_argv(
+                policy,
+                &["pr", "merge", &pr.to_string(), "--merge", "--delete-branch"],
+            ),
+        )?;
+        journal.phase = "merged".into();
+        persist(&journal_path, &journal)?;
+    }
 
-    if let Err(deploy_error) = checked_owned(runner, &journal.worktree, &policy.deploy_argv) {
-        let rollback = checked_owned(runner, &journal.worktree, &policy.rollback_argv)
-            .map(|_| "rollback passed".to_owned())
-            .unwrap_or_else(|error| format!("rollback failed: {error}"));
-        let detail = format!("staging deploy failed: {deploy_error}; {rollback}");
-        comment_blocker(runner, policy, &journal.worktree, pr, &detail);
-        return fail_journal(&journal_path, journal, "staging_rolled_back", detail);
+    if phase_before(&journal.phase, "staging_deployed") {
+        if let Err(deploy_error) = checked_owned(runner, &journal.worktree, &policy.deploy_argv) {
+            let rollback = checked_owned(runner, &journal.worktree, &policy.rollback_argv)
+                .map(|_| "rollback passed".to_owned())
+                .unwrap_or_else(|error| format!("rollback failed: {error}"));
+            let detail = format!("staging deploy failed: {deploy_error}; {rollback}");
+            comment_blocker(runner, policy, &journal.worktree, pr, &detail);
+            return fail_journal(&journal_path, journal, "staging_rolled_back", detail);
+        }
     }
-    journal.phase = "staging_deployed".into();
-    persist(&journal_path, &journal)?;
-    if let Err(smoke_error) = checked_owned(runner, &journal.worktree, &policy.smoke_argv) {
-        let rollback = checked_owned(runner, &journal.worktree, &policy.rollback_argv)
-            .map(|_| "rollback passed".to_owned())
-            .unwrap_or_else(|error| format!("rollback failed: {error}"));
-        let detail = format!("staging smoke failed: {smoke_error}; {rollback}");
-        comment_blocker(runner, policy, &journal.worktree, pr, &detail);
-        return fail_journal(&journal_path, journal, "staging_rolled_back", detail);
+    if phase_before(&journal.phase, "staging_deployed") {
+        journal.phase = "staging_deployed".into();
+        persist(&journal_path, &journal)?;
+    }
+    if phase_before(&journal.phase, "staging_verified") {
+        if let Err(smoke_error) = checked_owned(runner, &journal.worktree, &policy.smoke_argv) {
+            let rollback = checked_owned(runner, &journal.worktree, &policy.rollback_argv)
+                .map(|_| "rollback passed".to_owned())
+                .unwrap_or_else(|error| format!("rollback failed: {error}"));
+            let detail = format!("staging smoke failed: {smoke_error}; {rollback}");
+            comment_blocker(runner, policy, &journal.worktree, pr, &detail);
+            return fail_journal(&journal_path, journal, "staging_rolled_back", detail);
+        }
     }
     journal.phase = "staging_verified".into();
     journal.detail = None;
@@ -304,6 +342,33 @@ fn reject_production_commands(policy: &DeliveryConfig) -> Result<(), String> {
 
 fn argv(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn provider_argv(policy: &DeliveryConfig, values: &[&str]) -> Vec<String> {
+    policy
+        .provider_argv
+        .iter()
+        .cloned()
+        .chain(values.iter().map(|v| (*v).to_owned()))
+        .collect()
+}
+
+fn phase_before(current: &str, target: &str) -> bool {
+    fn rank(value: &str) -> u8 {
+        match value {
+            "admitted" => 0,
+            "committed" => 1,
+            "pushed" => 2,
+            "published" | "awaiting_merge_authority" => 3,
+            "merged" => 4,
+            "checks_failed" => 3,
+            "staging_rolled_back" => 4,
+            "staging_deployed" => 5,
+            "staging_verified" => 6,
+            _ => 0,
+        }
+    }
+    rank(current) < rank(target)
 }
 
 fn checked(
@@ -340,10 +405,13 @@ fn comment_blocker(
     detail: &str,
 ) {
     if policy.comment_blockers {
-        let _ = checked(
+        let _ = checked_owned(
             runner,
             directory,
-            &["gh", "pr", "comment", &pr.to_string(), "--body", detail],
+            &provider_argv(
+                policy,
+                &["pr", "comment", &pr.to_string(), "--body", detail],
+            ),
         );
     }
 }
@@ -433,17 +501,25 @@ mod tests {
         )
         .unwrap();
         let policy = DeliveryConfig {
+            mode: DeliveryMode::ReviewGatedAutomatic,
             enabled: true,
             max_deliveries_per_session: 1,
             command_timeout_ms: 1_000,
             remote: "origin".into(),
             base: "main".into(),
             auto_merge: true,
+            provider_argv: vec!["gh".into()],
             staging_environment: "staging".into(),
             deploy_argv: vec!["deploy".into()],
             smoke_argv: vec!["smoke".into()],
             rollback_argv: vec!["rollback".into()],
             comment_blockers: true,
+            review_gate: Some(familiar_ai_core::ReviewGateConfig {
+                implementer: "impl".into(),
+                reviewer: "review".into(),
+                approver: "approve".into(),
+            }),
+            ..DeliveryConfig::default()
         };
         (temp, ownership_path, policy)
     }
@@ -506,6 +582,60 @@ mod tests {
         let calls = runner.calls.lock().unwrap();
         assert!(calls.iter().any(|call| call[0] == "rollback"));
         assert!(calls.iter().any(|call| call.contains(&"comment".into())));
+    }
+
+    #[test]
+    fn retry_after_partial_deploy_does_not_repeat_publish_or_merge() {
+        let (_temp, ownership, policy) = fixture();
+        let runner = FakeRunner {
+            calls: Mutex::new(Vec::new()),
+            fail_deploy: true,
+            fail_smoke: false,
+            staged: "src/lib.rs\n",
+        };
+        assert!(deliver_with(&ownership, &policy, &runner).is_err());
+        assert!(deliver_with(&ownership, &policy, &runner).is_err());
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.contains(&"merge".into()))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.get(1).is_some_and(|v| v == "push"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.first().is_some_and(|v| v == "deploy"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn manual_policy_publishes_pr_and_stops_before_checks_merge_or_deploy() {
+        let (_temp, ownership, mut policy) = fixture();
+        policy.mode = DeliveryMode::ReviewedPrManual;
+        let runner = FakeRunner {
+            calls: Mutex::new(Vec::new()),
+            fail_deploy: false,
+            fail_smoke: false,
+            staged: "src/lib.rs\n",
+        };
+        let result = deliver_with(&ownership, &policy, &runner).unwrap();
+        assert_eq!(result.phase, "awaiting_merge_authority");
+        let calls = runner.calls.lock().unwrap();
+        assert!(!calls.iter().any(|call| call.contains(&"merge".into())));
+        assert!(!calls
+            .iter()
+            .any(|call| call.first().is_some_and(|v| v == "deploy")));
     }
 
     #[test]

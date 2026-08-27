@@ -68,6 +68,11 @@ pub enum RunError {
         result: Option<Box<ExecutionResult>>,
         detail: String,
     },
+    HumanReviewRequired {
+        result: Box<ExecutionResult>,
+        cycle: Box<ReviewCycle>,
+        prd_id: String,
+    },
 }
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -83,6 +88,7 @@ impl fmt::Display for RunError {
                 detail,
             } => write!(f, "history_finalize_failed for {execution_id}: {detail}"),
             Self::Workflow { detail, .. } => f.write_str(detail),
+            Self::HumanReviewRequired { .. } => f.write_str("human review required"),
         }
     }
 }
@@ -96,6 +102,7 @@ impl RunError {
                 ..
             } => result.exit_code.filter(|code| *code != 0),
             Self::Agent(error) => error.result().exit_code.filter(|code| *code != 0),
+            Self::HumanReviewRequired { result, .. } => result.exit_code.filter(|code| *code != 0),
             _ => None,
         }
     }
@@ -417,7 +424,7 @@ pub fn resume_implemented_checkpoint(
     }
     if !matches!(
         checkpoint.phase.as_str(),
-        "implemented" | "implemented_pending_review"
+        "implemented" | "implemented_pending_review" | "blocked"
     ) {
         return Err(RunError::Config(format!(
             "checkpoint phase {} cannot start review",
@@ -538,6 +545,97 @@ pub fn resume_implemented_checkpoint(
             .map_err(|e| RunError::Storage(e.to_string()))?;
     }
     Ok(completed)
+}
+
+/// Record an attached human's explicit acceptance of the exact retained
+/// review evidence, then complete the already-implemented checkpoint. This is
+/// never called by the unattended driver.
+pub fn accept_review_risk(
+    current: &Path,
+    prd_id: &str,
+    actor: &str,
+    cycle: &ReviewCycle,
+    config: &Config,
+    paths: &AppPaths,
+) -> Result<(), RunError> {
+    if !actor.trim().starts_with("human:") {
+        return Err(RunError::Config(
+            "risk acceptance requires a human:<identity> actor".into(),
+        ));
+    }
+    let discovery = FilesystemBacklogDiscovery;
+    let repository = discovery
+        .resolve(current)
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let repository_config = config.repository(&repository.worktree);
+    let discovered = discovery
+        .discover_with_layout(&repository, &repository_config.layout())
+        .map_err(|e| RunError::Config(e.to_string()))?;
+    let target = discovered
+        .into_iter()
+        .find(|target| target.id.to_string() == prd_id)
+        .ok_or_else(|| {
+            RunError::Config(format!("checkpoint PRD {prd_id} is no longer discoverable"))
+        })?;
+    let mut db = Database::open(&config.database.resolve_path(&paths.data_dir))
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    db.run_migrations()
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    let checkpoint = familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .get(&repository.key, prd_id)
+        .map_err(|e| RunError::Storage(e.to_string()))?
+        .ok_or_else(|| RunError::Config(format!("no durable checkpoint for {prd_id}")))?;
+    if checkpoint.phase != "blocked" {
+        return Err(RunError::Config(
+            "risk acceptance requires a blocked human-review checkpoint".into(),
+        ));
+    }
+    let execution_id = checkpoint
+        .execution_id
+        .as_deref()
+        .ok_or_else(|| RunError::Config("checkpoint execution identity is unknown".into()))?;
+    let findings = serde_json::json!({"review": cycle.review_result.as_ref().map(|r| &r.findings), "scope": cycle.scope_evaluations.iter().flat_map(|e| &e.findings).collect::<Vec<_>>()}).to_string();
+    let stops =
+        serde_json::to_string(&cycle.stop_reasons).map_err(|e| RunError::Storage(e.to_string()))?;
+    familiar_ai_storage::DeliveryRepository::new(db.conn())
+        .record_authority_decision(
+            &format!("review-risk:{execution_id}"),
+            &repository.key,
+            execution_id,
+            prd_id,
+            "attached_human",
+            actor,
+            "accepted_reviewed_risk",
+            None,
+            &findings,
+            &stops,
+            None,
+            0,
+        )
+        .map_err(|e| RunError::Storage(e.to_string()))?;
+    SqliteBacklogRepository::new(db.conn_mut())
+        .recover(
+            &repository,
+            &target,
+            familiar_ai_core::BacklogRecoveryAction::ManualCompleteOverride,
+            actor,
+            "accepted the exact persisted HumanReviewRequired findings and stop reasons",
+        )
+        .map_err(|e| RunError::Workflow {
+            result: None,
+            detail: e.to_string(),
+        })?;
+    let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+    for (phase, detail) in [
+        ("approved", "attached_human_accepted_reviewed_risk"),
+        ("integrated", "backlog_completion_committed"),
+        ("completed", "risk_acceptance_completed"),
+    ] {
+        checkpoints
+            .transition(&checkpoint.checkpoint_id, phase, detail)
+            .map_err(|e| RunError::Storage(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// What the driver observes about one attempt beyond success or failure.
@@ -979,15 +1077,21 @@ fn finish_implementation(
         || cycle.stop_reasons != [ReviewStopReason::CleanReview]
     {
         let reason = review_retained_reason(&cycle);
-        return Err(retained_traced(
-            trace,
-            target,
-            reason,
-            RunError::Workflow {
-                result: Some(Box::new(result)),
-                detail: "review did not produce a clean terminal result".into(),
-            },
-        ));
+        trace.retained_reason = Some(reason);
+        if let Some(checkpoint) = familiar_ai_storage::CheckpointRepository::new(db.conn())
+            .get(&repository.key, &target.id.to_string())
+            .map_err(|e| RunError::Storage(e.to_string()))?
+        {
+            let detail = serde_json::json!({"findings": cycle.review_result.as_ref().map(|r| &r.findings), "scope_findings": cycle.scope_evaluations.iter().flat_map(|e| &e.findings).collect::<Vec<_>>(), "stop_reasons": cycle.stop_reasons}).to_string();
+            familiar_ai_storage::CheckpointRepository::new(db.conn())
+                .transition(&checkpoint.checkpoint_id, "blocked", &detail)
+                .map_err(|e| RunError::Storage(e.to_string()))?;
+        }
+        return Err(RunError::HumanReviewRequired {
+            result: Box::new(result),
+            cycle: Box::new(cycle),
+            prd_id: target.id.to_string(),
+        });
     }
     let required_checks = config
         .review

@@ -88,6 +88,31 @@ isolated_worktrees = false
 max_parallel_components = 1 # 1 = original serial behavior; >1 schedules dependency components
 worktree_root = ""           # empty = driver-owned directory under the state directory
 
+# Delivery authority is repository-owned. Add a
+# [repositories."/absolute/canonical/worktree".delivery] section for each
+# repository that Familiar may publish. `mode` is one of `disabled`,
+# `reviewed_pr_manual` (the safe default when a section omits it),
+# `poc_self_approval`, or `review_gated_automatic`. A missing repository
+# delivery section grants no publish, merge, or deploy authority.
+# provider_argv = ["provider-cli"]
+# max_deliveries_per_session = 1
+# command_timeout_ms = 1800000
+# remote = "configured-remote"
+# base = "configured-base"
+# staging_environment = "configured-non-production-environment"
+# deploy_argv = ["deployment-adapter", "deploy"]
+# smoke_argv = ["deployment-adapter", "health"]
+# rollback_argv = ["deployment-adapter", "rollback"]
+# migration_gate_argv = ["deployment-adapter", "migration-gate"]
+# required_checks = ["configured-check"]
+# credential_references = ["DELIVERY_CREDENTIAL_REFERENCE"]
+# PoC mode additionally requires [repositories."...".delivery.poc_warrant]
+# with actor, finite max_prds, RFC3339 expires_at, and the fixed visible
+# assurance_label = "LOW_ASSURANCE_POC_SELF_APPROVAL". Governed automatic mode
+# requires [repositories."...".delivery.review_gate] with three distinct
+# implementer, reviewer, and approver identities. These fields model evidence;
+# they do not claim certification.
+
 # Persistent worker supervision (launchd on macOS, systemd user service on Linux).
 # The generated definition preserves PATH, writes durable logs, restarts only
 # after failure, and runs one finite warrant at a time.
