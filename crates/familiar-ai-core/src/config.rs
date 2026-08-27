@@ -609,6 +609,9 @@ pub struct ReviewConfig {
     pub implementation_agent: ReviewAgentConfig,
     #[serde(default)]
     pub reviewer_agent: ReviewAgentConfig,
+    /// Optional cost-tier policy. Absence preserves full independent review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_policy: Option<ReviewTierPolicyConfig>,
     #[serde(default = "default_review_package_bytes")]
     pub max_package_bytes: u64,
     #[serde(default = "default_review_package_tokens")]
@@ -625,6 +628,44 @@ pub struct ReviewAgentConfig {
     pub agent_id: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewTierPolicyConfig {
+    /// Repositories at assurance levels requiring independent review cannot
+    /// configure a checks-only rule.
+    #[serde(default)]
+    pub independent_review_required: bool,
+    #[serde(default)]
+    pub standard_reviewer_agent: ReviewAgentConfig,
+    #[serde(default)]
+    pub rules: Vec<ReviewTierRuleConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewTierConfig {
+    ChecksOnly,
+    Standard,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewTierRuleConfig {
+    pub id: String,
+    pub tier: ReviewTierConfig,
+    #[serde(default)]
+    pub path_prefixes: Vec<String>,
+    #[serde(default)]
+    pub max_changed_files: Option<u64>,
+    #[serde(default)]
+    pub max_changed_bytes: Option<u64>,
+    #[serde(default)]
+    pub change_kinds: Vec<String>,
+    #[serde(default)]
+    pub scope_classes: Vec<ScopeFileClassName>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -969,6 +1010,7 @@ impl Default for ReviewConfig {
             verification: Vec::new(),
             implementation_agent: ReviewAgentConfig::default(),
             reviewer_agent: ReviewAgentConfig::default(),
+            tier_policy: None,
             max_package_bytes: default_review_package_bytes(),
             max_package_tokens: default_review_package_tokens(),
             max_evidence_bytes: default_review_evidence_bytes(),
@@ -1061,6 +1103,100 @@ impl ReviewConfig {
             || self.max_verification_log_bytes == 0
         {
             return Err("enabled review requires positive package and evidence ceilings".into());
+        }
+        if let Some(policy) = &self.tier_policy {
+            let mut ids = std::collections::BTreeSet::new();
+            let mut signatures = std::collections::BTreeMap::new();
+            let has_standard = policy
+                .rules
+                .iter()
+                .any(|rule| rule.tier == ReviewTierConfig::Standard);
+            if has_standard
+                && (policy.standard_reviewer_agent.adapter_id.is_empty()
+                    || policy.standard_reviewer_agent.agent_id.is_empty()
+                    || !policy
+                        .standard_reviewer_agent
+                        .model
+                        .as_deref()
+                        .is_some_and(|model| !model.is_empty()))
+            {
+                return Err("standard review rules require an explicit tier_policy.standard_reviewer_agent identity and model".into());
+            }
+            if has_standard
+                && policy.standard_reviewer_agent.adapter_id != self.reviewer_agent.adapter_id
+            {
+                return Err(
+                    "tier_policy.standard_reviewer_agent must use the configured reviewer adapter"
+                        .into(),
+                );
+            }
+            if has_standard && policy.standard_reviewer_agent.model == self.reviewer_agent.model {
+                return Err(
+                    "tier_policy.standard_reviewer_agent model must differ from the full reviewer model"
+                        .into(),
+                );
+            }
+            for rule in &policy.rules {
+                if rule.id.trim().is_empty() || !ids.insert(rule.id.clone()) {
+                    return Err(format!(
+                        "review tier rule id '{}' is empty or duplicated",
+                        rule.id
+                    ));
+                }
+                if policy.independent_review_required && rule.tier == ReviewTierConfig::ChecksOnly {
+                    return Err(format!("review tier rule '{}' selects checks-only although independent review is required", rule.id));
+                }
+                if rule.path_prefixes.is_empty()
+                    && rule.max_changed_files.is_none()
+                    && rule.max_changed_bytes.is_none()
+                    && rule.change_kinds.is_empty()
+                    && rule.scope_classes.is_empty()
+                {
+                    return Err(format!(
+                        "review tier rule '{}' has no footprint predicates",
+                        rule.id
+                    ));
+                }
+                for path in &rule.path_prefixes {
+                    validate_scope_path(path)
+                        .map_err(|error| format!("review tier rule '{}': {error}", rule.id))?;
+                }
+                for kind in &rule.change_kinds {
+                    if !SUPPORTED_CHANGE_KINDS.contains(&kind.as_str()) {
+                        return Err(format!(
+                            "review tier rule '{}' names unsupported change kind '{kind}'",
+                            rule.id
+                        ));
+                    }
+                }
+                let mut paths = rule.path_prefixes.clone();
+                let mut kinds = rule.change_kinds.clone();
+                let mut classes = rule.scope_classes.clone();
+                paths.sort();
+                paths.dedup();
+                kinds.sort();
+                kinds.dedup();
+                classes.sort();
+                classes.dedup();
+                let signature = serde_json::to_string(&(
+                    paths,
+                    rule.max_changed_files,
+                    rule.max_changed_bytes,
+                    kinds,
+                    classes,
+                ))
+                .map_err(|error| error.to_string())?;
+                if let Some((other, tier)) =
+                    signatures.insert(signature, (rule.id.clone(), rule.tier))
+                {
+                    if tier != rule.tier {
+                        return Err(format!(
+                            "review tier rules '{other}' and '{}' contradict each other",
+                            rule.id
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2165,6 +2301,41 @@ output_microusd_per_million = 300
             model: None,
         };
         review
+    }
+
+    #[test]
+    fn review_tier_rules_fail_closed_before_execution() {
+        let mut review = valid_enabled_review();
+        review.tier_policy = Some(ReviewTierPolicyConfig {
+            independent_review_required: true,
+            standard_reviewer_agent: ReviewAgentConfig::default(),
+            rules: vec![ReviewTierRuleConfig {
+                id: "tiny".into(),
+                tier: ReviewTierConfig::ChecksOnly,
+                path_prefixes: vec!["src/".into()],
+                max_changed_files: Some(1),
+                max_changed_bytes: None,
+                change_kinds: vec!["modified".into()],
+                scope_classes: vec![],
+            }],
+        });
+        assert!(review
+            .validate()
+            .unwrap_err()
+            .contains("independent review is required"));
+
+        let policy = review.tier_policy.as_mut().unwrap();
+        policy.independent_review_required = false;
+        policy.rules.push(ReviewTierRuleConfig {
+            id: "same".into(),
+            tier: ReviewTierConfig::Full,
+            path_prefixes: vec!["src/".into()],
+            max_changed_files: Some(1),
+            max_changed_bytes: None,
+            change_kinds: vec!["modified".into()],
+            scope_classes: vec![],
+        });
+        assert!(review.validate().unwrap_err().contains("contradict"));
     }
 
     #[test]

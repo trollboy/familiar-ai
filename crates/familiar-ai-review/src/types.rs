@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::expected_files::{ExpectedFileEntry, ExpectedMatchKind};
+use crate::tier::ReviewTierSelection;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentAssignment {
@@ -621,6 +622,8 @@ pub struct ReviewCycle {
     pub scope_policy_snapshot: Option<ArtifactRef>,
     #[serde(default)]
     pub scope_evaluations: Vec<ScopeCheckResult>,
+    #[serde(default)]
+    pub tier_selection: Option<ReviewTierSelection>,
     pub aggregate_usage: ExecutionUsage,
     pub aggregate_duration_ms: u64,
     pub started_at: String,

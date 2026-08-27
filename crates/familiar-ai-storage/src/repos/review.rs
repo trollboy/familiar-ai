@@ -176,6 +176,9 @@ impl ReviewStore for ReviewRepository<'_> {
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO review_cycles(cycle_id,task_id,attempt,state,disposition,cycle_json,started_at,ended_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(cycle_id) DO UPDATE SET attempt=excluded.attempt,state=excluded.state,disposition=excluded.disposition,cycle_json=excluded.cycle_json,ended_at=excluded.ended_at",params![cycle.cycle_id,cycle.task_id,cycle.attempt,enum_json(&cycle.state)?,enum_json(&cycle.disposition)?,raw,cycle.started_at,cycle.ended_at]).map_err(|e|e.to_string())?;
+        if let Some(selection) = &cycle.tier_selection {
+            tx.execute("INSERT INTO review_tier_selections(cycle_id,tier,selecting_rule,selection_json) VALUES(?1,?2,?3,?4) ON CONFLICT(cycle_id) DO UPDATE SET tier=excluded.tier,selecting_rule=excluded.selecting_rule,selection_json=excluded.selection_json", params![cycle.cycle_id, enum_json(&selection.tier)?, selection.selecting_rule, serde_json::to_string(selection).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+        }
         if let Some(result) = &cycle.review_result {
             for f in &result.findings {
                 tx.execute("INSERT OR REPLACE INTO review_findings(finding_id,cycle_id,category,severity,blocking,status,finding_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![f.finding_id,cycle.cycle_id,enum_json(&f.category)?,enum_json(&f.severity)?,f.blocking,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
@@ -317,6 +320,7 @@ mod tests {
                 policy_snapshot_hash: "sha256:policy".into(),
                 phase: "initial".into(),
             }],
+            tier_selection: None,
             aggregate_usage: ExecutionUsage::default(),
             aggregate_duration_ms: 0,
             started_at: "2026-08-03T00:00:00Z".into(),

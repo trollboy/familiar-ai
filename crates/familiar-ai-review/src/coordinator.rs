@@ -61,6 +61,8 @@ pub struct CoordinationRequest {
     pub task: ReviewTask,
     pub implementation: AgentObservation,
     pub reviewer: AgentAssignment,
+    pub standard_reviewer: Option<AgentAssignment>,
+    pub tier_policy: ReviewTierPolicy,
     pub contracts: Vec<BoundedDocument>,
     pub invariants: Vec<BoundedInvariant>,
     pub verification_plan: VerificationPlan,
@@ -120,6 +122,7 @@ impl ReviewCoordinator<'_> {
             verification_history: vec![],
             scope_policy_snapshot: None,
             scope_evaluations: vec![],
+            tier_selection: None,
             aggregate_usage: initial_usage,
             aggregate_duration_ms: request.implementation_duration_ms,
             started_at: started,
@@ -139,16 +142,6 @@ impl ReviewCoordinator<'_> {
         self.store
             .save_cycle(&cycle)
             .map_err(CoordinatorError::Persistence)?;
-        let isolation = self.reviewer.isolation_evidence();
-        let Some(independence) = check_independence(
-            &request.implementation.assignment,
-            &request.reviewer,
-            request.allow_same_model_fallback,
-            isolation.as_ref(),
-        ) else {
-            return self.stop(cycle, ReviewStopReason::NoIndependentReviewer);
-        };
-        cycle.independence = Some(independence);
         let mut captured = match self
             .collector
             .capture(repository, &request.task.base_revision)
@@ -170,6 +163,15 @@ impl ReviewCoordinator<'_> {
             &evaluation,
             &request.scope_policy,
             "initial",
+        ));
+        cycle.tier_selection = Some(select_review_tier(
+            &request.tier_policy,
+            &captured.changed_files,
+            captured.diff.byte_size,
+            cycle
+                .scope_evaluations
+                .last()
+                .expect("scope evaluation just recorded"),
         ));
         self.store
             .save_cycle(&cycle)
@@ -221,6 +223,39 @@ impl ReviewCoordinator<'_> {
         if required_failed(&cycle.verification_before_review) {
             return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful);
         }
+        if cycle
+            .tier_selection
+            .as_ref()
+            .is_some_and(|selection| selection.tier == ReviewTier::ChecksOnly)
+        {
+            cycle.disposition = ReviewDisposition::ReadyForHumanApproval;
+            return self.stop(cycle, ReviewStopReason::CleanReview);
+        }
+        let full_reviewer = request.reviewer.clone();
+        let standard_reviewer = request.standard_reviewer.clone();
+        let selected_reviewer = if cycle
+            .tier_selection
+            .as_ref()
+            .is_some_and(|selection| selection.tier == ReviewTier::Standard)
+        {
+            standard_reviewer
+                .clone()
+                .unwrap_or_else(|| full_reviewer.clone())
+        } else {
+            full_reviewer.clone()
+        };
+        let isolation = self.reviewer.isolation_evidence();
+        let Some(independence) = check_independence(
+            &request.implementation.assignment,
+            &selected_reviewer,
+            request.allow_same_model_fallback,
+            isolation.as_ref(),
+        ) else {
+            return self.stop(cycle, ReviewStopReason::NoIndependentReviewer);
+        };
+        cycle.independence = Some(independence);
+        let mut request = request;
+        request.reviewer = selected_reviewer;
         let mut prior = Vec::new();
         let mut remediation_count = 0;
         loop {
@@ -532,6 +567,29 @@ impl ReviewCoordinator<'_> {
                 &format!("remediation-{remediation_count}"),
             );
             cycle.scope_evaluations.push(scope.clone());
+            let selection = select_review_tier(
+                &request.tier_policy,
+                &captured.changed_files,
+                captured.diff.byte_size,
+                &scope,
+            );
+            request.reviewer = if selection.tier == ReviewTier::Standard {
+                standard_reviewer
+                    .clone()
+                    .unwrap_or_else(|| full_reviewer.clone())
+            } else {
+                full_reviewer.clone()
+            };
+            cycle.tier_selection = Some(selection);
+            cycle.independence = check_independence(
+                &request.implementation.assignment,
+                &request.reviewer,
+                request.allow_same_model_fallback,
+                self.reviewer.isolation_evidence().as_ref(),
+            );
+            if cycle.independence.is_none() {
+                return self.stop(cycle, ReviewStopReason::NoIndependentReviewer);
+            }
             cycle.remediation_result = Some(RemediationResult {
                 changed_files: captured.changed_files.clone(),
                 resulting_diff: captured.diff.clone(),
@@ -1158,6 +1216,8 @@ mod tests {
                 unavailable_fields: BTreeMap::new(),
             },
             reviewer: assignment(AgentRole::Review, "review"),
+            standard_reviewer: None,
+            tier_policy: ReviewTierPolicy::default(),
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {
@@ -1193,6 +1253,69 @@ mod tests {
             implementation_duration_ms: 1,
             scope_policy: test_scope_policy(&["src/"]),
         }
+    }
+    #[test]
+    fn checks_only_runs_applicable_verification_without_review_attempt() {
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &Verifier,
+            reviewer: &Reviewer,
+            implementer: &Implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+        };
+        let mut request = base_request();
+        request.tier_policy.rules.push(ReviewTierRule {
+            id: "small-source".into(),
+            tier: ReviewTier::ChecksOnly,
+            path_prefixes: vec!["src/".into()],
+            max_changed_files: Some(1),
+            max_changed_bytes: Some(10),
+            change_kinds: vec![GitChangeKind::Modified],
+            scope_classes: vec![ScopeFileClass::OrdinarySource],
+        });
+        let cycle = coordinator
+            .run(Path::new("."), request, &mut Vec::new())
+            .unwrap();
+        assert_eq!(cycle.state, ReviewCycleState::Completed);
+        assert_eq!(cycle.verification_before_review.len(), 1);
+        assert!(cycle.review_attempts.is_empty());
+        assert!(cycle.reviewer.is_none());
+        assert_eq!(cycle.tier_selection.unwrap().tier, ReviewTier::ChecksOnly);
+    }
+    #[test]
+    fn standard_uses_configured_independent_reviewer_identity() {
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &Verifier,
+            reviewer: &Reviewer,
+            implementer: &Implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+        };
+        let mut request = base_request();
+        request.tier_policy.rules.push(ReviewTierRule {
+            id: "standard-source".into(),
+            tier: ReviewTier::Standard,
+            path_prefixes: vec!["src/".into()],
+            max_changed_files: Some(1),
+            max_changed_bytes: Some(10),
+            change_kinds: vec![GitChangeKind::Modified],
+            scope_classes: vec![ScopeFileClass::OrdinarySource],
+        });
+        let mut cheaper = assignment(AgentRole::Review, "standard");
+        cheaper.agent_id = "economy-reviewer".into();
+        cheaper.provider = Some("independent".into());
+        cheaper.requested_model = Some("economy".into());
+        request.standard_reviewer = Some(cheaper.clone());
+        let cycle = coordinator
+            .run(Path::new("."), request, &mut Vec::new())
+            .unwrap();
+        assert_eq!(cycle.tier_selection.unwrap().tier, ReviewTier::Standard);
+        assert_eq!(cycle.reviewer.unwrap().assignment, cheaper);
+        assert_eq!(cycle.review_attempts.len(), 1);
     }
     struct FailingVerifier;
     impl VerificationRunner for FailingVerifier {
@@ -1385,6 +1508,8 @@ mod tests {
                 unavailable_fields: BTreeMap::new(),
             },
             reviewer: assignment(AgentRole::Review, "review"),
+            standard_reviewer: None,
+            tier_policy: ReviewTierPolicy::default(),
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {
@@ -1463,6 +1588,8 @@ mod tests {
                 unavailable_fields: BTreeMap::new(),
             },
             reviewer: assignment(AgentRole::Review, "review"),
+            standard_reviewer: None,
+            tier_policy: ReviewTierPolicy::default(),
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {

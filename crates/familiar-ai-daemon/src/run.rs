@@ -28,8 +28,9 @@ use familiar_ai_review::{
     CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, ExpectedFilesError,
     GitChangeKind, GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator,
     ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason,
-    ReviewTask, ScopeClassPolicy, ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass,
-    ScopeFileClassPolicies, ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
+    ReviewTask, ReviewTier, ReviewTierPolicy, ReviewTierRule, ScopeClassPolicy,
+    ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass, ScopeFileClassPolicies,
+    ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
     StructuredReviewAdapter, VerificationCheck, VerificationPlan, WorkflowLimits,
 };
 use familiar_ai_storage::{
@@ -1144,6 +1145,17 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         role: AgentRole::Review,
         session_id: None,
     };
+    let standard_reviewer = config.review.tier_policy.as_ref().and_then(|policy| {
+        let configured = &policy.standard_reviewer_agent;
+        (!configured.adapter_id.is_empty()).then(|| AgentAssignment {
+            adapter_id: configured.adapter_id.clone(),
+            agent_id: configured.agent_id.clone(),
+            provider: configured.provider.clone(),
+            requested_model: configured.model.clone(),
+            role: AgentRole::Review,
+            session_id: None,
+        })
+    });
     let criteria = familiar_ai_core::structured_prd_metadata(&context.prd.content)
         .map_err(|error| RunError::Config(error.to_string()))?
         .map(|metadata| metadata.acceptance_criteria)
@@ -1248,6 +1260,8 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             unavailable_fields: BTreeMap::new(),
         },
         reviewer,
+        standard_reviewer,
+        tier_policy: configured_tier_policy(&config.review),
         contracts,
         invariants: Vec::new(),
         verification_plan: VerificationPlan {
@@ -1319,6 +1333,57 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
     );
     report_scope_findings(&cycle);
     Ok(cycle)
+}
+
+fn configured_tier_policy(config: &familiar_ai_core::config::ReviewConfig) -> ReviewTierPolicy {
+    let Some(policy) = &config.tier_policy else {
+        return ReviewTierPolicy::default();
+    };
+    ReviewTierPolicy {
+        rules: policy
+            .rules
+            .iter()
+            .map(|rule| ReviewTierRule {
+                id: rule.id.clone(),
+                tier: match rule.tier {
+                    familiar_ai_core::config::ReviewTierConfig::ChecksOnly => {
+                        ReviewTier::ChecksOnly
+                    }
+                    familiar_ai_core::config::ReviewTierConfig::Standard => ReviewTier::Standard,
+                    familiar_ai_core::config::ReviewTierConfig::Full => ReviewTier::Full,
+                },
+                path_prefixes: rule
+                    .path_prefixes
+                    .iter()
+                    .map(|path| {
+                        familiar_ai_core::config::validate_scope_path(path)
+                            .expect("validated tier path")
+                    })
+                    .collect(),
+                max_changed_files: rule.max_changed_files,
+                max_changed_bytes: rule.max_changed_bytes,
+                change_kinds: rule
+                    .change_kinds
+                    .iter()
+                    .map(|kind| match kind.as_str() {
+                        "added" => GitChangeKind::Added,
+                        "modified" => GitChangeKind::Modified,
+                        "deleted" => GitChangeKind::Deleted,
+                        "renamed" => GitChangeKind::Renamed,
+                        "copied" => GitChangeKind::Copied,
+                        "type_changed" => GitChangeKind::TypeChanged,
+                        "unmerged" => GitChangeKind::Unmerged,
+                        _ => unreachable!("validated change kind"),
+                    })
+                    .collect(),
+                scope_classes: rule
+                    .scope_classes
+                    .iter()
+                    .map(|class| map_file_class(*class))
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 const SCOPE_FINDING_RENDER_LIMIT: usize = 50;

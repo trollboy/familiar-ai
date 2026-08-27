@@ -874,6 +874,7 @@ mod tests {
             verification_history: vec![evidence],
             scope_policy_snapshot: None,
             scope_evaluations: Vec::new(),
+            tier_selection: None,
             aggregate_usage: ExecutionUsage::default(),
             aggregate_duration_ms: 1,
             started_at: "2026-08-03T00:00:00Z".into(),

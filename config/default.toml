@@ -185,6 +185,25 @@ generated_artifact = "human_review"
 # agent_id = "implementation"
 # provider = "openai"
 # model = "configured-model"
+
+# Optional deterministic cost tiers. When omitted or unmatched, full review is
+# used. Rules are evaluated in authored order against measured diff evidence.
+# Unknown, ambiguous, and high-risk footprints always use full review.
+# [review.tier_policy]
+# independent_review_required = false
+# [review.tier_policy.standard_reviewer_agent]
+# adapter_id = "codex-cli"
+# agent_id = "economy-reviewer"
+# provider = "openai"
+# model = "configured-cheaper-model"
+# [[review.tier_policy.rules]]
+# id = "small-tests"
+# tier = "checks-only" # "checks-only" | "standard" | "full"
+# path_prefixes = ["tests/"]
+# max_changed_files = 2
+# max_changed_bytes = 4096
+# change_kinds = ["added", "modified"]
+# scope_classes = ["test"]
 # [review.reviewer_agent]
 # adapter_id = "codex-cli"
 # agent_id = "reviewer"

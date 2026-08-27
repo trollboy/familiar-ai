@@ -61,7 +61,7 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
     let (built, stopped): (Vec<_>, Vec<_>) = attempts
         .iter()
         .partition(|attempt| attempt.outcome.as_deref() == Some("completed"));
-    render_built(&mut out, &built);
+    render_built(db, &mut out, &built);
     render_stopped(db, &mut out, &stopped);
     render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
@@ -138,7 +138,7 @@ fn render_header(out: &mut String, session: &DriverSession) {
     }
 }
 
-fn render_built(out: &mut String, built: &[&DriverAttempt]) {
+fn render_built(db: &Database, out: &mut String, built: &[&DriverAttempt]) {
     let _ = writeln!(out, "\nBUILT ({})", built.len());
     if built.is_empty() {
         let _ = writeln!(out, "  (nothing completed)");
@@ -160,6 +160,7 @@ fn render_built(out: &mut String, built: &[&DriverAttempt]) {
             attempt.review_configuration_source, attempt.execution_context_configuration_source
         );
         render_workspace(out, attempt);
+        render_scope_detail(db, out, attempt);
     }
     render_omitted(out, built.len(), MAX_LISTED_ATTEMPTS);
 }
@@ -240,6 +241,39 @@ fn render_scope_detail(db: &Database, out: &mut String, attempt: &DriverAttempt)
     let Some(cycle) = cycle else {
         return;
     };
+    if let Some(selection) = &cycle.tier_selection {
+        let usage = cycle.review_attempts.iter().fold(0_u64, |total, stage| {
+            total.saturating_add(stage.usage.total_tokens.unwrap_or(0))
+        });
+        let reviewer = cycle
+            .reviewer
+            .as_ref()
+            .map(|value| value.assignment.agent_id.as_str())
+            .unwrap_or("none");
+        let _ = writeln!(
+            out,
+            "      review-tier: {:?} rule={} files={} bytes={} reviewer={} review_tokens={}",
+            selection.tier,
+            selection
+                .selecting_rule
+                .as_deref()
+                .unwrap_or("default-full"),
+            selection.footprint.changed_files,
+            selection.footprint.changed_bytes,
+            reviewer,
+            if cycle
+                .review_attempts
+                .iter()
+                .all(|stage| stage.usage.total_tokens.is_some())
+            {
+                usage.to_string()
+            } else if cycle.review_attempts.is_empty() {
+                "0".into()
+            } else {
+                "unknown".into()
+            }
+        );
+    }
     let Some(evaluation) = cycle.scope_evaluations.last() else {
         return;
     };

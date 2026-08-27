@@ -85,7 +85,7 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
                     prompt: &prompt,
                     prompt_cache_key: None,
                     filesystem: familiar_ai_agent::FilesystemPolicy::ReadOnly,
-                    model: self.assignment.requested_model.as_deref(),
+                    model: request.reviewer.requested_model.as_deref(),
                     timeout_ms: Some(self.timeout_ms),
                     budget: familiar_ai_agent::ExecutionBudget::default(),
                 },
@@ -100,7 +100,7 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
         let mut result: ReviewResult = serde_json::from_str(text.trim()).map_err(|e| {
             ReviewExecutionError::Agent(format!("malformed structured review: {e}"))
         })?;
-        result.reviewer = observation(self.assignment.clone(), &observed);
+        result.reviewer = observation(request.reviewer.clone(), &observed);
         result.usage = usage(&observed);
         Ok(result)
     }

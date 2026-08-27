@@ -1,6 +1,6 @@
 # Familiar Product Backlog
 
-**Updated:** 2026-08-26
+**Updated:** 2026-08-27
 **Authority:** `docs/north-star.md`
 
 This index reconciles the active backlog with current implementation. Location
@@ -24,7 +24,7 @@ structured layout contract.
 ## Economy track
 
 - PRD-024 — finish genuinely enforceable execution budgets. **Completed.**
-- PRD-028 — cost-tiered review.
+- PRD-028 — cost-tiered review. **Completed.**
 - PRD-029 — stable prompt prefixes and cache economics. **Completed.**
 - PRD-032 — model probation and empirical routing.
 
@@ -47,9 +47,9 @@ query consistently.
 
 ## Reconciliation record
 
-- PRDs 001–018, 021–027, 029, 030, 034, and 039 are implemented and archived.
-- PRD-020 is implemented and archived.
-- PRDs 019, 028, 031–033, and 035–038 are active; checkpointed recovery
+- PRDs 001–018, 020–030, 034, and 039 are implemented and archived, except
+  PRD-019, which remains active.
+- PRDs 019, 031–033, and 035–038 are active; checkpointed recovery
   is now available for their execution.
 - PRDs 028 and 029, and the completion intent for PRD-027, were recovered from
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
