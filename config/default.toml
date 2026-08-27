@@ -34,6 +34,40 @@
 #   { prefix = "docs/prd/", kind = "prd" },
 #   { prefix = "docs/runbooks/", kind = "supporting" },
 # ]
+#
+# Execution policy is resolved wholesale per section. This worked example
+# gives a second repository its own context ceiling, scope, and verification
+# pipeline; omitted sections fall back whole to their global counterpart.
+# [repositories."/home/operator/Projects/spectra".execution_context]
+# hard_ceiling_tokens = 60000
+# [repositories."/home/operator/Projects/spectra".review]
+# enabled = true
+# max_review_attempts = 3
+# max_remediation_attempts = 2
+# max_total_duration_ms = 1200000
+# allowed_paths = ["internal/", "api/", "tests/", "docs/prd/"]
+# [repositories."/home/operator/Projects/spectra".review.scope]
+# declaration_mode = "expected_or_configured"
+# [repositories."/home/operator/Projects/spectra".review.scope.file_classes]
+# dependency_manifest = "human_review"
+# dependency_lockfile = "human_review"
+# migration = "human_review"
+# configuration = "human_review"
+# test = "allow_when_expected"
+# generated_artifact = "human_review"
+# [[repositories."/home/operator/Projects/spectra".review.verification]]
+# check_id = "lint"
+# argv = ["/usr/bin/docker", "compose", "run", "--rm", "tools", "make", "lint"]
+# working_directory = "."
+# timeout_ms = 1200000
+# required = true
+# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }
+# [repositories."/home/operator/Projects/spectra".review.implementation_agent]
+# adapter_id = "codex"
+# agent_id = "implementation"
+# [repositories."/home/operator/Projects/spectra".review.reviewer_agent]
+# adapter_id = "codex"
+# agent_id = "reviewer"
 
 # Unattended driver warrant. `familiar-ai drive` refuses to start unless at
 # least one ceiling below is finite — an unbounded unattended loop is not a

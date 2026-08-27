@@ -34,6 +34,8 @@ pub struct DriverAttempt {
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub last_durable_phase: Option<String>,
+    pub review_configuration_source: String,
+    pub execution_context_configuration_source: String,
 }
 
 pub struct DriverRepository<'a> {
@@ -134,6 +136,25 @@ impl<'a> DriverRepository<'a> {
         prd_path: &str,
         execution_id: Option<&str>,
     ) -> familiar_ai_core::Result<i64> {
+        self.record_attempt_started_with_sources(
+            session_id,
+            prd_id,
+            prd_path,
+            execution_id,
+            "global",
+            "global",
+        )
+    }
+
+    pub fn record_attempt_started_with_sources(
+        &self,
+        session_id: &str,
+        prd_id: &str,
+        prd_path: &str,
+        execution_id: Option<&str>,
+        review_configuration_source: &str,
+        execution_context_configuration_source: &str,
+    ) -> familiar_ai_core::Result<i64> {
         let next: i64 = self
             .conn
             .query_row(
@@ -144,15 +165,17 @@ impl<'a> DriverRepository<'a> {
             .map_err(db)?;
         self.conn
             .execute(
-                "INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at) \
-                 VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at,review_configuration_source,execution_context_configuration_source) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     session_id,
                     next,
                     prd_id,
                     prd_path,
                     execution_id,
-                    Utc::now().to_rfc3339()
+                    Utc::now().to_rfc3339(),
+                    review_configuration_source,
+                    execution_context_configuration_source,
                 ],
             )
             .map_err(db)?;
@@ -260,7 +283,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase FROM driver_attempts \
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source FROM driver_attempts \
                  WHERE session_id=?1 ORDER BY sequence",
             )
             .map_err(db)?;
@@ -282,6 +305,8 @@ impl<'a> DriverRepository<'a> {
                     exit_code: row.get(12)?,
                     signal: row.get(13)?,
                     last_durable_phase: row.get(14)?,
+                    review_configuration_source: row.get(15)?,
+                    execution_context_configuration_source: row.get(16)?,
                 })
             })
             .map_err(db)?;

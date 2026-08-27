@@ -347,6 +347,16 @@ pub fn drive(
         .resolve(&current)
         .map_err(|error| DriveError::Config(error.to_string()))?;
     let repository_config = config.repository(&repository.worktree);
+    let effective = config.effective_execution(&repository.worktree);
+    let review_configuration_source = effective.review_source.as_str();
+    let execution_context_configuration_source = effective.execution_context_source.as_str();
+    let mut effective_config = config.clone();
+    effective_config.review = effective.review;
+    effective_config.execution_context = effective.execution_context;
+    // A drive session is pinned to one repository. Isolated worker paths are
+    // implementation details and must not trigger a second policy lookup.
+    effective_config.repositories.clear();
+    let config = &effective_config;
     let (implementation_entry, _) =
         crate::run::resolved_agent_entries(config).map_err(DriveError::Config)?;
     let adapter_id = implementation_entry.adapter.as_str();
@@ -439,12 +449,15 @@ pub fn drive(
             for target in targets {
                 attempted_ids.insert(target.id.clone());
                 attempted += 1;
-                let sequence = match DriverRepository::new(db.conn()).record_attempt_started(
-                    &session_id,
-                    &target.id.to_string(),
-                    target.path.as_str(),
-                    None,
-                ) {
+                let sequence = match DriverRepository::new(db.conn())
+                    .record_attempt_started_with_sources(
+                        &session_id,
+                        &target.id.to_string(),
+                        target.path.as_str(),
+                        None,
+                        review_configuration_source,
+                        execution_context_configuration_source,
+                    ) {
                     Ok(sequence) => sequence,
                     Err(error) => {
                         eprintln!("drive: cannot record attempt: {error}");

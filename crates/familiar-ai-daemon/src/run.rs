@@ -226,6 +226,11 @@ fn execute_tracked_inner(
         .resolve(current)
         .map_err(|e| RunError::Config(e.to_string()))?;
     let repository_config = config.repository(&repository.worktree);
+    let effective = config.effective_execution(&repository.worktree);
+    let mut effective_config = config.clone();
+    effective_config.review = effective.review;
+    effective_config.execution_context = effective.execution_context;
+    let config = &effective_config;
     let context = ContextCompiler::new()
         .compile_profiled(
             ContextRequest {

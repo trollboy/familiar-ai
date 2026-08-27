@@ -147,6 +147,10 @@ pub struct RepositoryConfig {
     pub archived_dir: String,
     #[serde(default)]
     pub reference_roots: Vec<ReferenceRootConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_context: Option<ExecutionContextConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,6 +186,8 @@ impl Default for RepositoryConfig {
             active_dir: default_active_dir(),
             archived_dir: default_archived_dir(),
             reference_roots: Vec::new(),
+            review: None,
+            execution_context: None,
         }
     }
 }
@@ -987,6 +993,29 @@ pub struct ExecutionContextConfig {
     pub hard_ceiling_tokens: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationSource {
+    Global,
+    Repository,
+}
+
+impl ConfigurationSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Repository => "repository",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveExecutionConfig {
+    pub review: ReviewConfig,
+    pub review_source: ConfigurationSource,
+    pub execution_context: ExecutionContextConfig,
+    pub execution_context_source: ConfigurationSource,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionHistoryConfig {
     #[serde(default)]
@@ -1526,6 +1555,16 @@ impl Config {
                     )));
                 }
             }
+            if let Some(review) = &entry.review {
+                review.validate().map_err(|error| {
+                    FamiliarError::Config(format!("repositories.{worktree}.review: {error}"))
+                })?;
+                if let Some(agents) = &self.agents {
+                    agents.validate(review).map_err(|error| {
+                        FamiliarError::Config(format!("repositories.{worktree}.review: {error}"))
+                    })?;
+                }
+            }
             let absolute = Path::new(worktree);
             if !absolute.is_absolute() {
                 return Err(FamiliarError::Config(format!(
@@ -1559,6 +1598,47 @@ impl Config {
             })
             .unwrap_or_default()
     }
+
+    pub fn effective_execution(&self, canonical_worktree: &Path) -> EffectiveExecutionConfig {
+        let entry = self.repositories.iter().find_map(|(path, entry)| {
+            Path::new(path)
+                .canonicalize()
+                .ok()
+                .filter(|path| path == canonical_worktree)
+                .map(|_| entry)
+        });
+        EffectiveExecutionConfig {
+            review: entry
+                .and_then(|entry| entry.review.clone())
+                .unwrap_or_else(|| self.review.clone()),
+            review_source: if entry.and_then(|entry| entry.review.as_ref()).is_some() {
+                ConfigurationSource::Repository
+            } else {
+                ConfigurationSource::Global
+            },
+            execution_context: entry
+                .and_then(|entry| entry.execution_context.clone())
+                .unwrap_or_else(|| self.execution_context.clone()),
+            execution_context_source: if entry
+                .and_then(|entry| entry.execution_context.as_ref())
+                .is_some()
+            {
+                ConfigurationSource::Repository
+            } else {
+                ConfigurationSource::Global
+            },
+        }
+    }
+
+    fn validate_execution(&self) -> crate::Result<()> {
+        self.review.validate().map_err(FamiliarError::Config)?;
+        if let Some(agents) = &self.agents {
+            agents
+                .validate(&self.review)
+                .map_err(FamiliarError::Config)?;
+        }
+        Ok(())
+    }
     pub fn load(config_path: Option<&Path>) -> crate::Result<Self> {
         reject_stale_env()?;
         let mut figment = Figment::from(Serialized::defaults(Config::default()));
@@ -1575,6 +1655,7 @@ impl Config {
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
+        config.validate_execution()?;
         config.validate_preflight()?;
         config.delivery.validate().map_err(FamiliarError::Config)?;
         Ok(config)
@@ -1600,6 +1681,7 @@ impl Config {
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
+        config.validate_execution()?;
         config.validate_preflight()?;
         config.delivery.validate().map_err(FamiliarError::Config)?;
         Ok(config)
@@ -1639,6 +1721,7 @@ mod tests {
                 active_dir: "docs/prd/todo".into(),
                 archived_dir: "docs/prd/done".into(),
                 reference_roots: vec![],
+                ..RepositoryConfig::default()
             },
         );
         config.validate_repositories().unwrap();
@@ -1666,6 +1749,7 @@ mod tests {
                     active_dir: active.into(),
                     archived_dir: archived.into(),
                     reference_roots: vec![],
+                    ..RepositoryConfig::default()
                 },
             );
             assert!(config
@@ -1674,6 +1758,80 @@ mod tests {
                 .to_string()
                 .contains(expected));
         }
+    }
+
+    #[test]
+    fn repository_execution_sections_resolve_wholesale_and_through_symlinks() {
+        let repo = tempfile::tempdir().unwrap();
+        let link_parent = tempfile::tempdir().unwrap();
+        let link = link_parent.path().join("worktree-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(repo.path(), &link).unwrap();
+
+        let mut config = Config::default();
+        config.review.allowed_paths = vec!["global/".into()];
+        config.execution_context.hard_ceiling_tokens = Some(10);
+        let scoped_review = ReviewConfig {
+            allowed_paths: vec!["scoped/".into()],
+            max_review_attempts: 99,
+            ..ReviewConfig::default()
+        };
+        config.repositories.insert(
+            link.display().to_string(),
+            RepositoryConfig {
+                review: Some(scoped_review.clone()),
+                execution_context: Some(ExecutionContextConfig {
+                    hard_ceiling_tokens: Some(20),
+                }),
+                ..RepositoryConfig::default()
+            },
+        );
+        config.validate_repositories().unwrap();
+        let effective = config.effective_execution(&repo.path().canonicalize().unwrap());
+        assert_eq!(effective.review, scoped_review);
+        assert_eq!(effective.review_source, ConfigurationSource::Repository);
+        assert_eq!(effective.execution_context.hard_ceiling_tokens, Some(20));
+        assert_eq!(
+            effective.execution_context_source,
+            ConfigurationSource::Repository
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        let fallback = config.effective_execution(&other.path().canonicalize().unwrap());
+        assert_eq!(fallback.review, config.review);
+        assert_eq!(fallback.review_source, ConfigurationSource::Global);
+        assert_eq!(fallback.execution_context, config.execution_context);
+    }
+
+    #[test]
+    fn repository_execution_validation_and_closed_keys_fail_at_load() {
+        let repo = tempfile::tempdir().unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            format!(
+                "[repositories.\"{}\"]\nagents = {{}}\n",
+                repo.path().display()
+            ),
+        )
+        .unwrap();
+        let unknown = Config::load(Some(file.path())).unwrap_err().to_string();
+        assert!(
+            unknown.contains("unknown field") && unknown.contains("agents"),
+            "{unknown}"
+        );
+
+        std::fs::write(
+            file.path(),
+            format!(
+                "[repositories.\"{}\".review]\nenabled = true\nmax_review_attempts = 0\n",
+                repo.path().display()
+            ),
+        )
+        .unwrap();
+        let invalid = Config::load(Some(file.path())).unwrap_err().to_string();
+        assert!(invalid.contains(&format!("repositories.{}.review", repo.path().display())));
+        assert!(invalid.contains("finite positive review"), "{invalid}");
     }
 
     #[cfg(unix)]

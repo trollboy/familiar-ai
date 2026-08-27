@@ -108,6 +108,11 @@ fn render_built(out: &mut String, built: &[&DriverAttempt]) {
             optional_cost(attempt.known_cost_microusd),
             attempt.last_durable_phase.as_deref().unwrap_or("unknown")
         );
+        let _ = writeln!(
+            out,
+            "      configuration: review={} execution_context={}",
+            attempt.review_configuration_source, attempt.execution_context_configuration_source
+        );
     }
     render_omitted(out, built.len(), MAX_LISTED_ATTEMPTS);
 }
@@ -132,6 +137,11 @@ fn render_stopped(db: &Database, out: &mut String, stopped: &[&DriverAttempt]) {
             out,
             "  {}  {}  reason={reason}",
             attempt.prd_id, attempt.prd_path
+        );
+        let _ = writeln!(
+            out,
+            "      configuration: review={} execution_context={}",
+            attempt.review_configuration_source, attempt.execution_context_configuration_source
         );
         if attempt.adapter_id.is_some()
             || attempt.model.is_some()
@@ -346,7 +356,14 @@ mod tests {
         let db = database();
         let repository = seed(&db, "drive-1", r#"{"max_prds":3}"#);
         let first = repository
-            .record_attempt_started("drive-1", "PRD-17", "docs/prds/PRD-017.md", Some("exec-1"))
+            .record_attempt_started_with_sources(
+                "drive-1",
+                "PRD-17",
+                "docs/prds/PRD-017.md",
+                Some("exec-1"),
+                "repository",
+                "global",
+            )
             .unwrap();
         repository
             .record_attempt_diagnostics(
@@ -400,9 +417,11 @@ mod tests {
              \n\
              BUILT (1)\n  \
              PRD-17  docs/prds/PRD-017.md  duration=1200ms  cost=2500 micro-USD  phase=completed\n\
+             \x20\x20\x20\x20\x20\x20configuration: review=repository execution_context=global\n\
              \n\
              STOPPED (1)\n  \
              PRD-18  docs/prds/PRD-018.md  reason=review_disabled\n\
+             \x20\x20\x20\x20\x20\x20configuration: review=global execution_context=global\n\
              \n\
              COST\n  \
              known:   2500 micro-USD across 1 attempt(s)\n  \
