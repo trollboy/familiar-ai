@@ -10,15 +10,16 @@ structured layout contract.
 
 ## Critical path: “have at it”
 
-1. PRD-030 — structured PRD contract and profile-neutral dependencies. **Completed.**
-2. PRD-031 — worker capability registry and deterministic routing.
-3. PRD-019 — planner and one human batch-approval gate.
-4. PRD-020 — reconcile parallel scheduling with the canonical graph.
-5. PRD-033 — repository delivery policy and approval modes.
-6. PRD-034 — portable persistent worker. **Completed.**
-7. PRD-036 — repository onboarding.
-8. PRD-037 — security and recovery burn-in.
-9. PRD-038 — multi-repository product acceptance.
+1. PRD-039 — checkpointed execution and concurrent `resume all`. **Next.**
+2. PRD-030 — structured PRD contract and profile-neutral dependencies. **Completed.**
+3. PRD-031 — worker capability registry and deterministic routing.
+4. PRD-019 — planner and one human batch-approval gate.
+5. PRD-020 — reconcile parallel scheduling with the canonical graph.
+6. PRD-033 — repository delivery policy and approval modes.
+7. PRD-034 — portable persistent worker. **Completed.**
+8. PRD-036 — repository onboarding.
+9. PRD-037 — security and recovery burn-in.
+10. PRD-038 — multi-repository product acceptance.
 
 ## Economy track
 
@@ -48,7 +49,8 @@ query consistently.
 
 - PRDs 001–018, 021–027, 029, 030, and 034 are implemented and archived.
 - PRD-020 is partial and remains active.
-- PRDs 019, 028, 031–033, and 035–038 are active.
+- PRDs 019, 020, 028, 031–033, and 035–039 are active; PRD-039 gates all
+  other active work until resumable recovery is implemented.
 - PRDs 028 and 029, and the completion intent for PRD-027, were recovered from
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
