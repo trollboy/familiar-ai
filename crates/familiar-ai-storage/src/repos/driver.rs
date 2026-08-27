@@ -374,7 +374,7 @@ impl<'a> DriverRepository<'a> {
         prd_id: &str,
     ) -> familiar_ai_core::Result<Option<DriverAttempt>> {
         self.conn.query_row(
-            "SELECT a.sequence,a.prd_id,a.prd_path,a.execution_id,a.started_at,a.ended_at,a.outcome,a.retained_reason,a.known_cost_microusd,a.duration_ms,a.adapter_id,a.model,a.exit_code,a.signal,a.last_durable_phase,a.review_configuration_source,a.execution_context_configuration_source FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.prd_id=?2 ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
+            "SELECT a.sequence,a.prd_id,a.prd_path,a.execution_id,a.started_at,a.ended_at,a.outcome,a.retained_reason,a.known_cost_microusd,a.duration_ms,a.adapter_id,a.model,a.exit_code,a.signal,a.last_durable_phase,a.review_configuration_source,a.execution_context_configuration_source,a.component_id,a.worktree_path,a.branch FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.prd_id=?2 ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
             params![repository_key, prd_id],
             |row| Ok(DriverAttempt {
                 sequence: row.get(0)?, prd_id: row.get(1)?, prd_path: row.get(2)?,
@@ -385,6 +385,7 @@ impl<'a> DriverRepository<'a> {
                 adapter_id: row.get(10)?, model: row.get(11)?, exit_code: row.get(12)?,
                 signal: row.get(13)?, last_durable_phase: row.get(14)?,
                 review_configuration_source: row.get(15)?, execution_context_configuration_source: row.get(16)?,
+                component_id: row.get(17)?, worktree_path: row.get(18)?, branch: row.get(19)?,
             }),
         ).optional().map_err(db)
     }
