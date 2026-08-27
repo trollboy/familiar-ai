@@ -13,9 +13,9 @@ structured layout contract.
 1. PRD-039 — checkpointed execution and concurrent `resume all`. **Completed.**
 2. PRD-030 — structured PRD contract and profile-neutral dependencies. **Completed.**
 3. PRD-031 — worker capability registry and deterministic routing. **Completed.**
-4. PRD-019 — planner and one human batch-approval gate.
-5. PRD-020 — reconcile parallel scheduling with the canonical graph. **Completed.**
-6. PRD-033 — repository delivery policy and approval modes.
+4. PRD-033 — actionable review decisions and repository delivery policy.
+5. PRD-019 — planner and one human batch-approval gate.
+6. PRD-020 — reconcile parallel scheduling with the canonical graph. **Completed.**
 7. PRD-034 — portable persistent worker. **Completed.**
 8. PRD-036 — repository onboarding.
 9. PRD-037 — security and recovery burn-in.
