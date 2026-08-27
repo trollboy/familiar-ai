@@ -157,6 +157,36 @@ max_verification_log_bytes = 256000
 # effort = "high"
 # permission_mode = "default"      # bypassPermissions is always rejected here
 
+# Adapter-neutral worker registry. This is mutually exclusive with [agents].
+# Automatic routing uses lowest estimated cost, then worker id. A stage pin is
+# exact and is refused if unavailable, incapable, over budget, under-context,
+# insufficiently isolated, or (for review) not independent.
+# [worker_registry.routing]
+# implementation_pin = "codex-primary"
+# review_pin = "claude-review"
+# max_stage_cost_microusd = 0
+# required_context_tokens = 0
+# [worker_registry.workers.codex-primary]
+# adapter = "codex" # "codex" | "claude-code" | "ollama"
+# provider = "openai"
+# model = "gpt-5"
+# capabilities = ["planning", "implementation", "remediation", "narrow-task"]
+# fresh_process_isolation = true
+# context_tokens = 200000
+# estimated_cost_microusd = 0
+# available = true
+# [worker_registry.workers.claude-review]
+# adapter = "claude-code"
+# provider = "anthropic"
+# model = "sonnet"
+# capabilities = ["review"]
+# fresh_process_isolation = true
+# context_tokens = 200000
+# estimated_cost_microusd = 0
+# available = true
+# Ollama uses adapter = "ollama" and model = "qwen3:8b"; Familiar invokes it
+# through the existing Codex OSS adapter path.
+
 [review.scope]
 allow_prd_expected_file_expansion = false
 declaration_mode = "expected_or_configured"

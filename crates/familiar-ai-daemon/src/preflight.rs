@@ -44,9 +44,29 @@ impl PreflightReport {
 
 pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> PreflightReport {
     let mut checks = Vec::new();
-    checks.push(agent_check("agent.implementation", agents.implementation));
-    if config.review.enabled {
-        checks.push(agent_check("agent.reviewer", agents.reviewer));
+    if let Some(registry) = &config.worker_registry {
+        match crate::run::resolved_worker_plan(config) {
+            Ok((_, _, records)) => {
+                for record in records {
+                    let worker = &registry.workers[&record.selected_worker];
+                    let agent = crate::run::build_agent(&worker.as_agent_entry());
+                    checks.push(agent_check(
+                        &format!("worker.{:?}", record.stage).to_ascii_lowercase(),
+                        agent.as_ref(),
+                    ));
+                }
+            }
+            Err(detail) => checks.push(PreflightCheck {
+                check_id: "worker.routing".into(),
+                status: PreflightStatus::Failed,
+                detail,
+            }),
+        }
+    } else {
+        checks.push(agent_check("agent.implementation", agents.implementation));
+        if config.review.enabled {
+            checks.push(agent_check("agent.reviewer", agents.reviewer));
+        }
     }
     for command in &config.preflight.commands {
         checks.push(command_check(command, repository));
@@ -173,6 +193,7 @@ mod tests {
             &AgentSet {
                 implementation: &agent,
                 reviewer: &agent,
+                remediation: &agent,
             },
             &config,
             temp.path(),

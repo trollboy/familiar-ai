@@ -9,18 +9,20 @@ use std::time::Instant;
 
 use chrono::Utc;
 use familiar_ai_agent::{
-    AgentExecutionError, ClaudeCodeAgent, ClaudeCodeSettings, CodexAgent, CodingAgent,
-    ExecutionBudget, ExecutionRequest, ExecutionResult,
+    builtin_adapter_factories, AgentExecutionError, CodingAgent, ExecutionBudget, ExecutionRequest,
+    ExecutionResult, RouteRequest, SelectionRecord, WorkerCapability, WorkerDescriptor,
+    WorkerRegistry, WorkerStage,
 };
 use familiar_ai_context::{
     render_stable_prefix, ContextBudget, ContextBudgetError, ContextBudgeter,
     ContextCompilationError, ContextCompiler, ContextProfile, ContextReferenceKind,
     ContextReferenceRoot, ContextRequest, ExecutionContext,
 };
+use familiar_ai_core::config::WorkerCapabilityConfig;
 use familiar_ai_core::{
-    admit_run_prd, resolve_run_prd, validate_graph, AgentAdapterKind, AgentEntryConfig, AppPaths,
-    BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice, FilesystemBacklogDiscovery,
-    ScopeClassPolicyConfig, ScopeDeclarationModeConfig, ScopeFileClassName,
+    admit_run_prd, resolve_run_prd, validate_graph, AgentEntryConfig, AppPaths, BacklogDiscovery,
+    BacklogStatusStore, Config, ExecutionPrice, FilesystemBacklogDiscovery, ScopeClassPolicyConfig,
+    ScopeDeclarationModeConfig, ScopeFileClassName,
 };
 use familiar_ai_review::{
     compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
@@ -109,6 +111,19 @@ pub struct RunWorkflowResult {
 pub struct AgentSet<'a> {
     pub implementation: &'a dyn CodingAgent,
     pub reviewer: &'a dyn CodingAgent,
+    pub remediation: &'a dyn CodingAgent,
+}
+
+pub fn resolved_remediation_entry(config: &Config) -> Result<AgentEntryConfig, String> {
+    let Some(registry) = &config.worker_registry else {
+        return resolved_agent_entries(config).map(|entries| entries.0);
+    };
+    let (_, _, records) = resolved_worker_plan(config)?;
+    let selected = records
+        .iter()
+        .find(|record| record.stage == WorkerStage::Remediation)
+        .ok_or_else(|| "remediation worker was not selected".to_owned())?;
+    Ok(registry.workers[&selected.selected_worker].as_agent_entry())
 }
 
 /// Resolve the configured agent entries: validated when `[agents]` is
@@ -117,6 +132,10 @@ pub struct AgentSet<'a> {
 pub fn resolved_agent_entries(
     config: &Config,
 ) -> Result<(AgentEntryConfig, AgentEntryConfig), String> {
+    if config.worker_registry.is_some() {
+        let plan = resolved_worker_plan(config)?;
+        return Ok((plan.0, plan.1));
+    }
     match &config.agents {
         Some(agents) => {
             agents.validate(&config.review)?;
@@ -126,19 +145,179 @@ pub fn resolved_agent_entries(
     }
 }
 
+/// Resolve every stage before execution. Selection is pure: it neither probes
+/// executables nor invokes an adapter. Preflight performs those probes next.
+pub fn resolved_worker_plan(
+    config: &Config,
+) -> Result<(AgentEntryConfig, AgentEntryConfig, Vec<SelectionRecord>), String> {
+    let configured = config
+        .worker_registry
+        .as_ref()
+        .ok_or_else(|| "worker registry is not configured".to_owned())?;
+    configured.validate()?;
+    let mut registry = WorkerRegistry::default();
+    for (id, worker) in &configured.workers {
+        let capabilities = worker
+            .capabilities
+            .iter()
+            .map(|capability| match capability {
+                WorkerCapabilityConfig::Planning => WorkerCapability::Planning,
+                WorkerCapabilityConfig::Implementation => WorkerCapability::Implementation,
+                WorkerCapabilityConfig::Review => WorkerCapability::Review,
+                WorkerCapabilityConfig::Remediation => WorkerCapability::Remediation,
+                WorkerCapabilityConfig::NarrowTask => WorkerCapability::NarrowTask,
+            })
+            .collect();
+        registry.register(worker_descriptor(id, worker, capabilities))?;
+    }
+    let routing = &configured.routing;
+    let select = |stage, pin: &Option<String>, independent_from| {
+        registry
+            .select(&RouteRequest {
+                stage,
+                pinned_worker: pin.clone(),
+                max_cost_microusd: routing.max_stage_cost_microusd,
+                required_context_tokens: routing.required_context_tokens,
+                require_isolation: stage == WorkerStage::Review,
+                independent_from,
+            })
+            .map_err(|e| e.to_string())
+    };
+    let implementation = select(
+        WorkerStage::Implementation,
+        &routing.implementation_pin,
+        None,
+    )?;
+    let implementation_worker = registry.get(&implementation.selected_worker).unwrap();
+    let mut records = vec![implementation.clone()];
+    records.push(select(
+        WorkerStage::Remediation,
+        &routing.remediation_pin,
+        None,
+    )?);
+    let review = if config.review.enabled {
+        Some(select(
+            WorkerStage::Review,
+            &routing.review_pin,
+            Some((
+                implementation_worker.provider.clone(),
+                implementation_worker.model.clone(),
+            )),
+        )?)
+    } else {
+        None
+    };
+    if let Some(record) = &review {
+        records.push(record.clone());
+    }
+    let reviewer_id = review
+        .as_ref()
+        .map(|r| r.selected_worker.as_str())
+        .unwrap_or(&implementation.selected_worker);
+    let implementation_entry = configured.workers[&implementation.selected_worker].as_agent_entry();
+    let reviewer_entry = configured.workers[reviewer_id].as_agent_entry();
+    Ok((implementation_entry, reviewer_entry, records))
+}
+
 /// Deterministic constructor: adapter enum to concrete agent, nothing else.
 /// Performs no probing, filesystem checks, or model calls.
 pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
-    match entry.adapter {
-        AgentAdapterKind::Codex => Box::new(CodexAgent::new(entry.resolved_executable())),
-        AgentAdapterKind::ClaudeCode => Box::new(ClaudeCodeAgent::new(ClaudeCodeSettings {
-            executable: entry.resolved_executable(),
-            model: entry.model.clone(),
-            effort: entry.effort.map(|effort| effort.as_str().to_owned()),
-            permission_mode: entry.permission_mode.map(|mode| mode.as_str().to_owned()),
-            max_budget_microusd: None,
-            extra_args: entry.extra_args.clone(),
-        })),
+    let descriptor = WorkerDescriptor {
+        id: "legacy".into(),
+        adapter_id: entry.adapter.as_str().into(),
+        provider: entry.adapter.as_str().into(),
+        model: entry.model.clone().unwrap_or_default(),
+        executable: entry.resolved_executable(),
+        capabilities: Default::default(),
+        fresh_process_isolation: true,
+        context_tokens: 0,
+        estimated_cost_microusd: 0,
+        available: true,
+        effort: entry.effort.map(|value| value.as_str().into()),
+        permission_mode: entry.permission_mode.map(|value| value.as_str().into()),
+        extra_args: entry.extra_args.clone(),
+    };
+    builtin_adapter_factories()
+        .build(&descriptor)
+        .expect("built-in adapter factory must be registered")
+}
+
+fn worker_descriptor(
+    id: &str,
+    worker: &familiar_ai_core::config::RegistryWorkerConfig,
+    capabilities: std::collections::BTreeSet<WorkerCapability>,
+) -> WorkerDescriptor {
+    WorkerDescriptor {
+        id: id.into(),
+        adapter_id: worker.adapter.as_str().into(),
+        provider: worker.provider.clone(),
+        model: worker.as_agent_entry().model.unwrap_or_default(),
+        executable: worker
+            .executable
+            .clone()
+            .unwrap_or_else(|| worker.adapter.default_executable().into()),
+        capabilities,
+        fresh_process_isolation: worker.fresh_process_isolation,
+        context_tokens: worker.context_tokens,
+        estimated_cost_microusd: worker.estimated_cost_microusd,
+        available: worker.available,
+        effort: worker.effort.map(|value| value.as_str().into()),
+        permission_mode: worker.permission_mode.map(|value| value.as_str().into()),
+        extra_args: worker.extra_args.clone(),
+    }
+}
+
+type OwnedAgentSet = (
+    Box<dyn CodingAgent>,
+    Box<dyn CodingAgent>,
+    Box<dyn CodingAgent>,
+);
+
+fn build_selected_agents(config: &Config) -> Result<Option<OwnedAgentSet>, RunError> {
+    let Some(registry) = &config.worker_registry else {
+        return Ok(None);
+    };
+    let (_, _, records) = resolved_worker_plan(config).map_err(RunError::Config)?;
+    let build_stage = |stage| -> Result<Box<dyn CodingAgent>, RunError> {
+        let record = records
+            .iter()
+            .find(|record| record.stage == stage)
+            .ok_or_else(|| RunError::Config(format!("{stage:?} worker was not selected")))?;
+        let worker = &registry.workers[&record.selected_worker];
+        let capabilities = worker
+            .capabilities
+            .iter()
+            .map(|capability| match capability {
+                WorkerCapabilityConfig::Planning => WorkerCapability::Planning,
+                WorkerCapabilityConfig::Implementation => WorkerCapability::Implementation,
+                WorkerCapabilityConfig::Review => WorkerCapability::Review,
+                WorkerCapabilityConfig::Remediation => WorkerCapability::Remediation,
+                WorkerCapabilityConfig::NarrowTask => WorkerCapability::NarrowTask,
+            })
+            .collect();
+        builtin_adapter_factories()
+            .build(&worker_descriptor(
+                &record.selected_worker,
+                worker,
+                capabilities,
+            ))
+            .map_err(RunError::Config)
+    };
+    let implementation = build_stage(WorkerStage::Implementation)?;
+    let remediation = build_stage(WorkerStage::Remediation)?;
+    let reviewer = if config.review.enabled {
+        build_stage(WorkerStage::Review)?
+    } else {
+        build_stage(WorkerStage::Implementation)?
+    };
+    Ok(Some((implementation, reviewer, remediation)))
+}
+
+fn borrowed_agent_set(owned: &OwnedAgentSet) -> AgentSet<'_> {
+    AgentSet {
+        implementation: owned.0.as_ref(),
+        reviewer: owned.1.as_ref(),
+        remediation: owned.2.as_ref(),
     }
 }
 
@@ -328,6 +507,9 @@ pub fn resume_implemented_checkpoint(
         execution_id: Some(execution_id.into()),
         retained_reason: None,
     };
+    let owned_agents = build_selected_agents(config)?;
+    let selected_agents = owned_agents.as_ref().map(borrowed_agent_set);
+    let agents = selected_agents.as_ref().unwrap_or(agents);
     let completed = finish_implementation(
         &mut db,
         &repository,
@@ -383,7 +565,34 @@ fn execute_tracked_inner(
     let mut effective_config = config.clone();
     effective_config.review = effective.review;
     effective_config.execution_context = effective.execution_context;
+    if let Some(registry) = &effective_config.worker_registry {
+        let (_, _, records) = resolved_worker_plan(&effective_config).map_err(RunError::Config)?;
+        for (stage, identity) in [
+            (
+                WorkerStage::Implementation,
+                &mut effective_config.review.implementation_agent,
+            ),
+            (
+                WorkerStage::Review,
+                &mut effective_config.review.reviewer_agent,
+            ),
+        ] {
+            if let Some(record) = records.iter().find(|record| record.stage == stage) {
+                let worker = &registry.workers[&record.selected_worker];
+                identity.adapter_id = worker.adapter.as_str().into();
+                identity.agent_id = record.selected_worker.clone();
+                identity.provider = Some(worker.provider.clone());
+                identity.model = Some(worker.as_agent_entry().model.unwrap_or_default());
+            }
+        }
+    }
     let config = &effective_config;
+    // Registry selection owns construction of the executors it selected. This
+    // prevents library callers from supplying a different trait object than
+    // the one that passed routing and preflight.
+    let owned_agents = build_selected_agents(config)?;
+    let selected_agents = owned_agents.as_ref().map(borrowed_agent_set);
+    let agents = selected_agents.as_ref().unwrap_or(agents);
     let profile = context_profile(&repository_config);
     let context = ContextCompiler::new()
         .compile_profiled(
@@ -439,6 +648,27 @@ fn execute_tracked_inner(
     // Contradictory agent configuration must fail closed before any claim,
     // regardless of which caller constructed the agents.
     let implementation_entry = resolved_agent_entries(config).map_err(RunError::Config)?.0;
+    if config.worker_registry.is_some() {
+        let (_, _, records) = resolved_worker_plan(config).map_err(RunError::Config)?;
+        let selections = familiar_ai_storage::WorkerSelectionRepository::new(db.conn());
+        for (index, record) in records.iter().enumerate() {
+            let candidates = record.candidates.iter().map(|candidate| serde_json::json!({
+                "worker_id": candidate.worker_id,
+                "rejected_reasons": candidate.rejected.iter().map(|reason| format!("{reason:?}")).collect::<Vec<_>>()
+            })).collect::<Vec<_>>();
+            selections
+                .record(
+                    &format!("{id}:worker:{index}"),
+                    Some(&id),
+                    &format!("{:?}", record.stage).to_ascii_lowercase(),
+                    &record.rule,
+                    &record.selected_worker,
+                    &serde_json::to_string(&candidates)
+                        .map_err(|e| RunError::Storage(e.to_string()))?,
+                )
+                .map_err(|e| RunError::Storage(e.to_string()))?;
+        }
+    }
     let execution_budget = ExecutionBudget {
         max_cost_microusd: std::num::NonZeroU64::new(
             implementation_entry.max_execution_cost_microusd,
@@ -568,11 +798,11 @@ fn execute_tracked_inner(
                 .prompt_cache_enabled
                 .then_some(prompt_cache_key.as_str()),
             filesystem: familiar_ai_agent::FilesystemPolicy::Normal,
-            model: config
-                .review
-                .enabled
-                .then_some(config.review.implementation_agent.model.as_deref())
-                .flatten(),
+            model: if config.worker_registry.is_some() || config.review.enabled {
+                config.review.implementation_agent.model.as_deref()
+            } else {
+                implementation_entry.model.as_deref()
+            },
             timeout_ms: None,
             budget: execution_budget,
         },
@@ -736,7 +966,7 @@ fn finish_implementation(
         execution_id: id,
         implementation_result: &result,
         implementation_finalization: finalization,
-        implementation_agent: agents.implementation,
+        implementation_agent: agents.remediation,
         reviewer_agent: agents.reviewer,
         config,
         paths,
@@ -2032,6 +2262,7 @@ mod tests {
         AgentSet {
             implementation: agent,
             reviewer: agent,
+            remediation: agent,
         }
     }
 
@@ -2670,6 +2901,7 @@ mod tests {
         let agents = AgentSet {
             implementation: &agent,
             reviewer: &agent,
+            remediation: &agent,
         };
         let error = preflight_execution_prerequisites(&agents, &Config::default(), temp.path())
             .unwrap_err();

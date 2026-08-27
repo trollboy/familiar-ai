@@ -188,6 +188,7 @@ fn agents(agent: &RecordingAgent) -> AgentSet<'_> {
     AgentSet {
         implementation: agent,
         reviewer: agent,
+        remediation: agent,
     }
 }
 
@@ -445,6 +446,7 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     let agents = AgentSet {
         implementation: &agent,
         reviewer: &agent,
+        remediation: &agent,
     };
     let summary = with_working_directory(&repository, || {
         drive(
@@ -479,6 +481,7 @@ fn panicked_worker_is_terminalized_before_the_session_stops() {
     let agents = AgentSet {
         implementation: &agent,
         reviewer: &agent,
+        remediation: &agent,
     };
     let summary = with_working_directory(&temp.path().join("repo"), || {
         drive(
@@ -514,6 +517,7 @@ fn preflight_failure_detail_is_durable_without_claiming() {
     let agents = AgentSet {
         implementation: &agent,
         reviewer: &agent,
+        remediation: &agent,
     };
     let summary = with_working_directory(&temp.path().join("repo"), || {
         drive(

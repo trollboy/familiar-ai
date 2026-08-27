@@ -24,3 +24,4 @@ pub use repos::lifecycle::{
 pub use repos::project::ProjectRepository;
 pub use repos::review::ReviewRepository;
 pub use repos::session_rollup::SessionRollupRepository;
+pub use repos::worker_selection::WorkerSelectionRepository;

@@ -10,13 +10,78 @@ use familiar_ai_core::{
     config::ReviewAgentConfig, AgentAdapterKind, AgentEntryConfig, AgentPermissionMode,
     AgentsConfig, Config,
 };
-use familiar_ai_daemon::run::{build_agent, resolved_agent_entries};
+use familiar_ai_daemon::run::{build_agent, resolved_agent_entries, resolved_worker_plan};
 
 fn write_executable(path: &Path, script: &str) {
     fs::write(path, script).unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).unwrap();
+}
+
+#[test]
+fn registry_routes_every_stage_deterministically_and_honors_pin() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        temp.path(),
+        r#"
+[worker_registry.routing]
+implementation_pin = "claude"
+max_stage_cost_microusd = 100
+required_context_tokens = 1000
+
+[worker_registry.workers.codex]
+adapter = "codex"
+provider = "openai"
+model = "gpt"
+capabilities = ["planning", "implementation", "review", "remediation", "narrow-task"]
+fresh_process_isolation = true
+context_tokens = 2000
+estimated_cost_microusd = 1
+
+[worker_registry.workers.claude]
+adapter = "claude-code"
+provider = "anthropic"
+model = "sonnet"
+capabilities = ["planning", "implementation", "review", "remediation", "narrow-task"]
+fresh_process_isolation = true
+context_tokens = 2000
+estimated_cost_microusd = 2
+"#,
+    )
+    .unwrap();
+    let config = Config::load(Some(temp.path())).unwrap();
+    let (implementation, _, first) = resolved_worker_plan(&config).unwrap();
+    let (_, _, second) = resolved_worker_plan(&config).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(implementation.adapter, AgentAdapterKind::ClaudeCode);
+    assert_eq!(first[0].rule, "user-pin");
+    assert_eq!(first[0].selected_worker, "claude");
+    assert!(first[0]
+        .candidates
+        .iter()
+        .any(|candidate| candidate.worker_id == "codex" && !candidate.rejected.is_empty()));
+}
+
+#[test]
+fn ollama_registry_entry_uses_existing_codex_oss_adapter() {
+    let entry = familiar_ai_core::config::RegistryWorkerConfig {
+        adapter: AgentAdapterKind::Ollama,
+        provider: "ollama".into(),
+        model: "qwen3:8b".into(),
+        executable: None,
+        capabilities: vec![familiar_ai_core::config::WorkerCapabilityConfig::Implementation],
+        fresh_process_isolation: true,
+        context_tokens: 1,
+        estimated_cost_microusd: 0,
+        available: true,
+        effort: None,
+        permission_mode: None,
+        extra_args: Vec::new(),
+    }
+    .as_agent_entry();
+    assert_eq!(entry.resolved_executable(), "codex");
+    assert_eq!(entry.model.as_deref(), Some("ollama/qwen3:8b"));
 }
 
 #[test]

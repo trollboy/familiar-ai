@@ -41,6 +41,10 @@ pub struct Config {
     /// review-identity consistency checking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentsConfig>,
+    /// Adapter-neutral capability registry. When absent, legacy `[agents]`
+    /// entries are translated to the historical two-worker registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_registry: Option<WorkerRegistryConfig>,
     #[serde(default)]
     pub driver: DriverConfig,
     #[serde(default)]
@@ -401,6 +405,8 @@ pub enum AgentAdapterKind {
     #[default]
     Codex,
     ClaudeCode,
+    /// Ollama is invoked through the existing Codex OSS adapter.
+    Ollama,
 }
 
 impl AgentAdapterKind {
@@ -408,12 +414,14 @@ impl AgentAdapterKind {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
+            Self::Ollama => "ollama",
         }
     }
     pub fn default_executable(&self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude",
+            Self::Ollama => "codex",
         }
     }
 }
@@ -512,8 +520,10 @@ impl AgentEntryConfig {
                 return Err(format!("[agents.{role}] executable must be non-empty"));
             }
         }
-        if self.adapter == AgentAdapterKind::Codex
-            && (self.effort.is_some() || self.permission_mode.is_some())
+        if matches!(
+            self.adapter,
+            AgentAdapterKind::Codex | AgentAdapterKind::Ollama
+        ) && (self.effort.is_some() || self.permission_mode.is_some())
         {
             return Err(format!(
                 "[agents.{role}] effort and permission_mode are valid only for adapter \"claude-code\""
@@ -532,6 +542,122 @@ impl AgentEntryConfig {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkerCapabilityConfig {
+    Planning,
+    Implementation,
+    Review,
+    Remediation,
+    NarrowTask,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryWorkerConfig {
+    pub adapter: AgentAdapterKind,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<WorkerCapabilityConfig>,
+    #[serde(default)]
+    pub fresh_process_isolation: bool,
+    #[serde(default)]
+    pub context_tokens: u64,
+    #[serde(default)]
+    pub estimated_cost_microusd: u64,
+    #[serde(default = "default_worker_available")]
+    pub available: bool,
+    #[serde(default)]
+    pub effort: Option<AgentEffort>,
+    #[serde(default)]
+    pub permission_mode: Option<AgentPermissionMode>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+fn default_worker_available() -> bool {
+    true
+}
+
+impl RegistryWorkerConfig {
+    pub fn as_agent_entry(&self) -> AgentEntryConfig {
+        let model = match self.adapter {
+            AgentAdapterKind::Ollama if !self.model.starts_with("ollama/") => {
+                Some(format!("ollama/{}", self.model))
+            }
+            _ => Some(self.model.clone()),
+        };
+        AgentEntryConfig {
+            adapter: self.adapter,
+            executable: self.executable.clone(),
+            model,
+            effort: self.effort,
+            permission_mode: self.permission_mode,
+            extra_args: self.extra_args.clone(),
+            ..AgentEntryConfig::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerRoutingConfig {
+    #[serde(default)]
+    pub implementation_pin: Option<String>,
+    #[serde(default)]
+    pub planning_pin: Option<String>,
+    #[serde(default)]
+    pub review_pin: Option<String>,
+    #[serde(default)]
+    pub remediation_pin: Option<String>,
+    #[serde(default)]
+    pub narrow_task_pin: Option<String>,
+    #[serde(default)]
+    pub max_stage_cost_microusd: u64,
+    #[serde(default)]
+    pub required_context_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerRegistryConfig {
+    #[serde(default)]
+    pub workers: BTreeMap<String, RegistryWorkerConfig>,
+    #[serde(default)]
+    pub routing: WorkerRoutingConfig,
+}
+
+impl WorkerRegistryConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.workers.is_empty() {
+            return Err("worker_registry.workers must not be empty".into());
+        }
+        for (id, worker) in &self.workers {
+            if id.trim().is_empty()
+                || worker.provider.trim().is_empty()
+                || worker.model.trim().is_empty()
+                || worker.capabilities.is_empty()
+            {
+                return Err(format!(
+                    "worker_registry.workers.{id} requires provider, model, and capabilities"
+                ));
+            }
+            worker.as_agent_entry().validate(
+                &format!("worker_registry.workers.{id}"),
+                worker
+                    .capabilities
+                    .contains(&WorkerCapabilityConfig::Review),
+            )?;
         }
         Ok(())
     }
@@ -1864,11 +1990,19 @@ impl Config {
     }
 
     fn validate_execution(&self) -> crate::Result<()> {
+        if self.agents.is_some() && self.worker_registry.is_some() {
+            return Err(FamiliarError::Config(
+                "[agents] and [worker_registry] are mutually exclusive".into(),
+            ));
+        }
         self.review.validate().map_err(FamiliarError::Config)?;
         if let Some(agents) = &self.agents {
             agents
                 .validate(&self.review)
                 .map_err(FamiliarError::Config)?;
+        }
+        if let Some(registry) = &self.worker_registry {
+            registry.validate().map_err(FamiliarError::Config)?;
         }
         Ok(())
     }

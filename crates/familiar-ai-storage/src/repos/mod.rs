@@ -10,6 +10,7 @@ pub mod project;
 pub mod review;
 pub mod session_rollup;
 pub mod stats;
+pub mod worker_selection;
 
 use chrono::{DateTime, Utc};
 use familiar_ai_core::FamiliarError;

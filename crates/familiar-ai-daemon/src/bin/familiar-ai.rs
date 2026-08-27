@@ -9,7 +9,9 @@ use familiar_ai_core::{
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
 };
 use familiar_ai_daemon::drive::{drive, DriveSummary, DriveWarrant};
-use familiar_ai_daemon::run::{build_agent, execute_with_config, resolved_agent_entries, AgentSet};
+use familiar_ai_daemon::run::{
+    build_agent, execute_with_config, resolved_agent_entries, resolved_remediation_entry, AgentSet,
+};
 use familiar_ai_storage::{
     Database, ExecutionHistoryRepository, SqliteBacklogRepository, SqliteBootstrapRepository,
 };
@@ -330,9 +332,11 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
     let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
     let implementation = build_agent(&implementation_entry);
     let reviewer = build_agent(&reviewer_entry);
+    let remediation = build_agent(&resolved_remediation_entry(&config)?);
     let agents = AgentSet {
         implementation: implementation.as_ref(),
         reviewer: reviewer.as_ref(),
+        remediation: remediation.as_ref(),
     };
     let mut failures = blocked
         .into_iter()
@@ -582,10 +586,12 @@ fn preflight_command() -> Result<(), String> {
     let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
     let implementation = build_agent(&implementation_entry);
     let reviewer = build_agent(&reviewer_entry);
+    let remediation = build_agent(&resolved_remediation_entry(&config)?);
     let report = familiar_ai_daemon::preflight::run(
         &AgentSet {
             implementation: implementation.as_ref(),
             reviewer: reviewer.as_ref(),
+            remediation: remediation.as_ref(),
         },
         &config,
         &repository.worktree,
@@ -628,11 +634,13 @@ fn run(prd_path: &std::path::Path) -> Result<(), familiar_ai_daemon::run::RunErr
         resolved_agent_entries(&config).map_err(RunError::Config)?;
     let implementation = build_agent(&implementation_entry);
     let reviewer = build_agent(&reviewer_entry);
+    let remediation = build_agent(&resolved_remediation_entry(&config).map_err(RunError::Config)?);
     execute_with_config(
         prd_path,
         &AgentSet {
             implementation: implementation.as_ref(),
             reviewer: reviewer.as_ref(),
+            remediation: remediation.as_ref(),
         },
         &config,
         &paths,
@@ -664,6 +672,7 @@ fn drive_command(
     let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
     let implementation = build_agent(&implementation_entry);
     let reviewer = build_agent(&reviewer_entry);
+    let remediation = build_agent(&resolved_remediation_entry(&config)?);
     let warrant = DriveWarrant::from_config(&config).tightened_by(
         max_prds,
         max_cost_microusd,
@@ -673,6 +682,7 @@ fn drive_command(
         &AgentSet {
             implementation: implementation.as_ref(),
             reviewer: reviewer.as_ref(),
+            remediation: remediation.as_ref(),
         },
         &config,
         &paths,
