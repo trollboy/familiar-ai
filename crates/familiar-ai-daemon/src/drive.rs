@@ -27,6 +27,7 @@ pub enum DriveTermination {
     NothingEligible,
     BudgetPrdsExhausted,
     BudgetCostExhausted,
+    BudgetTokensExhausted,
     BudgetDurationExhausted,
     CostUnknown,
     StorageFailure,
@@ -45,6 +46,7 @@ impl DriveTermination {
             Self::NothingEligible => "nothing_eligible",
             Self::BudgetPrdsExhausted => "budget_prds_exhausted",
             Self::BudgetCostExhausted => "budget_cost_exhausted",
+            Self::BudgetTokensExhausted => "budget_tokens_exhausted",
             Self::BudgetDurationExhausted => "budget_duration_exhausted",
             Self::CostUnknown => "cost_unknown",
             Self::StorageFailure => "storage_failure",
@@ -79,6 +81,7 @@ impl DriveTermination {
 pub struct DriveWarrant {
     pub max_prds: u64,
     pub max_cost_microusd: u64,
+    pub max_tokens: u64,
     pub max_duration_ms: u64,
 }
 
@@ -87,6 +90,7 @@ impl DriveWarrant {
         Self {
             max_prds: config.driver.max_prds_per_session,
             max_cost_microusd: config.driver.max_session_cost_microusd,
+            max_tokens: config.driver.max_session_tokens,
             max_duration_ms: config.driver.max_session_duration_ms,
         }
     }
@@ -105,12 +109,17 @@ impl DriveWarrant {
         Self {
             max_prds: tighten(self.max_prds, prds),
             max_cost_microusd: tighten(self.max_cost_microusd, cost),
+            max_tokens: self.max_tokens,
             max_duration_ms: tighten(self.max_duration_ms, duration),
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.max_prds == 0 && self.max_cost_microusd == 0 && self.max_duration_ms == 0 {
+        if self.max_prds == 0
+            && self.max_cost_microusd == 0
+            && self.max_tokens == 0
+            && self.max_duration_ms == 0
+        {
             return Err("unattended drive requires at least one finite ceiling".into());
         }
         Ok(())
@@ -118,18 +127,27 @@ impl DriveWarrant {
 
     fn as_json(&self) -> String {
         format!(
-            "{{\"max_prds\":{},\"max_cost_microusd\":{},\"max_duration_ms\":{}}}",
-            self.max_prds, self.max_cost_microusd, self.max_duration_ms
+            "{{\"max_prds\":{},\"max_cost_microusd\":{},\"max_tokens\":{},\"max_duration_ms\":{}}}",
+            self.max_prds, self.max_cost_microusd, self.max_tokens, self.max_duration_ms
         )
     }
 
     /// The ceiling breached before starting another attempt, if any.
-    fn exhausted(&self, attempted: u64, cost: u64, elapsed_ms: u64) -> Option<DriveTermination> {
+    fn exhausted(
+        &self,
+        attempted: u64,
+        cost: u64,
+        tokens: u64,
+        elapsed_ms: u64,
+    ) -> Option<DriveTermination> {
         if self.max_prds > 0 && attempted >= self.max_prds {
             return Some(DriveTermination::BudgetPrdsExhausted);
         }
         if self.max_cost_microusd > 0 && cost >= self.max_cost_microusd {
             return Some(DriveTermination::BudgetCostExhausted);
+        }
+        if self.max_tokens > 0 && tokens >= self.max_tokens {
+            return Some(DriveTermination::BudgetTokensExhausted);
         }
         if self.max_duration_ms > 0 && elapsed_ms >= self.max_duration_ms {
             return Some(DriveTermination::BudgetDurationExhausted);
@@ -145,6 +163,7 @@ pub struct DriveSummary {
     pub attempted: u64,
     pub completed: u64,
     pub known_cost_microusd: u64,
+    pub known_tokens: u64,
 }
 
 #[derive(Debug)]
@@ -370,6 +389,7 @@ pub fn drive(
     let mut attempted = 0_u64;
     let mut completed = 0_u64;
     let mut known_cost = 0_u64;
+    let mut known_tokens = 0_u64;
     let mut delivered = 0_u64;
 
     let session_preflight = crate::preflight::run(agents, config, &repository.worktree);
@@ -386,7 +406,7 @@ pub fn drive(
                 break DriveTermination::WorkerHeartbeatLost;
             }
             let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            if let Some(reason) = warrant.exhausted(attempted, known_cost, elapsed) {
+            if let Some(reason) = warrant.exhausted(attempted, known_cost, known_tokens, elapsed) {
                 break reason;
             }
             let discovered =
@@ -654,6 +674,13 @@ pub fn drive(
                 if let Some(value) = cost {
                     known_cost = known_cost.saturating_add(value);
                 }
+                let tokens = trace
+                    .execution_id
+                    .as_deref()
+                    .and_then(|id| attempt_tokens(&db, id));
+                if let Some(value) = tokens {
+                    known_tokens = known_tokens.saturating_add(value);
+                }
                 let unclassified = result.is_err() && trace.retained_reason.is_none();
                 if let Err(error) = &result {
                     eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
@@ -779,6 +806,9 @@ pub fn drive(
                 if warrant.max_cost_microusd > 0 && cost.is_none() {
                     batch_stop.get_or_insert(DriveTermination::CostUnknown);
                 }
+                if warrant.max_tokens > 0 && tokens.is_none() {
+                    batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                }
             }
             if let Some(reason) = batch_stop {
                 break reason;
@@ -804,6 +834,7 @@ pub fn drive(
         attempted,
         completed,
         known_cost_microusd: known_cost,
+        known_tokens,
     })
 }
 
@@ -862,6 +893,14 @@ fn attempt_cost(db: &Database, execution_id: &str) -> Option<u64> {
         .and_then(|row| row.estimated_cost_microusd)
 }
 
+fn attempt_tokens(db: &Database, execution_id: &str) -> Option<u64> {
+    ExecutionHistoryRepository::new(db.conn())
+        .get(execution_id)
+        .ok()
+        .flatten()?
+        .total_tokens
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,6 +927,7 @@ mod tests {
         let configured = DriveWarrant {
             max_prds: 10,
             max_cost_microusd: 500,
+            max_tokens: 700,
             max_duration_ms: 1_000,
         };
         // Lower values win.
@@ -897,6 +937,7 @@ mod tests {
             DriveWarrant {
                 max_prds: 3,
                 max_cost_microusd: 100,
+                max_tokens: 700,
                 max_duration_ms: 250
             }
         );
@@ -922,19 +963,20 @@ mod tests {
         let warrant = DriveWarrant {
             max_prds: 2,
             max_cost_microusd: 100,
+            max_tokens: 200,
             max_duration_ms: 1_000,
         };
-        assert_eq!(warrant.exhausted(0, 0, 0), None);
+        assert_eq!(warrant.exhausted(0, 0, 0, 0), None);
         assert_eq!(
-            warrant.exhausted(2, 0, 0),
+            warrant.exhausted(2, 0, 0, 0),
             Some(DriveTermination::BudgetPrdsExhausted)
         );
         assert_eq!(
-            warrant.exhausted(0, 100, 0),
+            warrant.exhausted(0, 100, 0, 0),
             Some(DriveTermination::BudgetCostExhausted)
         );
         assert_eq!(
-            warrant.exhausted(0, 0, 1_000),
+            warrant.exhausted(0, 0, 0, 1_000),
             Some(DriveTermination::BudgetDurationExhausted)
         );
         // Ceilings set to zero never trigger.
@@ -942,7 +984,7 @@ mod tests {
             max_prds: 1,
             ..DriveWarrant::default()
         };
-        assert_eq!(only_prds.exhausted(0, u64::MAX, u64::MAX), None);
+        assert_eq!(only_prds.exhausted(0, u64::MAX, u64::MAX, u64::MAX), None);
     }
 
     #[test]
@@ -1011,11 +1053,12 @@ mod tests {
         let warrant = DriveWarrant {
             max_prds: 4,
             max_cost_microusd: 0,
+            max_tokens: 0,
             max_duration_ms: 60_000,
         };
         assert_eq!(
             warrant.as_json(),
-            r#"{"max_prds":4,"max_cost_microusd":0,"max_duration_ms":60000}"#
+            r#"{"max_prds":4,"max_cost_microusd":0,"max_tokens":0,"max_duration_ms":60000}"#
         );
     }
 

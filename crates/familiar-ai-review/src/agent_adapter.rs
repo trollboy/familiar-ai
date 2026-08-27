@@ -86,6 +86,7 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
                     filesystem: familiar_ai_agent::FilesystemPolicy::ReadOnly,
                     model: self.assignment.requested_model.as_deref(),
                     timeout_ms: Some(self.timeout_ms),
+                    budget: familiar_ai_agent::ExecutionBudget::default(),
                 },
                 &mut captured,
             )
@@ -139,6 +140,7 @@ impl RemediationAgent for CodingRemediationAdapter<'_> {
                     filesystem: familiar_ai_agent::FilesystemPolicy::WorkspaceWrite,
                     model: self.assignment.requested_model.as_deref(),
                     timeout_ms: Some(request.budget.max_duration_ms),
+                    budget: familiar_ai_agent::ExecutionBudget::default(),
                 },
                 output,
             )

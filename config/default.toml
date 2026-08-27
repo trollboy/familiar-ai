@@ -45,6 +45,7 @@
 [driver]
 max_prds_per_session = 0      # 0 = unlimited
 max_session_cost_microusd = 0 # 0 = no cost ceiling
+max_session_tokens = 0        # 0 = no cumulative token ceiling
 max_session_duration_ms = 0   # 0 = no duration ceiling
 max_concurrency = 1
 isolated_worktrees = false
@@ -99,7 +100,9 @@ max_verification_log_bytes = 256000
 # effort = "high"                  # optional; claude-code only: "low" | "medium" | "high"
 # permission_mode = "acceptEdits"  # optional; claude-code only:
 #                                  # "default" | "plan" | "acceptEdits" | "bypassPermissions"
-# max_budget_microusd = 0          # optional; 0/absent -> no adapter budget ceiling
+# max_execution_cost_microusd = 0  # optional; Claude Code enforces this natively
+# max_execution_tokens = 0         # optional; refused unless the adapter supports it
+# max_execution_duration_ms = 0    # optional; refused unless the adapter supports it
 # extra_args = []                  # optional; validated passthrough
 # [agents.reviewer]
 # adapter = "claude-code"

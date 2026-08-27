@@ -30,7 +30,7 @@ fn absent_agents_section_resolves_to_historical_codex_defaults() {
         assert_eq!(entry.model, None);
         assert_eq!(entry.effort, None);
         assert_eq!(entry.permission_mode, None);
-        assert_eq!(entry.max_budget_microusd, 0);
+        assert_eq!(entry.max_execution_cost_microusd, 0);
         assert!(entry.extra_args.is_empty());
     }
 }
@@ -112,6 +112,7 @@ fn build_agent_maps_each_adapter_to_its_invocation_shape() {
             filesystem: FilesystemPolicy::Normal,
             model: None,
             timeout_ms: None,
+            budget: familiar_ai_agent::ExecutionBudget::default(),
         }
     }
     codex_agent

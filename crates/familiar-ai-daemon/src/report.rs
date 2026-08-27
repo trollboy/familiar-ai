@@ -262,6 +262,12 @@ fn render_judgment(out: &mut String, session: &DriverSession, stopped: &[&Driver
                 "    ready_for_delivery and require a later bounded delivery session."
             );
         }
+        Some("budget_tokens_exhausted") => {
+            let _ = writeln!(
+                out,
+                "  ! the cumulative session token ceiling was reached; remaining work was not launched."
+            );
+        }
         _ => {}
     }
     if stopped.is_empty() {

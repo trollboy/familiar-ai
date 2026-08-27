@@ -56,6 +56,13 @@ impl CodingAgent for CodexAgent {
         request: ExecutionRequest<'_>,
         output: &mut dyn Write,
     ) -> Result<ExecutionResult, AgentExecutionError> {
+        if let Some(denomination) = request.budget.denominations().next() {
+            return Err(AgentExecutionError::UnenforceableBudget {
+                adapter: "codex",
+                denomination,
+                result: Box::default(),
+            });
+        }
         let mut result = ExecutionResult {
             // Probing executes the adapter binary. Never do that outside the
             // isolated filesystem boundary used for review.
@@ -316,6 +323,7 @@ mod tests {
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(50),
+                budget: crate::ExecutionBudget::default(),
             },
             &mut Vec::new(),
         );
@@ -347,6 +355,7 @@ mod tests {
                     filesystem: crate::FilesystemPolicy::Normal,
                     model: None,
                     timeout_ms: Some(5_000),
+                    budget: crate::ExecutionBudget::default(),
                 },
                 &mut Vec::new(),
             )
@@ -375,6 +384,7 @@ mod tests {
             filesystem: crate::FilesystemPolicy::Normal,
             model: None,
             timeout_ms: Some(5_000),
+            budget: crate::ExecutionBudget::default(),
         };
 
         write("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"partial\"}}'\n");
@@ -491,6 +501,7 @@ mod tests {
                     filesystem: crate::FilesystemPolicy::ReadOnly,
                     model: None,
                     timeout_ms: Some(5_000),
+                    budget: crate::ExecutionBudget::default(),
                 },
                 &mut output,
             )

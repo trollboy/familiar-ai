@@ -229,6 +229,8 @@ pub struct DriverConfig {
     #[serde(default)]
     pub max_session_cost_microusd: u64,
     #[serde(default)]
+    pub max_session_tokens: u64,
+    #[serde(default)]
     pub max_session_duration_ms: u64,
     #[serde(default = "default_driver_concurrency")]
     pub max_concurrency: usize,
@@ -259,6 +261,7 @@ impl Default for DriverConfig {
         Self {
             max_prds_per_session: 0,
             max_session_cost_microusd: 0,
+            max_session_tokens: 0,
             max_session_duration_ms: 0,
             max_concurrency: default_driver_concurrency(),
             isolated_worktrees: false,
@@ -272,11 +275,12 @@ impl DriverConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.max_prds_per_session == 0
             && self.max_session_cost_microusd == 0
+            && self.max_session_tokens == 0
             && self.max_session_duration_ms == 0
         {
             return Err(
                 "unattended drive requires at least one finite ceiling in [driver]: \
-                 max_prds_per_session, max_session_cost_microusd, or max_session_duration_ms"
+                 max_prds_per_session, max_session_cost_microusd, max_session_tokens, or max_session_duration_ms"
                     .into(),
             );
         }
@@ -399,9 +403,14 @@ pub struct AgentEntryConfig {
     pub effort: Option<AgentEffort>,
     #[serde(default)]
     pub permission_mode: Option<AgentPermissionMode>,
-    /// 0 or absent means no adapter budget ceiling.
+    /// 0 or absent means no per-execution cost ceiling.
     #[serde(default)]
-    pub max_budget_microusd: u64,
+    #[serde(alias = "max_budget_microusd")]
+    pub max_execution_cost_microusd: u64,
+    #[serde(default)]
+    pub max_execution_tokens: u64,
+    #[serde(default)]
+    pub max_execution_duration_ms: u64,
     #[serde(default)]
     pub extra_args: Vec<String>,
 }
@@ -2066,7 +2075,7 @@ output_microusd_per_million = 300
             agents.implementation.permission_mode,
             Some(AgentPermissionMode::AcceptEdits)
         );
-        assert_eq!(agents.implementation.max_budget_microusd, 5);
+        assert_eq!(agents.implementation.max_execution_cost_microusd, 5);
         assert_eq!(agents.implementation.extra_args.len(), 2);
         assert_eq!(
             agents.reviewer.permission_mode,

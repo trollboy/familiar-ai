@@ -70,6 +70,14 @@ impl ClaudeCodeAgent {
             argv.push("--model".into());
             argv.push(model.to_owned());
         }
+        if let Some(limit) = request.budget.max_cost_microusd {
+            argv.push("--max-budget-usd".into());
+            argv.push(format!(
+                "{}.{:06}",
+                limit.get() / 1_000_000,
+                limit.get() % 1_000_000
+            ));
+        }
         match request.filesystem {
             crate::FilesystemPolicy::ReadOnly => {
                 let mode = if self.permission_mode() == BYPASS_PERMISSION_MODE {
@@ -96,6 +104,9 @@ impl ClaudeCodeAgent {
 }
 
 impl CodingAgent for ClaudeCodeAgent {
+    fn budget_capability(&self) -> crate::BudgetCapability {
+        crate::BudgetCapability::CLAUDE_CODE
+    }
     fn preflight(&self) -> Result<(), String> {
         self.probe_version().map(|_| ()).ok_or_else(|| {
             format!(
@@ -113,6 +124,17 @@ impl CodingAgent for ClaudeCodeAgent {
         request: ExecutionRequest<'_>,
         output: &mut dyn Write,
     ) -> Result<ExecutionResult, AgentExecutionError> {
+        if let Some(denomination) = request
+            .budget
+            .denominations()
+            .find(|value| !self.budget_capability().supports(*value))
+        {
+            return Err(AgentExecutionError::UnenforceableBudget {
+                adapter: "claude-code",
+                denomination,
+                result: Box::default(),
+            });
+        }
         let mut result = ExecutionResult {
             // Probing executes the adapter binary. Never do that outside the
             // isolated filesystem boundary used for review.
@@ -165,6 +187,11 @@ impl CodingAgent for ClaudeCodeAgent {
         {
             use std::os::unix::process::ExitStatusExt;
             result.signal = status.signal();
+        }
+        if stream.budget_stopped {
+            return Err(AgentExecutionError::BudgetStopped {
+                result: Box::new(result),
+            });
         }
         if let Err(source) = output_result {
             return Err(AgentExecutionError::Output {
@@ -232,6 +259,7 @@ struct ClaudeStream {
     total_cost_usd: Option<f64>,
     terminal_seen: bool,
     malformed_seen: bool,
+    budget_stopped: bool,
 }
 
 impl ClaudeStream {
@@ -336,6 +364,36 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
                 stream.cache_read_input_tokens = uint(usage.get("cache_read_input_tokens"));
                 stream.output_tokens = uint(usage.get("output_tokens"));
             }
+            let top_level_credible = [
+                stream.input_tokens,
+                stream.cache_creation_input_tokens,
+                stream.cache_read_input_tokens,
+                stream.output_tokens,
+            ]
+            .into_iter()
+            .all(|value| value.is_some())
+                && [
+                    stream.input_tokens,
+                    stream.cache_creation_input_tokens,
+                    stream.cache_read_input_tokens,
+                    stream.output_tokens,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|value| value > 0);
+            if !top_level_credible {
+                if let Some(aggregate) = aggregate_model_usage(&value) {
+                    stream.input_tokens = Some(aggregate.0);
+                    stream.cache_creation_input_tokens = Some(aggregate.1);
+                    stream.cache_read_input_tokens = Some(aggregate.2);
+                    stream.output_tokens = Some(aggregate.3);
+                } else {
+                    stream.input_tokens = None;
+                    stream.cache_creation_input_tokens = None;
+                    stream.cache_read_input_tokens = None;
+                    stream.output_tokens = None;
+                }
+            }
             stream.total_cost_usd = value
                 .get("total_cost_usd")
                 .and_then(Value::as_f64)
@@ -345,6 +403,7 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
                 stream.result_model = single_result_model(&value);
             }
             let subtype = value.get("subtype").and_then(Value::as_str);
+            stream.budget_stopped = subtype == Some("error_max_budget_usd");
             let is_error = value
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -362,6 +421,44 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
         }
         _ => StreamAction::Silent,
     }
+}
+
+fn aggregate_model_usage(value: &Value) -> Option<(u64, u64, u64, u64)> {
+    let models = value.get("modelUsage")?.as_object()?;
+    if models.is_empty() {
+        return None;
+    }
+    let mut totals = (0_u64, 0_u64, 0_u64, 0_u64);
+    for usage in models.values().map(Value::as_object) {
+        let usage = usage?;
+        let values = (
+            uint(
+                usage
+                    .get("inputTokens")
+                    .or_else(|| usage.get("input_tokens")),
+            )?,
+            uint(
+                usage
+                    .get("cacheCreationInputTokens")
+                    .or_else(|| usage.get("cache_creation_input_tokens")),
+            )?,
+            uint(
+                usage
+                    .get("cacheReadInputTokens")
+                    .or_else(|| usage.get("cache_read_input_tokens")),
+            )?,
+            uint(
+                usage
+                    .get("outputTokens")
+                    .or_else(|| usage.get("output_tokens")),
+            )?,
+        );
+        totals.0 = totals.0.checked_add(values.0)?;
+        totals.1 = totals.1.checked_add(values.1)?;
+        totals.2 = totals.2.checked_add(values.2)?;
+        totals.3 = totals.3.checked_add(values.3)?;
+    }
+    (totals != (0, 0, 0, 0)).then_some(totals)
 }
 
 /// A result event names a model only when `modelUsage` contains exactly one.
@@ -410,6 +507,7 @@ mod tests {
             filesystem,
             model,
             timeout_ms: None,
+            budget: crate::ExecutionBudget::default(),
         }
     }
 
@@ -528,7 +626,41 @@ mod tests {
         let mut result = ExecutionResult::default();
         stream.apply(&mut result);
         assert_eq!(result.input_tokens, None);
-        assert_eq!(result.output_tokens, Some(4));
+        assert_eq!(result.output_tokens, None);
+    }
+
+    #[test]
+    fn zeroed_top_level_usage_falls_back_to_aggregated_model_usage() {
+        let mut stream = ClaudeStream::default();
+        parse_event(
+            r#"{"type":"result","subtype":"error_max_budget_usd","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{"a":{"inputTokens":10,"cacheCreationInputTokens":2,"cacheReadInputTokens":3,"outputTokens":4},"b":{"inputTokens":20,"cacheCreationInputTokens":1,"cacheReadInputTokens":5,"outputTokens":6}}}"#,
+            &mut stream,
+        );
+        let mut result = ExecutionResult::default();
+        stream.apply(&mut result);
+        assert!(stream.budget_stopped);
+        assert_eq!(result.input_tokens, Some(41));
+        assert_eq!(result.cached_tokens, Some(8));
+        assert_eq!(result.output_tokens, Some(10));
+    }
+
+    #[test]
+    fn cost_budget_is_pinned_in_argv_as_exact_fixed_point_dollars() {
+        let mut request = request(Path::new("."), None, crate::FilesystemPolicy::Normal);
+        request.budget.max_cost_microusd = std::num::NonZeroU64::new(8_000_001);
+        let argv = agent(settings(Path::new("claude"))).argv(&request);
+        let position = argv
+            .iter()
+            .position(|arg| arg == "--max-budget-usd")
+            .unwrap();
+        assert_eq!(
+            &argv[position..=position + 1],
+            ["--max-budget-usd", "8.000001"]
+        );
+        assert_eq!(
+            argv.iter().filter(|arg| *arg == "--max-budget-usd").count(),
+            1
+        );
     }
 
     #[test]

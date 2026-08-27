@@ -10,7 +10,7 @@ use std::time::Instant;
 use chrono::Utc;
 use familiar_ai_agent::{
     AgentExecutionError, ClaudeCodeAgent, ClaudeCodeSettings, CodexAgent, CodingAgent,
-    ExecutionRequest, ExecutionResult,
+    ExecutionBudget, ExecutionRequest, ExecutionResult,
 };
 use familiar_ai_context::{
     ContextBudget, ContextBudgetError, ContextBudgeter, ContextCompilationError, ContextCompiler,
@@ -134,8 +134,7 @@ pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
             model: entry.model.clone(),
             effort: entry.effort.map(|effort| effort.as_str().to_owned()),
             permission_mode: entry.permission_mode.map(|mode| mode.as_str().to_owned()),
-            max_budget_microusd: (entry.max_budget_microusd > 0)
-                .then_some(entry.max_budget_microusd),
+            max_budget_microusd: None,
             extra_args: entry.extra_args.clone(),
         })),
     }
@@ -262,7 +261,34 @@ fn execute_tracked_inner(
     trace.execution_id = Some(id.clone());
     // Contradictory agent configuration must fail closed before any claim,
     // regardless of which caller constructed the agents.
-    resolved_agent_entries(config).map_err(RunError::Config)?;
+    let implementation_entry = resolved_agent_entries(config).map_err(RunError::Config)?.0;
+    let execution_budget = ExecutionBudget {
+        max_cost_microusd: std::num::NonZeroU64::new(
+            implementation_entry.max_execution_cost_microusd,
+        ),
+        max_tokens: std::num::NonZeroU64::new(implementation_entry.max_execution_tokens),
+        max_duration_ms: std::num::NonZeroU64::new(implementation_entry.max_execution_duration_ms),
+    };
+    let capability = agents.implementation.budget_capability();
+    if capability.cost_always_zero
+        && execution_budget.max_cost_microusd.is_some()
+        && execution_budget.max_tokens.is_none()
+        && execution_budget.max_duration_ms.is_none()
+    {
+        return Err(RunError::Config(format!(
+            "adapter {} always reports zero cost; this warrant requires a tokens or duration ceiling to bind it",
+            implementation_entry.adapter.as_str()
+        )));
+    }
+    if let Some(denomination) = execution_budget
+        .denominations()
+        .find(|value| !capability.supports(*value))
+    {
+        return Err(RunError::Config(format!(
+            "adapter {} cannot enforce a per-execution {denomination} ceiling",
+            implementation_entry.adapter.as_str()
+        )));
+    }
     let review_preflight = compute_review_preflight(
         config,
         prd_path,
@@ -367,6 +393,7 @@ fn execute_tracked_inner(
                 .then_some(config.review.implementation_agent.model.as_deref())
                 .flatten(),
             timeout_ms: None,
+            budget: execution_budget,
         },
         &mut io::stdout(),
     );
@@ -382,6 +409,10 @@ fn execute_tracked_inner(
         Err(AgentExecutionError::Timeout { result }) => (result.as_ref(), "timed_out"),
         Err(AgentExecutionError::BudgetExceeded { result, .. }) => {
             (result.as_ref(), "budget_exceeded")
+        }
+        Err(AgentExecutionError::BudgetStopped { result }) => (result.as_ref(), "budget_stopped"),
+        Err(AgentExecutionError::UnenforceableBudget { result, .. }) => {
+            (result.as_ref(), "budget_refused")
         }
     };
     if result.agent_version.is_none() {
@@ -783,6 +814,8 @@ fn agent_reason(error: &AgentExecutionError) -> &'static str {
     match error {
         AgentExecutionError::Timeout { .. } => "interrupted",
         AgentExecutionError::BudgetExceeded { .. } => "budget_exceeded",
+        AgentExecutionError::BudgetStopped { .. } => "budget_stopped",
+        AgentExecutionError::UnenforceableBudget { .. } => "budget_refused",
         AgentExecutionError::MalformedOutput { .. } => "malformed_output",
         _ => "implementation_failed",
     }
@@ -987,7 +1020,13 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             estimated_cost_microusd: implementation_finalization.estimated_cost_microusd,
             pricing_provenance: implementation_finalization
                 .estimated_cost_microusd
-                .map(|_| "execution_history_pricing".into()),
+                .map(|_| {
+                    if implementation_result.reported_cost_microusd.is_some() {
+                        "vendor_reported".into()
+                    } else {
+                        "configured_rate".into()
+                    }
+                }),
             unavailable_fields: implementation_finalization.unavailable_fields.clone(),
         },
         implementation_duration_ms: implementation_finalization.duration_ms,
@@ -1232,12 +1271,16 @@ fn terminal(
         .model
         .as_ref()
         .and_then(|m| config.execution_history.pricing.get(m));
-    let (cost, rates, reason) = calculate_cost(
-        result.input_tokens,
-        result.cached_tokens,
-        result.output_tokens,
-        price,
-    );
+    let (cost, rates, reason) = if let Some(vendor) = result.reported_cost_microusd {
+        (Some(vendor), (None, None, None), "")
+    } else {
+        calculate_cost(
+            result.input_tokens,
+            result.cached_tokens,
+            result.output_tokens,
+            price,
+        )
+    };
     if cost.is_none() {
         missing.insert("estimated_cost_microusd".into(), reason.into());
     } else {
