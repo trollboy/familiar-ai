@@ -271,6 +271,7 @@ mod tests {
             location: crate::PrdLocation::Active,
             title: "One".into(),
             dependencies: vec![],
+            metadata: crate::PrdMetadata::default(),
             content_hash: hash.clone(),
         };
         let repo = RepositoryIdentity {

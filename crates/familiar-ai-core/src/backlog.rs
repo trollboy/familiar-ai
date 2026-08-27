@@ -122,6 +122,7 @@ pub struct BacklogLayout {
     pub profile: BacklogProfile,
     pub active_dir: RepositoryPath,
     pub archived_dir: RepositoryPath,
+    pub metadata_policy: PrdMetadataPolicy,
 }
 
 impl Default for BacklogLayout {
@@ -130,6 +131,32 @@ impl Default for BacklogLayout {
             profile: BacklogProfile::Canonical,
             active_dir: RepositoryPath("docs/prds".into()),
             archived_dir: RepositoryPath("docs/prds/done".into()),
+            metadata_policy: PrdMetadataPolicy::Incremental,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrdMetadataPolicy {
+    /// Structured front matter is authoritative when present; legacy canonical
+    /// documents retain their historical metadata grammar while repositories migrate.
+    Incremental,
+    /// Every discovered PRD must use the versioned structured contract.
+    Strict,
+}
+
+impl PrdMetadataPolicy {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "incremental" => Ok(Self::Incremental),
+            "strict" => Ok(Self::Strict),
+            _ => Err(format!("unknown PRD metadata policy '{value}'")),
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Incremental => "incremental",
+            Self::Strict => "strict",
         }
     }
 }
@@ -259,7 +286,18 @@ pub struct DiscoveredPrd {
     pub location: PrdLocation,
     pub title: String,
     pub dependencies: Vec<PrdId>,
+    pub metadata: PrdMetadata,
     pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrdMetadata {
+    pub contract_version: Option<u64>,
+    pub status: Option<String>,
+    pub expected_files: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub risk_classes: Vec<String>,
+    pub external_gates: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -699,7 +737,14 @@ impl FilesystemBacklogDiscovery {
                 PrdLocation::Active => format!("{}/{name}", layout.active_dir),
                 PrdLocation::Archived => format!("{}/{name}", layout.archived_dir),
             };
-            match parse_candidate(&path, &rel, &name, location, layout.profile) {
+            match parse_candidate(
+                &path,
+                &rel,
+                &name,
+                location,
+                layout.profile,
+                layout.metadata_policy,
+            ) {
                 Ok(v) => parsed.push(v),
                 Err(_)
                     if location == PrdLocation::Archived
@@ -727,10 +772,24 @@ type ParsedFilenameIdentity = Result<(u64, Option<char>, usize), String>;
 
 fn filename_identity(name: &str, profile: BacklogProfile) -> Option<ParsedFilenameIdentity> {
     match profile {
-        BacklogProfile::Canonical => filename_number(name).map(|r| {
-            r.map(|n| (n, None, 0))
-                .map_err(|_| "filename number overflows u64".into())
-        }),
+        BacklogProfile::Canonical => {
+            let identity = name.strip_prefix("PRD-")?.strip_suffix(".md")?;
+            let digit_len = identity.bytes().take_while(u8::is_ascii_digit).count();
+            if digit_len == 0 {
+                return None;
+            }
+            let suffix = match &identity.as_bytes()[digit_len..] {
+                [] => None,
+                [b'a'..=b'z'] => identity[digit_len..].chars().next(),
+                _ => return None,
+            };
+            Some(
+                identity[..digit_len]
+                    .parse::<u64>()
+                    .map(|number| (number, suffix, 0))
+                    .map_err(|_| "filename number overflows u64".into()),
+            )
+        }
         BacklogProfile::NumberedSlug => {
             let stem = name.strip_suffix(".md")?;
             let (identity, slug) = stem.split_once('-')?;
@@ -763,12 +822,243 @@ fn filename_identity(name: &str, profile: BacklogProfile) -> Option<ParsedFilena
     }
 }
 
-fn filename_number(name: &str) -> Option<Result<u64, std::num::ParseIntError>> {
-    let digits = name.strip_prefix("PRD-")?.strip_suffix(".md")?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+fn parse_prd_id(token: &str, profile: BacklogProfile) -> Result<PrdId, String> {
+    let (raw, rendering) = if let Some(raw) = token.strip_prefix("PRD-") {
+        (raw, PrdRendering::Canonical)
+    } else if let Some(raw) = token.strip_prefix("PRD ") {
+        let width = raw.bytes().take_while(u8::is_ascii_digit).count();
+        (raw, PrdRendering::NumberedSlug { width })
+    } else {
+        return Err(format!("invalid dependency token '{token}'"));
+    };
+    let digits = raw.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return Err(format!("invalid dependency token '{token}'"));
     }
-    Some(digits.parse())
+    let suffix = match &raw.as_bytes()[digits..] {
+        [] => None,
+        [b'a'..=b'z'] => raw[digits..].chars().next(),
+        _ => return Err(format!("ambiguous dependency or range '{token}'")),
+    };
+    let number = raw[..digits]
+        .parse::<u64>()
+        .map_err(|_| format!("dependency '{token}' overflows u64"))?;
+    Ok(PrdId {
+        number,
+        suffix,
+        rendering: match profile {
+            BacklogProfile::Canonical => PrdRendering::Canonical,
+            BacklogProfile::NumberedSlug => rendering,
+        },
+    })
+}
+
+/// Parse the deliberately small, deterministic YAML subset used by the PRD contract.
+/// The return value includes identity and dependencies because their rendering is profile-specific.
+type ParsedFrontMatter = (PrdId, Vec<PrdId>, PrdMetadata);
+
+fn parse_front_matter<'a>(
+    content: &'a str,
+    path: &str,
+) -> Result<(Option<ParsedFrontMatter>, &'a str), BacklogError> {
+    if !content.starts_with("---\n") && !content.starts_with("---\r\n") {
+        return Ok((None, content));
+    }
+    let first_end = content.find('\n').unwrap() + 1;
+    let rest = &content[first_end..];
+    let closing = rest
+        .find("\n---\n")
+        .map(|index| (index, 5))
+        .or_else(|| rest.find("\n---\r\n").map(|index| (index, 6)))
+        .ok_or_else(|| malformed(path, "unterminated structured PRD front matter"))?;
+    let yaml = &rest[..closing.0];
+    let document = &rest[closing.0 + closing.1..];
+    let mut values = BTreeMap::<String, Vec<String>>::new();
+    let mut current: Option<String> = None;
+    for (offset, raw) in yaml.lines().enumerate() {
+        let line = raw.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("  - ") {
+            let key = current.as_ref().ok_or_else(|| {
+                malformed(
+                    path,
+                    format!(
+                        "front matter line {} has a list item without a field",
+                        offset + 2
+                    ),
+                )
+            })?;
+            values
+                .get_mut(key)
+                .unwrap()
+                .push(unquote(item.trim()).map_err(|message| malformed(path, message))?);
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            return Err(malformed(
+                path,
+                format!("front matter line {} has invalid indentation", offset + 2),
+            ));
+        }
+        let (key, raw_value) = line.split_once(':').ok_or_else(|| {
+            malformed(
+                path,
+                format!("front matter line {} must be key: value", offset + 2),
+            )
+        })?;
+        if !matches!(
+            key,
+            "familiar_ai_prd"
+                | "id"
+                | "status"
+                | "dependencies"
+                | "expected_files"
+                | "acceptance_criteria"
+                | "risk_classes"
+                | "external_gates"
+        ) {
+            return Err(malformed(
+                path,
+                format!("unknown structured PRD field '{key}'"),
+            ));
+        }
+        if values.contains_key(key) {
+            return Err(malformed(
+                path,
+                format!("duplicate structured PRD field '{key}'"),
+            ));
+        }
+        let raw_value = raw_value.trim();
+        let parsed = if raw_value.is_empty() {
+            Vec::new()
+        } else {
+            parse_yaml_list_or_scalar(raw_value)?
+        };
+        values.insert(key.into(), parsed);
+        current = Some(key.into());
+    }
+    for required in [
+        "familiar_ai_prd",
+        "id",
+        "status",
+        "dependencies",
+        "expected_files",
+        "acceptance_criteria",
+        "risk_classes",
+    ] {
+        if !values.contains_key(required) {
+            return Err(malformed(
+                path,
+                format!("missing structured PRD field '{required}'"),
+            ));
+        }
+    }
+    let one = |key: &str| -> Result<String, BacklogError> {
+        let value = &values[key];
+        if value.len() != 1 {
+            return Err(malformed(
+                path,
+                format!("structured PRD field '{key}' requires one scalar value"),
+            ));
+        }
+        Ok(value[0].clone())
+    };
+    let version = one("familiar_ai_prd")?
+        .parse::<u64>()
+        .map_err(|_| malformed(path, "familiar_ai_prd must be integer version 1"))?;
+    if version != 1 {
+        return Err(malformed(
+            path,
+            format!("unsupported familiar_ai_prd version {version}; expected 1"),
+        ));
+    }
+    let id_text = one("id")?;
+    let profile = if id_text.starts_with("PRD ") {
+        BacklogProfile::NumberedSlug
+    } else {
+        BacklogProfile::Canonical
+    };
+    let id = parse_prd_id(&id_text, profile).map_err(|message| malformed(path, message))?;
+    let status = one("status")?;
+    if !matches!(
+        status.as_str(),
+        "draft" | "ready" | "in_progress" | "completed" | "blocked"
+    ) {
+        return Err(malformed(
+            path,
+            format!("invalid structured PRD status '{status}'"),
+        ));
+    }
+    let mut dependencies = Vec::new();
+    for token in &values["dependencies"] {
+        let dep = parse_prd_id(token, profile).map_err(|message| malformed(path, message))?;
+        if dep == id {
+            return Err(malformed(path, format!("self-dependency {dep}")));
+        }
+        if dependencies.contains(&dep) {
+            return Err(malformed(path, format!("duplicate dependency {dep}")));
+        }
+        dependencies.push(dep);
+    }
+    dependencies.sort();
+    for required_nonempty in ["expected_files", "acceptance_criteria", "risk_classes"] {
+        if values[required_nonempty].is_empty() {
+            return Err(malformed(
+                path,
+                format!("structured PRD field '{required_nonempty}' must not be empty"),
+            ));
+        }
+    }
+    let metadata = PrdMetadata {
+        contract_version: Some(version),
+        status: Some(status),
+        expected_files: values.remove("expected_files").unwrap(),
+        acceptance_criteria: values.remove("acceptance_criteria").unwrap(),
+        risk_classes: values.remove("risk_classes").unwrap(),
+        external_gates: values.remove("external_gates").unwrap_or_default(),
+    };
+    Ok((Some((id, dependencies, metadata)), document))
+}
+
+/// Returns authoritative structured metadata when a document has v1 front matter.
+/// Callers must not infer authority from body prose when this returns `Some`.
+pub fn structured_prd_metadata(content: &str) -> Result<Option<PrdMetadata>, BacklogError> {
+    Ok(parse_front_matter(content, "<document>")?
+        .0
+        .map(|value| value.2))
+}
+
+fn parse_yaml_list_or_scalar(value: &str) -> Result<Vec<String>, BacklogError> {
+    if value == "[]" {
+        return Ok(Vec::new());
+    }
+    if let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        if inner.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        return inner
+            .split(',')
+            .map(|item| unquote(item.trim()).map_err(BacklogError::Discovery))
+            .collect();
+    }
+    Ok(vec![unquote(value).map_err(BacklogError::Discovery)?])
+}
+
+fn unquote(value: &str) -> Result<String, String> {
+    let value = if (value.starts_with('"') && value.ends_with('"'))
+        || (value.starts_with('\'') && value.ends_with('\''))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    if value.is_empty() {
+        Err("structured PRD values must not be empty".into())
+    } else {
+        Ok(value.into())
+    }
 }
 
 fn parse_candidate(
@@ -777,6 +1067,7 @@ fn parse_candidate(
     name: &str,
     location: PrdLocation,
     profile: BacklogProfile,
+    metadata_policy: PrdMetadataPolicy,
 ) -> Result<DiscoveredPrd, BacklogError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|e| malformed(relative, format!("cannot inspect file: {e}")))?;
@@ -794,7 +1085,27 @@ fn parse_candidate(
     let content = std::str::from_utf8(&bytes)
         .map_err(|_| malformed(relative, "content is not valid UTF-8"))?;
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    let mut lines = content.lines();
+    let (structured, document) = parse_front_matter(content, relative)?;
+    if structured.is_none() && metadata_policy == PrdMetadataPolicy::Strict {
+        return Err(malformed(
+            relative,
+            "missing structured PRD front matter (policy=strict)",
+        ));
+    }
+    if structured.is_some() {
+        for line in document.lines().map(|line| line.trim_end_matches('\r')) {
+            if matches!(line, "## Expected Files" | "## Acceptance Criteria")
+                || line.starts_with("**Status:**")
+                || line.starts_with("**Depends on:**")
+            {
+                return Err(malformed(
+                    relative,
+                    format!("contradictory body metadata '{line}'"),
+                ));
+            }
+        }
+    }
+    let mut lines = document.lines();
     let heading = lines
         .by_ref()
         .find(|line| !line.trim_matches([' ', '\t', '\r']).is_empty())
@@ -802,7 +1113,7 @@ fn parse_candidate(
     let heading = heading.strip_suffix('\r').unwrap_or(heading);
     if profile == BacklogProfile::NumberedSlug {
         return parse_numbered_slug_content(
-            relative, number, suffix, width, location, &bytes, heading,
+            relative, number, suffix, width, location, &bytes, heading, structured,
         );
     }
     let body = heading.strip_prefix("# PRD-").ok_or_else(|| {
@@ -814,13 +1125,19 @@ fn parse_candidate(
     let (digits, title) = body
         .split_once(": ")
         .ok_or_else(|| malformed(relative, "heading must be '# PRD-<digits>: <title>'"))?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    let heading_digit_len = digits.bytes().take_while(u8::is_ascii_digit).count();
+    let heading_suffix = match &digits.as_bytes()[heading_digit_len..] {
+        [] => None,
+        [b'a'..=b'z'] => digits[heading_digit_len..].chars().next(),
+        _ => return Err(malformed(relative, "heading has an invalid PRD identity")),
+    };
+    if heading_digit_len == 0 {
         return Err(malformed(relative, "heading has an invalid PRD identity"));
     }
-    let heading_number: u64 = digits
+    let heading_number: u64 = digits[..heading_digit_len]
         .parse()
         .map_err(|_| malformed(relative, "heading number overflows u64"))?;
-    if heading_number != number {
+    if heading_number != number || heading_suffix != suffix {
         return Err(malformed(
             relative,
             format!("heading identity PRD-{heading_number} does not match filename PRD-{number}"),
@@ -851,33 +1168,42 @@ fn parse_candidate(
         }
         break;
     }
-    let mut dependencies = Vec::new();
-    if let Some(value) = dependency_value {
-        if value == "none" { /* empty */
-        } else {
-            for token in value.split(',') {
-                let token = token.trim_matches([' ', '\t']);
-                if token.is_empty() {
-                    return Err(malformed(relative, "empty dependency list element"));
+    if structured.is_some() && dependency_value.is_some() {
+        return Err(malformed(relative, "contradictory body metadata: Depends on is forbidden when structured front matter is present"));
+    }
+    let mut dependencies = structured
+        .as_ref()
+        .map(|value| value.1.clone())
+        .unwrap_or_default();
+    if structured.is_none() {
+        if let Some(value) = dependency_value {
+            if value == "none" { /* empty */
+            } else {
+                for token in value.split(',') {
+                    let token = token.trim_matches([' ', '\t']);
+                    if token.is_empty() {
+                        return Err(malformed(relative, "empty dependency list element"));
+                    }
+                    let dep = parse_prd_id(token, profile)
+                        .map_err(|message| malformed(relative, message))?;
+                    if dep.number() == number {
+                        return Err(malformed(relative, format!("self-dependency {dep}")));
+                    }
+                    if dependencies.contains(&dep) {
+                        return Err(malformed(relative, format!("duplicate dependency {dep}")));
+                    }
+                    dependencies.push(dep);
                 }
-                let digits = token
-                    .strip_prefix("PRD-")
-                    .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
-                    .ok_or_else(|| {
-                        malformed(relative, format!("invalid dependency token '{token}'"))
-                    })?;
-                let dep = PrdId::new(digits.parse().map_err(|_| {
-                    malformed(relative, format!("dependency '{token}' overflows u64"))
-                })?);
-                if dep.number() == number {
-                    return Err(malformed(relative, format!("self-dependency {dep}")));
-                }
-                if dependencies.contains(&dep) {
-                    return Err(malformed(relative, format!("duplicate dependency {dep}")));
-                }
-                dependencies.push(dep);
+                dependencies.sort();
             }
-            dependencies.sort();
+        }
+    }
+    if let Some((front_id, _, _)) = &structured {
+        if front_id.number != number || front_id.suffix != suffix {
+            return Err(malformed(
+                relative,
+                format!("front matter identity {front_id} does not match filename identity"),
+            ));
         }
     }
     let hash = digest(&SHA256, &bytes)
@@ -886,16 +1212,21 @@ fn parse_candidate(
         .map(|b| format!("{b:02x}"))
         .collect();
     Ok(DiscoveredPrd {
-        id: PrdId::new(number),
+        id: match profile {
+            BacklogProfile::Canonical => PrdId::with_suffix(number, suffix),
+            BacklogProfile::NumberedSlug => unreachable!(),
+        },
         number,
         path: RepositoryPath::new(relative.to_owned())?,
         location,
         title: title.to_owned(),
         dependencies,
+        metadata: structured.map(|value| value.2).unwrap_or_default(),
         content_hash: hash,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_numbered_slug_content(
     relative: &str,
     number: u64,
@@ -904,6 +1235,7 @@ fn parse_numbered_slug_content(
     location: PrdLocation,
     bytes: &[u8],
     heading: &str,
+    structured: Option<(PrdId, Vec<PrdId>, PrdMetadata)>,
 ) -> Result<DiscoveredPrd, BacklogError> {
     let body = heading.strip_prefix("# PRD ").ok_or_else(|| {
         malformed(
@@ -941,13 +1273,25 @@ fn parse_numbered_slug_content(
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
+    if let Some((front_id, _, _)) = &structured {
+        if front_id.number != number || front_id.suffix != suffix {
+            return Err(malformed(
+                relative,
+                format!("front matter identity {front_id} does not match filename identity"),
+            ));
+        }
+    }
     Ok(DiscoveredPrd {
         id: PrdId::numbered_slug(number, suffix, width),
         number,
         path: RepositoryPath::new(relative.to_owned())?,
         location,
         title: title.to_owned(),
-        dependencies: Vec::new(),
+        dependencies: structured
+            .as_ref()
+            .map(|value| value.1.clone())
+            .unwrap_or_default(),
+        metadata: structured.map(|value| value.2).unwrap_or_default(),
         content_hash: hash,
     })
 }
@@ -1129,6 +1473,7 @@ mod tests {
             location: PrdLocation::Active,
             title: "Two".into(),
             dependencies: vec![PrdId::new(1)],
+            metadata: PrdMetadata::default(),
             content_hash: "two".into(),
         };
         let dependency = DiscoveredPrd {
@@ -1138,6 +1483,7 @@ mod tests {
             location: PrdLocation::Active,
             title: "One".into(),
             dependencies: vec![],
+            metadata: PrdMetadata::default(),
             content_hash: "one".into(),
         };
         let mut entries = vec![
@@ -1327,6 +1673,7 @@ mod tests {
             location: PrdLocation::Active,
             title: n.to_string(),
             dependencies: deps,
+            metadata: PrdMetadata::default(),
             content_hash: "x".into(),
         };
         assert!(matches!(
@@ -1357,7 +1704,8 @@ mod tests {
                 "docs/prds/PRD-001.md",
                 "PRD-001.md",
                 PrdLocation::Active,
-                BacklogProfile::Canonical
+                BacklogProfile::Canonical,
+                PrdMetadataPolicy::Incremental,
             )
             .is_err());
         }
@@ -1374,6 +1722,7 @@ mod tests {
             "PRD-001.md",
             PrdLocation::Active,
             BacklogProfile::Canonical,
+            PrdMetadataPolicy::Incremental,
         )
         .unwrap();
         assert!(parsed.dependencies.is_empty());
@@ -1434,6 +1783,7 @@ fn numbered_slug_discovers_renders_and_ignores_dependencies() {
         profile: BacklogProfile::NumberedSlug,
         active_dir: RepositoryPath::new("docs/prd/todo").unwrap(),
         archived_dir: RepositoryPath::new("docs/prd/done").unwrap(),
+        metadata_policy: PrdMetadataPolicy::Incremental,
     };
     let found = FilesystemBacklogDiscovery
         .discover_with_layout(&repo, &layout)
@@ -1479,11 +1829,133 @@ fn numbered_slug_grammar_failures_are_closed() {
             profile: BacklogProfile::NumberedSlug,
             active_dir: RepositoryPath::new("todo").unwrap(),
             archived_dir: RepositoryPath::new("done").unwrap(),
+            metadata_policy: PrdMetadataPolicy::Incremental,
         };
         let error = FilesystemBacklogDiscovery
             .discover_with_layout(&repo, &layout)
             .unwrap_err()
             .to_string();
         assert!(error.contains(expected), "{name}: {error}");
+    }
+}
+
+#[cfg(test)]
+mod structured_contract_tests {
+    use super::*;
+
+    fn document(id: &str, heading: &str, dependencies: &[&str]) -> String {
+        let deps = dependencies
+            .iter()
+            .map(|dep| format!("  - {dep}\n"))
+            .collect::<String>();
+        format!("---\nfamiliar_ai_prd: 1\nid: {id}\nstatus: ready\ndependencies:\n{deps}expected_files:\n  - src/lib.rs\nacceptance_criteria:\n  - works\nrisk_classes:\n  - scheduling\nexternal_gates: []\n---\n{heading}\n\nThis prose says Depends on PRD-999 but grants no authority.\n")
+    }
+
+    #[test]
+    fn profiles_produce_equivalent_structured_dependency_graphs() {
+        let canonical = tempfile::tempdir().unwrap();
+        let numbered = tempfile::tempdir().unwrap();
+        for root in [canonical.path(), numbered.path()] {
+            fs::create_dir_all(root.join("active")).unwrap();
+        }
+        for (name, id, heading, deps) in [
+            ("PRD-001.md", "PRD-001", "# PRD-1: One", vec![]),
+            (
+                "PRD-002a.md",
+                "PRD-002a",
+                "# PRD-2a: Two A",
+                vec!["PRD-001"],
+            ),
+            ("PRD-003.md", "PRD-003", "# PRD-3: Three", vec!["PRD-002a"]),
+        ] {
+            fs::write(
+                canonical.path().join("active").join(name),
+                document(id, heading, &deps),
+            )
+            .unwrap();
+        }
+        for (name, id, heading, deps) in [
+            ("0001-one.md", "PRD-001", "# PRD 0001 — One", vec![]),
+            (
+                "0002a-two.md",
+                "PRD-002a",
+                "# PRD 0002a — Two A",
+                vec!["PRD-001"],
+            ),
+            (
+                "0003-three.md",
+                "PRD-003",
+                "# PRD 0003 — Three",
+                vec!["PRD-002a"],
+            ),
+        ] {
+            fs::write(
+                numbered.path().join("active").join(name),
+                document(id, heading, &deps),
+            )
+            .unwrap();
+        }
+        let discover = |root: &Path, profile| {
+            FilesystemBacklogDiscovery
+                .discover_with_layout(
+                    &RepositoryIdentity {
+                        worktree: root.into(),
+                        key: "test".into(),
+                    },
+                    &BacklogLayout {
+                        profile,
+                        active_dir: RepositoryPath::new("active").unwrap(),
+                        archived_dir: RepositoryPath::new("done").unwrap(),
+                        metadata_policy: PrdMetadataPolicy::Strict,
+                    },
+                )
+                .unwrap()
+        };
+        let canonical = discover(canonical.path(), BacklogProfile::Canonical);
+        let numbered = discover(numbered.path(), BacklogProfile::NumberedSlug);
+        validate_graph(&canonical).unwrap();
+        validate_graph(&numbered).unwrap();
+        let graph = |prds: &[DiscoveredPrd]| {
+            prds.iter()
+                .map(|prd| {
+                    (
+                        (prd.id.number(), prd.id.suffix()),
+                        prd.dependencies
+                            .iter()
+                            .map(|dep| (dep.number(), dep.suffix()))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(graph(&canonical), graph(&numbered));
+        assert_eq!(canonical[1].dependencies, vec![PrdId::new(1)]);
+        assert_eq!(
+            canonical[2].dependencies,
+            vec![PrdId::with_suffix(2, Some('a'))]
+        );
+    }
+
+    #[test]
+    fn strict_policy_and_structured_authority_are_closed() {
+        let metadata = structured_prd_metadata(&document("PRD-001", "# PRD-1: One", &[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.acceptance_criteria, ["works"]);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("PRD-001.md");
+        fs::write(&path, "# PRD-1: One\n").unwrap();
+        let error = parse_candidate(
+            &path,
+            "active/PRD-001.md",
+            "PRD-001.md",
+            PrdLocation::Active,
+            BacklogProfile::Canonical,
+            PrdMetadataPolicy::Strict,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("missing structured PRD front matter (policy=strict)"));
     }
 }

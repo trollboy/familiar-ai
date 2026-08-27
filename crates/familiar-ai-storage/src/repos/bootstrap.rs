@@ -334,6 +334,7 @@ mod tests {
             location: familiar_ai_core::PrdLocation::Active,
             title: n.to_string(),
             dependencies: vec![],
+            metadata: familiar_ai_core::PrdMetadata::default(),
             content_hash: format!("{n:064x}"),
         }
     }

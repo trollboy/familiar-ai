@@ -69,6 +69,8 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum BacklogCommand {
+    /// Deterministically check structured PRD metadata migration state. Never writes PRDs.
+    MetadataCheck,
     Bootstrap {
         #[command(subcommand)]
         command: BootstrapCommand,
@@ -426,8 +428,29 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
         return Err("backlog is empty".into());
     }
     validate_graph(&discovered).map_err(|e| e.to_string())?;
+    if matches!(command, BacklogCommand::MetadataCheck) {
+        let mut legacy = Vec::new();
+        for prd in &discovered {
+            if prd.metadata.contract_version == Some(1) {
+                println!("{}: structured-v1", prd.path);
+            } else {
+                println!("{}: legacy: add familiar_ai_prd v1 front matter", prd.path);
+                legacy.push(prd.path.to_string());
+            }
+        }
+        if !legacy.is_empty() {
+            return Err(format!(
+                "{} legacy PRD(s) require migration under policy={}: {}",
+                legacy.len(),
+                repository_config.prd_metadata_policy,
+                legacy.join(", ")
+            ));
+        }
+        return Ok(());
+    }
     let mut db = database()?;
     match command {
+        BacklogCommand::MetadataCheck => unreachable!("handled before storage is opened"),
         BacklogCommand::Bootstrap {
             command: BootstrapCommand::Status,
         } => {
@@ -700,6 +723,14 @@ mod tests {
             Command::Next
         ));
         assert!(Cli::try_parse_from(["familiar-ai", "next", "PRD-1.md"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "backlog", "metadata-check"])
+                .unwrap()
+                .command,
+            Command::Backlog {
+                command: BacklogCommand::MetadataCheck
+            }
+        ));
         assert!(matches!(
             Cli::try_parse_from([
                 "familiar-ai",

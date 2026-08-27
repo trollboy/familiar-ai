@@ -145,6 +145,10 @@ pub struct RepositoryConfig {
     pub active_dir: String,
     #[serde(default = "default_archived_dir")]
     pub archived_dir: String,
+    /// `incremental` accepts legacy documents with exact migration diagnostics;
+    /// `strict` requires the structured front-matter contract.
+    #[serde(default = "default_prd_metadata_policy")]
+    pub prd_metadata_policy: String,
     #[serde(default)]
     pub reference_roots: Vec<ReferenceRootConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,6 +182,9 @@ fn default_active_dir() -> String {
 fn default_archived_dir() -> String {
     "docs/prds/done".into()
 }
+fn default_prd_metadata_policy() -> String {
+    "incremental".into()
+}
 
 impl Default for RepositoryConfig {
     fn default() -> Self {
@@ -185,6 +192,7 @@ impl Default for RepositoryConfig {
             profile: default_profile_name(),
             active_dir: default_active_dir(),
             archived_dir: default_archived_dir(),
+            prd_metadata_policy: default_prd_metadata_policy(),
             reference_roots: Vec::new(),
             review: None,
             execution_context: None,
@@ -200,6 +208,8 @@ impl RepositoryConfig {
                 .expect("validated active_dir"),
             archived_dir: crate::RepositoryPath::new(self.archived_dir.clone())
                 .expect("validated archived_dir"),
+            metadata_policy: crate::PrdMetadataPolicy::parse(&self.prd_metadata_policy)
+                .expect("validated prd_metadata_policy"),
         }
     }
     pub fn resolved_reference_roots(&self) -> Vec<ReferenceRootConfig> {
@@ -1539,6 +1549,8 @@ impl Config {
         let mut resolved = BTreeMap::<PathBuf, String>::new();
         for (worktree, entry) in &self.repositories {
             crate::BacklogProfile::parse(&entry.profile).map_err(FamiliarError::Config)?;
+            crate::PrdMetadataPolicy::parse(&entry.prd_metadata_policy)
+                .map_err(FamiliarError::Config)?;
             for (label, value) in [
                 ("active_dir", &entry.active_dir),
                 ("archived_dir", &entry.archived_dir),
@@ -1737,6 +1749,7 @@ mod tests {
                 profile: "numbered-slug".into(),
                 active_dir: "docs/prd/todo".into(),
                 archived_dir: "docs/prd/done".into(),
+                prd_metadata_policy: "incremental".into(),
                 reference_roots: vec![],
                 ..RepositoryConfig::default()
             },
@@ -1765,6 +1778,7 @@ mod tests {
                     profile: profile.into(),
                     active_dir: active.into(),
                     archived_dir: archived.into(),
+                    prd_metadata_policy: "incremental".into(),
                     reference_roots: vec![],
                     ..RepositoryConfig::default()
                 },

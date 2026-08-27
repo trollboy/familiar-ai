@@ -719,6 +719,7 @@ impl BacklogStatusStore for SqliteBacklogRepository<'_> {
                 location: PrdLocation::Active,
                 title: String::new(),
                 dependencies: Vec::new(),
+                metadata: familiar_ai_core::PrdMetadata::default(),
                 content_hash,
             },
             status: next,
@@ -744,6 +745,7 @@ mod tests {
             location: PrdLocation::Active,
             title: "Nine".into(),
             dependencies: vec![],
+            metadata: familiar_ai_core::PrdMetadata::default(),
             content_hash: "abc".into(),
         }
     }
@@ -777,6 +779,7 @@ mod tests {
                     location: PrdLocation::Active,
                     title: spelling,
                     dependencies: vec![],
+                    metadata: familiar_ai_core::PrdMetadata::default(),
                     content_hash: format!("hash-{number}-{}", suffix.unwrap_or('_')),
                 }
             })
@@ -1144,6 +1147,7 @@ mod tests {
             location: PrdLocation::Active,
             title: "Ten".into(),
             dependencies: vec![PrdId::new(9)],
+            metadata: familiar_ai_core::PrdMetadata::default(),
             content_hash: "def".into(),
         }
     }
@@ -1259,6 +1263,7 @@ mod tests {
             location: PrdLocation::Active,
             title: "Unknown".into(),
             dependencies: vec![],
+            metadata: familiar_ai_core::PrdMetadata::default(),
             content_hash: "zzz".into(),
         };
         assert!(matches!(

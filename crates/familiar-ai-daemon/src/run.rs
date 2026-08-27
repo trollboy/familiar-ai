@@ -654,7 +654,17 @@ fn compute_review_preflight(
             "cannot read PRD for scope policy compilation: {error}"
         ))
     })?;
-    let contract = match parse_expected_files(&prd_bytes) {
+    let structured_metadata = familiar_ai_core::structured_prd_metadata(&prd_bytes)
+        .map_err(|error| RunError::Config(error.to_string()))?;
+    let scope_document = structured_metadata.as_ref().map(|metadata| {
+        let bullets = metadata
+            .expected_files
+            .iter()
+            .map(|path| format!("- `{path}`\n"))
+            .collect::<String>();
+        format!("## Expected Files\n\n{bullets}")
+    });
+    let contract = match parse_expected_files(scope_document.as_deref().unwrap_or(&prd_bytes)) {
         Ok(contract) => contract,
         Err(ExpectedFilesError::MissingHeading)
             if config.review.scope.declaration_mode
@@ -899,7 +909,10 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         role: AgentRole::Review,
         session_id: None,
     };
-    let criteria = acceptance_criteria(&context.prd.content);
+    let criteria = familiar_ai_core::structured_prd_metadata(&context.prd.content)
+        .map_err(|error| RunError::Config(error.to_string()))?
+        .map(|metadata| metadata.acceptance_criteria)
+        .unwrap_or_else(|| acceptance_criteria(&context.prd.content));
     if criteria.is_empty() {
         return Err(RunError::Config(
             "enabled review requires an explicit PRD Acceptance Criteria section".into(),

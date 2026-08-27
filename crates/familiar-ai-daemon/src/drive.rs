@@ -255,7 +255,18 @@ fn conflict_scopes(repository: &Path, prd: &DiscoveredPrd) -> Result<Vec<String>
             path.display()
         ))
     })?;
-    let entries = familiar_ai_review::parse_expected_files(&content).map_err(|error| {
+    let scope_content = if prd.metadata.contract_version == Some(1) {
+        let bullets = prd
+            .metadata
+            .expected_files
+            .iter()
+            .map(|path| format!("- `{path}`\n"))
+            .collect::<String>();
+        format!("## Expected Files\n\n{bullets}")
+    } else {
+        content
+    };
+    let entries = familiar_ai_review::parse_expected_files(&scope_content).map_err(|error| {
         DriveError::Config(format!(
             "cannot parse conflict scope from {}: {error}",
             path.display()
