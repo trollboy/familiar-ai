@@ -55,7 +55,7 @@ enum Command {
     /// Publish, check, merge, deploy to staging, and smoke-test one reviewed
     /// worktree under the configured finite delivery policy.
     Deliver { ownership_record: PathBuf },
-    /// Generate or execute a bounded launchd-supervised worker.
+    /// Install and operate a bounded native-supervised worker.
     Worker {
         #[command(subcommand)]
         command: WorkerCommand,
@@ -109,6 +109,16 @@ enum BacklogCommand {
 
 #[derive(Debug, Subcommand)]
 enum WorkerCommand {
+    /// Install and start the native per-user supervisor definition.
+    Install { repository: PathBuf },
+    /// Stop and remove the definition, preserving logs, database, and history.
+    Uninstall { repository: PathBuf },
+    /// Show native supervisor state and every validation blocker.
+    Status { repository: PathBuf },
+    /// Validate the platform and definition without installing or claiming work.
+    Validate { repository: PathBuf },
+    /// Run a harmless fail-once fixture proving restart recovery and one report.
+    Test,
     /// Generate a launchd plist using this exact executable.
     Plist {
         repository: PathBuf,
@@ -194,6 +204,76 @@ fn main() -> ExitCode {
 
 fn worker_command(command: WorkerCommand) -> Result<(), String> {
     match command {
+        WorkerCommand::Install { repository } => {
+            let (spec, repository, paths) = worker_spec(&repository)?;
+            let changed =
+                familiar_ai_daemon::supervisor::install(&spec, &repository, &paths.log_dir)?;
+            println!(
+                "installed={} changed={} definition={}",
+                spec.label,
+                changed,
+                spec.definition.display()
+            );
+            Ok(())
+        }
+        WorkerCommand::Uninstall { repository } => {
+            let (spec, _, _) = worker_spec(&repository)?;
+            let removed = familiar_ai_daemon::supervisor::uninstall(&spec)?;
+            println!(
+                "uninstalled={} removed={} durable_history=preserved",
+                spec.label, removed
+            );
+            Ok(())
+        }
+        WorkerCommand::Status { repository } => {
+            let (spec, repository, _) = worker_spec(&repository)?;
+            let status = familiar_ai_daemon::supervisor::status(&spec, &repository);
+            println!(
+                "backend={:?}\ninstalled={}\ndefinition={}\nstate={}",
+                status.backend,
+                status.installed,
+                status.definition.display(),
+                status.supervisor_state
+            );
+            for blocker in &status.blockers {
+                println!("blocker={blocker}");
+            }
+            if status.blockers.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("worker has {} blocker(s)", status.blockers.len()))
+            }
+        }
+        WorkerCommand::Validate { repository } => {
+            let (spec, repository, _) = worker_spec(&repository)?;
+            familiar_ai_daemon::supervisor::validate(&spec, &repository)
+                .map_err(|v| v.join("; "))?;
+            println!(
+                "valid=true backend={:?} definition={}",
+                spec.backend,
+                spec.definition.display()
+            );
+            Ok(())
+        }
+        WorkerCommand::Test => {
+            // Detection is deliberately first: unsupported hosts cannot even
+            // begin the fixture, much less claim production work.
+            let backend = familiar_ai_daemon::supervisor::detect()?;
+            let root = std::env::temp_dir()
+                .join(format!("familiar-ai-worker-fixture-{}", std::process::id()));
+            let first = familiar_ai_daemon::supervisor::run_fixture(&root);
+            if first.is_ok() {
+                return Err("fixture did not request its failure restart".into());
+            }
+            let result = familiar_ai_daemon::supervisor::run_fixture(&root)?;
+            let again = familiar_ai_daemon::supervisor::run_fixture(&root)?;
+            std::fs::remove_dir_all(&root).map_err(|e| format!("cannot clean fixture: {e}"))?;
+            if result != again {
+                return Err("fixture recovery was not idempotent".into());
+            }
+            println!("backend={backend:?} {result}");
+            Ok(())
+        }
         WorkerCommand::Plist {
             repository,
             label,
@@ -214,6 +294,8 @@ fn worker_command(command: WorkerCommand) -> Result<(), String> {
                 &paths.log_dir.join(format!("{label}.stdout.log")),
                 &paths.log_dir.join(format!("{label}.stderr.log")),
                 &toolchain_path,
+                10,
+                1,
             )?;
             std::fs::write(&output, rendered).map_err(|error| error.to_string())?;
             println!("plist={}", output.display());
@@ -236,6 +318,27 @@ fn worker_command(command: WorkerCommand) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn worker_spec(
+    repository: &std::path::Path,
+) -> Result<(familiar_ai_daemon::supervisor::Spec, PathBuf, AppPaths), String> {
+    // Platform detection must happen before canonicalization/config loading so
+    // unsupported platforms fail before any work-like activity.
+    familiar_ai_daemon::supervisor::detect()?;
+    let executable = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let repository = repository
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve repository {}: {e}", repository.display()))?;
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let spec =
+        familiar_ai_daemon::supervisor::spec(&executable, &repository, &paths, &config.worker)?;
+    Ok((spec, repository, paths))
 }
 
 fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {

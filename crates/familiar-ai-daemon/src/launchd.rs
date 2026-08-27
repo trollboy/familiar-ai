@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+#[allow(clippy::too_many_arguments)] // native definition has these explicit audited fields
 pub fn plist(
     label: &str,
     executable: &Path,
@@ -10,6 +11,8 @@ pub fn plist(
     stdout_log: &Path,
     stderr_log: &Path,
     toolchain_path: &str,
+    restart_throttle_secs: u64,
+    max_prds: u64,
 ) -> Result<String, String> {
     if label.trim().is_empty()
         || !label
@@ -31,6 +34,9 @@ pub fn plist(
     if toolchain_path.trim().is_empty() || toolchain_path.contains('\0') {
         return Err("launchd toolchain PATH must be non-empty and contain no NUL bytes".into());
     }
+    if restart_throttle_secs == 0 || max_prds == 0 {
+        return Err("launchd restart throttle and max PRDs must be positive".into());
+    }
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,11 +50,11 @@ pub fn plist(
     <string>run</string>
     <string>{}</string>
     <string>--max-prds</string>
-    <string>1</string>
+    <string>{}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ThrottleInterval</key><integer>{}</integer>
   <key>ProcessType</key><string>Background</string>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>{}</string></dict>
@@ -60,6 +66,8 @@ pub fn plist(
         xml(label),
         xml(&executable.display().to_string()),
         xml(&repository.display().to_string()),
+        max_prds,
+        restart_throttle_secs,
         xml(toolchain_path),
         xml(&stdout_log.display().to_string()),
         xml(&stderr_log.display().to_string()),
@@ -88,9 +96,13 @@ mod tests {
             Path::new("/tmp/out.log"),
             Path::new("/tmp/err.log"),
             "/opt/homebrew/bin:/usr/bin:/bin",
+            10,
+            1,
         )
         .unwrap();
         assert!(rendered.contains("<key>SuccessfulExit</key><false/>"));
+        assert!(rendered.contains("<key>ThrottleInterval</key><integer>10</integer>"));
+        assert!(rendered.contains("<key>RunAtLoad</key><true/>"));
         assert!(rendered.contains("<string>worker</string>"));
         assert!(rendered.contains("/tmp/repo&amp;fixture"));
         assert!(
@@ -107,6 +119,8 @@ mod tests {
             Path::new("/tmp/out"),
             Path::new("/tmp/err"),
             "/usr/bin:/bin",
+            10,
+            1,
         )
         .is_err());
         assert!(plist(
@@ -116,6 +130,8 @@ mod tests {
             Path::new("/tmp/out"),
             Path::new("/tmp/err"),
             "",
+            10,
+            1,
         )
         .is_err());
     }

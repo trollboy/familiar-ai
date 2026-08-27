@@ -44,9 +44,65 @@ pub struct Config {
     #[serde(default)]
     pub driver: DriverConfig,
     #[serde(default)]
+    pub worker: WorkerConfig,
+    #[serde(default)]
     pub preflight: PreflightConfig,
     #[serde(default)]
     pub delivery: DeliveryConfig,
+}
+
+/// Portable user-supervisor settings. The worker deliberately inherits only
+/// PATH; credentials required by preflight must be supplied by the supervisor
+/// environment and are checked before a PRD is claimed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerConfig {
+    #[serde(default = "default_worker_label")]
+    pub label: String,
+    #[serde(default = "default_worker_restart_throttle_secs")]
+    pub restart_throttle_secs: u64,
+    #[serde(default = "default_worker_max_prds")]
+    pub max_prds_per_run: u64,
+}
+
+fn default_worker_label() -> String {
+    "ai.familiar.worker".into()
+}
+fn default_worker_restart_throttle_secs() -> u64 {
+    10
+}
+fn default_worker_max_prds() -> u64 {
+    1
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            label: default_worker_label(),
+            restart_throttle_secs: default_worker_restart_throttle_secs(),
+            max_prds_per_run: default_worker_max_prds(),
+        }
+    }
+}
+
+impl WorkerConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.label.is_empty()
+            || !self
+                .label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".-_".contains(c))
+        {
+            return Err("worker.label must contain only letters, digits, '.', '-', or '_'".into());
+        }
+        if self.restart_throttle_secs == 0 {
+            return Err("worker.restart_throttle_secs must be positive".into());
+        }
+        if self.max_prds_per_run == 0 {
+            return Err("worker.max_prds_per_run must be positive and finite".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1687,6 +1743,7 @@ impl Config {
         config.validate_execution()?;
         config.validate_preflight()?;
         config.delivery.validate().map_err(FamiliarError::Config)?;
+        config.worker.validate().map_err(FamiliarError::Config)?;
         Ok(config)
     }
 
@@ -1713,6 +1770,7 @@ impl Config {
         config.validate_execution()?;
         config.validate_preflight()?;
         config.delivery.validate().map_err(FamiliarError::Config)?;
+        config.worker.validate().map_err(FamiliarError::Config)?;
         Ok(config)
     }
 }
@@ -1736,7 +1794,22 @@ mod tests {
         assert!(config.database.path.is_none());
         assert_eq!(config.execution_context.hard_ceiling_tokens, None);
         assert!(!config.review.enabled);
+        assert_eq!(config.worker.max_prds_per_run, 1);
+        assert_eq!(config.worker.restart_throttle_secs, 10);
         assert_eq!(config.review.max_review_attempts, 3);
+    }
+
+    #[test]
+    fn persistent_worker_requires_finite_throttled_runs() {
+        let mut worker = WorkerConfig::default();
+        worker.max_prds_per_run = 0;
+        assert!(worker
+            .validate()
+            .unwrap_err()
+            .contains("positive and finite"));
+        worker.max_prds_per_run = 1;
+        worker.restart_throttle_secs = 0;
+        assert!(worker.validate().unwrap_err().contains("throttle"));
     }
 
     #[test]

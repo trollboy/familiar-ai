@@ -86,6 +86,14 @@ max_session_duration_ms = 0   # 0 = no duration ceiling
 max_concurrency = 1
 isolated_worktrees = false
 
+# Persistent worker supervision (launchd on macOS, systemd user service on Linux).
+# The generated definition preserves PATH, writes durable logs, restarts only
+# after failure, and runs one finite warrant at a time.
+[worker]
+label = "ai.familiar.worker"
+restart_throttle_secs = 10
+max_prds_per_run = 1
+
 # Commands run as exact argv before any PRD claim; no shell is involved.
 # [[preflight.commands]]
 # check_id = "go"
