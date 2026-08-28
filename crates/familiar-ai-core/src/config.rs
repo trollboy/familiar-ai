@@ -41,6 +41,9 @@ pub struct Config {
     /// review-identity consistency checking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentsConfig>,
+    /// Agent and deterministic size ceilings used only by `familiar-ai plan`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner: Option<PlannerConfig>,
     /// Adapter-neutral capability registry. When absent, legacy `[agents]`
     /// entries are translated to the historical two-worker registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -693,6 +696,37 @@ impl AgentEntryConfig {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PlannerConfig {
+    #[serde(flatten)]
+    pub agent: AgentEntryConfig,
+    #[serde(default = "default_planner_max_prds")]
+    pub max_prds_per_batch: usize,
+    #[serde(default = "default_planner_max_bytes")]
+    pub max_bytes_per_prd: usize,
+}
+
+const fn default_planner_max_prds() -> usize {
+    8
+}
+const fn default_planner_max_bytes() -> usize {
+    64 * 1024
+}
+
+impl PlannerConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        self.agent.validate("planner", false)?;
+        if self.max_prds_per_batch == 0 || self.max_bytes_per_prd == 0 {
+            return Err(
+                "[planner] max_prds_per_batch and max_bytes_per_prd must be positive and finite"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -2160,6 +2194,9 @@ impl Config {
         if let Some(registry) = &self.worker_registry {
             registry.validate().map_err(FamiliarError::Config)?;
         }
+        if let Some(planner) = &self.planner {
+            planner.validate().map_err(FamiliarError::Config)?;
+        }
         Ok(())
     }
     pub fn load(config_path: Option<&Path>) -> crate::Result<Self> {
@@ -2845,6 +2882,20 @@ output_microusd_per_million = 300
         assert!(agents.validate(&ReviewConfig::default()).is_ok());
         // Codex entries resolve their executable by adapter default.
         assert_eq!(AgentEntryConfig::default().resolved_executable(), "codex");
+    }
+
+    #[test]
+    fn planner_uses_agent_validation_and_positive_size_ceilings() {
+        let parsed: Config = toml::from_str(
+            "[planner]\nadapter='codex'\nmax_prds_per_batch=3\nmax_bytes_per_prd=4096\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.planner.as_ref().unwrap().max_prds_per_batch, 3);
+        assert!(parsed.planner.as_ref().unwrap().validate().is_ok());
+        let bad: Config =
+            toml::from_str("[planner]\nadapter='codex'\neffort='high'\nmax_prds_per_batch=0\n")
+                .unwrap();
+        assert!(bad.planner.unwrap().validate().is_err());
     }
 
     #[test]

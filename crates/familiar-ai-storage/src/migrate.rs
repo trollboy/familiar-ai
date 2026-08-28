@@ -92,6 +92,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 21,
         sql: include_str!("../migrations/021_delivery_policy.sql"),
     },
+    Migration {
+        version: 22,
+        sql: include_str!("../migrations/022_planner_batches.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_ai_core::Result<usize> {
@@ -192,6 +196,7 @@ mod tests {
             "review_verification_evidence",
             "review_tier_selections",
             "worker_selections",
+            "planner_batches",
             "lesson_proposals",
             "lesson_proposal_events",
         ] {
@@ -204,7 +209,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 21);
+        assert_eq!(first, 22);
         assert_eq!(second, 0);
     }
 
@@ -223,7 +228,7 @@ mod tests {
         };
         assert_eq!(
             versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
         );
     }
 

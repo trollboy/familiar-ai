@@ -10,6 +10,9 @@ use familiar_ai_core::{
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
 };
 use familiar_ai_daemon::drive::{drive, DriveSummary, DriveWarrant};
+use familiar_ai_daemon::plan::{
+    approve as approve_plan, generate as generate_plan, print_summary, reject as reject_plan,
+};
 use familiar_ai_daemon::run::{
     build_agent, execute_with_config, resolved_agent_entries, resolved_remediation_entry, AgentSet,
 };
@@ -79,6 +82,31 @@ enum Command {
     Backlog {
         #[command(subcommand)]
         command: BacklogCommand,
+    },
+    /// Draft or decide a human-reviewed PRD proposal batch.
+    Plan {
+        #[command(subcommand)]
+        command: Option<PlanCommand>,
+        /// Design documents supplied to the configured planner agent.
+        design_docs: Vec<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlanCommand {
+    /// Re-validate and admit a proposal batch to the ordinary backlog.
+    Approve {
+        batch_id: String,
+        #[arg(long)]
+        actor: String,
+    },
+    /// Record a rejection and remove its proposal files.
+    Reject {
+        batch_id: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -170,6 +198,13 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         },
         Command::Next => match next() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Plan {
+            command,
+            design_docs,
+        } => match plan(command, &design_docs) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -886,6 +921,66 @@ fn next() -> Result<(), String> {
         selected.status.as_str(),
         selected.title
     );
+    Ok(())
+}
+
+fn plan(command: Option<PlanCommand>, design_docs: &[PathBuf]) -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    paths.ensure_dirs().map_err(|e| e.to_string())?;
+    let config =
+        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let root = std::env::current_dir().map_err(|e| e.to_string())?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&root)
+        .map_err(|e| e.to_string())?;
+    let mut db = database()?;
+    let limits = config.planner.as_ref().ok_or("[planner] is required")?;
+    match command {
+        None => {
+            let agent = build_agent(&limits.agent);
+            let (id, summary) = generate_plan(
+                &repository.worktree,
+                design_docs,
+                &config,
+                &paths,
+                &db,
+                agent.as_ref(),
+            )?;
+            print_summary(&id, &summary);
+        }
+        Some(PlanCommand::Approve { batch_id, actor }) => {
+            if !design_docs.is_empty() {
+                return Err("design documents are not accepted by plan approve".into());
+            }
+            let summary = approve_plan(
+                &repository.worktree,
+                &batch_id,
+                &actor,
+                limits,
+                &repository,
+                &mut db,
+            )?;
+            print_summary(&batch_id, &summary);
+        }
+        Some(PlanCommand::Reject {
+            batch_id,
+            actor,
+            reason,
+        }) => {
+            if !design_docs.is_empty() {
+                return Err("design documents are not accepted by plan reject".into());
+            }
+            reject_plan(
+                &repository.worktree,
+                &batch_id,
+                &actor,
+                &reason,
+                &repository,
+                &mut db,
+            )?;
+            println!("Batch {batch_id} rejected");
+        }
+    }
     Ok(())
 }
 

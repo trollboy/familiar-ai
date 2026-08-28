@@ -22,6 +22,7 @@ pub use repos::lifecycle::{
     LifecycleChange, LifecycleOutcome, LifecycleRepository, PendingSummaryWork, RetirementReason,
     ScanRun, ScanStatus,
 };
+pub use repos::planner::{PlannerBatchRecord, PlannerBatchRepository};
 pub use repos::project::ProjectRepository;
 pub use repos::review::ReviewRepository;
 pub use repos::session_rollup::SessionRollupRepository;

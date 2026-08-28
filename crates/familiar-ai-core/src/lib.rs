@@ -21,7 +21,7 @@ pub use config::{
     AgentAdapterKind, AgentEffort, AgentEntryConfig, AgentPermissionMode, AgentsConfig,
     BudgetProfile, Config, DashboardConfig, DeliveryConfig, DeliveryMode, DriverConfig,
     DriverModelRouteConfig, ExecutionHistoryConfig, ExecutionPrice, InferenceConfig, InferenceMode,
-    PackerConfig, PocSelfApprovalWarrant, PreflightCommandConfig, PreflightConfig,
+    PackerConfig, PlannerConfig, PocSelfApprovalWarrant, PreflightCommandConfig, PreflightConfig,
     ProhibitedChangeConfig, ProviderKind, ReferenceKind, ReferenceRootConfig, RepositoryConfig,
     ResolvedProhibitedRule, ReviewGateConfig, ReviewScopeConfig, RollupConfig,
     ScopeClassPolicyConfig, ScopeClassificationConfig, ScopeDeclarationModeConfig,
