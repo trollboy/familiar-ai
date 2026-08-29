@@ -749,6 +749,13 @@ fn handle_attached_review(
                         prd_id,
                     });
                 }
+                // Keystrokes pressed during the long silent phases would
+                // otherwise be consumed as the choice; drop anything buffered
+                // before asking.
+                #[cfg(unix)]
+                unsafe {
+                    libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+                }
                 eprint!("Choose [r]etry remediation, [a]ccept reviewed risk, or [p]reserve checkpoint: ");
                 let _ = io::stderr().flush();
                 let mut choice = String::new();

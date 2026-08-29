@@ -1983,4 +1983,52 @@ mod structured_contract_tests {
             .to_string()
             .contains("missing structured PRD front matter (policy=strict)"));
     }
+
+    #[test]
+    fn risk_class_outside_vocabulary_is_rejected_with_path_and_class() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("PRD-001.md");
+        fs::write(&path, document("PRD-001", "# PRD-1: One", &[])).unwrap();
+        let error = parse_candidate(
+            &path,
+            "active/PRD-001.md",
+            "PRD-001.md",
+            PrdLocation::Active,
+            BacklogProfile::Canonical,
+            PrdMetadataPolicy::Strict,
+            &["money".into()],
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("active/PRD-001.md"), "{message}");
+        assert!(
+            message.contains(
+                "risk class 'scheduling' is not in the configured repository risk vocabulary"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn empty_vocabulary_rejects_every_structured_prd_declaring_risk_classes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("PRD-001.md");
+        fs::write(&path, document("PRD-001", "# PRD-1: One", &[])).unwrap();
+        let error = parse_candidate(
+            &path,
+            "active/PRD-001.md",
+            "PRD-001.md",
+            PrdLocation::Active,
+            BacklogProfile::Canonical,
+            PrdMetadataPolicy::Strict,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not in the configured repository risk vocabulary"),
+            "{error}"
+        );
+    }
 }

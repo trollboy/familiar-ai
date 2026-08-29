@@ -46,6 +46,8 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
         request: &ReviewRequest,
         output: &mut dyn Write,
     ) -> Result<ReviewResult, ReviewExecutionError> {
+        let started_at = Utc::now().to_rfc3339();
+        let timer = Instant::now();
         let prompt_bytes = render_review_prompt(request)
             .map_err(|error| ReviewExecutionError::Agent(error.to_string()))?;
         let prompt = String::from_utf8(prompt_bytes)
@@ -97,12 +99,43 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
             .map_err(|e| ReviewExecutionError::Agent(e.to_string()))?;
         let text =
             String::from_utf8(captured).map_err(|e| ReviewExecutionError::Agent(e.to_string()))?;
-        let mut result: ReviewResult = serde_json::from_str(text.trim()).map_err(|e| {
-            ReviewExecutionError::Agent(format!("malformed structured review: {e}"))
-        })?;
-        result.reviewer = observation(request.reviewer.clone(), &observed);
-        result.usage = usage(&observed);
-        Ok(result)
+        // The reviewer's wire contract is deliberately minimal: identity
+        // echoes plus findings. Everything else on ReviewResult is observed
+        // or recomputed here and in policy validation, never trusted from
+        // model output.
+        #[derive(serde::Deserialize)]
+        struct WireReviewResult {
+            review_id: String,
+            reviewed_manifest_hash: String,
+            #[serde(default)]
+            findings: Vec<ReviewFinding>,
+        }
+        let trimmed = text.trim();
+        let wire: WireReviewResult = serde_json::from_str(trimmed)
+            .or_else(|first| match (trimmed.find('{'), trimmed.rfind('}')) {
+                (Some(start), Some(end)) if start < end => {
+                    serde_json::from_str(&trimmed[start..=end]).map_err(|_| first)
+                }
+                _ => Err(first),
+            })
+            .map_err(|e| {
+                let snippet: String = trimmed.chars().take(2000).collect();
+                ReviewExecutionError::Agent(format!(
+                    "malformed structured review: {e}; raw reviewer output begins: {snippet}"
+                ))
+            })?;
+        Ok(ReviewResult {
+            review_id: wire.review_id,
+            reviewer: observation(request.reviewer.clone(), &observed),
+            started_at,
+            ended_at: Utc::now().to_rfc3339(),
+            duration_ms: timer.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            findings: wire.findings,
+            reviewed_manifest_hash: wire.reviewed_manifest_hash,
+            usage: usage(&observed),
+            disposition: ReviewDisposition::Pending,
+            unavailable_fields: Default::default(),
+        })
     }
 }
 

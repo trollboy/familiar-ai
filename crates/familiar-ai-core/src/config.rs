@@ -2114,6 +2114,11 @@ impl Config {
                         "repositories.{worktree}.risk_vocabulary entries must be non-empty"
                     )));
                 }
+                if class.trim() != class {
+                    return Err(FamiliarError::Config(format!(
+                        "repositories.{worktree}.risk_vocabulary class '{class}' must not have leading or trailing whitespace"
+                    )));
+                }
                 if !seen_risk_classes.insert(class) {
                     return Err(FamiliarError::Config(format!(
                         "repositories.{worktree}.risk_vocabulary contains duplicate class '{class}'"

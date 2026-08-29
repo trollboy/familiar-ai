@@ -190,6 +190,7 @@ impl ReviewCoordinator<'_> {
             .save_cycle(&cycle)
             .map_err(CoordinatorError::Persistence)?;
         for check in &request.verification_plan.checks {
+            eprintln!("review: verification '{}' running...", check.check_id);
             if let Err(error) = self.reserve(&cycle, &request.limits, Action::Verification) {
                 return self.stop(cycle, limit_reason(&error));
             }
@@ -300,9 +301,14 @@ impl ReviewCoordinator<'_> {
                 .map_err(CoordinatorError::Persistence)?;
             let attempt_started = Utc::now().to_rfc3339();
             let attempt_timer = Instant::now();
+            eprintln!(
+                "review: independent reviewer analyzing (attempt {}, typically 2-3 minutes)...",
+                cycle.attempt
+            );
             let result = match self.reviewer.review(&package, output) {
                 Ok(result) => result,
-                Err(_) => {
+                Err(error) => {
+                    eprintln!("review: reviewer agent failed: {error}");
                     let mut stage = failed_stage(
                         format!("{}-review-{}", cycle.cycle_id, cycle.attempt),
                         StageKind::Review,
@@ -329,7 +335,8 @@ impl ReviewCoordinator<'_> {
             };
             let result = match self.policy.apply_and_validate(&package, result) {
                 Ok(result) => result,
-                Err(_) => {
+                Err(error) => {
+                    eprintln!("review: result rejected by policy validation: {error}");
                     let mut stage = failed_stage(
                         format!("{}-review-{}", cycle.cycle_id, cycle.attempt),
                         StageKind::Review,
@@ -510,7 +517,8 @@ impl ReviewCoordinator<'_> {
                         });
                         break result;
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        eprintln!("review: remediation agent failed: {error}");
                         let mut stage = failed_stage(
                             remediation.remediation_id,
                             StageKind::Remediation,
