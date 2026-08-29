@@ -284,7 +284,9 @@ fn every_wave_two_prd_parses_deterministically() {
     }
     // Every fixture has a pinned validity. PRDs predating the grammar are not
     // rewritten: some legitimately pin as errors, and 004/005/007 happen to
-    // already satisfy the closed grammar.
+    // already satisfy the closed grammar. Contract-v1 PRDs (042 onward) pin as
+    // errors here by design: their Expected Files authority is front matter,
+    // synthesized into this grammar at execution time.
     let valid: Vec<_> = outcomes
         .iter()
         .filter(|(_, ok)| *ok)
@@ -321,7 +323,9 @@ fn every_wave_two_prd_parses_deterministically() {
             "PRD-036.md",
             "PRD-037.md",
             "PRD-038.md",
-            "PRD-039.md"
+            "PRD-039.md",
+            "PRD-040.md",
+            "PRD-041.md"
         ]
     );
 }

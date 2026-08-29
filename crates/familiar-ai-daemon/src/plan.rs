@@ -812,8 +812,10 @@ mod tests {
     #[test]
     fn successful_generation_retains_raw_output_and_is_not_discoverable() {
         let root = repository();
-        let mut config = Config::default();
-        config.planner = Some(limits());
+        let config = Config {
+            planner: Some(limits()),
+            ..Default::default()
+        };
         let paths = paths(root.path());
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();

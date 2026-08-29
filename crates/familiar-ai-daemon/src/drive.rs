@@ -441,7 +441,7 @@ pub fn drive(
         DriverRepository::new(db.conn())
             .record_session_detail(&session_id, &detail)
             .map_err(|error| DriveError::Storage(error.to_string()))?;
-        eprintln!("drive: session preflight failed: {}", detail);
+        eprintln!("drive: session preflight failed: {detail}");
         DriveTermination::PreflightFailed
     } else {
         loop {
@@ -776,7 +776,7 @@ pub fn drive(
                                         .unwrap_or_else(|_| "{}".into());
                                     let _ = DeliveryRepository::new(db.conn())
                                         .record_authority_decision(
-                                            &format!("poc-risk:{}:{prd_id}", session_id),
+                                            &format!("poc-risk:{session_id}:{prd_id}"),
                                             &repository.key,
                                             &session_id,
                                             prd_id,
