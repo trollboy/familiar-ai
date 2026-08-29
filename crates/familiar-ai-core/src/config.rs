@@ -2301,8 +2301,10 @@ mod tests {
 
     #[test]
     fn persistent_worker_requires_finite_throttled_runs() {
-        let mut worker = WorkerConfig::default();
-        worker.max_prds_per_run = 0;
+        let mut worker = WorkerConfig {
+            max_prds_per_run: 0,
+            ..Default::default()
+        };
         assert!(worker
             .validate()
             .unwrap_err()
