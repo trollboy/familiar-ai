@@ -463,6 +463,7 @@ mod tests {
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(5_000),
+                budget: crate::ExecutionBudget::default(),
             },
             &mut output,
         );

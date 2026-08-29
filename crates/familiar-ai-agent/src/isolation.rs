@@ -369,6 +369,7 @@ mod tests {
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(1_000),
+                budget: crate::ExecutionBudget::default(),
             },
             &mut Vec::new(),
         );
