@@ -123,6 +123,9 @@ pub struct BacklogLayout {
     pub active_dir: RepositoryPath,
     pub archived_dir: RepositoryPath,
     pub metadata_policy: PrdMetadataPolicy,
+    /// Closed vocabulary of permitted `risk_classes` values. Empty rejects
+    /// every structured PRD that declares risk classes.
+    pub risk_vocabulary: Vec<String>,
 }
 
 impl Default for BacklogLayout {
@@ -132,6 +135,7 @@ impl Default for BacklogLayout {
             active_dir: RepositoryPath("docs/prds".into()),
             archived_dir: RepositoryPath("docs/prds/done".into()),
             metadata_policy: PrdMetadataPolicy::Incremental,
+            risk_vocabulary: Vec::new(),
         }
     }
 }
@@ -744,6 +748,7 @@ impl FilesystemBacklogDiscovery {
                 location,
                 layout.profile,
                 layout.metadata_policy,
+                &layout.risk_vocabulary,
             ) {
                 Ok(v) => parsed.push(v),
                 Err(_)
@@ -1061,6 +1066,7 @@ fn unquote(value: &str) -> Result<String, String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_candidate(
     path: &Path,
     relative: &str,
@@ -1068,6 +1074,7 @@ fn parse_candidate(
     location: PrdLocation,
     profile: BacklogProfile,
     metadata_policy: PrdMetadataPolicy,
+    risk_vocabulary: &[String],
 ) -> Result<DiscoveredPrd, BacklogError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|e| malformed(relative, format!("cannot inspect file: {e}")))?;
@@ -1091,6 +1098,18 @@ fn parse_candidate(
             relative,
             "missing structured PRD front matter (policy=strict)",
         ));
+    }
+    if let Some((_, _, front_matter)) = &structured {
+        for class in &front_matter.risk_classes {
+            if !risk_vocabulary.contains(class) {
+                return Err(malformed(
+                    relative,
+                    format!(
+                        "risk class '{class}' is not in the configured repository risk vocabulary"
+                    ),
+                ));
+            }
+        }
     }
     if structured.is_some() {
         for line in document.lines().map(|line| line.trim_end_matches('\r')) {
@@ -1706,6 +1725,7 @@ mod tests {
                 PrdLocation::Active,
                 BacklogProfile::Canonical,
                 PrdMetadataPolicy::Incremental,
+                &[],
             )
             .is_err());
         }
@@ -1723,6 +1743,7 @@ mod tests {
             PrdLocation::Active,
             BacklogProfile::Canonical,
             PrdMetadataPolicy::Incremental,
+            &[],
         )
         .unwrap();
         assert!(parsed.dependencies.is_empty());
@@ -1784,6 +1805,7 @@ fn numbered_slug_discovers_renders_and_ignores_dependencies() {
         active_dir: RepositoryPath::new("docs/prd/todo").unwrap(),
         archived_dir: RepositoryPath::new("docs/prd/done").unwrap(),
         metadata_policy: PrdMetadataPolicy::Incremental,
+        risk_vocabulary: Vec::new(),
     };
     let found = FilesystemBacklogDiscovery
         .discover_with_layout(&repo, &layout)
@@ -1830,6 +1852,7 @@ fn numbered_slug_grammar_failures_are_closed() {
             active_dir: RepositoryPath::new("todo").unwrap(),
             archived_dir: RepositoryPath::new("done").unwrap(),
             metadata_policy: PrdMetadataPolicy::Incremental,
+            risk_vocabulary: Vec::new(),
         };
         let error = FilesystemBacklogDiscovery
             .discover_with_layout(&repo, &layout)
@@ -1907,6 +1930,7 @@ mod structured_contract_tests {
                         active_dir: RepositoryPath::new("active").unwrap(),
                         archived_dir: RepositoryPath::new("done").unwrap(),
                         metadata_policy: PrdMetadataPolicy::Strict,
+                        risk_vocabulary: vec!["scheduling".into()],
                     },
                 )
                 .unwrap()
@@ -1952,6 +1976,7 @@ mod structured_contract_tests {
             PrdLocation::Active,
             BacklogProfile::Canonical,
             PrdMetadataPolicy::Strict,
+            &[],
         )
         .unwrap_err();
         assert!(error

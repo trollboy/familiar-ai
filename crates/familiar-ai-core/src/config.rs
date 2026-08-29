@@ -355,6 +355,12 @@ pub struct RepositoryConfig {
     pub prd_metadata_policy: String,
     #[serde(default)]
     pub reference_roots: Vec<ReferenceRootConfig>,
+    /// Closed vocabulary of permitted `risk_classes` values. Structured PRD
+    /// parsing and `metadata-check` reject any declared risk class outside
+    /// it; an unconfigured or empty vocabulary rejects every structured PRD
+    /// that declares risk classes.
+    #[serde(default)]
+    pub risk_vocabulary: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -402,6 +408,7 @@ impl Default for RepositoryConfig {
             archived_dir: default_archived_dir(),
             prd_metadata_policy: default_prd_metadata_policy(),
             reference_roots: Vec::new(),
+            risk_vocabulary: Vec::new(),
             review: None,
             execution_context: None,
             delivery: None,
@@ -424,6 +431,7 @@ impl RepositoryConfig {
                 .expect("validated archived_dir"),
             metadata_policy: crate::PrdMetadataPolicy::parse(&self.prd_metadata_policy)
                 .expect("validated prd_metadata_policy"),
+            risk_vocabulary: self.risk_vocabulary.clone(),
         }
     }
     pub fn resolved_reference_roots(&self) -> Vec<ReferenceRootConfig> {
@@ -2096,6 +2104,19 @@ impl Config {
                     return Err(FamiliarError::Config(format!(
                         "repositories.{worktree}.reference_roots prefix must end with '/': '{}'",
                         root.prefix
+                    )));
+                }
+            }
+            let mut seen_risk_classes = std::collections::BTreeSet::new();
+            for class in &entry.risk_vocabulary {
+                if class.trim().is_empty() {
+                    return Err(FamiliarError::Config(format!(
+                        "repositories.{worktree}.risk_vocabulary entries must be non-empty"
+                    )));
+                }
+                if !seen_risk_classes.insert(class) {
+                    return Err(FamiliarError::Config(format!(
+                        "repositories.{worktree}.risk_vocabulary contains duplicate class '{class}'"
                     )));
                 }
             }
