@@ -63,10 +63,15 @@ structured layout contract.
 ## Usage and cost accounting track (drafted 2026-08-30, awaiting owner approval)
 
 A dependency-ordered decomposition of provider usage, cost ingestion,
-billing-source discovery, and reconciliation. Kept as three bounded PRDs
-because each has a distinct risk surface and delivery boundary: a
-persistence/ledger layer, the only network-facing collector (admin-credential
-security), and deterministic reconciliation plus the read surface.
+billing-source discovery, attribution, reservations, and
+reconciliation — bounded PRDs, each with a distinct risk surface and
+delivery boundary: the persistence/ledger layer, network-facing
+collectors (admin-credential security), the local-first
+project/series surface, the typed reservation mechanism, and
+deterministic reconciliation. Local-first ordering is deliberate:
+everything through PRD-055 and PRD-064 lands from local observations
+alone; the collectors and PRD-053 add authoritative rows without
+changing semantics.
 
 - PRD-051 — billing modes and the usage observation ledger: distinct
   uncached/cache-read/cache-write/output categories, per-model observations,
@@ -86,9 +91,9 @@ security), and deterministic reconciliation plus the read surface.
   PRD-047/051.
 - PRD-053 — cost reconciliation and attributed reporting: append-only
   reconciliation with explicit unattributed/pending/mismatch states,
-  per-component warrant reservations, uncached-token/cost warrant
-  denominations, authority-labeled cost queries on the PRD-035 surfaces.
-  Depends on PRD-035/051/052.
+  monetary warrants consuming the PRD-064 reservation contract, and
+  source-centric variance views integrated into PRD-055's query
+  surface. Depends on PRD-052/055/064.
 - PRD-054 — OpenAI Platform and Codex usage accounting (drafted
   2026-08-30): the second provider behind the same interfaces —
   Codex terminal telemetry with the reasoning-output category, sanitized
@@ -119,16 +124,36 @@ security), and deterministic reconciliation plus the read surface.
   acceptance never requires PRD-055) plus the
   period/observed/ingested time envelope and discrete-never-cumulative
   facts; PRD-055 implements full registry resolution behind that
-  boundary. PRD-053 gained the reservation lifecycle
-  (acquire/commit/release/expire/crash-recover). Depends on
-  PRD-051/053. Boundary: PRD-053 keeps source-centric billing views
-  (month-to-date per source, variance); PRD-055 adds the
-  project-centric time axis over the same rows, counted once.
+  boundary. Depends on PRD-051 only — the full local surface (project
+  registry, local-execution attribution, usage/estimated-cost/token
+  series, sparse/dense buckets, drill-down) lands from ledger
+  observations with no provider collector; authoritative and
+  reconciliation dimensions are carried generically and gain rows
+  when PRD-053 lands. Boundary: PRD-053 adds reconciliation facts and
+  source-centric billing views into the same surface; PRD-055 owns
+  the project-centric time axis, counted once.
+- PRD-064 — typed resource reservations (extracted from PRD-053 so
+  local hardware scheduling never depends on Anthropic administrative
+  billing): one provider-neutral atomic reservation lifecycle
+  (acquire, all-or-nothing or explicit-partial, commit/settle,
+  release, expiry, renewal, crash recovery, deterministic contention
+  ordering, owner and project/execution/component attribution,
+  explicit overrun, conservative unknown-consumption settlement) over
+  typed capacities — nanoUSD, uncached tokens, total tokens,
+  accelerator/system memory, inference and loading slots, exclusive
+  runtime claims. Consumed by PRD-053 (monetary warrants), PRD-056
+  (ceilings), and PRD-063 (hardware). Depends on PRD-024/039/051.
 
-Ledger defect ownership: PRD-053 owns B1 and, with PRD-051, B8; PRD-051
+Ledger defect ownership: PRD-064 owns B1 and the mechanism half of B8
+(PRD-051 owns B8's data half); PRD-051
 enables but does not fix B5, B6, and B13, whose stop-reason,
 review-checkpoint, and finalize-retry fixes remain execution/recovery work.
 PRD-051 supplies the trustworthy cost observations PRD-032 requires.
+No-configuration compatibility is precise, not absolute: execution
+requires no billing source, schedule, or server, local observations
+are captured automatically with minimal or degraded ProjectId,
+unknown money stays unknown, no implicit network collection occurs,
+and accounting commands expose exactly the specified new fields.
 
 ## Worker identity track (drafted 2026-08-30, awaiting owner approval)
 
@@ -192,12 +217,17 @@ PRD-051 supplies the trustworthy cost observations PRD-032 requires.
   `ollama` over one neutral local transport (compatibility = transport
   reuse only), artifact verification with degraded fallback, typed
   resource telemetry with no invented USD (allocation policies only as
-  declared operator estimates), and PRD-053-lifecycle hardware
-  reservations in the PRD-056 scheduler so co-scheduling never
-  exceeds real capacity. Unsloth is modeled as preparation provenance
+  operator-allocation local estimates with category, policy identity,
+  measurements, and authority labels — never subscriptions), and
+  PRD-064 typed hardware reservations in the PRD-056 scheduler —
+  Familiar's own launches never knowingly exceed observed capacity,
+  with managed versus externally shared capacity, freshness,
+  confidence, and contention recorded honestly. Unsloth is modeled as
+  preparation provenance
   plus a serving RuntimeId — never a provider or model family.
   MLX-native/llama.cpp-direct/vLLM backlogged behind the contract.
-  PRD-062 depends on PRD-047/057; PRD-063 on PRD-051/056/057/058/062.
+  PRD-062 depends on PRD-047/057; PRD-063 on
+  PRD-051/056/057/058/062/064.
 
 ## Control plane track (drafted 2026-08-30, awaiting owner approval)
 
@@ -213,7 +243,14 @@ PRD-051 supplies the trustworthy cost observations PRD-032 requires.
   MCP re-homed) with exactly one mutating orchestrator at all times.
   Retires the multi-writer SQLite contention class (B13's environment)
   and absorbs the wave-one daemon; the PRD-034 supervisor shifts to
-  keeping the daemon alive. Depends on PRD-034/035/039/044/051.
+  keeping the daemon alive. The per-user control-plane database is the
+  named system of record (no cross-database transactions); the
+  ownership claim carries installation identity, owner nonce, and
+  process-start identity so reused PIDs can never impersonate the
+  owner; surviving orphan workers are adopted, awaited, terminated, or
+  parked as explicit ambiguous-live-orphans — never resumed over; and
+  same-user peer identity is only a precondition beneath minted
+  per-class session authority. Depends on PRD-034/035/039/044/051/064.
 
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to
@@ -237,7 +274,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–063 were drafted 2026-08-30 by autonomous specification runs
+- PRDs 051–064 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
