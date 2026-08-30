@@ -44,7 +44,8 @@ structured layout contract.
 ## Supporting product surface
 
 - PRD-026 — complete per-repository execution policy resolution. **Completed.**
-- PRD-035 — execution-era API/MCP/dashboard state surface.
+- PRD-035 — execution-era API/MCP/dashboard state surface. **Completed 2026-08-30** —
+  first fully autonomous finding→remediation→clean-review→completion cycle.
 
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to
