@@ -57,7 +57,7 @@ structured layout contract.
 
 ## Provider and delivery track (approved 2026-08-30)
 
-- PRD-047 — provider/model configuration CLI: kind-tagged endpoints,
+- PRD-047 — provider/model configuration CLI. **Completed 2026-08-30:** kind-tagged endpoints,
   BYO-Auth diagnostics, probe-before-persist, comment-preserving edits,
   decision-row audit.
 - PRD-048 — internal delivery targets: Familiar as its own CI/CD at

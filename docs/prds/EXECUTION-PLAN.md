@@ -10,6 +10,10 @@ scope-conformant work.
 
 ## Dependency waves
 
+**Wave 1 completed 2026-08-30.** See
+[`../wave1_afteraction_report.md`](../wave1_afteraction_report.md) for delivery
+evidence and the orchestration defects observed during execution.
+
 Dependencies on completed PRDs (001–031, 033–035, 039, 040, 042, 043) are
 satisfied. The remaining graph resolves into six waves; every PRD within a
 wave may execute concurrently, and a PRD may start as soon as its own
