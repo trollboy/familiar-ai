@@ -130,6 +130,25 @@ enables but does not fix B5, B6, and B13, whose stop-reason,
 review-checkpoint, and finalize-retry fixes remain execution/recovery work.
 PRD-051 supplies the trustworthy cost observations PRD-032 requires.
 
+## Worker identity track (drafted 2026-08-30, awaiting owner approval)
+
+- PRD-057 — worker identity, runtime, and capability generalization:
+  replaces `provider/model` with the complete worker spec (ProviderId,
+  RuntimeId, ModelId or explicit unknown/runtime-selected,
+  ModelArtifactId, AuthProfileId, CapabilityProfileId) so the same
+  model through Claude Code, a raw API, or a local runtime is a
+  distinct routable, scoreable, billable worker; typed capability
+  vocabulary with declared/probed/observed/unknown provenance;
+  empirical-history partition rules for material parameter changes;
+  reviewer independence judged on provider/model lineage, not runtime;
+  deterministic migration of existing registry workers with
+  provider/model aliases; adapter-owned typed extension config. New
+  providers/runtimes become configuration plus adapters — routing,
+  accounting, project identity, and execution semantics untouched.
+  Depends on PRD-031/044/047/051; PRD-032 now scores spec identities.
+  Eventual wording alignments identified in PRD-031/043/044/047/
+  051/053/054/055/056.
+
 ## Control plane track (drafted 2026-08-30, awaiting owner approval)
 
 - PRD-056 — daemon-owned multi-project control plane: one deterministic
@@ -168,7 +187,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–056 were drafted 2026-08-30 by autonomous specification runs
+- PRDs 051–057 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
