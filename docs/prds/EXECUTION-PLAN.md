@@ -33,14 +33,30 @@ configuration, storage, or run surfaces), with stale-base composition
 defects (duplicate migration numbers, completion before integration) and
 substantial manual landing work.
 
-**GATE (2026-08-30): PRD-066 blocks Wave 3.** Integration-aware parallel
-orchestration — the merge queue (parallel execution, ordered landing; scope
-release and completion at integration, not review), continuous admission
-replacing batch lockstep, authoring-time achievable-width validation,
-migration-number allocation, hash-bound scope decisions, reconciled
-recovery, and live worker heartbeats. Covers wave-2 defects 1–4 and 13–15.
-Execute it as a single-PRD warranted session:
-`familiar-ai drive --max-prds 1 --prd PRD-066`.
+**GATE (2026-08-30): PRDs 066, 067, and 068 block Wave 3 — every wave-2
+defect is fixed before new product work runs.**
+
+- **PRD-066** — integration-aware parallel orchestration: the merge queue
+  (parallel execution, ordered landing; scope release and completion at
+  integration, not review), continuous admission replacing batch lockstep,
+  authoring-time achievable-width validation, migration-number allocation,
+  hash-bound scope decisions, reconciled recovery, live worker heartbeats.
+  Covers defects 1–4 and 13–15. Runs first and alone:
+  `familiar-ai drive --max-prds 1 --prd PRD-066`.
+- **PRD-067** — durable verification truth: dispositions computed from
+  durable check records (narration that contradicts them fails the phase),
+  open findings block clean completion absent a recorded human waiver,
+  environment-denied checks classified distinctly with preflighted
+  writable paths. Covers defects 7, 8, and 17.
+- **PRD-068** — driver hygiene: precise context-failure classification
+  with continue-past-retained sessions, model-cache invalidate-once,
+  metadata-check strict/advisory exit modes. Covers defects 9, 16, 18.
+
+067 and 068 run after 066 lands, through 066's own merge queue, as one
+session — their declared scopes are disjoint (review crate + run.rs +
+dedicated test file, versus context/agent/drive/bin + dedicated test
+file), making them the first honest width-2 test of the new machinery:
+`familiar-ai drive --max-prds 2 --prd PRD-067 --prd PRD-068`.
 
 A PRD may start only when its dependencies are complete AND it is inside
 the session's approved allowlist — the earlier "wave boundaries are
@@ -61,6 +77,7 @@ whole-crate declarations forfeit concurrency by design.
 | gate | 065 — orchestration reliability — **completed 2026-08-30** | 1 | 1 |
 | 2 | 041, 048, 049, 051 — **completed 2026-08-30** | 4 | 1 (measured) |
 | gate | 066 — integration-aware parallel orchestration | 1 | 1 |
+| gate | 067, 068 — verification truth, driver hygiene | 2 | 2 (disjoint by construction) |
 | 3 | 050, 052, 054, 057, 064 | 5 | ~2–3 (pipeline via merge queue) |
 | 4 | 032, 055, 056, 062 | 4 | ~2 |
 | 5 | 038, 053, 058 | 3 | ~2 |
