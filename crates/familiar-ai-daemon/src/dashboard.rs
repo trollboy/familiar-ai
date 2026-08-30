@@ -3,18 +3,20 @@
 //! Provides `/health`, `/stats`, `/projects`, `/recent` JSON endpoints and
 //! a minimal HTML page at `/`. No auth, no framework, no SPA.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use tokio::net::TcpListener;
 
-use familiar_ai_core::{AppStatus, VersionInfo};
+use familiar_ai_core::{AppStatus, BacklogDiscovery, FilesystemBacklogDiscovery, VersionInfo};
+use familiar_ai_daemon::stewardship::StewardshipError;
 use familiar_ai_llm::InferenceRouter;
 use familiar_ai_storage::repos::stats;
 use familiar_ai_storage::Database;
@@ -38,6 +40,24 @@ pub async fn run_dashboard(
         .route("/stats", get(stats_endpoint))
         .route("/projects", get(projects))
         .route("/recent", get(recent))
+        .route("/stewardship/backlog", get(stewardship_backlog))
+        .route("/stewardship/sessions", get(stewardship_sessions))
+        .route(
+            "/stewardship/sessions/{session_id}/attempts",
+            get(stewardship_attempts),
+        )
+        .route(
+            "/stewardship/sessions/{session_id}/budget",
+            get(stewardship_budget),
+        )
+        .route(
+            "/stewardship/sessions/{session_id}/review",
+            get(stewardship_review),
+        )
+        .route("/stewardship/checkpoints", get(stewardship_checkpoints))
+        .route("/stewardship/recovery", get(stewardship_recovery))
+        .route("/stewardship/delivery", get(stewardship_delivery))
+        .route("/stewardship/gates", get(stewardship_gates))
         .route("/favicon.png", get(favicon))
         .route("/settings/inference", get(inference_settings_page))
         .route("/settings/inference/status", get(inference_status))
@@ -156,6 +176,236 @@ async fn recent(State(state): State<DashboardState>) -> impl IntoResponse {
         "recent_decisions": decisions,
         "recent_rollups": rollups,
     }))
+}
+
+/// Resolves the repository identity for a stewardship request from its
+/// mandatory `repo` query parameter. There is no cwd-based default here —
+/// unlike the CLI and MCP, the dashboard is one long-running process that
+/// may serve many repositories, so the caller must always say which one.
+fn resolve_repo_identity(
+    params: &HashMap<String, String>,
+) -> Result<familiar_ai_core::RepositoryIdentity, Box<Response>> {
+    let Some(repo) = params.get("repo") else {
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "missing required query parameter: repo"})),
+            )
+                .into_response(),
+        ));
+    };
+    FilesystemBacklogDiscovery
+        .resolve(std::path::Path::new(repo))
+        .map_err(|e| {
+            Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response(),
+            )
+        })
+}
+
+fn parse_limit(params: &HashMap<String, String>) -> usize {
+    params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20)
+}
+
+fn stewardship_error_response(error: StewardshipError) -> Response {
+    match error {
+        StewardshipError::NotFound(message) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": message}))).into_response()
+        }
+        StewardshipError::Storage(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": message})),
+        )
+            .into_response(),
+    }
+}
+
+async fn stewardship_backlog(
+    State(state): State<DashboardState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    let status = params.get("status").map(String::as_str);
+    let cursor = params.get("cursor").map(String::as_str);
+    match familiar_ai_daemon::stewardship::list_backlog(
+        &db,
+        &identity,
+        status,
+        cursor,
+        parse_limit(&params),
+    ) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_sessions(
+    State(state): State<DashboardState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    let cursor = params.get("cursor").map(String::as_str);
+    match familiar_ai_daemon::stewardship::list_sessions(
+        &db,
+        &identity,
+        cursor,
+        parse_limit(&params),
+    ) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_attempts(
+    State(state): State<DashboardState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    let cursor = params.get("cursor").and_then(|s| s.parse::<i64>().ok());
+    match familiar_ai_daemon::stewardship::list_attempts(
+        &db,
+        &identity,
+        &session_id,
+        cursor,
+        parse_limit(&params),
+    ) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_checkpoints(
+    State(state): State<DashboardState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    let cursor = params.get("cursor").map(String::as_str);
+    match familiar_ai_daemon::stewardship::list_checkpoints(
+        &db,
+        &identity,
+        cursor,
+        parse_limit(&params),
+    ) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_recovery(
+    State(state): State<DashboardState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    let cursor = params.get("cursor").and_then(|s| s.parse::<i64>().ok());
+    match familiar_ai_daemon::stewardship::list_recovery_events(
+        &db,
+        &identity,
+        cursor,
+        parse_limit(&params),
+    ) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_delivery(
+    State(state): State<DashboardState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    let cursor = params.get("cursor").map(String::as_str);
+    match familiar_ai_daemon::stewardship::list_delivery_decisions(
+        &db,
+        &identity,
+        cursor,
+        parse_limit(&params),
+    ) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_budget(
+    State(state): State<DashboardState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    match familiar_ai_daemon::stewardship::get_budget(&db, &identity, &session_id) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_review(
+    State(state): State<DashboardState>,
+    Path(session_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    match familiar_ai_daemon::stewardship::list_review_findings(&db, &identity, &session_id) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
+async fn stewardship_gates(
+    State(state): State<DashboardState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let db = state.db.lock().unwrap();
+    match familiar_ai_daemon::stewardship::list_pending_human_gates(
+        &db,
+        &identity,
+        parse_limit(&params),
+    ) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
 }
 
 async fn inference_status(State(state): State<DashboardState>) -> impl IntoResponse {
@@ -395,6 +645,7 @@ mod tests {
     use axum::http::Request;
     use familiar_ai_core::config::InferenceConfig;
     use familiar_ai_core::models::NewProject;
+    use familiar_ai_core::BacklogStatusStore;
     use familiar_ai_storage::ProjectRepository;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -417,6 +668,24 @@ mod tests {
             .route("/stats", get(stats_endpoint))
             .route("/projects", get(projects))
             .route("/recent", get(recent))
+            .route("/stewardship/backlog", get(stewardship_backlog))
+            .route("/stewardship/sessions", get(stewardship_sessions))
+            .route(
+                "/stewardship/sessions/{session_id}/attempts",
+                get(stewardship_attempts),
+            )
+            .route(
+                "/stewardship/sessions/{session_id}/budget",
+                get(stewardship_budget),
+            )
+            .route(
+                "/stewardship/sessions/{session_id}/review",
+                get(stewardship_review),
+            )
+            .route("/stewardship/checkpoints", get(stewardship_checkpoints))
+            .route("/stewardship/recovery", get(stewardship_recovery))
+            .route("/stewardship/delivery", get(stewardship_delivery))
+            .route("/stewardship/gates", get(stewardship_gates))
             .with_state(state)
     }
 
@@ -505,5 +774,164 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.contains("text/html"));
+    }
+
+    fn temp_git_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        repo
+    }
+
+    async fn request_json(app: &Router, path: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn stewardship_backlog_requires_repo_query_param() {
+        let state = make_state();
+        let app = make_app(state);
+        let (status, json) = request_json(&app, "/stewardship/backlog").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(json["error"].as_str().unwrap().contains("repo"));
+    }
+
+    #[tokio::test]
+    async fn stewardship_backlog_reflects_reconciled_state() {
+        let repo = temp_git_repo();
+        let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
+        let state = make_state();
+        {
+            let mut db = state.db.lock().unwrap();
+            let discovered = vec![familiar_ai_core::DiscoveredPrd {
+                id: familiar_ai_core::PrdId::new(1),
+                number: 1,
+                path: familiar_ai_core::RepositoryPath::new("docs/prds/PRD-1.md").unwrap(),
+                location: familiar_ai_core::PrdLocation::Active,
+                title: "One".into(),
+                dependencies: vec![],
+                metadata: familiar_ai_core::PrdMetadata::default(),
+                content_hash: "hash".into(),
+            }];
+            familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
+                .reconcile_and_snapshot(&identity, &discovered)
+                .unwrap();
+        }
+        let app = make_app(state);
+        let path = format!("/stewardship/backlog?repo={}", repo.path().display());
+        let (status, json) = request_json(&app, &path).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = json["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["prd_path"], "docs/prds/PRD-1.md");
+        assert_eq!(json["repository_key"], identity.key);
+    }
+
+    #[tokio::test]
+    async fn stewardship_sessions_attempts_and_budget_agree() {
+        let repo = temp_git_repo();
+        let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
+        let state = make_state();
+        {
+            let db = state.db.lock().unwrap();
+            let driver = familiar_ai_storage::DriverRepository::new(db.conn());
+            driver
+                .open_session("session-1", &identity.key, r#"{"max_prds":1}"#)
+                .unwrap();
+            let a = driver
+                .record_attempt_started("session-1", "PRD-1", "docs/prds/PRD-1.md", Some("exec-1"))
+                .unwrap();
+            driver
+                .record_attempt_finished("session-1", a, "completed", None, Some(1_000), Some(10))
+                .unwrap();
+        }
+        let app = make_app(state);
+
+        let sessions_path = format!("/stewardship/sessions?repo={}", repo.path().display());
+        let (status, json) = request_json(&app, &sessions_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["items"].as_array().unwrap().len(), 1);
+
+        let attempts_path = format!(
+            "/stewardship/sessions/session-1/attempts?repo={}",
+            repo.path().display()
+        );
+        let (status, json) = request_json(&app, &attempts_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["items"].as_array().unwrap().len(), 1);
+
+        let budget_path = format!(
+            "/stewardship/sessions/session-1/budget?repo={}",
+            repo.path().display()
+        );
+        let (status, json) = request_json(&app, &budget_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["known_cost_microusd"], 1000);
+    }
+
+    #[tokio::test]
+    async fn stewardship_attempts_refuses_a_session_from_another_repository() {
+        let repo_a = temp_git_repo();
+        let repo_b = temp_git_repo();
+        let identity_a = FilesystemBacklogDiscovery.resolve(repo_a.path()).unwrap();
+        let state = make_state();
+        {
+            let db = state.db.lock().unwrap();
+            familiar_ai_storage::DriverRepository::new(db.conn())
+                .open_session("session-a", &identity_a.key, "{}")
+                .unwrap();
+        }
+        let app = make_app(state);
+        let path = format!(
+            "/stewardship/sessions/session-a/attempts?repo={}",
+            repo_b.path().display()
+        );
+        let (status, _json) = request_json(&app, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn stewardship_gates_lists_stopped_attempt() {
+        let repo = temp_git_repo();
+        let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
+        let state = make_state();
+        {
+            let db = state.db.lock().unwrap();
+            let driver = familiar_ai_storage::DriverRepository::new(db.conn());
+            driver
+                .open_session("session-1", &identity.key, "{}")
+                .unwrap();
+            let a = driver
+                .record_attempt_started("session-1", "PRD-1", "docs/prds/PRD-1.md", Some("exec-1"))
+                .unwrap();
+            driver
+                .record_attempt_finished(
+                    "session-1",
+                    a,
+                    "retained",
+                    Some("scope_broadened"),
+                    None,
+                    Some(5),
+                )
+                .unwrap();
+        }
+        let app = make_app(state);
+        let path = format!("/stewardship/gates?repo={}", repo.path().display());
+        let (status, json) = request_json(&app, &path).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = json["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["kind"], "stopped_attempt");
     }
 }

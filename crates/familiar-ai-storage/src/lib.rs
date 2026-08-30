@@ -4,11 +4,16 @@ pub mod repos;
 pub(crate) mod sql;
 
 pub use db::Database;
-pub use repos::backlog::SqliteBacklogRepository;
+pub use repos::backlog::{
+    list_entries as list_backlog_entries, list_recovery_events, BacklogEntryRow, RecoveryEventRow,
+    SqliteBacklogRepository,
+};
 pub use repos::bootstrap::SqliteBootstrapRepository;
 pub use repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
 pub use repos::decision::DecisionRepository;
-pub use repos::delivery::{DeliveryAuthorityDecision, DeliveryEffect, DeliveryRepository};
+pub use repos::delivery::{
+    DeliveryAuthorityDecision, DeliveryDecisionRow, DeliveryEffect, DeliveryRepository,
+};
 pub use repos::driver::{DriverAttempt, DriverRepository, DriverSession};
 pub use repos::execution_history::{
     ExecutionFinalization, ExecutionHistoryRepository, ExecutionRecord, ExecutionStart,
@@ -26,4 +31,8 @@ pub use repos::planner::{PlannerBatchRecord, PlannerBatchRepository};
 pub use repos::project::ProjectRepository;
 pub use repos::review::ReviewRepository;
 pub use repos::session_rollup::SessionRollupRepository;
+pub use repos::stewardship::{
+    budget_summary, pending_human_gates, review_findings_for_session, BudgetSummary, PendingGate,
+    ReviewFindingsRow,
+};
 pub use repos::worker_selection::WorkerSelectionRepository;

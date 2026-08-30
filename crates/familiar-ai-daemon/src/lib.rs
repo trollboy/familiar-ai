@@ -6,6 +6,7 @@ pub mod preflight;
 pub mod report;
 pub mod resume;
 pub mod run;
+pub mod stewardship;
 pub mod supervisor;
 pub mod systemd;
 pub mod worker_lock;

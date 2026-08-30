@@ -6,7 +6,7 @@ use chrono::Utc;
 use familiar_ai_core::FamiliarError;
 use rusqlite::{params, Connection, OptionalExtension};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DriverSession {
     pub session_id: String,
     pub repository_key: String,
@@ -17,7 +17,7 @@ pub struct DriverSession {
     pub warrant_json: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DriverAttempt {
     pub sequence: i64,
     pub prd_id: String,
@@ -330,6 +330,56 @@ impl<'a> DriverRepository<'a> {
             .map_err(db)
     }
 
+    /// Deterministic, repository-scoped, cursor-paginated listing of driver
+    /// sessions, most recent first. `after` is the opaque cursor returned by
+    /// a previous page (the last delivered session's `session_id`); an
+    /// absent cursor starts at the most recent session.
+    pub fn list_sessions_by_repository(
+        &self,
+        repository_key: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> familiar_ai_core::Result<Vec<DriverSession>> {
+        let boundary: (String, String) = match after {
+            Some(session_id) => {
+                let started_at: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT started_at FROM driver_sessions WHERE session_id=?1",
+                        params![session_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(db)?;
+                match started_at {
+                    Some(started_at) => (started_at, session_id.to_string()),
+                    // An unknown cursor yields an empty continuation rather
+                    // than silently restarting the sequence.
+                    None => return Ok(Vec::new()),
+                }
+            }
+            // A cursor after every possible (started_at, session_id) pair —
+            // the first page starts from the very top of the ordering.
+            None => ("~".repeat(40), "~".repeat(64)),
+        };
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_id,repository_key,started_at,ended_at,termination_reason,warrant_json,termination_detail \
+                 FROM driver_sessions WHERE repository_key=?1 \
+                 AND (started_at,session_id) < (?2,?3) \
+                 ORDER BY started_at DESC, session_id DESC LIMIT ?4",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map(
+                params![repository_key, boundary.0, boundary.1, limit as i64],
+                map_session,
+            )
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
     pub fn attempts(&self, session_id: &str) -> familiar_ai_core::Result<Vec<DriverAttempt>> {
         let mut stmt = self
             .conn
@@ -364,6 +414,55 @@ impl<'a> DriverRepository<'a> {
                     branch: row.get(19)?,
                 })
             })
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
+    /// Deterministic, cursor-paginated listing of one session's attempts,
+    /// ordered by `sequence` ascending. `after` is the last delivered
+    /// `sequence` (exclusive).
+    pub fn attempts_page(
+        &self,
+        session_id: &str,
+        after: Option<i64>,
+        limit: usize,
+    ) -> familiar_ai_core::Result<Vec<DriverAttempt>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch FROM driver_attempts \
+                 WHERE session_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map(
+                params![session_id, after.unwrap_or(0), limit as i64],
+                |row| {
+                    Ok(DriverAttempt {
+                        sequence: row.get(0)?,
+                        prd_id: row.get(1)?,
+                        prd_path: row.get(2)?,
+                        execution_id: row.get(3)?,
+                        started_at: row.get(4)?,
+                        ended_at: row.get(5)?,
+                        outcome: row.get(6)?,
+                        retained_reason: row.get(7)?,
+                        known_cost_microusd: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                        duration_ms: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+                        adapter_id: row.get(10)?,
+                        model: row.get(11)?,
+                        exit_code: row.get(12)?,
+                        signal: row.get(13)?,
+                        last_durable_phase: row.get(14)?,
+                        review_configuration_source: row.get(15)?,
+                        execution_context_configuration_source: row.get(16)?,
+                        component_id: row.get(17)?,
+                        worktree_path: row.get(18)?,
+                        branch: row.get(19)?,
+                    })
+                },
+            )
             .map_err(db)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db)
     }
@@ -567,5 +666,89 @@ mod tests {
         assert!(repository
             .record_attempt_finished("older", 99, "completed", None, None, None)
             .is_err());
+    }
+
+    #[test]
+    fn list_sessions_by_repository_is_scoped_ordered_and_paginated() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        repository.open_session("s1", "/repo/.git", "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        repository.open_session("s2", "/repo/.git", "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        repository.open_session("s3", "/repo/.git", "{}").unwrap();
+        // A session from a different repository must never leak into a
+        // repository-scoped listing.
+        repository
+            .open_session("other-1", "/other/.git", "{}")
+            .unwrap();
+
+        let all = repository
+            .list_sessions_by_repository("/repo/.git", None, 10)
+            .unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["s3", "s2", "s1"]
+        );
+
+        let first_page = repository
+            .list_sessions_by_repository("/repo/.git", None, 1)
+            .unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].session_id, "s3");
+
+        let second_page = repository
+            .list_sessions_by_repository("/repo/.git", Some(&first_page[0].session_id), 10)
+            .unwrap();
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["s2", "s1"]
+        );
+
+        // An unknown cursor yields an empty continuation rather than
+        // silently restarting the sequence.
+        assert!(repository
+            .list_sessions_by_repository("/repo/.git", Some("nope"), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn attempts_page_is_ordered_by_sequence_and_paginated() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        repository
+            .open_session("session-page", "/repo/.git", "{}")
+            .unwrap();
+        for n in 1..=3 {
+            repository
+                .record_attempt_started(
+                    "session-page",
+                    &format!("PRD-{n}"),
+                    &format!("docs/prds/PRD-{n}.md"),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let all = repository.attempts_page("session-page", None, 10).unwrap();
+        assert_eq!(
+            all.iter().map(|a| a.sequence).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+
+        let first_page = repository.attempts_page("session-page", None, 1).unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].sequence, 1);
+
+        let rest = repository
+            .attempts_page("session-page", Some(first_page[0].sequence), 10)
+            .unwrap();
+        assert_eq!(rest.iter().map(|a| a.sequence).collect::<Vec<_>>(), [2, 3]);
     }
 }

@@ -1,7 +1,7 @@
 use familiar_ai_core::{
     validate_recovery_attribution, BacklogEntry, BacklogRecoveryAction, BacklogStatus,
-    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, PrdId, PrdLocation, RepositoryIdentity,
-    RepositoryPath,
+    BacklogStatusStore, BacklogStoreError, DiscoveredPrd, FamiliarError, PrdId, PrdLocation,
+    RepositoryIdentity, RepositoryPath,
 };
 use familiar_ai_review::{
     FindingStatus, ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewFinding, ReviewRequest,
@@ -625,6 +625,114 @@ fn reconcile_prd(
 
 fn storage(error: rusqlite::Error) -> BacklogStoreError {
     BacklogStoreError::Storage(error.to_string())
+}
+
+fn db(error: rusqlite::Error) -> FamiliarError {
+    FamiliarError::Database(error.to_string())
+}
+
+/// One repository-scoped row of the backlog graph, as currently recorded —
+/// the read-model counterpart of [`BacklogStatusStore::reconcile_and_snapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BacklogEntryRow {
+    pub prd_path: String,
+    pub prd_number: i64,
+    pub prd_suffix: Option<String>,
+    pub status: String,
+    pub discovered_at: String,
+    pub last_seen_at: String,
+    pub missing_since: Option<String>,
+    pub updated_at: String,
+}
+
+/// Deterministic, repository-scoped, cursor-paginated listing of the backlog
+/// graph ordered by `prd_path`. `after` is the last `prd_path` already
+/// delivered to the caller (exclusive); an empty/absent cursor starts at the
+/// beginning. Callers reading more than `limit` rows continue with the last
+/// item's `prd_path` as the next cursor.
+pub fn list_entries(
+    conn: &Connection,
+    repository_key: &str,
+    status: Option<&str>,
+    after: Option<&str>,
+    limit: usize,
+) -> familiar_ai_core::Result<Vec<BacklogEntryRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT prd_path,prd_number,prd_suffix,status,discovered_at,last_seen_at,missing_since,updated_at \
+             FROM backlog_prds WHERE repository_key=?1 AND (?2 IS NULL OR status=?2) AND prd_path>?3 \
+             ORDER BY prd_path LIMIT ?4",
+        )
+        .map_err(db)?;
+    let rows = stmt
+        .query_map(
+            params![repository_key, status, after.unwrap_or(""), limit as i64],
+            |row| {
+                Ok(BacklogEntryRow {
+                    prd_path: row.get(0)?,
+                    prd_number: row.get(1)?,
+                    prd_suffix: row.get(2)?,
+                    status: row.get(3)?,
+                    discovered_at: row.get(4)?,
+                    last_seen_at: row.get(5)?,
+                    missing_since: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )
+        .map_err(db)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db)
+}
+
+/// One audited human recovery action against the backlog: the status
+/// transition it caused, plus the action/reason from `backlog_recovery_events`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RecoveryEventRow {
+    pub event_id: i64,
+    pub prd_path: String,
+    pub old_status: String,
+    pub new_status: String,
+    pub actor: String,
+    pub changed_at: String,
+    pub action: String,
+    pub reason: String,
+}
+
+/// Deterministic, repository-scoped, cursor-paginated listing of every
+/// audited backlog recovery event (`release`, `manual_complete_override`,
+/// `recorded_complete`), ordered by `event_id`. `after` is the last
+/// `event_id` already delivered (exclusive).
+pub fn list_recovery_events(
+    conn: &Connection,
+    repository_key: &str,
+    after: Option<i64>,
+    limit: usize,
+) -> familiar_ai_core::Result<Vec<RecoveryEventRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT bse.event_id,bse.prd_path,bse.old_status,bse.new_status,bse.actor,bse.changed_at,bre.action,bre.reason \
+             FROM backlog_status_events bse JOIN backlog_recovery_events bre ON bre.status_event_id=bse.event_id \
+             WHERE bse.repository_key=?1 AND bse.event_id>?2 ORDER BY bse.event_id LIMIT ?3",
+        )
+        .map_err(db)?;
+    let rows = stmt
+        .query_map(
+            params![repository_key, after.unwrap_or(0), limit as i64],
+            |row| {
+                Ok(RecoveryEventRow {
+                    event_id: row.get(0)?,
+                    prd_path: row.get(1)?,
+                    old_status: row.get(2)?,
+                    new_status: row.get(3)?,
+                    actor: row.get(4)?,
+                    changed_at: row.get(5)?,
+                    action: row.get(6)?,
+                    reason: row.get(7)?,
+                })
+            },
+        )
+        .map_err(db)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db)
 }
 
 fn read_entry(
@@ -1471,5 +1579,134 @@ mod tests {
         )
         .unwrap();
         assert!(validate_persisted_findings(&tx, &cycle).is_err());
+    }
+
+    const RUN_ACTOR: &str = "system:familiar-ai-run:00000000000000000001-0000000001-000001";
+
+    #[test]
+    fn list_entries_is_repository_scoped_paginated_and_status_filtered() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = repo();
+        let other = RepositoryIdentity {
+            worktree: "/tmp/other".into(),
+            key: "/tmp/other/.git".into(),
+        };
+        let discovered: Vec<_> = (1..=3)
+            .map(|n| DiscoveredPrd {
+                id: PrdId::new(n),
+                number: n,
+                path: RepositoryPath::new(format!("docs/prds/PRD-{n:03}.md")).unwrap(),
+                location: PrdLocation::Active,
+                title: format!("T{n}"),
+                dependencies: vec![],
+                metadata: familiar_ai_core::PrdMetadata::default(),
+                content_hash: format!("hash-{n}"),
+            })
+            .collect();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&repository, &discovered)
+            .unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&other, &discovered)
+            .unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .claim_run(&repository, &discovered, &discovered[0], RUN_ACTOR)
+            .unwrap();
+
+        // Cross-repository isolation: `other`'s identically-shaped entries
+        // never appear in a `repository`-scoped listing.
+        let all = list_entries(db.conn(), &repository.key, None, None, 10).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all.iter().map(|e| e.prd_path.as_str()).collect::<Vec<_>>(),
+            [
+                "docs/prds/PRD-001.md",
+                "docs/prds/PRD-002.md",
+                "docs/prds/PRD-003.md"
+            ]
+        );
+
+        let pending = list_entries(db.conn(), &repository.key, Some("pending"), None, 10).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|e| e.status == "pending"));
+
+        let in_progress =
+            list_entries(db.conn(), &repository.key, Some("in_progress"), None, 10).unwrap();
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(in_progress[0].prd_path, "docs/prds/PRD-001.md");
+
+        // Cursor pagination: page through one row at a time and confirm the
+        // sequence matches the unpaginated listing.
+        let mut cursor: Option<String> = None;
+        let mut paged = Vec::new();
+        loop {
+            let page =
+                list_entries(db.conn(), &repository.key, None, cursor.as_deref(), 1).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            cursor = Some(page.last().unwrap().prd_path.clone());
+            paged.extend(page);
+        }
+        assert_eq!(
+            paged.iter().map(|e| e.prd_path.clone()).collect::<Vec<_>>(),
+            all.iter().map(|e| e.prd_path.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn list_recovery_events_is_repository_scoped_and_paginated() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = repo();
+        let discovered = vec![prd()];
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&repository, &discovered)
+            .unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .claim_run(&repository, &discovered, &discovered[0], RUN_ACTOR)
+            .unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .recover(
+                &repository,
+                &discovered[0],
+                BacklogRecoveryAction::Release,
+                "human:tester",
+                "needs another pass",
+            )
+            .unwrap();
+
+        let other = RepositoryIdentity {
+            worktree: "/tmp/other2".into(),
+            key: "/tmp/other2/.git".into(),
+        };
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&other, &discovered)
+            .unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .claim_run(&other, &discovered, &discovered[0], RUN_ACTOR)
+            .unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .recover(
+                &other,
+                &discovered[0],
+                BacklogRecoveryAction::Release,
+                "human:tester",
+                "unrelated repository event",
+            )
+            .unwrap();
+
+        let events = list_recovery_events(db.conn(), &repository.key, None, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "release");
+        assert_eq!(events[0].reason, "needs another pass");
+        assert_eq!(events[0].old_status, "in_progress");
+        assert_eq!(events[0].new_status, "pending");
+
+        // `after` excludes everything up to and including the given event_id.
+        let empty =
+            list_recovery_events(db.conn(), &repository.key, Some(events[0].event_id), 10).unwrap();
+        assert!(empty.is_empty());
     }
 }

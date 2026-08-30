@@ -129,7 +129,7 @@ async fn full_session_handshake_list_call() {
     let list_resp = parse_response(writes[1]);
     assert_eq!(list_resp["id"], 2);
     let tools = list_resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 23);
 
     let call_resp = parse_response(writes[2]);
     assert_eq!(call_resp["id"], 3);

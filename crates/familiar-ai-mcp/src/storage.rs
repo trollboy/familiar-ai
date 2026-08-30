@@ -5,13 +5,23 @@ use async_trait::async_trait;
 use familiar_ai_core::models::{
     Decision, FileSummary, NewDecision, NewFileSummary, NewSessionRollup, Project, SessionRollup,
 };
+use familiar_ai_core::{
+    BacklogEntry, BacklogRecoveryAction, BacklogStatusStore, BootstrapRollbackResult,
+    DiscoveredPrd, RepositoryIdentity,
+};
 use familiar_ai_storage::repos::decision::search_decisions as repo_search_decisions;
 use familiar_ai_storage::repos::file_summary::{
     count_file_summaries_under as repo_count_under, list_file_summaries_under as repo_list_under,
     search_file_summaries as repo_search_summaries,
 };
 use familiar_ai_storage::{
-    Database, DecisionRepository, FileSummaryRepository, ProjectRepository, SessionRollupRepository,
+    BacklogEntryRow, BudgetSummary, DeliveryDecisionRow, DeliveryRepository, DriverAttempt,
+    DriverRepository, DriverSession, ExecutionCheckpoint, PendingGate, RecoveryEventRow,
+    ReviewFindingsRow,
+};
+use familiar_ai_storage::{
+    CheckpointRepository, Database, DecisionRepository, FileSummaryRepository, ProjectRepository,
+    SessionRollupRepository, SqliteBacklogRepository, SqliteBootstrapRepository,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +105,143 @@ pub trait Storage: Send + Sync {
         &self,
         summary: &NewFileSummary,
     ) -> Result<FileSummary, StorageError>;
+
+    // --- Stewardship state (PRD-035): repository-scoped, read-first ---
+    // Reads default to an empty/absent result rather than an error so a
+    // future non-SQLite backend or test double is not forced to implement
+    // every method before it can compile.
+
+    async fn list_backlog(
+        &self,
+        _repository_key: &str,
+        _status: Option<&str>,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<BacklogEntryRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_driver_sessions(
+        &self,
+        _repository_key: &str,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<DriverSession>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Used to check repository ownership before disclosing a session's
+    /// attempts or budget to a caller who only supplied a `session_id`.
+    async fn get_driver_session(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<DriverSession>, StorageError> {
+        Ok(None)
+    }
+
+    async fn list_driver_attempts(
+        &self,
+        _session_id: &str,
+        _after: Option<i64>,
+        _limit: usize,
+    ) -> Result<Vec<DriverAttempt>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_checkpoints(
+        &self,
+        _repository_key: &str,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<ExecutionCheckpoint>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_recovery_events(
+        &self,
+        _repository_key: &str,
+        _after: Option<i64>,
+        _limit: usize,
+    ) -> Result<Vec<RecoveryEventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_delivery_decisions(
+        &self,
+        _repository_key: &str,
+        _after: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<DeliveryDecisionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn get_budget_summary(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<BudgetSummary>, StorageError> {
+        Ok(None)
+    }
+
+    async fn list_review_findings(
+        &self,
+        _repository_key: &str,
+        _session_id: &str,
+    ) -> Result<Vec<ReviewFindingsRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_pending_human_gates(
+        &self,
+        _repository_key: &str,
+        _limit: usize,
+    ) -> Result<Vec<PendingGate>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    // --- Stewardship mutations (PRD-035) ---
+    // Each wraps exactly the same audited domain call the `familiar-ai`
+    // CLI's `backlog release`/`backlog complete`/`backlog record-complete`/
+    // `backlog bootstrap rollback` commands make — same actor/reason
+    // validation, same storage transaction, same audit trail.
+
+    async fn backlog_recover(
+        &self,
+        _repository: &RepositoryIdentity,
+        _target: &DiscoveredPrd,
+        _action: BacklogRecoveryAction,
+        _actor: &str,
+        _reason: &str,
+    ) -> Result<BacklogEntry, StorageError> {
+        Err(StorageError::Other(
+            "backlog recovery not implemented".into(),
+        ))
+    }
+
+    async fn backlog_record_complete(
+        &self,
+        _repository: &RepositoryIdentity,
+        _discovered: &[DiscoveredPrd],
+        _target: &DiscoveredPrd,
+        _actor: &str,
+        _reason: &str,
+    ) -> Result<BacklogEntry, StorageError> {
+        Err(StorageError::Other(
+            "backlog record-complete not implemented".into(),
+        ))
+    }
+
+    async fn bootstrap_rollback(
+        &self,
+        _repository: &RepositoryIdentity,
+        _discovered: &[DiscoveredPrd],
+        _run_id: &str,
+        _actor: &str,
+        _reason: &str,
+    ) -> Result<BootstrapRollbackResult, StorageError> {
+        Err(StorageError::Other(
+            "bootstrap rollback not implemented".into(),
+        ))
+    }
 }
 
 /// SQLite-backed Storage implementation.
@@ -220,6 +367,162 @@ impl Storage for SqliteStorage {
     ) -> Result<FileSummary, StorageError> {
         let db = self.db.lock().unwrap();
         db.create_or_update_file_summary(summary).map_err(map_err)
+    }
+
+    async fn list_backlog(
+        &self,
+        repository_key: &str,
+        status: Option<&str>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BacklogEntryRow>, StorageError> {
+        let db = self.db.lock().unwrap();
+        familiar_ai_storage::list_backlog_entries(db.conn(), repository_key, status, after, limit)
+            .map_err(map_err)
+    }
+
+    async fn list_driver_sessions(
+        &self,
+        repository_key: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DriverSession>, StorageError> {
+        let db = self.db.lock().unwrap();
+        DriverRepository::new(db.conn())
+            .list_sessions_by_repository(repository_key, after, limit)
+            .map_err(map_err)
+    }
+
+    async fn list_driver_attempts(
+        &self,
+        session_id: &str,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<DriverAttempt>, StorageError> {
+        let db = self.db.lock().unwrap();
+        DriverRepository::new(db.conn())
+            .attempts_page(session_id, after, limit)
+            .map_err(map_err)
+    }
+
+    async fn get_driver_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<DriverSession>, StorageError> {
+        let db = self.db.lock().unwrap();
+        DriverRepository::new(db.conn())
+            .get_session(session_id)
+            .map_err(map_err)
+    }
+
+    async fn list_checkpoints(
+        &self,
+        repository_key: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ExecutionCheckpoint>, StorageError> {
+        let db = self.db.lock().unwrap();
+        CheckpointRepository::new(db.conn())
+            .page(repository_key, after, limit)
+            .map_err(map_err)
+    }
+
+    async fn list_recovery_events(
+        &self,
+        repository_key: &str,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<RecoveryEventRow>, StorageError> {
+        let db = self.db.lock().unwrap();
+        familiar_ai_storage::list_recovery_events(db.conn(), repository_key, after, limit)
+            .map_err(map_err)
+    }
+
+    async fn list_delivery_decisions(
+        &self,
+        repository_key: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DeliveryDecisionRow>, StorageError> {
+        let db = self.db.lock().unwrap();
+        DeliveryRepository::new(db.conn())
+            .list_decisions(repository_key, after, limit)
+            .map_err(map_err)
+    }
+
+    async fn get_budget_summary(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<BudgetSummary>, StorageError> {
+        let db = self.db.lock().unwrap();
+        familiar_ai_storage::budget_summary(db.conn(), session_id).map_err(map_err)
+    }
+
+    async fn list_review_findings(
+        &self,
+        repository_key: &str,
+        session_id: &str,
+    ) -> Result<Vec<ReviewFindingsRow>, StorageError> {
+        let db = self.db.lock().unwrap();
+        familiar_ai_storage::review_findings_for_session(db.conn(), repository_key, session_id)
+            .map_err(map_err)
+    }
+
+    async fn list_pending_human_gates(
+        &self,
+        repository_key: &str,
+        limit: usize,
+    ) -> Result<Vec<PendingGate>, StorageError> {
+        let db = self.db.lock().unwrap();
+        familiar_ai_storage::pending_human_gates(db.conn(), repository_key, limit).map_err(map_err)
+    }
+
+    async fn backlog_recover(
+        &self,
+        repository: &RepositoryIdentity,
+        target: &DiscoveredPrd,
+        action: BacklogRecoveryAction,
+        actor: &str,
+        reason: &str,
+    ) -> Result<BacklogEntry, StorageError> {
+        let mut db = self.db.lock().unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .recover(repository, target, action, actor, reason)
+            .map_err(map_err)
+    }
+
+    async fn backlog_record_complete(
+        &self,
+        repository: &RepositoryIdentity,
+        discovered: &[DiscoveredPrd],
+        target: &DiscoveredPrd,
+        actor: &str,
+        reason: &str,
+    ) -> Result<BacklogEntry, StorageError> {
+        let mut db = self.db.lock().unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(repository, discovered)
+            .map_err(map_err)?;
+        SqliteBacklogRepository::new(db.conn_mut())
+            .record_complete(repository, discovered, target, actor, reason)
+            .map_err(map_err)
+    }
+
+    async fn bootstrap_rollback(
+        &self,
+        repository: &RepositoryIdentity,
+        discovered: &[DiscoveredPrd],
+        run_id: &str,
+        actor: &str,
+        reason: &str,
+    ) -> Result<BootstrapRollbackResult, StorageError> {
+        let mut db = self.db.lock().unwrap();
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(repository, discovered)
+            .map_err(map_err)?;
+        SqliteBootstrapRepository::new(db.conn_mut())
+            .rollback(repository, discovered, run_id, actor, reason)
+            .map_err(map_err)
     }
 }
 

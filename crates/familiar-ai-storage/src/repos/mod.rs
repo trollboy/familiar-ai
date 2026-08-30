@@ -12,6 +12,7 @@ pub mod project;
 pub mod review;
 pub mod session_rollup;
 pub mod stats;
+pub mod stewardship;
 pub mod worker_selection;
 
 use chrono::{DateTime, Utc};

@@ -2,7 +2,7 @@ use chrono::Utc;
 use familiar_ai_core::FamiliarError;
 use rusqlite::{params, Connection, OptionalExtension};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExecutionCheckpoint {
     pub checkpoint_id: String,
     pub repository_key: String,
@@ -80,6 +80,24 @@ impl<'a> CheckpointRepository<'a> {
         let mut stmt=self.conn.prepare("SELECT checkpoint_id,repository_key,prd_id,prd_path,execution_id,phase,base_revision,worktree_path,branch_name,diff_hash,changed_files_json,agent_identity,usage_json,test_evidence_json,invalid_reason FROM execution_checkpoints WHERE repository_key=?1 ORDER BY prd_id,checkpoint_id").map_err(db)?;
         let rows = stmt
             .query_map([repository], map)
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        Ok(rows)
+    }
+
+    /// Deterministic, repository-scoped, cursor-paginated listing of
+    /// checkpoints (worktree/branch identity plus recovery phase), ordered
+    /// by `prd_id`. `after` is the last delivered `prd_id` (exclusive).
+    pub fn page(
+        &self,
+        repository: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> familiar_ai_core::Result<Vec<ExecutionCheckpoint>> {
+        let mut stmt = self.conn.prepare("SELECT checkpoint_id,repository_key,prd_id,prd_path,execution_id,phase,base_revision,worktree_path,branch_name,diff_hash,changed_files_json,agent_identity,usage_json,test_evidence_json,invalid_reason FROM execution_checkpoints WHERE repository_key=?1 AND prd_id>?2 ORDER BY prd_id,checkpoint_id LIMIT ?3").map_err(db)?;
+        let rows = stmt
+            .query_map(params![repository, after.unwrap_or(""), limit as i64], map)
             .map_err(db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
@@ -165,4 +183,66 @@ fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionCheckpoint> {
 }
 fn db(e: rusqlite::Error) -> FamiliarError {
     FamiliarError::Database(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn database() -> crate::Database {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db
+    }
+
+    fn checkpoint(repository_key: &str, prd_id: &str) -> ExecutionCheckpoint {
+        ExecutionCheckpoint {
+            checkpoint_id: format!("{repository_key}:{prd_id}"),
+            repository_key: repository_key.into(),
+            prd_id: prd_id.into(),
+            prd_path: format!("docs/prds/{prd_id}.md"),
+            execution_id: Some(format!("exec-{prd_id}")),
+            phase: "implemented".into(),
+            base_revision: "deadbeef".into(),
+            worktree_path: format!("/state/worktrees/{prd_id}"),
+            branch_name: Some(format!("familiar/{prd_id}")),
+            diff_hash: "sha256:abc".into(),
+            changed_files_json: "[]".into(),
+            agent_identity: "claude-code".into(),
+            usage_json: "{}".into(),
+            test_evidence_json: "{}".into(),
+            invalid_reason: None,
+        }
+    }
+
+    #[test]
+    fn page_is_repository_scoped_ordered_and_paginated() {
+        let db = database();
+        let repository = CheckpointRepository::new(db.conn());
+        repository.put(&checkpoint("/repo/.git", "PRD-1")).unwrap();
+        repository.put(&checkpoint("/repo/.git", "PRD-2")).unwrap();
+        repository.put(&checkpoint("/repo/.git", "PRD-3")).unwrap();
+        // A checkpoint from a different repository must never leak into a
+        // repository-scoped listing.
+        repository.put(&checkpoint("/other/.git", "PRD-1")).unwrap();
+
+        let all = repository.page("/repo/.git", None, 10).unwrap();
+        assert_eq!(
+            all.iter().map(|c| c.prd_id.as_str()).collect::<Vec<_>>(),
+            ["PRD-1", "PRD-2", "PRD-3"]
+        );
+        assert_eq!(all, repository.all("/repo/.git").unwrap());
+
+        let first_page = repository.page("/repo/.git", None, 1).unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].prd_id, "PRD-1");
+
+        let rest = repository
+            .page("/repo/.git", Some(&first_page[0].prd_id), 10)
+            .unwrap();
+        assert_eq!(
+            rest.iter().map(|c| c.prd_id.as_str()).collect::<Vec<_>>(),
+            ["PRD-2", "PRD-3"]
+        );
+    }
 }

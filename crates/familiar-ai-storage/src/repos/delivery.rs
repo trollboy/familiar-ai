@@ -22,6 +22,25 @@ pub struct DeliveryAuthorityDecision {
     pub warrant_consumed: u64,
 }
 
+/// One delivery authority decision, keyed for the repository-scoped
+/// stewardship query surface (adds identity and ordering fields the
+/// per-session [`DeliveryAuthorityDecision`] read does not need).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeliveryDecisionRow {
+    pub decision_id: String,
+    pub session_id: String,
+    pub prd_id: String,
+    pub mode: String,
+    pub actor: String,
+    pub decision: String,
+    pub assurance_label: Option<String>,
+    pub findings_json: String,
+    pub stop_reasons_json: String,
+    pub warrant_json: Option<String>,
+    pub warrant_consumed: u64,
+    pub created_at: String,
+}
+
 pub struct DeliveryRepository<'a> {
     conn: &'a Connection,
 }
@@ -104,8 +123,149 @@ impl<'a> DeliveryRepository<'a> {
             .map_err(db)?;
         Ok(decisions)
     }
+
+    /// Deterministic, repository-scoped, cursor-paginated listing of every
+    /// delivery authority decision across sessions, ordered by
+    /// `(created_at, decision_id)`. `after` is the opaque cursor returned by
+    /// a previous page (the last delivered row's `decision_id`).
+    pub fn list_decisions(
+        &self,
+        repository_key: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> familiar_ai_core::Result<Vec<DeliveryDecisionRow>> {
+        let boundary: (String, String) = match after {
+            Some(decision_id) => {
+                let created_at: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT created_at FROM delivery_authority_decisions WHERE decision_id=?1",
+                        params![decision_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(db)?;
+                match created_at {
+                    Some(created_at) => (created_at, decision_id.to_string()),
+                    None => return Ok(Vec::new()),
+                }
+            }
+            None => (String::new(), String::new()),
+        };
+        let mut statement = self.conn.prepare(
+            "SELECT decision_id,session_id,prd_id,mode,actor,decision,assurance_label,findings_json,stop_reasons_json,warrant_json,warrant_consumed,created_at \
+             FROM delivery_authority_decisions WHERE repository_key=?1 AND (created_at,decision_id)>(?2,?3) \
+             ORDER BY created_at,decision_id LIMIT ?4",
+        ).map_err(db)?;
+        let rows = statement
+            .query_map(
+                params![repository_key, boundary.0, boundary.1, limit as i64],
+                |row| {
+                    Ok(DeliveryDecisionRow {
+                        decision_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        prd_id: row.get(2)?,
+                        mode: row.get(3)?,
+                        actor: row.get(4)?,
+                        decision: row.get(5)?,
+                        assurance_label: row.get(6)?,
+                        findings_json: row.get(7)?,
+                        stop_reasons_json: row.get(8)?,
+                        warrant_json: row.get(9)?,
+                        warrant_consumed: row.get(10)?,
+                        created_at: row.get(11)?,
+                    })
+                },
+            )
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        Ok(rows)
+    }
 }
 
 fn db(error: rusqlite::Error) -> FamiliarError {
     FamiliarError::Database(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn database() -> crate::Database {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db
+    }
+
+    #[test]
+    fn list_decisions_is_repository_scoped_ordered_and_paginated() {
+        let db = database();
+        let repository = DeliveryRepository::new(db.conn());
+        for (n, decision_id) in ["d1", "d2", "d3"].into_iter().enumerate() {
+            repository
+                .record_authority_decision(
+                    decision_id,
+                    "/repo/.git",
+                    "session-1",
+                    &format!("PRD-{n}"),
+                    "manual",
+                    "human:tester",
+                    "approved",
+                    None,
+                    "[]",
+                    "[]",
+                    None,
+                    0,
+                )
+                .unwrap();
+        }
+        // A decision from a different repository must never leak into a
+        // repository-scoped listing.
+        repository
+            .record_authority_decision(
+                "other-1",
+                "/other/.git",
+                "session-1",
+                "PRD-0",
+                "manual",
+                "human:tester",
+                "approved",
+                None,
+                "[]",
+                "[]",
+                None,
+                0,
+            )
+            .unwrap();
+
+        let all = repository.list_decisions("/repo/.git", None, 10).unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|d| d.decision_id.as_str())
+                .collect::<Vec<_>>(),
+            ["d1", "d2", "d3"]
+        );
+
+        let first_page = repository.list_decisions("/repo/.git", None, 1).unwrap();
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].decision_id, "d1");
+
+        let rest = repository
+            .list_decisions("/repo/.git", Some(&first_page[0].decision_id), 10)
+            .unwrap();
+        assert_eq!(
+            rest.iter()
+                .map(|d| d.decision_id.as_str())
+                .collect::<Vec<_>>(),
+            ["d2", "d3"]
+        );
+
+        // An unknown cursor yields an empty continuation rather than
+        // silently restarting the sequence.
+        assert!(repository
+            .list_decisions("/repo/.git", Some("nope"), 10)
+            .unwrap()
+            .is_empty());
+    }
 }

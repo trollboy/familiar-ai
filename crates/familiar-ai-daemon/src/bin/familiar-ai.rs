@@ -90,6 +90,72 @@ enum Command {
         /// Design documents supplied to the configured planner agent.
         design_docs: Vec<PathBuf>,
     },
+    /// Query durable execution-era state (backlog, sessions, attempts,
+    /// worktrees, review findings, budgets, delivery, recovery events, and
+    /// pending human gates) for the current repository. Read-only; prints
+    /// one JSON object per invocation.
+    Stewardship {
+        #[command(subcommand)]
+        command: StewardshipCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StewardshipCommand {
+    /// List the backlog graph.
+    Backlog {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List driver sessions, most recent first.
+    Sessions {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List one session's attempts, including worktree/branch identity.
+    Attempts {
+        session_id: String,
+        #[arg(long)]
+        cursor: Option<i64>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List execution checkpoints (worktree/branch identity, recovery phase).
+    Checkpoints {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List audited backlog recovery events.
+    Recovery {
+        #[arg(long)]
+        cursor: Option<i64>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List delivery authority decisions.
+    Delivery {
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show one session's warrant, cost, and delivery-warrant consumption.
+    Budget { session_id: String },
+    /// Show review disposition and blocking scope findings for one session.
+    Review { session_id: String },
+    /// List stopped attempts and blocked checkpoints awaiting a human decision.
+    Gates {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -254,6 +320,10 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         },
         Command::Worker { command } => match worker_command(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Stewardship { command } => match stewardship_command(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -877,6 +947,85 @@ fn report_command(session_id: Option<&str>) -> Result<(), String> {
     let rendered =
         familiar_ai_daemon::report::render(&db, session_id).map_err(|e| e.to_string())?;
     print!("{rendered}");
+    Ok(())
+}
+
+/// Read-only: prints one JSON object over durable execution-era state,
+/// scoped to the repository resolved from the current directory exactly as
+/// every other backlog-aware command resolves it. Shares its query
+/// implementation with the dashboard's `/stewardship/*` endpoints.
+fn stewardship_command(command: StewardshipCommand) -> Result<(), String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&cwd)
+        .map_err(|e| e.to_string())?;
+    let db = database()?;
+    let value = match command {
+        StewardshipCommand::Backlog {
+            status,
+            cursor,
+            limit,
+        } => familiar_ai_daemon::stewardship::list_backlog(
+            &db,
+            &repository,
+            status.as_deref(),
+            cursor.as_deref(),
+            limit,
+        ),
+        StewardshipCommand::Sessions { cursor, limit } => {
+            familiar_ai_daemon::stewardship::list_sessions(
+                &db,
+                &repository,
+                cursor.as_deref(),
+                limit,
+            )
+        }
+        StewardshipCommand::Attempts {
+            session_id,
+            cursor,
+            limit,
+        } => familiar_ai_daemon::stewardship::list_attempts(
+            &db,
+            &repository,
+            &session_id,
+            cursor,
+            limit,
+        ),
+        StewardshipCommand::Checkpoints { cursor, limit } => {
+            familiar_ai_daemon::stewardship::list_checkpoints(
+                &db,
+                &repository,
+                cursor.as_deref(),
+                limit,
+            )
+        }
+        StewardshipCommand::Recovery { cursor, limit } => {
+            familiar_ai_daemon::stewardship::list_recovery_events(&db, &repository, cursor, limit)
+        }
+        StewardshipCommand::Delivery { cursor, limit } => {
+            familiar_ai_daemon::stewardship::list_delivery_decisions(
+                &db,
+                &repository,
+                cursor.as_deref(),
+                limit,
+            )
+        }
+        StewardshipCommand::Budget { session_id } => {
+            familiar_ai_daemon::stewardship::get_budget(&db, &repository, &session_id)
+        }
+        StewardshipCommand::Review { session_id } => {
+            familiar_ai_daemon::stewardship::list_review_findings(&db, &repository, &session_id)
+        }
+        StewardshipCommand::Gates { limit } => {
+            familiar_ai_daemon::stewardship::list_pending_human_gates(&db, &repository, limit)
+        }
+    }
+    .map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
+    );
     Ok(())
 }
 
