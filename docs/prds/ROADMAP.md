@@ -84,6 +84,20 @@ security), and deterministic reconciliation plus the read surface.
   per-component warrant reservations, uncached-token/cost warrant
   denominations, authority-labeled cost queries on the PRD-035 surfaces.
   Depends on PRD-035/051/052.
+- PRD-054 — OpenAI Platform and Codex usage accounting (drafted
+  2026-08-30): the second provider behind the same interfaces —
+  Codex terminal telemetry with the reasoning-output category, raw JSONL
+  evidence, and exactly-once terminal persistence; authentication-mode
+  classification (ChatGPT plan / API key / enterprise access token)
+  before any monetary interpretation; OpenAI organization Costs/Usage
+  collection as `kind = "billing"` sources with org/project scope and
+  duplicate-collector rejection; ChatGPT plan credits as a typed unit
+  that never converts to dollars. Depends on PRD-047/051; reconciles
+  through PRD-053's engine. OpenAI was added as a provider-adapter PRD
+  (PRD-051 extended only for the neutral generalizations: the
+  reasoning-output category and typed credit units) because PRD-052 is
+  deliberately Anthropic-bounded and a merged collector PRD would couple
+  two vendors' API risk into one delivery boundary.
 
 Ledger defect ownership: PRD-053 owns B1 and, with PRD-051, B8; PRD-051
 enables but does not fix B5, B6, and B13, whose stop-reason,
@@ -112,7 +126,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–053 were drafted 2026-08-30 by an autonomous specification run
+- PRDs 051–054 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
