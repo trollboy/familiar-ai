@@ -1,9 +1,9 @@
 # Backlog Execution Plan — 2026-08-30
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
-**Approval:** All 26 pending PRDs (032, 036–038, 041, 044–064) are approved
-for implementation. The 046 and 051–064 family received adversarial review
-and sign-off by Sol 5.6; owner batch-approved the full set 2026-08-30. Every
+**Approval:** All 29 pending PRDs (032, 036–038, 041, 044–064, 066–068) are
+approved for implementation. The 046 and 051–064 family received adversarial
+review and sign-off by Sol 5.6; owner batch-approved the full set 2026-08-30. Every
 frontmatter PRD is `status: ready`. This document is the owner's standing
 authorization: workers must not pause for per-PRD plan sign-off on
 scope-conformant work.
