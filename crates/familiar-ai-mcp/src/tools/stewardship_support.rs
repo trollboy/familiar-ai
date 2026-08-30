@@ -94,7 +94,9 @@ pub fn discover_prds(
     repository: &RepositoryIdentity,
     config: &Config,
 ) -> Result<Vec<DiscoveredPrd>, ToolError> {
-    let layout_config = config.repository(&repository.worktree);
+    let layout_config = config
+        .repository(&repository.worktree)
+        .map_err(|e| ToolError::Internal(format!("repository policy resolution failed: {e}")))?;
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(repository, &layout_config.layout())
         .map_err(|e| ToolError::Internal(format!("backlog discovery failed: {e}")))?;

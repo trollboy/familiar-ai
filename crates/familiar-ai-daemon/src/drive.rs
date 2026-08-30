@@ -330,6 +330,7 @@ fn select_batch(
     let mut selected: Vec<DiscoveredPrd> = Vec::new();
     let mut selected_scopes: Vec<(PrdId, Vec<(String, familiar_ai_review::ExpectedMatchKind)>)> =
         Vec::new();
+    let mut selected_resources: Vec<(PrdId, Vec<String>)> = Vec::new();
     for entry in entries {
         // An attempt that failed before claim leaves the PRD pending; without
         // this exclusion the session would select it forever.
@@ -373,7 +374,26 @@ fn select_batch(
             decisions.push(SelectionDecision {
                 prd_id: entry.prd.id.clone(),
                 decision: "deferred_width",
-                detail: format!("ready, but the warrant width of {} is exhausted", limit.max(1)),
+                detail: format!(
+                    "ready, but the warrant width of {} is exhausted",
+                    limit.max(1)
+                ),
+            });
+            continue;
+        }
+        if let Some((holder, resource)) = selected_resources.iter().find_map(|(id, held)| {
+            entry
+                .prd
+                .metadata
+                .resources
+                .iter()
+                .find(|resource| held.contains(resource))
+                .map(|resource| (id.clone(), resource.clone()))
+        }) {
+            decisions.push(SelectionDecision {
+                prd_id: entry.prd.id.clone(),
+                decision: "deferred_resource",
+                detail: format!("declared resource '{resource}' is held by {holder}"),
             });
             continue;
         }
@@ -405,6 +425,7 @@ fn select_batch(
             detail: String::new(),
         });
         selected_scopes.push((entry.prd.id.clone(), scope));
+        selected_resources.push((entry.prd.id.clone(), entry.prd.metadata.resources.clone()));
         selected.push(entry.prd);
     }
     if selected.is_empty() {
@@ -518,7 +539,7 @@ pub fn drive(
                 DriveError::Config(format!("cannot acquire driver ownership: {error}"))
             })?;
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|error| DriveError::Config(error.to_string()))?;
     let delivery_policy = repository_config.delivery.as_ref();
     if delivery_policy.is_some_and(|policy| policy.mode != familiar_ai_core::DeliveryMode::Disabled)
@@ -529,7 +550,9 @@ pub fn drive(
             "delivery requires driver.isolated_worktrees=true".into(),
         ));
     }
-    let effective = config.effective_execution(&repository.worktree);
+    let effective = config
+        .effective_execution(&repository.worktree)
+        .map_err(|error| DriveError::Config(error.to_string()))?;
     let review_configuration_source = effective.review_source.as_str();
     let execution_context_configuration_source = effective.execution_context_source.as_str();
     let mut effective_config = config.clone();
@@ -789,9 +812,7 @@ pub fn drive(
                                             None,
                                             None,
                                         );
-                                    eprintln!(
-                                        "drive: cannot persist workspace evidence: {error}"
-                                    );
+                                    eprintln!("drive: cannot persist workspace evidence: {error}");
                                     continue;
                                 }
                             }
@@ -1332,7 +1353,9 @@ mod tests {
             prd_allowlist: None,
         };
         // Lower values win.
-        let tightened = configured.clone().tightened_by(Some(3), Some(100), Some(250));
+        let tightened = configured
+            .clone()
+            .tightened_by(Some(3), Some(100), Some(250));
         assert_eq!(
             tightened,
             DriveWarrant {
@@ -1345,11 +1368,16 @@ mod tests {
         );
         // Higher values are ignored — a flag can never loosen configuration.
         assert_eq!(
-            configured.clone().tightened_by(Some(99), Some(9_999), Some(9_999)),
+            configured
+                .clone()
+                .tightened_by(Some(99), Some(9_999), Some(9_999)),
             configured
         );
         // Absent flags leave configuration alone.
-        assert_eq!(configured.clone().tightened_by(None, None, None), configured);
+        assert_eq!(
+            configured.clone().tightened_by(None, None, None),
+            configured
+        );
         // A flag may set a ceiling where configuration had none.
         assert_eq!(
             DriveWarrant::default().tightened_by(Some(5), None, None),
@@ -1531,13 +1559,13 @@ mod tests {
         DiscoveredPrd {
             id: PrdId::new(number),
             number,
-            path: familiar_ai_core::RepositoryPath::new(if location
-                == familiar_ai_core::PrdLocation::Archived
-            {
-                format!("docs/prds/done/PRD-{number:03}.md")
-            } else {
-                format!("docs/prds/PRD-{number:03}.md")
-            })
+            path: familiar_ai_core::RepositoryPath::new(
+                if location == familiar_ai_core::PrdLocation::Archived {
+                    format!("docs/prds/done/PRD-{number:03}.md")
+                } else {
+                    format!("docs/prds/PRD-{number:03}.md")
+                },
+            )
             .unwrap(),
             location,
             title: format!("PRD {number}"),
@@ -1549,6 +1577,7 @@ mod tests {
                 acceptance_criteria: vec!["x".into()],
                 risk_classes: vec!["scheduling".into()],
                 external_gates: Vec::new(),
+                resources: Vec::new(),
             },
             content_hash: format!("hash-{number}"),
         }
@@ -1590,13 +1619,13 @@ mod tests {
         (selected, decisions)
     }
 
-    /// PRD-065 defect-1 regression: the recorded Wave 1 graph — six pending
-    /// PRDs whose dependencies are completed shared ancestors, all one
-    /// weakly connected component — must select all six in one batch under a
-    /// width-six warrant. The pre-065 component scheduler collapsed this to
-    /// width one.
+    /// PRD-065 defect-1 regression, component half: with the recorded Wave 1
+    /// dependency edges but deliberately DISJOINT scopes, all six ready PRDs
+    /// are admitted in one batch. This isolates removal of
+    /// dependency-component serialization from scope conflicts; the honest
+    /// recorded-scope behavior is pinned separately below (review F3).
     #[test]
-    fn wave_one_graph_selects_all_six_ready_prds_at_width_six() {
+    fn wave_one_edges_with_disjoint_scopes_select_all_six() {
         use familiar_ai_core::PrdLocation::{Active, Archived};
         let (_temp, repository) = test_repository();
         let discovered = vec![
@@ -1652,6 +1681,171 @@ mod tests {
                 .count(),
             6
         );
+    }
+
+    /// PRD-065 review F3: the recorded Wave 1 input with its REAL structured
+    /// scopes (docs/prds/done/PRD-036..047). PRD-036 declares whole-crate
+    /// directories (`crates/familiar-ai-core/src/`,
+    /// `crates/familiar-ai-daemon/src/`, `crates/familiar-ai-daemon/tests/`,
+    /// `docs/contracts/`) that contain every other wave-1 PRD's scope, so the
+    /// honest achievable width of the recorded wave was ONE — the after-action
+    /// report's "intended width of six" was never scope-safe. This pins that
+    /// truth: 036 selects, the other five defer with recorded scope reasons
+    /// naming the holder, and none of it is component serialization.
+    #[test]
+    fn recorded_wave_one_scopes_admit_only_one_prd_honestly() {
+        use familiar_ai_core::PrdLocation::{Active, Archived};
+        let (_temp, repository) = test_repository();
+        let discovered = vec![
+            contract_prd(19, &[], Archived, &["a/19.rs"]),
+            contract_prd(20, &[19], Archived, &["a/20.rs"]),
+            contract_prd(21, &[], Archived, &["a/21.rs"]),
+            contract_prd(24, &[], Archived, &["a/24.rs"]),
+            contract_prd(26, &[], Archived, &["a/26.rs"]),
+            contract_prd(28, &[24], Archived, &["a/28.rs"]),
+            contract_prd(30, &[], Archived, &["a/30.rs"]),
+            contract_prd(31, &[], Archived, &["a/31.rs"]),
+            contract_prd(33, &[], Archived, &["a/33.rs"]),
+            contract_prd(34, &[], Archived, &["a/34.rs"]),
+            contract_prd(39, &[], Archived, &["a/39.rs"]),
+            contract_prd(42, &[30], Archived, &["a/42.rs"]),
+            contract_prd(43, &[], Archived, &["a/43.rs"]),
+            // The six wave-1 PRDs with their actual declared scopes, copied
+            // from the archived documents' authoritative metadata.
+            contract_prd(
+                36,
+                &[19, 26, 30, 31, 33, 39],
+                Active,
+                &[
+                    "crates/familiar-ai-core/src/",
+                    "crates/familiar-ai-daemon/src/",
+                    "crates/familiar-ai-daemon/tests/",
+                    "config/default.toml",
+                    "docs/contracts/",
+                ],
+            ),
+            contract_prd(
+                37,
+                &[21, 24, 33, 34, 39],
+                Active,
+                &[
+                    "docs/security/",
+                    "crates/familiar-ai-agent/tests/",
+                    "crates/familiar-ai-review/tests/",
+                    "crates/familiar-ai-daemon/tests/",
+                    "crates/familiar-ai-storage/tests/",
+                ],
+            ),
+            contract_prd(
+                44,
+                &[39, 43],
+                Active,
+                &[
+                    "crates/familiar-ai-core/src/config.rs",
+                    "crates/familiar-ai-daemon/src/drive.rs",
+                    "crates/familiar-ai-daemon/src/run.rs",
+                    "crates/familiar-ai-storage/migrations/",
+                    "crates/familiar-ai-storage/src/repos/",
+                    "crates/familiar-ai-daemon/tests/",
+                ],
+            ),
+            contract_prd(
+                45,
+                &[28, 42],
+                Active,
+                &[
+                    "crates/familiar-ai-core/src/config.rs",
+                    "crates/familiar-ai-review/src/tier.rs",
+                    "crates/familiar-ai-review/src/policy.rs",
+                ],
+            ),
+            contract_prd(
+                46,
+                &[43],
+                Active,
+                &[
+                    "crates/familiar-ai-daemon/src/drive.rs",
+                    "crates/familiar-ai-daemon/src/run.rs",
+                    "crates/familiar-ai-daemon/src/plan.rs",
+                    "crates/familiar-ai-daemon/src/worktree.rs",
+                    "crates/familiar-ai-review/src/coordinator.rs",
+                    "crates/familiar-ai-core/src/backlog.rs",
+                ],
+            ),
+            contract_prd(
+                47,
+                &[31, 43],
+                Active,
+                &[
+                    "docs/contracts/providers.md",
+                    "crates/familiar-ai-core/src/config.rs",
+                    "crates/familiar-ai-daemon/src/bin/familiar-ai.rs",
+                    "crates/familiar-ai-daemon/src/config_cli.rs",
+                    "crates/familiar-ai-storage/migrations/",
+                    "crates/familiar-ai-storage/src/repos/",
+                    "crates/familiar-ai-daemon/tests/",
+                ],
+            ),
+        ];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let (selected, decisions) =
+            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        assert_eq!(
+            selected,
+            vec![PrdId::new(36)],
+            "PRD-036's whole-crate scopes exclude every sibling"
+        );
+        for number in [37, 44, 45, 46, 47] {
+            let deferred = decisions
+                .iter()
+                .find(|decision| decision.prd_id == PrdId::new(number))
+                .unwrap_or_else(|| panic!("no decision for PRD-{number}"));
+            assert_eq!(deferred.decision, "deferred_scope_overlap", "PRD-{number}");
+            assert!(
+                deferred.detail.contains("PRD-36"),
+                "PRD-{number}: {}",
+                deferred.detail
+            );
+        }
+        // Spot-check one recorded reason names the actual overlapping pair.
+        let deferred_44 = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(44))
+            .unwrap();
+        assert!(
+            deferred_44.detail.contains("crates/familiar-ai-core/src/"),
+            "{}",
+            deferred_44.detail
+        );
+    }
+
+    /// PRD-065 review F2: two ready PRDs with disjoint file scopes but one
+    /// shared declared resource never run concurrently; a third PRD holding a
+    /// different resource still admits.
+    #[test]
+    fn declared_resource_conflicts_serialize_with_recorded_reason() {
+        use familiar_ai_core::PrdLocation::Active;
+        let (_temp, repository) = test_repository();
+        let mut first = contract_prd(1, &[], Active, &["a.rs"]);
+        first.metadata.resources = vec!["sqlite-db".into(), "gpu-0".into()];
+        let mut second = contract_prd(2, &[], Active, &["b.rs"]);
+        second.metadata.resources = vec!["sqlite-db".into()];
+        let mut third = contract_prd(3, &[], Active, &["c.rs"]);
+        third.metadata.resources = vec!["staging-deploy".into()];
+        let discovered = vec![first, second, third];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let (selected, decisions) =
+            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        assert_eq!(selected, vec![PrdId::new(1), PrdId::new(3)]);
+        let deferred = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(2))
+            .unwrap();
+        assert_eq!(deferred.decision, "deferred_resource");
+        assert!(deferred.detail.contains("sqlite-db"), "{}", deferred.detail);
+        assert!(deferred.detail.contains("PRD-1"), "{}", deferred.detail);
     }
 
     #[test]

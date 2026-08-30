@@ -394,6 +394,62 @@ fn conflicts(left: &[String], right: &[String]) -> bool {
     })
 }
 
+/// PRD-065 (review F1): resolve `commit` to a real commit object and prove it
+/// contains the validated candidate the checkpoint worktree holds — every
+/// file in the candidate's changed-file manifest has byte-identical content
+/// in the commit's tree, and a file the candidate deletes is absent from it.
+/// Returns the resolved full commit id. Callers must validate the checkpoint
+/// first: this binds the commit to the worktree's content, and only a
+/// validated checkpoint proves that content is the approved candidate.
+pub fn verify_commit_contains_candidate(
+    worktree: &Path,
+    commit: &str,
+    changed_files: &[String],
+) -> Result<String, String> {
+    let resolved = git(
+        worktree,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{commit}^{{commit}}"),
+        ],
+    )
+    .map_err(|error| format!("'{commit}' does not name a commit object: {error}"))?;
+    for path in changed_files {
+        let candidate = match fs::read(worktree.join(path)) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("cannot read candidate file {path}: {error}")),
+        };
+        let committed = git_bytes(
+            worktree,
+            &["cat-file", "blob", &format!("{resolved}:{path}")],
+        )
+        .ok();
+        match (candidate, committed) {
+            (None, None) => {}
+            (Some(ours), Some(theirs)) if ours == theirs => {}
+            (Some(_), None) => {
+                return Err(format!(
+                    "commit {resolved} does not contain approved candidate file '{path}'"
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "approved candidate deletes '{path}' but commit {resolved} still contains it"
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "approved candidate file '{path}' differs from its content in commit {resolved}"
+                ))
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 fn snapshot(path: &Path, base: &str) -> Result<(Vec<u8>, Vec<String>), String> {
     let mut evidence = git_bytes(path, &["diff", "--binary", "--no-ext-diff", base, "--"])?;
     let tracked = git(path, &["diff", "--name-only", "--no-ext-diff", base, "--"])?;
@@ -521,6 +577,85 @@ mod tests {
         let candidate = one(&db, "repo", "PRD-900").unwrap();
         assert!(!candidate.valid);
         assert!(candidate.reason.unwrap().starts_with("hash_mismatch:"));
+    }
+
+    /// PRD-065 review F1: the reviewer's required rejections — a nonexistent
+    /// commit, the unchanged base commit, and a different valid commit all
+    /// fail; only a commit actually containing the candidate binds.
+    #[test]
+    fn commit_containment_accepts_only_the_candidate_commit() {
+        let root = tempfile::tempdir().unwrap();
+        command(root.path(), &["init", "-q"]);
+        command(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        command(root.path(), &["config", "user.name", "Test"]);
+        std::fs::write(root.path().join("tracked"), "before").unwrap();
+        std::fs::write(root.path().join("doomed"), "delete me").unwrap();
+        command(root.path(), &["add", "tracked", "doomed"]);
+        command(root.path(), &["commit", "-qm", "base"]);
+        let base = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+
+        // The candidate: modify tracked, delete doomed, add untracked.
+        std::fs::write(root.path().join("tracked"), "after").unwrap();
+        std::fs::remove_file(root.path().join("doomed")).unwrap();
+        std::fs::write(root.path().join("fresh"), "new file").unwrap();
+        let manifest = vec!["doomed".to_string(), "fresh".into(), "tracked".into()];
+
+        // Create the candidate commit, then move HEAD back so the worktree
+        // still holds the candidate as dirty state (the checkpoint shape).
+        command(root.path(), &["add", "-A"]);
+        command(root.path(), &["commit", "-qm", "candidate"]);
+        let candidate_commit = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+        command(root.path(), &["reset", "-q", "--mixed", "HEAD~1"]);
+
+        // A different valid commit: same shape as the candidate (doomed
+        // deleted, fresh present) but divergent tracked content, so rejection
+        // is specifically by content comparison.
+        std::fs::write(root.path().join("tracked"), "divergent").unwrap();
+        command(root.path(), &["add", "-A"]);
+        command(root.path(), &["commit", "-qm", "divergent"]);
+        let divergent = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+        command(root.path(), &["reset", "-q", "--mixed", "HEAD~1"]);
+        std::fs::write(root.path().join("tracked"), "after").unwrap();
+
+        // The candidate commit binds and resolves to its full id.
+        assert_eq!(
+            verify_commit_contains_candidate(root.path(), &candidate_commit, &manifest).unwrap(),
+            candidate_commit
+        );
+        // The unchanged base commit is rejected: it lacks the candidate. The
+        // first divergence found is `doomed`, which the base still contains.
+        let error = verify_commit_contains_candidate(root.path(), &base, &manifest).unwrap_err();
+        assert!(error.contains("doomed"), "{error}");
+        // A different valid commit is rejected by content.
+        let error =
+            verify_commit_contains_candidate(root.path(), &divergent, &manifest).unwrap_err();
+        assert!(
+            error.contains("differs") || error.contains("does not contain"),
+            "{error}"
+        );
+        // A nonexistent commit is rejected outright.
+        let error = verify_commit_contains_candidate(
+            root.path(),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            &manifest,
+        )
+        .unwrap_err();
+        assert!(error.contains("does not name a commit"), "{error}");
+        // A commit that resurrects a candidate-deleted file is rejected: the
+        // base still contains `doomed`, and the message names it when the
+        // other files happen to match. Build one: candidate content but with
+        // doomed still present.
+        std::fs::write(root.path().join("doomed"), "delete me").unwrap();
+        command(root.path(), &["add", "-A"]);
+        command(root.path(), &["commit", "-qm", "kept-doomed"]);
+        let kept = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
+        command(root.path(), &["reset", "-q", "--mixed", "HEAD~1"]);
+        std::fs::remove_file(root.path().join("doomed")).unwrap();
+        let error = verify_commit_contains_candidate(root.path(), &kept, &manifest).unwrap_err();
+        assert!(error.contains("doomed"), "{error}");
     }
 
     #[test]

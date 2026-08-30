@@ -137,3 +137,44 @@ running Wave 2; they are contract and correctness gaps. Fix F3 and F4 in the
 same reliability pass so the scheduler's evidence and repository-policy
 boundary are trustworthy. F5 is mechanical but should remain a required merge
 gate.
+
+## Remediation disposition (2026-08-30)
+
+All five findings addressed in one corrective commit.
+
+- **F1 — fixed.** `approve-and-complete` now requires a resume-valid
+  checkpoint (the worktree provably holds the approved candidate), resolves
+  the commit to a real object, and proves per-file byte equality between the
+  candidate manifest and the commit's tree — a candidate-deleted file must be
+  absent from it. The default commit is the MAIN worktree's HEAD, and a HEAD
+  taken before the merge fails the containment proof instead of binding the
+  base revision. The approved hash and resolved commit persist in typed
+  columns (`execution_checkpoints.approved_diff_hash` / `approved_commit`,
+  migration 026). Rejection tests cover nonexistent commits, the unchanged
+  base, a divergent valid commit, and a commit resurrecting a deleted file.
+- **F2 — fixed.** Structured contract v1 gains the optional `resources` field
+  (closed identifier grammar, duplicates fail closed; documented in
+  `docs/contracts/structured-prd.md`). Ready-set selection defers a PRD whose
+  declared resource is held by a selected PRD, persisting `deferred_resource`
+  naming the resource and holder; migration 026 widens the closed decision
+  vocabulary. Parser, selection, and migration tests added.
+- **F3 — fixed, and the finding was even sharper than stated.** The honest
+  fixture built from the archived PRDs' real metadata shows the recorded
+  Wave 1 admits ONE PRD, not six: PRD-036 declares whole-crate directory
+  scopes that contain every sibling's scope. The new regression pins that
+  outcome (036 selected, five `deferred_scope_overlap` decisions naming it);
+  the synthetic disjoint-scope test is retained, renamed to state that it
+  isolates component-serialization removal only. PRD-065's acceptance
+  criterion is amended with the correction recorded inline. Practical
+  consequence: real parallel width requires narrower `expected_files` in
+  future PRDs — coarse whole-crate scopes forfeit concurrency by design.
+- **F4 — fixed.** Resolution now gathers exact-path AND identity matches
+  together; entries with identical configuration deduplicate (the drive
+  session's injected execution-root clone), while entries for one repository
+  with different configuration fail closed naming both — no silent shadowing.
+  The infallible `repository()`/`effective_execution()` variants are gone;
+  both APIs are fallible and every caller (drive, run, CLI, MCP) propagates
+  the conflict instead of defaulting.
+- **F5 — fixed.** `cargo fmt --all -- --check` is clean.
+
+Full workspace suite green after remediation.

@@ -2407,79 +2407,64 @@ impl Config {
         Ok(())
     }
 
-    /// Resolve one repository entry for a worktree. An exact canonical-path
-    /// match wins (a drive session's injected execution-root entry must shadow
-    /// identity resolution); otherwise entries are matched by Git
+    /// Resolve every configured entry that names this worktree's repository:
+    /// exact canonical-path matches AND entries matched through Git
     /// common-directory repository identity, so a linked worktree (an isolated
     /// lease created in a prior process, say) resolves the same policy as the
     /// main worktree it belongs to without any path-specific configuration
-    /// entry (PRD-065).
-    fn repository_entry(&self, canonical_worktree: &Path) -> Option<&RepositoryConfig> {
-        self.repository_entry_checked(canonical_worktree)
-            .ok()
-            .flatten()
-    }
-
-    /// Like `repository_entry`, but conflicting identity matches fail closed
-    /// with a diagnostic naming the entries instead of silently picking one.
+    /// entry (PRD-065). Entries with identical configuration deduplicate (a
+    /// drive session injects an execution-root clone of the pinned
+    /// repository's entry); entries for one repository with DIFFERENT
+    /// configuration fail closed with a diagnostic naming them — never a
+    /// silent shadow (review F4).
     fn repository_entry_checked(
         &self,
         canonical_worktree: &Path,
     ) -> crate::Result<Option<&RepositoryConfig>> {
-        if let Some(entry) = self.repositories.iter().find_map(|(path, entry)| {
-            Path::new(path)
-                .canonicalize()
-                .ok()
-                .filter(|path| path == canonical_worktree)
-                .map(|_| entry)
-        }) {
-            return Ok(Some(entry));
+        let identity = git_common_directory(canonical_worktree);
+        let mut matches: Vec<(&String, &RepositoryConfig)> = Vec::new();
+        for (path, entry) in &self.repositories {
+            let Ok(canonical) = Path::new(path).canonicalize() else {
+                continue;
+            };
+            let matched = canonical == canonical_worktree
+                || match (&identity, git_common_directory(&canonical)) {
+                    (Some(queried), Some(configured)) => *queried == configured,
+                    _ => false,
+                };
+            if matched {
+                matches.push((path, entry));
+            }
         }
-        let Some(identity) = git_common_directory(canonical_worktree) else {
+        let Some((first_path, first_entry)) = matches.first().copied() else {
             return Ok(None);
         };
-        let matches: Vec<(&String, &RepositoryConfig)> = self
-            .repositories
-            .iter()
-            .filter(|(path, _)| {
-                Path::new(path)
-                    .canonicalize()
-                    .ok()
-                    .and_then(|canonical| git_common_directory(&canonical))
-                    .is_some_and(|candidate| candidate == identity)
-            })
-            .collect();
-        match matches.as_slice() {
-            [] => Ok(None),
-            [(_, entry)] => Ok(Some(entry)),
-            conflicting => Err(FamiliarError::Config(format!(
-                "repository entries {} resolve to the same repository identity {identity}; keep exactly one",
-                conflicting
-                    .iter()
-                    .map(|(path, _)| format!("'{path}'"))
-                    .collect::<Vec<_>>()
-                    .join(" and ")
-            ))),
+        if let Some((conflicting_path, _)) = matches.iter().find(|(_, entry)| *entry != first_entry)
+        {
+            return Err(FamiliarError::Config(format!(
+                "repository entries '{first_path}' and '{conflicting_path}' resolve to the same repository{} with different configuration; keep exactly one",
+                identity
+                    .as_deref()
+                    .map(|value| format!(" identity {value}"))
+                    .unwrap_or_default()
+            )));
         }
+        Ok(Some(first_entry))
     }
 
-    pub fn repository(&self, canonical_worktree: &Path) -> RepositoryConfig {
-        self.repository_entry(canonical_worktree)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// `repository`, with identity conflicts surfaced instead of ignored.
-    pub fn repository_checked(&self, canonical_worktree: &Path) -> crate::Result<RepositoryConfig> {
+    pub fn repository(&self, canonical_worktree: &Path) -> crate::Result<RepositoryConfig> {
         Ok(self
             .repository_entry_checked(canonical_worktree)?
             .cloned()
             .unwrap_or_default())
     }
 
-    pub fn effective_execution(&self, canonical_worktree: &Path) -> EffectiveExecutionConfig {
-        let entry = self.repository_entry(canonical_worktree);
-        EffectiveExecutionConfig {
+    pub fn effective_execution(
+        &self,
+        canonical_worktree: &Path,
+    ) -> crate::Result<EffectiveExecutionConfig> {
+        let entry = self.repository_entry_checked(canonical_worktree)?;
+        Ok(EffectiveExecutionConfig {
             review: entry
                 .and_then(|entry| entry.review.clone())
                 .unwrap_or_else(|| self.review.clone()),
@@ -2499,7 +2484,7 @@ impl Config {
             } else {
                 ConfigurationSource::Global
             },
-        }
+        })
     }
 
     fn validate_execution(&self) -> crate::Result<()> {
@@ -2752,7 +2737,9 @@ model = "legacy"
             },
         );
         config.validate_repositories().unwrap();
-        let resolved = config.repository(&repo.path().canonicalize().unwrap());
+        let resolved = config
+            .repository(&repo.path().canonicalize().unwrap())
+            .unwrap();
         assert_eq!(
             resolved.layout().profile,
             crate::BacklogProfile::NumberedSlug
@@ -2805,9 +2792,7 @@ model = "legacy"
         );
         // The lease worktree has no entry of its own, yet resolves the main
         // worktree's policy.
-        let resolved = config
-            .repository_checked(&lease.canonicalize().unwrap())
-            .unwrap();
+        let resolved = config.repository(&lease.canonicalize().unwrap()).unwrap();
         assert_eq!(
             resolved.layout().profile,
             crate::BacklogProfile::NumberedSlug
@@ -2816,16 +2801,13 @@ model = "legacy"
         let other = temp.path().join("other");
         std::fs::create_dir(&other).unwrap();
         git(&other, &["init", "-q"]);
-        let fallback = config
-            .repository_checked(&other.canonicalize().unwrap())
-            .unwrap();
+        let fallback = config.repository(&other.canonicalize().unwrap()).unwrap();
         assert_eq!(fallback.layout().profile, crate::BacklogProfile::Canonical);
         // Two entries naming the same repository identity fail closed with a
         // diagnostic naming both.
-        config.repositories.insert(
-            lease.display().to_string(),
-            RepositoryConfig::default(),
-        );
+        config
+            .repositories
+            .insert(lease.display().to_string(), RepositoryConfig::default());
         // The exact-path match shadows identity resolution for the main
         // worktree itself, so probe from a third worktree of the same repo.
         let probe = temp.path().join("probe");
@@ -2834,7 +2816,7 @@ model = "legacy"
             &["worktree", "add", "-q", probe.to_str().unwrap(), "HEAD"],
         );
         let error = config
-            .repository_checked(&probe.canonicalize().unwrap())
+            .repository(&probe.canonicalize().unwrap())
             .unwrap_err()
             .to_string();
         assert!(error.contains("same repository identity"), "{error}");
@@ -2897,7 +2879,9 @@ model = "legacy"
             },
         );
         config.validate_repositories().unwrap();
-        let effective = config.effective_execution(&repo.path().canonicalize().unwrap());
+        let effective = config
+            .effective_execution(&repo.path().canonicalize().unwrap())
+            .unwrap();
         assert_eq!(effective.review, scoped_review);
         assert_eq!(effective.review_source, ConfigurationSource::Repository);
         assert_eq!(effective.execution_context.hard_ceiling_tokens, Some(20));
@@ -2907,7 +2891,9 @@ model = "legacy"
         );
 
         let other = tempfile::tempdir().unwrap();
-        let fallback = config.effective_execution(&other.path().canonicalize().unwrap());
+        let fallback = config
+            .effective_execution(&other.path().canonicalize().unwrap())
+            .unwrap();
         assert_eq!(fallback.review, config.review);
         assert_eq!(fallback.review_source, ConfigurationSource::Global);
         assert_eq!(fallback.execution_context, config.execution_context);

@@ -502,7 +502,7 @@ pub fn resume_implemented_checkpoint(
         )));
     }
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|e| RunError::Config(e.to_string()))?;
     let discovered = discovery
         .discover_with_layout(&repository, &repository_config.layout())
@@ -644,7 +644,7 @@ pub fn accept_review_risk(
         .resolve(current)
         .map_err(|e| RunError::Config(e.to_string()))?;
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|e| RunError::Config(e.to_string()))?;
     let discovered = discovery
         .discover_with_layout(&repository, &repository_config.layout())
@@ -742,9 +742,11 @@ fn execute_tracked_inner(
         None => route_context_for_prd(prd_path)?,
     };
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|e| RunError::Config(e.to_string()))?;
-    let effective = config.effective_execution(&repository.worktree);
+    let effective = config
+        .effective_execution(&repository.worktree)
+        .map_err(|e| RunError::Config(e.to_string()))?;
     let mut effective_config = config.clone();
     effective_config.review = effective.review;
     effective_config.execution_context = effective.execution_context;

@@ -220,8 +220,11 @@ impl<'a> SqliteBacklogRepository<'a> {
         approved_diff_hash: &str,
         commit: &str,
     ) -> Result<BacklogEntry, BacklogStoreError> {
-        let (actor, reason) =
-            validate_recovery_attribution(BacklogRecoveryAction::ApproveAndComplete, actor, reason)?;
+        let (actor, reason) = validate_recovery_attribution(
+            BacklogRecoveryAction::ApproveAndComplete,
+            actor,
+            reason,
+        )?;
         let commit = commit.trim();
         if commit.is_empty() {
             return Err(BacklogStoreError::Storage(
@@ -309,8 +312,8 @@ impl<'a> SqliteBacklogRepository<'a> {
         .map_err(storage)?;
         let checkpoint_changed = tx
             .execute(
-                "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2 AND phase=?3",
-                params![now, checkpoint_id, phase],
+                "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,approved_diff_hash=?4,approved_commit=?5,updated_at=?1 WHERE checkpoint_id=?2 AND phase=?3",
+                params![now, checkpoint_id, phase, approved_diff_hash, commit],
             )
             .map_err(storage)?;
         if checkpoint_changed != 1 {
@@ -1485,15 +1488,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "completed");
-        let (phase,): (String,) = storage
-            .connection
-            .query_row(
-                "SELECT phase FROM execution_checkpoints WHERE prd_id='PRD-9'",
-                [],
-                |row| Ok((row.get(0)?,)),
-            )
-            .unwrap();
+        let (phase, approved_hash, approved_commit): (String, Option<String>, Option<String>) =
+            storage
+                .connection
+                .query_row(
+                    "SELECT phase,approved_diff_hash,approved_commit FROM execution_checkpoints WHERE prd_id='PRD-9'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
         assert_eq!(phase, "completed");
+        // Review F1: the binding lives in typed columns, not only event text.
+        assert_eq!(approved_hash.as_deref(), Some("sha256:approved"));
+        assert_eq!(approved_commit.as_deref(), Some("abc123"));
         let (action, detail): (String, String) = storage
             .connection
             .query_row(

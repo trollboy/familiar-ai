@@ -612,7 +612,7 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
         db.run_migrations().map_err(|e| e.to_string())?;
     }
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|e| e.to_string())?;
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(&repository, &repository_config.layout())
@@ -930,7 +930,7 @@ fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {
     let config =
         Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|e| e.to_string())?;
     let policy = repository_config.delivery_policy()?;
     let result = familiar_ai_daemon::delivery::deliver(ownership_record, policy)?;
@@ -1329,7 +1329,7 @@ fn next() -> Result<(), String> {
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|e| e.to_string())?;
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(&repository, &repository_config.layout())
@@ -1440,7 +1440,7 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
     let repository_config = config
-        .repository_checked(&repository.worktree)
+        .repository(&repository.worktree)
         .map_err(|e| e.to_string())?;
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(&repository, &repository_config.layout())
@@ -1590,6 +1590,22 @@ fn approve_and_complete_backlog(
                 target.id
             )
         })?;
+    // The checkpoint worktree must still hold the exact approved candidate:
+    // that validation is what makes the commit-containment proof below a bind
+    // to the APPROVED content rather than to whatever sits on disk (F1).
+    let candidate = familiar_ai_daemon::resume::one(db, &repository.key, &target.id.to_string())?;
+    if !candidate.valid {
+        return Err(format!(
+            "checkpoint for {} is not valid ({}); the worktree no longer holds the approved candidate, so no commit can be provably bound to it.\nvalid next commands: familiar-ai resume {} (inspect), familiar-ai run {} (fresh attempt)",
+            target.id,
+            candidate.reason.as_deref().unwrap_or("invalid_checkpoint"),
+            target.id,
+            target.path
+        ));
+    }
+    // The default commit is the MAIN worktree's HEAD (where an approved
+    // candidate is merged), never the checkpoint worktree's HEAD, which still
+    // sits at the base revision.
     let commit = match commit {
         Some(value) => value.to_owned(),
         None => {
@@ -1607,6 +1623,14 @@ fn approve_and_complete_backlog(
             String::from_utf8_lossy(&output.stdout).trim().to_owned()
         }
     };
+    // Resolve the commit to a real object and prove it contains the candidate
+    // byte for byte. A default of HEAD taken before the candidate was merged
+    // fails here instead of durably binding completion to the base revision.
+    let commit = familiar_ai_daemon::resume::verify_commit_contains_candidate(
+        &candidate.worktree,
+        &commit,
+        &candidate.changed_files,
+    )?;
     SqliteBacklogRepository::new(db.conn_mut())
         .reconcile_and_snapshot(repository, discovered)
         .map_err(|e| e.to_string())?;
@@ -1644,14 +1668,19 @@ fn backlog_next_commands(
     repository: &familiar_ai_core::RepositoryIdentity,
     target: &familiar_ai_core::DiscoveredPrd,
 ) -> String {
-    let status: Option<String> =
-        familiar_ai_storage::list_backlog_entries(db.conn(), &repository.key, None, None, usize::MAX)
-            .ok()
-            .and_then(|rows| {
-                rows.into_iter()
-                    .find(|row| row.prd_path == target.path.as_str())
-                    .map(|row| row.status)
-            });
+    let status: Option<String> = familiar_ai_storage::list_backlog_entries(
+        db.conn(),
+        &repository.key,
+        None,
+        None,
+        usize::MAX,
+    )
+    .ok()
+    .and_then(|rows| {
+        rows.into_iter()
+            .find(|row| row.prd_path == target.path.as_str())
+            .map(|row| row.status)
+    });
     let id = &target.id;
     let path = &target.path;
     match status.as_deref() {

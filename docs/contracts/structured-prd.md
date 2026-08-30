@@ -24,10 +24,17 @@ external_gates: []
 
 The required fields are `familiar_ai_prd`, `id`, `status`, `dependencies`,
 `expected_files`, `acceptance_criteria`, and `risk_classes`. `external_gates`
-is optional. Version 1 accepts scalar strings and either block or inline lists.
-Unknown and duplicate fields fail closed. Status is one of `draft`, `ready`,
-`in_progress`, `completed`, or `blocked`. Expected files, acceptance criteria,
-and risk classes must be nonempty.
+and `resources` are optional. Version 1 accepts scalar strings and either
+block or inline lists. Unknown and duplicate fields fail closed. Status is one
+of `draft`, `ready`, `in_progress`, `completed`, or `blocked`. Expected files,
+acceptance criteria, and risk classes must be nonempty.
+
+`resources` (added by PRD-065) names exclusive scheduling resources the PRD
+holds while executing — a database file, a deploy target, a GPU. Identifiers
+use lowercase ASCII letters, digits, `-` and `_` only; duplicates fail closed.
+The unattended driver never runs two ready PRDs sharing a resource identifier
+concurrently, and records `deferred_resource` naming the resource and its
+holder when one defers the other.
 
 Identity uses `PRD-<number><optional-lowercase-suffix>` canonically. A
 numbered-slug repository may spell it `PRD <zero-padded-number><suffix>`; both

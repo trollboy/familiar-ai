@@ -307,6 +307,10 @@ pub struct PrdMetadata {
     pub acceptance_criteria: Vec<String>,
     pub risk_classes: Vec<String>,
     pub external_gates: Vec<String>,
+    /// PRD-065: exclusive scheduling resources this PRD holds while running.
+    /// Two ready PRDs sharing one identifier never run concurrently. Closed
+    /// grammar: lowercase ASCII, digits, '-' and '_'; duplicates fail closed.
+    pub resources: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -928,6 +932,7 @@ fn parse_front_matter<'a>(
                 | "acceptance_criteria"
                 | "risk_classes"
                 | "external_gates"
+                | "resources"
         ) {
             return Err(malformed(
                 path,
@@ -1021,6 +1026,25 @@ fn parse_front_matter<'a>(
             ));
         }
     }
+    let resources = values.remove("resources").unwrap_or_default();
+    let mut seen_resources = std::collections::BTreeSet::new();
+    for resource in &resources {
+        if resource.is_empty()
+            || !resource
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        {
+            return Err(malformed(
+                path,
+                format!(
+                    "invalid resource identifier '{resource}': lowercase ASCII letters, digits, '-' and '_' only"
+                ),
+            ));
+        }
+        if !seen_resources.insert(resource.clone()) {
+            return Err(malformed(path, format!("duplicate resource '{resource}'")));
+        }
+    }
     let metadata = PrdMetadata {
         contract_version: Some(version),
         status: Some(status),
@@ -1028,6 +1052,7 @@ fn parse_front_matter<'a>(
         acceptance_criteria: values.remove("acceptance_criteria").unwrap(),
         risk_classes: values.remove("risk_classes").unwrap(),
         external_gates: values.remove("external_gates").unwrap_or_default(),
+        resources,
     };
     Ok((Some((id, dependencies, metadata)), document))
 }
@@ -1877,6 +1902,36 @@ mod structured_contract_tests {
             .map(|dep| format!("  - {dep}\n"))
             .collect::<String>();
         format!("---\nfamiliar_ai_prd: 1\nid: {id}\nstatus: ready\ndependencies:\n{deps}expected_files:\n  - src/lib.rs\nacceptance_criteria:\n  - works\nrisk_classes:\n  - scheduling\nexternal_gates: []\n---\n{heading}\n\nThis prose says Depends on PRD-999 but grants no authority.\n")
+    }
+
+    /// PRD-065 review F2: the optional `resources` field parses under a
+    /// closed identifier grammar; invalid identifiers and duplicates fail
+    /// closed, and its absence yields an empty set.
+    #[test]
+    fn resources_field_parses_validates_and_defaults_empty() {
+        let with = |resources: &str| {
+            format!(
+                "---\nfamiliar_ai_prd: 1\nid: PRD-001\nstatus: ready\ndependencies: []\nexpected_files:\n  - src/lib.rs\nacceptance_criteria:\n  - works\nrisk_classes:\n  - scheduling\nresources:\n{resources}---\n# PRD-1: One\n"
+            )
+        };
+        let metadata = structured_prd_metadata(&with("  - sqlite-db\n  - gpu_0\n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.resources, vec!["sqlite-db", "gpu_0"]);
+        // Absent field: empty, still valid.
+        let absent = structured_prd_metadata(&document("PRD-001", "# PRD-1: One", &[]))
+            .unwrap()
+            .unwrap();
+        assert!(absent.resources.is_empty());
+        // Closed grammar: uppercase, spaces, and path separators fail.
+        for bad in ["  - SQLite\n", "  - two words\n", "  - a/b\n"] {
+            assert!(
+                structured_prd_metadata(&with(bad)).is_err(),
+                "{bad:?} should fail"
+            );
+        }
+        // Duplicates fail closed.
+        assert!(structured_prd_metadata(&with("  - db\n  - db\n")).is_err());
     }
 
     #[test]
