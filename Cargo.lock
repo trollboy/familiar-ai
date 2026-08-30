@@ -611,6 +611,7 @@ dependencies = [
 name = "familiar-ai-context"
 version = "0.1.0"
 dependencies = [
+ "familiar-ai-core",
  "familiar-ai-tokens",
  "tempfile",
  "thiserror 2.0.18",

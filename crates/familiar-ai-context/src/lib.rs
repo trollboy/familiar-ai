@@ -8,7 +8,7 @@ pub use budget::{
     ContextInclusionReason, ContextPriority,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -229,6 +229,13 @@ impl ContextCompiler {
                 path: prd_path.clone(),
                 source,
             })?;
+        let planned_outputs = familiar_ai_core::structured_prd_metadata(&prd_content)
+            .map_err(|error| ContextCompilationError::InvalidPrd {
+                path: prd_path.clone(),
+                detail: error.to_string(),
+            })?
+            .map(|metadata| metadata.expected_files.into_iter().collect::<BTreeSet<_>>())
+            .unwrap_or_default();
         let prd = document(
             prd_identity.clone(),
             DocumentKind::Prd,
@@ -239,6 +246,16 @@ impl ContextCompiler {
         let candidates = discover_profiled(&prd.content, &profile.reference_roots);
         let mut validated = BTreeMap::new();
         for (relative, (root, kind)) in candidates {
+            if planned_outputs.contains(&relative)
+                && matches!(
+                    fs::symlink_metadata(worktree.join(&relative)),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound
+                )
+            {
+                // An expected output is authority to create this path, not a
+                // claim that it already exists as authoritative context.
+                continue;
+            }
             let path = validate_reference(&worktree, &relative, &root)?;
             let canonical_identity = identity(&worktree, &path).map_err(|detail| {
                 ContextCompilationError::InvalidReference {
@@ -697,6 +714,23 @@ mod tests {
         assert!(
             matches!(error, ContextCompilationError::InvalidReference { path, .. } if path == "docs/adr/missing.md")
         );
+    }
+
+    #[test]
+    fn missing_expected_document_is_a_planned_output_not_required_context() {
+        let temp = repository();
+        fs::write(
+            temp.path().join("docs/prds/work.md"),
+            "---\nfamiliar_ai_prd: 1\nid: PRD-001\nstatus: ready\ndependencies: []\nexpected_files:\n  - docs/contracts/new.md\nacceptance_criteria:\n  - creates contract\nrisk_classes:\n  - docs\n---\n# Work\n\nCreate docs/contracts/new.md.\n",
+        )
+        .unwrap();
+        let context = ContextCompiler
+            .compile(ContextRequest {
+                repository: temp.path(),
+                prd: Path::new("docs/prds/work.md"),
+            })
+            .unwrap();
+        assert!(context.documents.is_empty());
     }
 
     #[test]

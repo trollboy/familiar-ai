@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+familiar-ai-core = { path = "../familiar-ai-core" }
 familiar-ai-tokens = { path = "../familiar-ai-tokens" }
 thiserror.workspace = true
 
