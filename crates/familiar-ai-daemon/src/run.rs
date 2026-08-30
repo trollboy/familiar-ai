@@ -270,6 +270,42 @@ pub fn resolved_worker_plan(
     Ok((implementation_entry, reviewer_entry, records))
 }
 
+/// Select the next more expensive implementation worker that remains eligible
+/// under the same PRD-044 routing constraints. Equal-cost peers are not a
+/// stronger tier, and a pin deliberately disables automatic escalation.
+pub fn next_implementation_worker(
+    config: &Config,
+    route_context: &RouteContext,
+) -> Result<Option<(String, AgentEntryConfig)>, String> {
+    let Some(registry) = &config.worker_registry else {
+        return Ok(None);
+    };
+    if registry.routing.implementation_pin.is_some() {
+        return Ok(None);
+    }
+    let (_, _, records) = resolved_worker_plan(config, route_context)?;
+    let selected = records
+        .iter()
+        .find(|record| record.stage == WorkerStage::Implementation)
+        .ok_or_else(|| "implementation worker was not selected".to_owned())?;
+    let current_cost = registry.workers[&selected.selected_worker].estimated_cost_microusd;
+    let next = registry
+        .workers
+        .iter()
+        .filter(|(_, worker)| {
+            worker.available
+                && worker
+                    .capabilities
+                    .contains(&WorkerCapabilityConfig::Implementation)
+                && worker.context_tokens >= registry.routing.required_context_tokens
+                && (registry.routing.max_stage_cost_microusd == 0
+                    || worker.estimated_cost_microusd <= registry.routing.max_stage_cost_microusd)
+                && worker.estimated_cost_microusd > current_cost
+        })
+        .min_by_key(|(id, worker)| (worker.estimated_cost_microusd, id.as_str()));
+    Ok(next.map(|(id, worker)| (id.clone(), worker.as_agent_entry())))
+}
+
 /// Deterministic constructor: adapter enum to concrete agent, nothing else.
 /// Performs no probing, filesystem checks, or model calls.
 pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
@@ -449,6 +485,30 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context(
     prerequisites_preflighted: bool,
     route_context: Option<RouteContext>,
 ) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
+    execute_with_config_tracked_from_preflighted_with_route_context_and_timeout(
+        current,
+        prd_path,
+        agents,
+        config,
+        paths,
+        prerequisites_preflighted,
+        route_context,
+        None,
+    )
+}
+
+/// Driver-only variant that constrains the implementation process to a
+/// caller-computed remainder of a session duration warrant.
+pub fn execute_with_config_tracked_from_preflighted_with_route_context_and_timeout(
+    current: &Path,
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+    prerequisites_preflighted: bool,
+    route_context: Option<RouteContext>,
+    implementation_timeout_ms: Option<u64>,
+) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
     let mut trace = AttemptTrace::default();
     let result = execute_tracked_inner(
         current,
@@ -458,6 +518,7 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context(
         paths,
         prerequisites_preflighted,
         route_context,
+        implementation_timeout_ms,
         &mut trace,
     );
     (result, trace)
@@ -731,6 +792,7 @@ fn execute_tracked_inner(
     paths: &AppPaths,
     prerequisites_preflighted: bool,
     route_context: Option<RouteContext>,
+    implementation_timeout_ms: Option<u64>,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let discovery = FilesystemBacklogDiscovery;
@@ -999,7 +1061,7 @@ fn execute_tracked_inner(
             } else {
                 implementation_entry.model.as_deref()
             },
-            timeout_ms: None,
+            timeout_ms: implementation_timeout_ms,
             budget: execution_budget,
         },
         &mut io::stdout(),

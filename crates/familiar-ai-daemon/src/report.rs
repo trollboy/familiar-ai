@@ -63,12 +63,39 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
         .iter()
         .partition(|attempt| attempt.outcome.as_deref() == Some("completed"));
     render_built(db, &mut out, &built);
+    render_escalations(&mut out, &attempts);
     render_stopped(db, &mut out, &stopped);
     render_authority(db, &mut out, &session.session_id)?;
     render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
     render_judgment(&mut out, &session, &stopped);
     Ok(familiar_ai_agent::redact_sensitive(out))
+}
+
+fn render_escalations(out: &mut String, attempts: &[DriverAttempt]) {
+    let escalations: Vec<_> = attempts
+        .iter()
+        .filter(|attempt| attempt.escalated_from_sequence.is_some())
+        .collect();
+    let _ = writeln!(out, "\nESCALATIONS ({})", escalations.len());
+    if escalations.is_empty() {
+        let _ = writeln!(out, "  (none)");
+        return;
+    }
+    for attempt in escalations.iter().take(MAX_LISTED_ATTEMPTS) {
+        let _ = writeln!(
+            out,
+            "  {}  attempt={} from={} reason={} worker={} model={} outcome={}",
+            attempt.prd_id,
+            attempt.sequence,
+            attempt.escalated_from_sequence.unwrap(),
+            attempt.escalation_reason.as_deref().unwrap_or("unknown"),
+            attempt.adapter_id.as_deref().unwrap_or("unknown"),
+            attempt.model.as_deref().unwrap_or("unknown"),
+            attempt.outcome.as_deref().unwrap_or("interrupted"),
+        );
+    }
+    render_omitted(out, escalations.len(), MAX_LISTED_ATTEMPTS);
 }
 
 fn render_authority(db: &Database, out: &mut String, session_id: &str) -> Result<(), ReportError> {
@@ -596,6 +623,9 @@ mod tests {
              BUILT (1)\n  \
              PRD-17  docs/prds/PRD-017.md  duration=1200ms  cost=2500 micro-USD  phase=completed\n\
              \x20\x20\x20\x20\x20\x20configuration: review=repository execution_context=global\n\
+             \n\
+             ESCALATIONS (0)\n  \
+             (none)\n\
              \n\
              STOPPED (1)\n  \
              PRD-18  docs/prds/PRD-018.md  reason=review_disabled\n\

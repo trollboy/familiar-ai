@@ -21,8 +21,9 @@ use familiar_ai_storage::{
 };
 
 use crate::run::{
-    execute_with_config_tracked_from_preflighted_with_route_context, resolved_worker_plan,
-    AgentSet, RouteContext,
+    execute_with_config_tracked_from_preflighted_with_route_context,
+    execute_with_config_tracked_from_preflighted_with_route_context_and_timeout,
+    next_implementation_worker, resolved_worker_plan, AgentSet, RouteContext,
 };
 use familiar_ai_agent::WorkerStage;
 
@@ -760,6 +761,9 @@ pub fn drive(
                 }
                 let mut execution_config = config.clone();
                 let route_context = route_context(&repository.worktree, &target)?;
+                let escalation_worker =
+                    next_implementation_worker(&execution_config, &route_context)
+                        .map_err(DriveError::Config)?;
                 let selections = if execution_config.worker_registry.is_some() {
                     let (_, _, selections) =
                         resolved_worker_plan(&execution_config, &route_context)
@@ -781,7 +785,10 @@ pub fn drive(
                         .find(|record| record.stage == WorkerStage::Remediation)
                         .map(|record| record.selected_worker.clone());
                 }
-                let use_worktree = parallelism > 1;
+                // A potentially escalatable attempt must not dirty the base
+                // tree: its retry is required to start from this same clean
+                // original state, not from the cheap worker's failed tree.
+                let use_worktree = parallelism > 1 || escalation_worker.is_some();
                 let worktree = if use_worktree {
                     match crate::worktree::WorktreeLease::create_component(
                         &repository.worktree,
@@ -862,6 +869,7 @@ pub fn drive(
                     worktree,
                     worktree_heartbeat,
                     component_id,
+                    escalation_worker,
                 ));
             }
             if preparation_failed {
@@ -880,6 +888,7 @@ pub fn drive(
                     worktree,
                     worktree_heartbeat,
                     component_id,
+                    escalation_worker,
                 ) in jobs
                 {
                     handles.push(scope.spawn(move || {
@@ -894,7 +903,7 @@ pub fn drive(
                                     &execution_config,
                                     paths,
                                     true,
-                                    Some(route_context),
+                                    Some(route_context.clone()),
                                 )
                             }));
                         let duration_ms =
@@ -908,6 +917,8 @@ pub fn drive(
                             duration_ms,
                             worktree_heartbeat,
                             component_id,
+                            escalation_worker,
+                            route_context,
                         )
                     }));
                 }
@@ -927,6 +938,8 @@ pub fn drive(
                     duration_ms,
                     worktree_heartbeat,
                     component_id,
+                    escalation_worker,
+                    route_context,
                 ) = joined.unwrap();
                 let heartbeat_failed = worktree_heartbeat
                     .as_ref()
@@ -1206,6 +1219,214 @@ pub fn drive(
                     batch_stop = Some(DriveTermination::StorageFailure);
                     continue;
                 }
+                if retained_reason == Some("verification_failed") {
+                    if let Some((stronger_id, stronger_entry)) = escalation_worker {
+                        let estimated_cost = config
+                            .worker_registry
+                            .as_ref()
+                            .and_then(|registry| registry.workers.get(&stronger_id))
+                            .map_or(0, |worker| worker.estimated_cost_microusd);
+                        let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                        let duration_reservation = remaining_duration_ms(&warrant, elapsed)
+                            .unwrap_or(stronger_entry.max_execution_duration_ms)
+                            .max(stronger_entry.max_execution_duration_ms);
+                        if escalation_admitted(
+                            &warrant,
+                            known_cost,
+                            known_tokens,
+                            elapsed,
+                            estimated_cost,
+                            config.driver.max_implementation_tokens,
+                            duration_reservation,
+                        ) && (warrant.max_cost_microusd == 0 || cost.is_some())
+                            && (warrant.max_tokens == 0 || tokens.is_some())
+                        {
+                            let escalation_component =
+                                format!("{component_id}-escalation-{sequence}");
+                            match crate::worktree::WorktreeLease::create_component(
+                                &repository.worktree,
+                                &paths.state_dir,
+                                &session_id,
+                                &escalation_component,
+                                (!config.driver.worktree_root.is_empty())
+                                    .then(|| Path::new(&config.driver.worktree_root)),
+                            ) {
+                                Ok(mut escalation_tree) => {
+                                    let escalation_root = escalation_tree.path().to_path_buf();
+                                    let escalation_sequence = DriverRepository::new(db.conn())
+                                        .record_escalated_attempt_started_with_sources(
+                                            &session_id,
+                                            &target.id.to_string(),
+                                            target.path.as_str(),
+                                            None,
+                                            review_configuration_source,
+                                            execution_context_configuration_source,
+                                            Some(&escalation_component),
+                                            Some(&escalation_root.to_string_lossy()),
+                                            Some(escalation_tree.branch()),
+                                            Some(sequence),
+                                            Some("required_verification_failed"),
+                                        );
+                                    match escalation_sequence {
+                                        Ok(escalation_sequence) => {
+                                            let mut escalation_config = config.clone();
+                                            if let Some(registry) =
+                                                &mut escalation_config.worker_registry
+                                            {
+                                                registry.routing.implementation_pin =
+                                                    Some(stronger_id.clone());
+                                            }
+                                            escalation_config.repositories.insert(
+                                                escalation_root.display().to_string(),
+                                                repository_config.clone(),
+                                            );
+                                            let escalation_timer = Instant::now();
+                                            let escalation_timeout_ms = remaining_duration_ms(
+                                                &warrant,
+                                                timer.elapsed().as_millis().min(u64::MAX as u128)
+                                                    as u64,
+                                            );
+                                            let (escalated, escalation_trace) =
+                                                execute_with_config_tracked_from_preflighted_with_route_context_and_timeout(
+                                                    &escalation_root,
+                                                    &escalation_root.join(target.path.as_str()),
+                                                    agents,
+                                                    &escalation_config,
+                                                    paths,
+                                                    true,
+                                                    Some(route_context.clone()),
+                                                    escalation_timeout_ms,
+                                                );
+                                            let escalation_duration = escalation_timer
+                                                .elapsed()
+                                                .as_millis()
+                                                .min(u64::MAX as u128)
+                                                as u64;
+                                            let escalation_cost = escalation_trace
+                                                .execution_id
+                                                .as_deref()
+                                                .and_then(|id| attempt_cost(&db, id));
+                                            let escalation_tokens = escalation_trace
+                                                .execution_id
+                                                .as_deref()
+                                                .and_then(|id| attempt_tokens(&db, id));
+                                            if let Some(value) = escalation_cost {
+                                                known_cost = known_cost.saturating_add(value);
+                                            }
+                                            if let Some(value) = escalation_tokens {
+                                                known_tokens = known_tokens.saturating_add(value);
+                                            }
+                                            let escalation_terminal = match &escalated {
+                                                Ok(workflow) => Some(&workflow.implementation),
+                                                Err(crate::run::RunError::Agent(error)) => {
+                                                    Some(error.result())
+                                                }
+                                                Err(crate::run::RunError::Workflow {
+                                                    result: Some(result),
+                                                    ..
+                                                }) => Some(result.as_ref()),
+                                                _ => None,
+                                            };
+                                            let escalation_outcome = if escalated.is_ok() {
+                                                "completed"
+                                            } else {
+                                                "retained"
+                                            };
+                                            let escalation_reason = if escalated.is_ok() {
+                                                None
+                                            } else {
+                                                escalation_trace
+                                                    .retained_reason
+                                                    .or(Some("unclassified_result"))
+                                            };
+                                            let diagnostic = DriverRepository::new(db.conn())
+                                                .record_attempt_diagnostics(
+                                                    &session_id,
+                                                    escalation_sequence,
+                                                    escalation_trace.execution_id.as_deref(),
+                                                    Some(stronger_entry.adapter.as_str()),
+                                                    escalation_terminal
+                                                        .and_then(|value| value.model.as_deref())
+                                                        .or(stronger_entry.model.as_deref()),
+                                                    escalation_terminal
+                                                        .and_then(|value| value.exit_code),
+                                                    escalation_terminal
+                                                        .and_then(|value| value.signal),
+                                                    escalation_outcome,
+                                                )
+                                                .and_then(|()| {
+                                                    DriverRepository::new(db.conn())
+                                                        .record_attempt_finished(
+                                                            &session_id,
+                                                            escalation_sequence,
+                                                            escalation_outcome,
+                                                            escalation_reason,
+                                                            escalation_cost,
+                                                            Some(escalation_duration),
+                                                        )
+                                                });
+                                            if let Err(error) = diagnostic {
+                                                eprintln!("drive: cannot persist escalated attempt: {error}");
+                                                batch_stop = Some(DriveTermination::StorageFailure);
+                                            } else if escalated.is_ok() {
+                                                completed = completed.saturating_add(1);
+                                                session_undelivered.insert(target.id.clone());
+                                                let _ = escalation_tree
+                                                    .mark_state("ready_for_delivery");
+                                                if let Some(policy) =
+                                                    delivery_policy.filter(|policy| {
+                                                        policy.mode
+                                                        != familiar_ai_core::DeliveryMode::Disabled
+                                                    })
+                                                {
+                                                    if delivered
+                                                        >= policy.max_deliveries_per_session
+                                                    {
+                                                        batch_stop = Some(
+                                                            DriveTermination::BudgetDeliveriesExhausted,
+                                                        );
+                                                    } else {
+                                                        match crate::delivery::deliver(
+                                                            escalation_tree.ownership_path(),
+                                                            policy,
+                                                        ) {
+                                                            Ok(delivery) => {
+                                                                delivered =
+                                                                    delivered.saturating_add(1);
+                                                                session_undelivered
+                                                                    .remove(&target.id);
+                                                                let _ = escalation_tree
+                                                                    .mark_state(&delivery.phase);
+                                                            }
+                                                            Err(error) => {
+                                                                eprintln!("drive: escalated delivery blocked for {}: {error}", target.id);
+                                                                batch_stop = Some(
+                                                                    DriveTermination::DeliveryBlocked,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                let _ = escalation_tree.mark_state("retained");
+                                            }
+                                            eprintln!("drive: escalation {escalation_sequence} {} worker={stronger_id} outcome={escalation_outcome}", target.id);
+                                        }
+                                        Err(error) => {
+                                            eprintln!("drive: cannot record escalation: {error}");
+                                            batch_stop = Some(DriveTermination::StorageFailure);
+                                        }
+                                    }
+                                }
+                                Err(error) => eprintln!(
+                                    "drive: escalation clean worktree unavailable: {error}"
+                                ),
+                            }
+                        } else {
+                            eprintln!("drive: escalation retained for {} because the remaining warrant cannot admit it", target.id);
+                        }
+                    }
+                }
                 eprintln!(
                     "drive: attempt {sequence} {} outcome={outcome}{}",
                     target.id,
@@ -1257,6 +1478,29 @@ fn component_parallelism(config: &Config, warrant: &DriveWarrant) -> usize {
     } else {
         config.driver.max_parallel_components
     }
+}
+
+fn escalation_admitted(
+    warrant: &DriveWarrant,
+    known_cost: u64,
+    known_tokens: u64,
+    elapsed_ms: u64,
+    estimated_cost: u64,
+    token_reservation: u64,
+    duration_reservation_ms: u64,
+) -> bool {
+    (warrant.max_cost_microusd == 0
+        || known_cost.saturating_add(estimated_cost) <= warrant.max_cost_microusd)
+        && (warrant.max_tokens == 0
+            || (token_reservation > 0
+                && known_tokens.saturating_add(token_reservation) <= warrant.max_tokens))
+        && (warrant.max_duration_ms == 0
+            || (duration_reservation_ms > 0
+                && elapsed_ms.saturating_add(duration_reservation_ms) <= warrant.max_duration_ms))
+}
+
+fn remaining_duration_ms(warrant: &DriveWarrant, elapsed_ms: u64) -> Option<u64> {
+    (warrant.max_duration_ms > 0).then(|| warrant.max_duration_ms.saturating_sub(elapsed_ms))
 }
 
 struct HeartbeatGuard {
@@ -1325,6 +1569,34 @@ fn attempt_tokens(db: &Database, execution_id: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escalation_admission_reserves_every_finite_warrant() {
+        let warrant = DriveWarrant {
+            max_prds: 1,
+            max_cost_microusd: 1_000,
+            max_tokens: 500,
+            max_duration_ms: 0,
+            prd_allowlist: None,
+        };
+        assert!(escalation_admitted(&warrant, 200, 100, 10, 300, 200, 0));
+        assert!(!escalation_admitted(&warrant, 800, 100, 10, 300, 200, 0));
+        assert!(!escalation_admitted(&warrant, 200, 400, 10, 300, 200, 0));
+        let duration_bounded = DriveWarrant {
+            max_duration_ms: 1_000,
+            ..warrant
+        };
+        assert!(escalation_admitted(&duration_bounded, 0, 0, 100, 1, 1, 900));
+        assert!(!escalation_admitted(
+            &duration_bounded,
+            0,
+            0,
+            900,
+            1,
+            1,
+            101
+        ));
+    }
 
     #[test]
     fn warrant_requires_at_least_one_finite_ceiling() {

@@ -12,8 +12,59 @@ use familiar_ai_core::{
     RepositoryConfig,
 };
 use familiar_ai_daemon::run::{
-    build_agent, resolved_agent_entries, resolved_worker_plan, RouteContext,
+    build_agent, next_implementation_worker, resolved_agent_entries, resolved_worker_plan,
+    RouteContext,
 };
+
+#[test]
+fn verification_escalation_selects_only_the_next_stronger_tier() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        temp.path(),
+        r#"
+[worker_registry.workers.cheap]
+adapter = "codex"
+provider = "openai"
+model = "small"
+capabilities = ["implementation", "remediation"]
+context_tokens = 2000
+estimated_cost_microusd = 1
+
+[worker_registry.workers.strong]
+adapter = "claude-code"
+provider = "anthropic"
+model = "strong"
+capabilities = ["implementation", "remediation"]
+context_tokens = 2000
+estimated_cost_microusd = 5
+
+[worker_registry.workers.strongest]
+adapter = "codex"
+provider = "openai"
+model = "largest"
+capabilities = ["implementation", "remediation"]
+context_tokens = 2000
+estimated_cost_microusd = 10
+"#,
+    )
+    .unwrap();
+    let mut config = Config::load(Some(temp.path())).unwrap();
+    let next = next_implementation_worker(&config, &RouteContext::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.0, "strong");
+    config
+        .worker_registry
+        .as_mut()
+        .unwrap()
+        .routing
+        .implementation_pin = Some("cheap".into());
+    assert!(
+        next_implementation_worker(&config, &RouteContext::default())
+            .unwrap()
+            .is_none()
+    );
+}
 
 fn write_executable(path: &Path, script: &str) {
     fs::write(path, script).unwrap();

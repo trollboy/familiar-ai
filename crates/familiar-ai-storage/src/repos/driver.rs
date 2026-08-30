@@ -39,6 +39,8 @@ pub struct DriverAttempt {
     pub component_id: Option<String>,
     pub worktree_path: Option<String>,
     pub branch: Option<String>,
+    pub escalated_from_sequence: Option<i64>,
+    pub escalation_reason: Option<String>,
 }
 
 pub struct DriverRepository<'a> {
@@ -204,6 +206,36 @@ impl<'a> DriverRepository<'a> {
         worktree_path: Option<&str>,
         branch: Option<&str>,
     ) -> familiar_ai_core::Result<i64> {
+        self.record_escalated_attempt_started_with_sources(
+            session_id,
+            prd_id,
+            prd_path,
+            execution_id,
+            review_configuration_source,
+            execution_context_configuration_source,
+            component_id,
+            worktree_path,
+            branch,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_escalated_attempt_started_with_sources(
+        &self,
+        session_id: &str,
+        prd_id: &str,
+        prd_path: &str,
+        execution_id: Option<&str>,
+        review_configuration_source: &str,
+        execution_context_configuration_source: &str,
+        component_id: Option<&str>,
+        worktree_path: Option<&str>,
+        branch: Option<&str>,
+        escalated_from_sequence: Option<i64>,
+        escalation_reason: Option<&str>,
+    ) -> familiar_ai_core::Result<i64> {
         let next: i64 = self
             .conn
             .query_row(
@@ -214,8 +246,8 @@ impl<'a> DriverRepository<'a> {
             .map_err(db)?;
         self.conn
             .execute(
-                "INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                "INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch,escalated_from_sequence,escalation_reason) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                 params![
                     session_id,
                     next,
@@ -228,6 +260,8 @@ impl<'a> DriverRepository<'a> {
                     component_id,
                     worktree_path,
                     branch,
+                    escalated_from_sequence,
+                    escalation_reason,
                 ],
             )
             .map_err(db)?;
@@ -425,7 +459,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch FROM driver_attempts \
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch,escalated_from_sequence,escalation_reason FROM driver_attempts \
                  WHERE session_id=?1 ORDER BY sequence",
             )
             .map_err(db)?;
@@ -452,6 +486,8 @@ impl<'a> DriverRepository<'a> {
                     component_id: row.get(17)?,
                     worktree_path: row.get(18)?,
                     branch: row.get(19)?,
+                    escalated_from_sequence: row.get(20)?,
+                    escalation_reason: row.get(21)?,
                 })
             })
             .map_err(db)?;
@@ -471,7 +507,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch FROM driver_attempts \
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch,escalated_from_sequence,escalation_reason FROM driver_attempts \
                  WHERE session_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3",
             )
             .map_err(db)?;
@@ -500,6 +536,8 @@ impl<'a> DriverRepository<'a> {
                         component_id: row.get(17)?,
                         worktree_path: row.get(18)?,
                         branch: row.get(19)?,
+                        escalated_from_sequence: row.get(20)?,
+                        escalation_reason: row.get(21)?,
                     })
                 },
             )
@@ -513,7 +551,7 @@ impl<'a> DriverRepository<'a> {
         prd_id: &str,
     ) -> familiar_ai_core::Result<Option<DriverAttempt>> {
         self.conn.query_row(
-            "SELECT a.sequence,a.prd_id,a.prd_path,a.execution_id,a.started_at,a.ended_at,a.outcome,a.retained_reason,a.known_cost_microusd,a.duration_ms,a.adapter_id,a.model,a.exit_code,a.signal,a.last_durable_phase,a.review_configuration_source,a.execution_context_configuration_source,a.component_id,a.worktree_path,a.branch FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.prd_id=?2 ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
+            "SELECT a.sequence,a.prd_id,a.prd_path,a.execution_id,a.started_at,a.ended_at,a.outcome,a.retained_reason,a.known_cost_microusd,a.duration_ms,a.adapter_id,a.model,a.exit_code,a.signal,a.last_durable_phase,a.review_configuration_source,a.execution_context_configuration_source,a.component_id,a.worktree_path,a.branch,a.escalated_from_sequence,a.escalation_reason FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.prd_id=?2 ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
             params![repository_key, prd_id],
             |row| Ok(DriverAttempt {
                 sequence: row.get(0)?, prd_id: row.get(1)?, prd_path: row.get(2)?,
@@ -525,6 +563,7 @@ impl<'a> DriverRepository<'a> {
                 signal: row.get(13)?, last_durable_phase: row.get(14)?,
                 review_configuration_source: row.get(15)?, execution_context_configuration_source: row.get(16)?,
                 component_id: row.get(17)?, worktree_path: row.get(18)?, branch: row.get(19)?,
+                escalated_from_sequence: row.get(20)?, escalation_reason: row.get(21)?,
             }),
         ).optional().map_err(db)
     }
@@ -804,5 +843,54 @@ mod tests {
             .attempts_page("session-page", Some(first_page[0].sequence), 10)
             .unwrap();
         assert_eq!(rest.iter().map(|a| a.sequence).collect::<Vec<_>>(), [2, 3]);
+    }
+
+    #[test]
+    fn escalation_evidence_is_linked_and_cannot_be_duplicated() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        repository
+            .open_session("escalation", "/repo/.git", "{}")
+            .unwrap();
+        let cheap = repository
+            .record_attempt_started("escalation", "PRD-41", "docs/prds/PRD-041.md", None)
+            .unwrap();
+        let stronger = repository
+            .record_escalated_attempt_started_with_sources(
+                "escalation",
+                "PRD-41",
+                "docs/prds/PRD-041.md",
+                None,
+                "global",
+                "global",
+                None,
+                None,
+                None,
+                Some(cheap),
+                Some("required_verification_failed"),
+            )
+            .unwrap();
+        assert_eq!(stronger, cheap + 1);
+        let attempts = repository.attempts("escalation").unwrap();
+        assert_eq!(attempts[1].escalated_from_sequence, Some(cheap));
+        assert_eq!(
+            attempts[1].escalation_reason.as_deref(),
+            Some("required_verification_failed")
+        );
+        assert!(repository
+            .record_escalated_attempt_started_with_sources(
+                "escalation",
+                "PRD-41",
+                "docs/prds/PRD-041.md",
+                None,
+                "global",
+                "global",
+                None,
+                None,
+                None,
+                Some(cheap),
+                Some("required_verification_failed"),
+            )
+            .is_err());
     }
 }
