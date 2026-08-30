@@ -29,7 +29,9 @@ structured layout contract.
 - PRD-042 — repository risk vocabulary. **Completed 2026-08-29** — the first
   PRD executed end-to-end by Familiar's own autopilot on this repository
   (sonnet implementation, opus independent review, human risk acceptance).
-- PRD-043 — risk-aware registry route rules. **Approved 2026-08-29.**
+- PRD-043 — risk-aware registry route rules. **Completed 2026-08-29** by the
+  autopilot with reviewer-driven remediation; the remediation also delivered
+  per-PRD route context, an advance on PRD-044.
 - PRD-044 — per-PRD worker selection; retires `model_routes`. **Approved 2026-08-29.**
 - PRD-045 — declared-risk review tiering. **Approved 2026-08-29.**
 - PRD-041 — verification-failure escalation. **Approved 2026-08-29.**
