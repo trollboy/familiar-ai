@@ -161,6 +161,22 @@ PRD-051 supplies the trustworthy cost observations PRD-032 requires.
   ships the smallest viable raw worker: an independent
   reviewer/narrow-task role with read-only tools and structured
   output. Depends on PRD-013/029/051/056/057.
+- PRD-059/060/061 — hosted raw-API inference adapters (drafted
+  2026-08-30, dependency-ordered): Anthropic Messages API (native
+  cache-read/cache-write categories, thinking replay, refusal stops,
+  non-billable model/token probes, reconciles PRD-052), OpenAI
+  Responses API (function-call items, cached-input and
+  reasoning-output categories, resolved-model identity, Familiar-owned
+  conversation state, reconciles PRD-054), and xAI Grok (own provider
+  semantics over PRD-060's verified transport where wire-compatible;
+  whole-chunk streaming tool calls recorded as a capability
+  difference; usage fields and reasoning controls unknown until
+  verified; no official admin billing API found — authoritative xAI
+  spend explicitly unsupported, local-estimate only). No shared
+  fourth adapter PRD: PRD-058 already owns the provider-neutral
+  contract. Each depends on PRD-057/058; PRD-061 also on PRD-060.
+  Provider details verified 2026-08-30 with re-verification required
+  at implementation.
 
 ## Control plane track (drafted 2026-08-30, awaiting owner approval)
 
@@ -200,7 +216,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–058 were drafted 2026-08-30 by autonomous specification runs
+- PRDs 051–061 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
