@@ -180,6 +180,24 @@ PRD-051 supplies the trustworthy cost observations PRD-032 requires.
   implement, test, enable, and disable independently.
   Provider details verified 2026-08-30 with re-verification required
   at implementation.
+- PRD-062/063 — local-model execution (drafted 2026-08-30,
+  dependency-ordered): PRD-062 gives PRD-057's ModelArtifactId its
+  substance — immutable content-derived artifact identity with full
+  provenance (base lineage, quantization, fine-tune/adapter
+  composition, Unsloth preparation recorded as tool provenance,
+  templates, license), degraded unverified states, PRD-047-style
+  registration; PRD-063 makes local models workers — a local-runtime
+  contract under the PRD-058 loop with first runtimes `unsloth`
+  (OpenAI-compatible serving, macOS-supported per current docs) and
+  `ollama` over one neutral local transport (compatibility = transport
+  reuse only), artifact verification with degraded fallback, typed
+  resource telemetry with no invented USD (allocation policies only as
+  declared operator estimates), and PRD-053-lifecycle hardware
+  reservations in the PRD-056 scheduler so co-scheduling never
+  exceeds real capacity. Unsloth is modeled as preparation provenance
+  plus a serving RuntimeId — never a provider or model family.
+  MLX-native/llama.cpp-direct/vLLM backlogged behind the contract.
+  PRD-062 depends on PRD-047/057; PRD-063 on PRD-051/056/057/058/062.
 
 ## Control plane track (drafted 2026-08-30, awaiting owner approval)
 
@@ -219,7 +237,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–061 were drafted 2026-08-30 by autonomous specification runs
+- PRDs 051–063 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
