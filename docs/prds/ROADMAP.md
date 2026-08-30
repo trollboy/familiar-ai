@@ -22,7 +22,7 @@ structured layout contract.
 5. PRD-019 — planner and one human batch-approval gate. **Completed.**
 6. PRD-020 — reconcile parallel scheduling with the canonical graph. **Completed.**
 7. PRD-034 — portable persistent worker. **Completed.**
-8. PRD-036 — repository onboarding.
+8. PRD-036 — repository onboarding. **Completed 2026-08-30.**
 9. PRD-037 — security and recovery burn-in.
 10. PRD-038 — multi-repository product acceptance.
 
