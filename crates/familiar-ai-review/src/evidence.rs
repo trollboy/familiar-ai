@@ -223,15 +223,13 @@ pub fn content_hash(bytes: &[u8]) -> String {
 }
 pub fn contains_secret(bytes: &[u8]) -> bool {
     let lower = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-    if lower.contains("-----begin private key-----")
-        || lower.contains("-----begin rsa private key-----")
-    {
-        return true;
-    }
     // Value-shaped detection: a marker alone is legitimately quotable (a
     // redaction pattern list quotes every one of these); a marker adjoined
-    // to a token-like value is a credential.
+    // to a token-like value is a credential. For PEM headers the "value" is
+    // the base64 body that follows a real key's header line.
     [
+        "-----begin private key-----",
+        "-----begin rsa private key-----",
         "aws_secret_access_key",
         "authorization: bearer ",
         "github_pat_",
@@ -510,7 +508,12 @@ mod tests {
     }
 
     #[test]
-    fn private_key_header_is_always_a_secret() {
-        assert!(contains_secret(b"-----BEGIN PRIVATE KEY-----"));
+    fn private_key_header_with_body_is_a_secret_and_quoted_header_is_not() {
+        assert!(contains_secret(
+            b"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEA\n"
+        ));
+        assert!(!contains_secret(
+            b"+    \"-----begin private key-----\",\n+    \"-----begin rsa private key-----\","
+        ));
     }
 }
