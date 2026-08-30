@@ -14,15 +14,26 @@ scope-conformant work.
 [`../wave1_afteraction_report.md`](../wave1_afteraction_report.md) for delivery
 evidence and the orchestration defects observed during execution.
 
-Dependencies on completed PRDs (001–031, 033–035, 039, 040, 042, 043) are
-satisfied. The remaining graph resolves into six waves; every PRD within a
-wave may execute concurrently, and a PRD may start as soon as its own
-dependencies are complete — wave boundaries are scheduling guidance, not
-barriers.
+**HARD GATE (2026-08-30): PRD-065 blocks Wave 2.** Wave 1 exposed four
+orchestration defects (after-action defects 1–3 and 7) that make parallel
+execution untrustworthy: the scheduler serializes to width one, the warrant
+cannot confine a session to an approved PRD set, lease worktrees lose
+policy resolution, and reviewed checkpoints cannot complete
+transactionally. PRD-065 (ready-set scheduling and session warrant
+integrity) must be implemented, reviewed, and merged before any Wave 2
+PRD is claimed. No other work runs concurrently with it.
+
+The remaining graph resolves into the waves below. A PRD may start only
+when its dependencies are complete AND it is inside the session's approved
+allowlist — the earlier "wave boundaries are guidance, not barriers"
+language is retracted; it authorized the Wave 1 boundary escape (defect 2).
+Until PRD-065's `--prd` allowlist exists, each drive session must be
+warranted for exactly one wave's PRD set.
 
 | Wave | PRDs | Width |
 |------|------|-------|
-| 1 | 036, 037, 044, 045, 046, 047 | 6 |
+| 1 | 036, 037, 044, 045, 046, 047 — **completed 2026-08-30** | 6 |
+| gate | 065 — orchestration reliability, runs alone | 1 |
 | 2 | 041, 048, 049, 051 | 4 |
 | 3 | 050, 052, 054, 057, 064 | 5 |
 | 4 | 032, 055, 056, 062 | 4 |
@@ -31,7 +42,8 @@ barriers.
 
 ## Critical path
 
-**044 → 051 → 064 → 056 → 058 → {059, 060, 061, 063}** — six PRDs deep; no
+**065 → 051 → 064 → 056 → 058 → {059, 060, 061, 063}** (044 completed) —
+still six PRDs deep with the gate; no
 amount of parallelism shortens it. PRD-044 starts first and PRD-051 is the
 widest gate (ten downstream PRDs). Within any wave, schedule the
 critical-path member ahead of its siblings.
