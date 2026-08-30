@@ -383,9 +383,17 @@ pub fn drive(
     let mut effective_config = config.clone();
     effective_config.review = effective.review;
     effective_config.execution_context = effective.execution_context;
-    // A drive session is pinned to one repository. Isolated worker paths are
-    // implementation details and must not trigger a second policy lookup.
-    effective_config.repositories.clear();
+    // A drive session is pinned to one repository: other repositories'
+    // entries are dropped so isolated worker paths can never trigger a
+    // second policy lookup. The pinned repository's own entry must survive —
+    // repository-scoped config that effective_execution does not fold (the
+    // risk vocabulary) is resolved again during per-attempt discovery.
+    effective_config.repositories.retain(|path, _| {
+        Path::new(path)
+            .canonicalize()
+            .map(|canonical| canonical == repository.worktree)
+            .unwrap_or(false)
+    });
     let config = &effective_config;
     let (implementation_entry, _) =
         crate::run::resolved_agent_entries(config).map_err(DriveError::Config)?;
