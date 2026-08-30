@@ -70,12 +70,17 @@ security), and deterministic reconciliation plus the read surface.
 
 - PRD-051 — billing modes and the usage observation ledger: distinct
   uncached/cache-read/cache-write/output categories, per-model observations,
-  retained raw terminal evidence, versioned price schedules, closed cost
+  sanitized accounting evidence envelopes (never complete terminal
+  streams), the minimal ProjectId contract with machine-local issuance,
+  exact nanoUSD canonical money, versioned price schedules, closed cost
   provenance, subscription declarations. Depends on PRD-024/029/039/044.
 - PRD-052 — authoritative Anthropic organization cost collection:
   `kind = "billing"` provider sources composing with PRD-047
   (probe-before-persist via `/v1/organizations/me`, BYO-Auth, decision rows),
-  paginated UTC daily cost-report windows with exact string-decimal money,
+  paginated UTC daily cost-report windows with exact string-decimal money
+  and a snapshot-revision model for corrected or restated provider
+  reports (dedup by payload hash, superseding revisions, one
+  current-effective projection),
   independent multi-organization cursors, duplicate-binding rejection,
   fail-closed individual-account and external-cloud modes. Depends on
   PRD-047/051.
@@ -86,8 +91,8 @@ security), and deterministic reconciliation plus the read surface.
   Depends on PRD-035/051/052.
 - PRD-054 — OpenAI Platform and Codex usage accounting (drafted
   2026-08-30): the second provider behind the same interfaces —
-  Codex terminal telemetry with the reasoning-output category, raw JSONL
-  evidence, and exactly-once terminal persistence; authentication-mode
+  Codex terminal telemetry with the reasoning-output category, sanitized
+  evidence envelopes, and exactly-once terminal persistence; authentication-mode
   classification (ChatGPT plan / API key / enterprise access token)
   before any monetary interpretation; OpenAI organization Costs/Usage
   collection as `kind = "billing"` sources with org/project scope and
@@ -108,10 +113,13 @@ security), and deterministic reconciliation plus the read surface.
   UTC ranges, hour/day/week/month buckets, sparse and dense series,
   drill-down to observations); rebuildable rollups with indefinite raw
   retention; provider capability matrix; future-server export
-  compatibility without any server in scope. PRD-051 gained the
-  foundational pieces (project identity on every observation; the
-  period/observed/ingested time envelope; discrete-never-cumulative
-  facts) and PRD-053 the reservation lifecycle
+  compatibility without any server in scope. PRD-051 owns the minimal
+  ProjectId contract (globally unique id, degraded classification,
+  machine-local issuance behind a stable resolver boundary — its
+  acceptance never requires PRD-055) plus the
+  period/observed/ingested time envelope and discrete-never-cumulative
+  facts; PRD-055 implements full registry resolution behind that
+  boundary. PRD-053 gained the reservation lifecycle
   (acquire/commit/release/expire/crash-recover). Depends on
   PRD-051/053. Boundary: PRD-053 keeps source-centric billing views
   (month-to-date per source, variance); PRD-055 adds the
