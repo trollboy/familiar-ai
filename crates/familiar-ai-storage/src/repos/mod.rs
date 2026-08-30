@@ -10,6 +10,7 @@ pub mod file_summary;
 pub mod lifecycle;
 pub mod planner;
 pub mod project;
+pub mod project_config;
 pub mod review;
 pub mod session_rollup;
 pub mod stats;

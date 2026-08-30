@@ -35,6 +35,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Show repository project-configuration approval and binding state.
+    Status {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
     /// Validate prerequisites without claiming a PRD or invoking a model.
     Preflight,
     /// Select the next eligible repository PRD without executing it.
@@ -136,6 +141,34 @@ enum ConfigCommand {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Approve or revoke the exact current familiar.toml snapshot.
+    Project {
+        #[command(subcommand)]
+        command: ProjectConfigCommand,
+    },
+    /// Show the approval-aware three-layer configuration with provenance.
+    Show {
+        #[arg(long)]
+        effective: bool,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectConfigCommand {
+    Approve {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        actor: String,
+    },
+    Revoke {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        actor: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -164,6 +197,15 @@ enum ProviderCommand {
     List {
         #[arg(long)]
         refresh: bool,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Bind a declared environment name to a machine-local provider.
+    Bind {
+        role: String,
+        provider: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
         #[arg(long)]
         actor: Option<String>,
     },
@@ -390,6 +432,12 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+        Command::Status { repository } => match familiar_ai_daemon::config_cli::execute(
+            familiar_ai_daemon::config_cli::ConfigAction::Status { repository },
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Preflight => match preflight_command() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
@@ -496,6 +544,17 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             ProviderCommand::List { refresh, actor } => {
                 ConfigAction::ProviderList { refresh, actor }
             }
+            ProviderCommand::Bind {
+                role,
+                provider,
+                repository,
+                actor,
+            } => ConfigAction::ProviderBind {
+                repository,
+                role,
+                provider,
+                actor,
+            },
         },
         ConfigCommand::Model { command } => match command {
             ModelCommand::Enable {
@@ -511,6 +570,23 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             ModelCommand::List => ConfigAction::ModelList,
         },
         ConfigCommand::History { limit } => ConfigAction::History { limit },
+        ConfigCommand::Project { command } => match command {
+            ProjectConfigCommand::Approve { repository, actor } => {
+                ConfigAction::ProjectApprove { repository, actor }
+            }
+            ProjectConfigCommand::Revoke { repository, actor } => {
+                ConfigAction::ProjectRevoke { repository, actor }
+            }
+        },
+        ConfigCommand::Show {
+            effective,
+            repository,
+        } => {
+            if !effective {
+                return Err("config show currently requires --effective".into());
+            }
+            ConfigAction::ShowEffective { repository }
+        }
     };
     execute(action)
 }
@@ -597,9 +673,8 @@ fn onboard(command: OnboardCommand) -> Result<(), String> {
 
 fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let current = std::env::current_dir().map_err(|e| e.to_string())?;
+    let config = effective_repository_config(&paths, &current)?;
     let repository = FilesystemBacklogDiscovery
         .resolve(&current)
         .map_err(|e| e.to_string())?;
@@ -917,8 +992,7 @@ fn worker_spec(
         .canonicalize()
         .map_err(|e| format!("cannot resolve repository {}: {e}", repository.display()))?;
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let config = effective_repository_config(&paths, &repository)?;
     let spec =
         familiar_ai_daemon::supervisor::spec(&executable, &repository, &paths, &config.worker)?;
     Ok((spec, repository, paths))
@@ -935,8 +1009,7 @@ fn deliver_command(ownership_record: &std::path::Path, to: Option<&str>) -> Resu
         &repository.key,
     )
     .map_err(|e| format!("cannot acquire mutating orchestrator ownership: {e}"))?;
-    let config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let config = effective_repository_config(&paths, &repository.worktree)?;
     let repository_config = config
         .repository(&repository.worktree)
         .map_err(|e| e.to_string())?;
@@ -1012,9 +1085,8 @@ fn deliver_command(ownership_record: &std::path::Path, to: Option<&str>) -> Resu
 
 fn preflight_command() -> Result<(), String> {
     let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
-    let config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let current = std::env::current_dir().map_err(|error| error.to_string())?;
+    let config = effective_repository_config(&paths, &current)?;
     let repository = FilesystemBacklogDiscovery
         .resolve(&current)
         .map_err(|error| error.to_string())?;
@@ -1063,8 +1135,8 @@ fn run(prd_path: &std::path::Path) -> Result<(), familiar_ai_daemon::run::RunErr
             "cannot acquire mutating orchestrator ownership: {e}"
         ))
     })?;
-    let config = Config::load(Some(&paths.config_dir.join("config.toml")))
-        .map_err(|e| RunError::Config(e.to_string()))?;
+    let config =
+        effective_repository_config(&paths, &repository.worktree).map_err(RunError::Config)?;
     let (implementation_entry, reviewer_entry) =
         resolved_agent_entries(&config).map_err(RunError::Config)?;
     let implementation = build_agent(&implementation_entry);
@@ -1243,8 +1315,8 @@ fn drive_command(
     prd_flags: Vec<String>,
 ) -> Result<DriveSummary, String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let mut config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
+    let current = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut config = effective_repository_config(&paths, &current)?;
     if let Some(value) = max_parallel_components {
         if value == 0 {
             return Err("--max-parallel-components must be positive".into());
@@ -1382,10 +1454,9 @@ fn stewardship_command(command: StewardshipCommand) -> Result<(), String> {
 
 fn next() -> Result<(), String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let cwd =
         std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
+    let config = effective_repository_config(&paths, &cwd)?;
     // Resolve Git before opening or migrating storage, preserving the domain's
     // required operation order for invalid working directories.
     let repository = FilesystemBacklogDiscovery
@@ -1436,9 +1507,8 @@ fn next() -> Result<(), String> {
 fn plan(command: Option<PlanCommand>, design_docs: &[PathBuf]) -> Result<(), String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
     paths.ensure_dirs().map_err(|e| e.to_string())?;
-    let config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let root = std::env::current_dir().map_err(|e| e.to_string())?;
+    let config = effective_repository_config(&paths, &root)?;
     let repository = FilesystemBacklogDiscovery
         .resolve(&root)
         .map_err(|e| e.to_string())?;
@@ -1495,10 +1565,9 @@ fn plan(command: Option<PlanCommand>, design_docs: &[PathBuf]) -> Result<(), Str
 
 fn backlog(command: BacklogCommand) -> Result<(), String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let config =
-        Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
     let cwd =
         std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
+    let config = effective_repository_config(&paths, &cwd)?;
     let repository = FilesystemBacklogDiscovery
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
@@ -1836,6 +1905,19 @@ fn database() -> Result<Database, String> {
         .map_err(|e| e.to_string())?;
     db.run_migrations().map_err(|e| e.to_string())?;
     Ok(db)
+}
+
+fn effective_repository_config(
+    paths: &AppPaths,
+    repository: &std::path::Path,
+) -> Result<Config, String> {
+    familiar_ai_daemon::config_cli::effective_config_for_repository(
+        &familiar_ai_daemon::config_cli::ConfigContext {
+            config_path: paths.config_dir.join("config.toml"),
+            data_dir: paths.data_dir.clone(),
+        },
+        repository,
+    )
 }
 fn history(limit: u8, verbose: bool) -> Result<(), String> {
     let db = database()?;

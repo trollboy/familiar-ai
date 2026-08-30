@@ -10,8 +10,10 @@ use familiar_ai_core::config::{
     validate_host, validate_ssh_host, AgentAdapterKind, AuthDescriptor, EndpointProviderKind,
     RegistryWorkerConfig, WorkerCapabilityConfig,
 };
-use familiar_ai_core::{AppPaths, Config};
-use familiar_ai_storage::{ConfigDecisionRepository, Database};
+use familiar_ai_core::{
+    AppPaths, BacklogDiscovery, Config, FamiliarToml, FilesystemBacklogDiscovery,
+};
+use familiar_ai_storage::{ConfigDecisionRepository, Database, FamiliarTomlRepository};
 use ring::digest::{digest, SHA256};
 use toml_edit::{value, Array, Document, Item, Table};
 
@@ -54,6 +56,26 @@ pub enum ConfigAction {
     ProviderList {
         refresh: bool,
         actor: Option<String>,
+    },
+    ProviderBind {
+        repository: PathBuf,
+        role: String,
+        provider: String,
+        actor: Option<String>,
+    },
+    ProjectApprove {
+        repository: PathBuf,
+        actor: String,
+    },
+    ProjectRevoke {
+        repository: PathBuf,
+        actor: String,
+    },
+    ShowEffective {
+        repository: PathBuf,
+    },
+    Status {
+        repository: PathBuf,
     },
     ModelEnable {
         model: String,
@@ -99,6 +121,20 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
         ConfigAction::ProviderList { refresh, actor } => {
             provider_list(context, refresh, actor.as_deref())
         }
+        ConfigAction::ProviderBind {
+            repository,
+            role,
+            provider,
+            actor,
+        } => provider_bind(context, &repository, &role, &provider, actor.as_deref()),
+        ConfigAction::ProjectApprove { repository, actor } => {
+            project_approve(context, &repository, &actor)
+        }
+        ConfigAction::ProjectRevoke { repository, actor } => {
+            project_revoke(context, &repository, &actor)
+        }
+        ConfigAction::ShowEffective { repository } => show_effective(context, &repository),
+        ConfigAction::Status { repository } => project_status(context, &repository),
         ConfigAction::ModelEnable {
             model,
             capabilities,
@@ -110,6 +146,368 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
         ConfigAction::ModelList => model_list(context),
         ConfigAction::History { limit } => history(context, limit),
     }
+}
+
+fn repository_identity(repository: &std::path::Path) -> Result<(PathBuf, String), String> {
+    let canonical = repository
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve repository {}: {e}", repository.display()))?;
+    let canonical = FilesystemBacklogDiscovery
+        .resolve(&canonical)
+        .map(|identity| identity.worktree)
+        .unwrap_or(canonical);
+    Ok((
+        canonical.clone(),
+        canonical.to_string_lossy().replace('\\', "/"),
+    ))
+}
+
+fn project_snapshot(
+    repository: &std::path::Path,
+) -> Result<Option<(String, FamiliarToml)>, String> {
+    let path = repository.join("familiar.toml");
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(Some((
+            content.clone(),
+            FamiliarToml::parse(&content).map_err(|e| e.to_string())?,
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+fn project_approve(
+    context: &ConfigContext,
+    repository: &std::path::Path,
+    supplied_actor: &str,
+) -> Result<(), String> {
+    let actor = actor(Some(supplied_actor))?;
+    let (repository, key) = repository_identity(repository)?;
+    let (content, _) = project_snapshot(&repository)?.ok_or("familiar.toml not found")?;
+    let hash = sha256(content.as_bytes());
+    let config = load_config(context)?;
+    let db = open_database(context, &config)?;
+    FamiliarTomlRepository::new(&db)
+        .record(&key, "approve", &actor, &hash, &content)
+        .map_err(|e| e.to_string())?;
+    println!("familiar.toml: approved (snapshot {hash}, {actor})");
+    Ok(())
+}
+
+fn project_revoke(
+    context: &ConfigContext,
+    repository: &std::path::Path,
+    supplied_actor: &str,
+) -> Result<(), String> {
+    let actor = actor(Some(supplied_actor))?;
+    let (repository, key) = repository_identity(repository)?;
+    let content = project_snapshot(&repository)?
+        .map(|v| v.0)
+        .unwrap_or_default();
+    let hash = sha256(content.as_bytes());
+    let config = load_config(context)?;
+    let db = open_database(context, &config)?;
+    FamiliarTomlRepository::new(&db)
+        .record(&key, "revoke", &actor, &hash, &content)
+        .map_err(|e| e.to_string())?;
+    println!("familiar.toml: revoked ({actor})");
+    Ok(())
+}
+
+fn approval(
+    context: &ConfigContext,
+    key: &str,
+) -> Result<Option<familiar_ai_storage::FamiliarTomlDecision>, String> {
+    let config = load_config(context)?;
+    let db = open_database(context, &config)?;
+    FamiliarTomlRepository::new(&db)
+        .latest(key)
+        .map_err(|e| e.to_string())
+}
+
+fn diff(old: &str, new: &str) -> String {
+    let old_lines = old.lines().collect::<Vec<_>>();
+    let new_lines = new.lines().collect::<Vec<_>>();
+    let mut out = String::from("--- approved/familiar.toml\n+++ current/familiar.toml\n");
+    let length = old_lines.len().max(new_lines.len());
+    for index in 0..length {
+        match (old_lines.get(index), new_lines.get(index)) {
+            (Some(a), Some(b)) if a == b => {}
+            (Some(a), Some(b)) => out.push_str(&format!("-{a}\n+{b}\n")),
+            (Some(a), None) => out.push_str(&format!("-{a}\n")),
+            (None, Some(b)) => out.push_str(&format!("+{b}\n")),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn resolved_project(
+    context: &ConfigContext,
+    repository: &std::path::Path,
+) -> Result<(Config, Option<FamiliarToml>, bool), String> {
+    let (repository, key) = repository_identity(repository)?;
+    let mut config = load_config(context)?;
+    let Some((content, project)) = project_snapshot(&repository)? else {
+        return Ok((config, None, false));
+    };
+    let approved = approval(context, &key)?.is_some_and(|row| {
+        row.decision == "approve" && row.content_hash == sha256(content.as_bytes())
+    });
+    if approved {
+        let machine = config.repository(&repository).map_err(|e| e.to_string())?;
+        let mut effective = project.repository_config(&machine);
+        if let Some(delivery) = effective.delivery.as_mut() {
+            for (role, declaration) in &project.environments {
+                if let Some(provider) = machine.bindings.get(&declaration.name) {
+                    delivery.targets.insert(role.clone(), provider.clone());
+                }
+            }
+        }
+        config
+            .preflight
+            .commands
+            .extend(project.verification.iter().map(|check| {
+                familiar_ai_core::PreflightCommandConfig {
+                    check_id: check.check_id.clone(),
+                    argv: check.argv.clone(),
+                    working_directory: check.working_directory.clone(),
+                }
+            }));
+        config.repositories.insert(key, effective);
+    }
+    Ok((config, Some(project), approved))
+}
+
+/// Load machine configuration and apply repository declarations only when the
+/// current bytes match the latest durable approval decision.
+pub fn effective_config_for_repository(
+    context: &ConfigContext,
+    repository: &std::path::Path,
+) -> Result<Config, String> {
+    Ok(resolved_project(context, repository)?.0)
+}
+
+fn provider_bind(
+    context: &ConfigContext,
+    repository: &std::path::Path,
+    role: &str,
+    provider: &str,
+    supplied_actor: Option<&str>,
+) -> Result<(), String> {
+    validate_name(role, "environment role")?;
+    validate_name(provider, "provider")?;
+    let actor = actor(supplied_actor)?;
+    let (repository, key) = repository_identity(repository)?;
+    let (_, project, approved) = resolved_project(context, &repository)?;
+    let project = project.ok_or("familiar.toml not found")?;
+    if !approved {
+        return Err(
+            "familiar.toml is not approved at its current snapshot; approve it first".into(),
+        );
+    }
+    if !project
+        .environments
+        .values()
+        .any(|declaration| declaration.name == role)
+    {
+        return Err(format!(
+            "familiar.toml declares no environment named '{role}'"
+        ));
+    }
+    let config = load_config(context)?;
+    let target = config
+        .providers
+        .get(provider)
+        .ok_or_else(|| format!("unknown provider '{provider}'"))?;
+    let required = project
+        .environments
+        .values()
+        .find(|d| d.name == role)
+        .unwrap();
+    let kind = match target.kind {
+        EndpointProviderKind::Inference => "inference",
+        EndpointProviderKind::DeployTarget => "deploy-target",
+    };
+    if kind != required.requires {
+        return Err(format!(
+            "provider '{provider}' does not satisfy requirement '{}'",
+            required.requires
+        ));
+    }
+    mutate(
+        context,
+        "familiar-ai config provider bind",
+        &actor,
+        |document| {
+            let repositories = root_table(document, "repositories")?;
+            if !repositories.contains_key(&key) {
+                repositories.insert(&key, Item::Table(Table::new()));
+            }
+            let repository = repositories
+                .get_mut(&key)
+                .and_then(Item::as_table_mut)
+                .ok_or("repository config is not a table")?;
+            if !repository.contains_key("bindings") {
+                repository.insert("bindings", Item::Table(Table::new()));
+            }
+            repository
+                .get_mut("bindings")
+                .and_then(Item::as_table_mut)
+                .ok_or("bindings is not a table")?
+                .insert(role, value(provider));
+            Ok(())
+        },
+    )?;
+    println!("bound {role} -> {provider}");
+    Ok(())
+}
+
+fn project_status(context: &ConfigContext, repository: &std::path::Path) -> Result<(), String> {
+    let (repository, key) = repository_identity(repository)?;
+    let latest = approval(context, &key)?;
+    let Some((content, project)) = project_snapshot(&repository)? else {
+        match latest {
+            Some(row) if row.decision == "approve" => {
+                let current_hash = sha256(b"");
+                println!(
+                    "familiar.toml: DRIFTED — authority suspended (current {current_hash}, approved {})",
+                    row.content_hash
+                );
+                print!("{}", diff(&row.content, ""));
+            }
+            Some(row) => println!(
+                "familiar.toml: absent; approval revoked ({} {})",
+                row.actor, row.created_at
+            ),
+            None => println!("familiar.toml: absent"),
+        }
+        return Ok(());
+    };
+    let current_hash = sha256(content.as_bytes());
+    match &latest {
+        Some(row) if row.decision == "approve" && row.content_hash == current_hash => println!(
+            "familiar.toml: approved (snapshot {}, {} {})",
+            row.content_hash, row.actor, row.created_at
+        ),
+        Some(row) if row.decision == "approve" => {
+            println!("familiar.toml: DRIFTED — authority suspended (current {current_hash}, approved {})", row.content_hash);
+            print!("{}", diff(&row.content, &content));
+        }
+        Some(row) => println!("familiar.toml: revoked ({} {})", row.actor, row.created_at),
+        None => println!("familiar.toml: unapproved (snapshot {current_hash}) — zero authority"),
+    }
+    let config = load_config(context)?;
+    let machine = config.repository(&repository).map_err(|e| e.to_string())?;
+    for declaration in project.environments.values() {
+        match machine.bindings.get(&declaration.name) {
+            Some(provider) if config.providers.contains_key(provider) => {
+                println!("binding: {} -> {} (ok)", declaration.name, provider)
+            }
+            _ => {
+                println!(
+                    "binding: {} (requires {}) -> UNBOUND",
+                    declaration.name, declaration.requires
+                );
+                println!(
+                    "  run: familiar-ai config provider bind {} <provider>",
+                    declaration.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn show_effective(context: &ConfigContext, repository: &std::path::Path) -> Result<(), String> {
+    let (repository, _) = repository_identity(repository)?;
+    let machine_config = load_config(context)?;
+    let machine_has_repository = machine_config
+        .repositories
+        .contains_key(&repository.to_string_lossy().replace('\\', "/"));
+    let (config, project, approved) = resolved_project(context, &repository)?;
+    let effective = config.repository(&repository).map_err(|e| e.to_string())?;
+    let source = |project_has: bool| {
+        if approved && project_has {
+            "familiar.toml"
+        } else if machine_has_repository {
+            "user repository"
+        } else {
+            "global default"
+        }
+    };
+    let p = project.as_ref();
+    println!(
+        "profile = {:?} # source: {}",
+        effective.profile,
+        source(p.and_then(|v| v.profile.as_ref()).is_some())
+    );
+    println!(
+        "active_dir = {:?} # source: {}",
+        effective.active_dir,
+        source(p.and_then(|v| v.active_dir.as_ref()).is_some())
+    );
+    println!(
+        "archived_dir = {:?} # source: {}",
+        effective.archived_dir,
+        source(p.and_then(|v| v.archived_dir.as_ref()).is_some())
+    );
+    println!(
+        "prd_metadata_policy = {:?} # source: {}",
+        effective.prd_metadata_policy,
+        source(p.and_then(|v| v.prd_metadata_policy.as_ref()).is_some())
+    );
+    println!(
+        "reference_roots = {:?} # source: {}",
+        effective.reference_roots,
+        source(p.is_some_and(|v| !v.reference_roots.is_empty()))
+    );
+    println!(
+        "risk_vocabulary = {:?} # source: {}",
+        effective.risk_vocabulary,
+        source(p.is_some_and(|v| !v.risk_vocabulary.is_empty()))
+    );
+    println!(
+        "review = {:?} # source: {}",
+        effective.review,
+        source(p.and_then(|v| v.review.as_ref()).is_some())
+    );
+    println!(
+        "execution_context = {:?} # source: {}",
+        effective.execution_context,
+        source(p.and_then(|v| v.execution_context.as_ref()).is_some())
+    );
+    println!(
+        "bindings = {:?} # source: user repository",
+        effective.bindings
+    );
+    println!(
+        "environments = {:?} # source: {}",
+        project
+            .as_ref()
+            .map(|value| &value.environments)
+            .cloned()
+            .unwrap_or_default(),
+        if approved {
+            "familiar.toml"
+        } else {
+            "inactive familiar.toml"
+        }
+    );
+    println!(
+        "verification = {:?} # source: {}",
+        project
+            .as_ref()
+            .map(|value| &value.verification)
+            .cloned()
+            .unwrap_or_default(),
+        if approved {
+            "familiar.toml"
+        } else {
+            "inactive familiar.toml"
+        }
+    );
+    Ok(())
 }
 
 fn provider_add(
@@ -1036,5 +1434,97 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("host unreachable"));
+    }
+
+    #[test]
+    fn project_snapshot_drift_suspends_authority_and_reapproval_restores_it() {
+        let (directory, context) = context();
+        let repository = directory.path().join("repo");
+        fs::create_dir(&repository).unwrap();
+        fs::write(repository.join("familiar.toml"), "profile='numbered-slug'\n[environments.prod]\nrequires='deploy-target'\nname='production'\n").unwrap();
+        project_approve(&context, &repository, "human:test").unwrap();
+        let (_, _, approved) = resolved_project(&context, &repository).unwrap();
+        assert!(approved);
+
+        fs::write(repository.join("familiar.toml"), "profile='canonical'\n[environments.prod]\nrequires='deploy-target'\nname='production'\n").unwrap();
+        let (_, _, approved) = resolved_project(&context, &repository).unwrap();
+        assert!(!approved);
+        project_approve(&context, &repository, "human:test").unwrap();
+        assert!(resolved_project(&context, &repository).unwrap().2);
+
+        let (_, key) = repository_identity(&repository).unwrap();
+        let config = load_config(&context).unwrap();
+        let db = open_database(&context, &config).unwrap();
+        let row = FamiliarTomlRepository::new(&db)
+            .latest(&key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.actor, "human:test");
+        assert!(!row.content_hash.is_empty());
+        assert!(!row.created_at.is_empty());
+    }
+
+    #[test]
+    fn removing_an_approved_project_file_remains_durable_drift() {
+        let (directory, context) = context();
+        let repository = directory.path().join("repo");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("familiar.toml"),
+            "profile='numbered-slug'\n",
+        )
+        .unwrap();
+        project_approve(&context, &repository, "human:test").unwrap();
+        fs::remove_file(repository.join("familiar.toml")).unwrap();
+
+        project_status(&context, &repository).unwrap();
+        let (_, key) = repository_identity(&repository).unwrap();
+        let row = approval(&context, &key).unwrap().unwrap();
+        assert_eq!(row.decision, "approve");
+        assert!(!row.content.is_empty());
+        assert!(!resolved_project(&context, &repository).unwrap().2);
+    }
+
+    #[test]
+    fn unapproved_project_cannot_be_bound() {
+        let (directory, context) = context();
+        let repository = directory.path().join("repo");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("familiar.toml"),
+            "[environments.prod]\nrequires='deploy-target'\nname='production'\n",
+        )
+        .unwrap();
+        let error = provider_bind(
+            &context,
+            &repository,
+            "production",
+            "missing",
+            Some("human:test"),
+        )
+        .unwrap_err();
+        assert!(error.contains("not approved"));
+    }
+
+    #[test]
+    fn approved_role_binds_only_in_machine_config() {
+        let (directory, context) = context();
+        let repository = directory.path().join("repo");
+        fs::create_dir(&repository).unwrap();
+        let shared = "[environments.staging]\nrequires='deploy-target'\nname='devbox'\n";
+        fs::write(repository.join("familiar.toml"), shared).unwrap();
+        fs::write(
+            &context.config_path,
+            "[providers.box]\nkind='deploy-target'\nhost='gpu-box'\nauth='ssh-agent'\n[providers.box.recipe]\nsync_argv=['true']\nrestart_argv=['true']\nsmoke_argv=['true']\n",
+        )
+        .unwrap();
+        project_approve(&context, &repository, "human:test").unwrap();
+        provider_bind(&context, &repository, "devbox", "box", Some("human:test")).unwrap();
+        let machine = fs::read_to_string(&context.config_path).unwrap();
+        assert!(machine.contains("devbox = \"box\""));
+        assert_eq!(
+            fs::read_to_string(repository.join("familiar.toml")).unwrap(),
+            shared
+        );
     }
 }

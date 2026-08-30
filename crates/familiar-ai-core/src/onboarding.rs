@@ -173,6 +173,7 @@ pub fn approve(proposal: &Path, answers: &Path, actor: &str) -> Result<(String, 
         review: Some(answers.review),
         execution_context: Some(answers.execution_context),
         delivery: Some(answers.delivery),
+        bindings: Default::default(),
     };
     // Validate through the authoritative Config validation path later; this
     // serialization hash covers only the approved repository policy.
