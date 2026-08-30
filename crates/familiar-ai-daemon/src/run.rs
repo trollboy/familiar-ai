@@ -556,7 +556,10 @@ pub fn resume_implemented_checkpoint(
         content_hash(preflight.prd_bytes.as_bytes()),
         &checkpoint.base_revision,
     )?;
-    let actor = format!("system:familiar-ai-resume:{}", new_id());
+    // Completion is owner-gated: the latest backlog event must carry the
+    // claiming actor, so a resume acts under the original run's identity
+    // rather than minting its own.
+    let actor = format!("system:familiar-ai-run:{execution_id}");
     let mut trace = AttemptTrace {
         execution_id: Some(execution_id.into()),
         retained_reason: None,

@@ -333,6 +333,11 @@ impl ReviewCoordinator<'_> {
                     return self.stop(cycle, ReviewStopReason::AgentFailure);
                 }
             };
+            // The reviewer execution succeeded and reported usage even when
+            // validation rejects its result; keep the ledger known so the
+            // remaining review attempts stay reachable under a finite token
+            // ceiling.
+            let reviewed_usage = result.usage.clone();
             let result = match self.policy.apply_and_validate(&package, result) {
                 Ok(result) => result,
                 Err(error) => {
@@ -344,6 +349,7 @@ impl ReviewCoordinator<'_> {
                         attempt_timer,
                         "malformed_review",
                     );
+                    stage.usage = reviewed_usage;
                     stage.request_artifact = cycle.review_request.clone();
                     if !add_usage(&mut cycle, &stage.usage) {
                         return self.stop(cycle, ReviewStopReason::TokenLimitExhausted);

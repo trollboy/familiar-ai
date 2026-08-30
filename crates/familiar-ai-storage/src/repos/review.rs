@@ -180,6 +180,14 @@ impl ReviewStore for ReviewRepository<'_> {
             tx.execute("INSERT INTO review_tier_selections(cycle_id,tier,selecting_rule,selection_json) VALUES(?1,?2,?3,?4) ON CONFLICT(cycle_id) DO UPDATE SET tier=excluded.tier,selecting_rule=excluded.selecting_rule,selection_json=excluded.selection_json", params![cycle.cycle_id, enum_json(&selection.tier)?, selection.selecting_rule, serde_json::to_string(selection).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
         }
         if let Some(result) = &cycle.review_result {
+            // review_findings is the CURRENT view of the cycle; a replayed
+            // review supersedes earlier attempts' rows entirely. The
+            // append-only history stays in review_finding_events.
+            tx.execute(
+                "DELETE FROM review_findings WHERE cycle_id=?1",
+                params![cycle.cycle_id],
+            )
+            .map_err(|e| e.to_string())?;
             for f in &result.findings {
                 tx.execute("INSERT OR REPLACE INTO review_findings(finding_id,cycle_id,category,severity,blocking,status,finding_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![f.finding_id,cycle.cycle_id,enum_json(&f.category)?,enum_json(&f.severity)?,f.blocking,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
                 tx.execute("INSERT OR IGNORE INTO review_finding_events(cycle_id,finding_id,review_attempt,status,finding_json) VALUES(?1,?2,?3,?4,?5)",params![cycle.cycle_id,f.finding_id,cycle.attempt,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
