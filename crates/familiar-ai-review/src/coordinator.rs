@@ -147,11 +147,17 @@ impl ReviewCoordinator<'_> {
             .capture(repository, &request.task.base_revision)
         {
             Ok(value) => value,
-            Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
+            Err(error) => {
+                eprintln!("review: diff capture failed: {error}");
+                return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+            }
         };
         let scope_evidence = match collect_scope_evidence(repository, &captured.changed_files) {
             Ok(value) => value,
-            Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
+            Err(error) => {
+                eprintln!("review: scope evidence collection failed: {error}");
+                return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+            }
         };
         let evaluation = evaluate_scope(
             &request.scope_policy,

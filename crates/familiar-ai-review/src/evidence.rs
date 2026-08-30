@@ -223,16 +223,43 @@ pub fn content_hash(bytes: &[u8]) -> String {
 }
 pub fn contains_secret(bytes: &[u8]) -> bool {
     let lower = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    if lower.contains("-----begin private key-----")
+        || lower.contains("-----begin rsa private key-----")
+    {
+        return true;
+    }
+    // Value-shaped detection: a marker alone is legitimately quotable (a
+    // redaction pattern list quotes every one of these); a marker adjoined
+    // to a token-like value is a credential.
     [
-        "-----begin private key-----",
-        "-----begin rsa private key-----",
         "aws_secret_access_key",
         "authorization: bearer ",
         "github_pat_",
         "sk-proj-",
     ]
     .iter()
-    .any(|marker| lower.contains(marker))
+    .any(|marker| marker_has_value(&lower, marker))
+}
+
+fn marker_has_value(haystack: &str, marker: &str) -> bool {
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(marker) {
+        let after = &haystack[from + found + marker.len()..];
+        let value = after.trim_start_matches(|c: char| {
+            c.is_ascii_whitespace() || matches!(c, '"' | '\'' | '=' | ':')
+        });
+        let token_len = value
+            .bytes()
+            .take_while(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+' | b'/')
+            })
+            .count();
+        if token_len >= 16 {
+            return true;
+        }
+        from += found + marker.len();
+    }
+    false
 }
 fn parse_name_status(bytes: &[u8]) -> Result<Vec<ChangedFile>, EvidenceError> {
     let fields: Vec<&[u8]> = bytes.split(|b| *b == 0).filter(|f| !f.is_empty()).collect();
@@ -457,5 +484,33 @@ mod tests {
             evidence.symlink_paths.into_iter().collect::<Vec<_>>(),
             vec!["link".to_owned()]
         );
+    }
+
+    #[test]
+    fn quoted_marker_list_is_not_a_secret() {
+        // A redaction implementation legitimately quotes every marker; the
+        // scanner must not deadlock the PRD that implements redaction.
+        let diff = br#"+    "aws_secret_access_key",
++    "authorization: bearer ",
++    "github_pat_",
++    "sk-proj-","#;
+        assert!(!contains_secret(diff));
+    }
+
+    #[test]
+    fn marker_with_token_like_value_is_a_secret() {
+        for leak in [
+            "aws_secret_access_key = \"wJalrXUtnFEMIK7MDENGbPxRfiCY\"",
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "github_pat_11ABCDEFG0123456789abcdef",
+            "sk-proj-abcdefghijklmnop123456",
+        ] {
+            assert!(contains_secret(leak.as_bytes()), "{leak}");
+        }
+    }
+
+    #[test]
+    fn private_key_header_is_always_a_secret() {
+        assert!(contains_secret(b"-----BEGIN PRIVATE KEY-----"));
     }
 }

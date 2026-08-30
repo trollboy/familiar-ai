@@ -250,7 +250,7 @@ mod tests {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "printf 'Authorization: Bearer secret'".into(),
+                "printf 'Authorization: Bearer sessiontoken0123456789'".into(),
             ],
             working_directory: ".".into(),
             environment: BTreeMap::new(),
@@ -262,6 +262,6 @@ mod tests {
         assert_eq!(evidence.status, VerificationStatus::Inconclusive);
         let retained = fs::read_to_string(evidence.stdout.unwrap().storage_ref).unwrap();
         assert!(retained.contains("REDACTED"));
-        assert!(!retained.contains("Bearer secret"));
+        assert!(!retained.contains("Bearer sessiontoken0123456789"));
     }
 }

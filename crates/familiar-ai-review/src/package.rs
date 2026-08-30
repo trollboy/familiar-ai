@@ -358,7 +358,8 @@ mod tests {
     fn deterministic_secret_marker_stops_disclosure() {
         let mut value = input();
         value.captured.bytes =
-            b"diff --git a/a b/a\n@@ -0,0 +1 @@\n+Authorization: Bearer secret\n".to_vec();
+            b"diff --git a/a b/a\n@@ -0,0 +1 @@\n+Authorization: Bearer sessiontoken0123456789\n"
+                .to_vec();
         assert!(matches!(
             build_review_request(value),
             Err(PackageError::UnsafeSecret)
