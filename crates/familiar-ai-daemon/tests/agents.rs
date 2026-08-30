@@ -10,7 +10,9 @@ use familiar_ai_core::{
     config::ReviewAgentConfig, AgentAdapterKind, AgentEntryConfig, AgentPermissionMode,
     AgentsConfig, Config,
 };
-use familiar_ai_daemon::run::{build_agent, resolved_agent_entries, resolved_worker_plan};
+use familiar_ai_daemon::run::{
+    build_agent, resolved_agent_entries, resolved_worker_plan, RouteContext,
+};
 
 fn write_executable(path: &Path, script: &str) {
     fs::write(path, script).unwrap();
@@ -51,8 +53,9 @@ estimated_cost_microusd = 2
     )
     .unwrap();
     let config = Config::load(Some(temp.path())).unwrap();
-    let (implementation, _, first) = resolved_worker_plan(&config).unwrap();
-    let (_, _, second) = resolved_worker_plan(&config).unwrap();
+    let (implementation, _, first) =
+        resolved_worker_plan(&config, &RouteContext::default()).unwrap();
+    let (_, _, second) = resolved_worker_plan(&config, &RouteContext::default()).unwrap();
     assert_eq!(first, second);
     assert_eq!(implementation.adapter, AgentAdapterKind::ClaudeCode);
     assert_eq!(first[0].rule, "user-pin");

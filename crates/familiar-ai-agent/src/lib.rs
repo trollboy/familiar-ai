@@ -12,6 +12,6 @@ pub use claude_code::{ClaudeCodeAgent, ClaudeCodeSettings, READ_ONLY_RESTRICTION
 pub use codex::CodexAgent;
 pub use registry::{
     builtin_adapter_factories, AdapterFactories, AdapterFactory, CandidateEvaluation,
-    RejectionReason, RouteError, RouteRequest, SelectionRecord, WorkerCapability, WorkerDescriptor,
-    WorkerRegistry, WorkerStage,
+    RejectionReason, RouteError, RouteRequest, RouteRule, SelectionRecord, WorkerCapability,
+    WorkerDescriptor, WorkerRegistry, WorkerStage,
 };

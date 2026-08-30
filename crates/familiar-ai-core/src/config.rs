@@ -819,6 +819,24 @@ pub struct WorkerRoutingConfig {
     pub max_stage_cost_microusd: u64,
     #[serde(default)]
     pub required_context_tokens: u64,
+    /// Operator-authored route rules. First match wins, mirroring review tier
+    /// rules; applied ahead of the lowest-cost-then-id tiebreak.
+    #[serde(default)]
+    pub rules: Vec<WorkerRouteRuleConfig>,
+}
+
+/// Selects a worker by declared risk and expected scope size. Absent
+/// `risk_classes` and `max_expected_files` predicates are unconstrained; a
+/// rule must declare at least one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerRouteRuleConfig {
+    pub id: String,
+    pub worker: String,
+    #[serde(default)]
+    pub risk_classes: Vec<String>,
+    #[serde(default)]
+    pub max_expected_files: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -831,7 +849,10 @@ pub struct WorkerRegistryConfig {
 }
 
 impl WorkerRegistryConfig {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(
+        &self,
+        risk_vocabulary: &std::collections::BTreeSet<&str>,
+    ) -> Result<(), String> {
         if self.workers.is_empty() {
             return Err("worker_registry.workers must not be empty".into());
         }
@@ -851,6 +872,57 @@ impl WorkerRegistryConfig {
                     .capabilities
                     .contains(&WorkerCapabilityConfig::Review),
             )?;
+        }
+        let mut rule_ids = std::collections::BTreeSet::new();
+        let mut signatures = std::collections::BTreeMap::new();
+        for rule in &self.routing.rules {
+            if rule.id.trim().is_empty() || !rule_ids.insert(rule.id.clone()) {
+                return Err(format!(
+                    "worker_registry.routing.rules rule id '{}' is empty or duplicated",
+                    rule.id
+                ));
+            }
+            if !self.workers.contains_key(&rule.worker) {
+                return Err(format!(
+                    "worker_registry.routing.rules rule '{}' names unknown worker '{}'",
+                    rule.id, rule.worker
+                ));
+            }
+            if rule.risk_classes.is_empty() && rule.max_expected_files.is_none() {
+                return Err(format!(
+                    "worker_registry.routing.rules rule '{}' has no match predicates",
+                    rule.id
+                ));
+            }
+            let mut classes = rule.risk_classes.clone();
+            classes.sort();
+            classes.dedup();
+            for class in &classes {
+                if class.trim().is_empty() {
+                    return Err(format!(
+                        "worker_registry.routing.rules rule '{}' risk_classes entries must be non-empty",
+                        rule.id
+                    ));
+                }
+                if !risk_vocabulary.contains(class.as_str()) {
+                    return Err(format!(
+                        "worker_registry.routing.rules rule '{}' names risk class '{class}' outside the configured vocabulary",
+                        rule.id
+                    ));
+                }
+            }
+            let signature = serde_json::to_string(&(classes, rule.max_expected_files))
+                .map_err(|error| error.to_string())?;
+            if let Some((other_id, other_worker)) =
+                signatures.insert(signature, (rule.id.clone(), rule.worker.clone()))
+            {
+                if other_worker != rule.worker {
+                    return Err(format!(
+                        "worker_registry.routing.rules '{other_id}' and '{}' contradict each other",
+                        rule.id
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -2218,7 +2290,14 @@ impl Config {
                 .map_err(FamiliarError::Config)?;
         }
         if let Some(registry) = &self.worker_registry {
-            registry.validate().map_err(FamiliarError::Config)?;
+            let risk_vocabulary: std::collections::BTreeSet<&str> = self
+                .repositories
+                .values()
+                .flat_map(|entry| entry.risk_vocabulary.iter().map(String::as_str))
+                .collect();
+            registry
+                .validate(&risk_vocabulary)
+                .map_err(FamiliarError::Config)?;
         }
         if let Some(planner) = &self.planner {
             planner.validate().map_err(FamiliarError::Config)?;
@@ -2716,6 +2795,94 @@ output_microusd_per_million = 300
             scope_classes: vec![],
         });
         assert!(review.validate().unwrap_err().contains("contradict"));
+    }
+
+    fn registry_worker(id: &str) -> RegistryWorkerConfig {
+        RegistryWorkerConfig {
+            adapter: AgentAdapterKind::Codex,
+            provider: "openai".into(),
+            model: id.into(),
+            executable: None,
+            capabilities: vec![WorkerCapabilityConfig::Implementation],
+            fresh_process_isolation: true,
+            context_tokens: 100,
+            estimated_cost_microusd: 1,
+            available: true,
+            effort: None,
+            permission_mode: None,
+            extra_args: vec![],
+        }
+    }
+
+    #[test]
+    fn route_rule_naming_unknown_worker_fails_validation() {
+        let mut registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([("codex".to_string(), registry_worker("codex"))]),
+            routing: WorkerRoutingConfig::default(),
+        };
+        registry.routing.rules.push(WorkerRouteRuleConfig {
+            id: "risky".into(),
+            worker: "missing".into(),
+            risk_classes: vec!["routing".into()],
+            max_expected_files: None,
+        });
+        let vocabulary = std::collections::BTreeSet::from(["routing"]);
+        assert!(registry
+            .validate(&vocabulary)
+            .unwrap_err()
+            .contains("unknown worker"));
+    }
+
+    #[test]
+    fn route_rule_naming_risk_class_outside_vocabulary_fails_validation() {
+        let mut registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([("codex".to_string(), registry_worker("codex"))]),
+            routing: WorkerRoutingConfig::default(),
+        };
+        registry.routing.rules.push(WorkerRouteRuleConfig {
+            id: "risky".into(),
+            worker: "codex".into(),
+            risk_classes: vec!["unknown-class".into()],
+            max_expected_files: None,
+        });
+        let vocabulary = std::collections::BTreeSet::from(["routing"]);
+        assert!(registry
+            .validate(&vocabulary)
+            .unwrap_err()
+            .contains("outside the configured vocabulary"));
+        assert!(registry
+            .validate(&std::collections::BTreeSet::new())
+            .is_err());
+    }
+
+    #[test]
+    fn route_rules_with_identical_predicates_and_different_workers_contradict() {
+        let mut registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([
+                ("codex".to_string(), registry_worker("codex")),
+                ("claude".to_string(), registry_worker("claude")),
+            ]),
+            routing: WorkerRoutingConfig::default(),
+        };
+        registry.routing.rules.push(WorkerRouteRuleConfig {
+            id: "first".into(),
+            worker: "codex".into(),
+            risk_classes: vec!["routing".into()],
+            max_expected_files: None,
+        });
+        let vocabulary = std::collections::BTreeSet::from(["routing"]);
+        assert!(registry.validate(&vocabulary).is_ok());
+
+        registry.routing.rules.push(WorkerRouteRuleConfig {
+            id: "second".into(),
+            worker: "claude".into(),
+            risk_classes: vec!["routing".into()],
+            max_expected_files: None,
+        });
+        assert!(registry
+            .validate(&vocabulary)
+            .unwrap_err()
+            .contains("contradict"));
     }
 
     #[test]

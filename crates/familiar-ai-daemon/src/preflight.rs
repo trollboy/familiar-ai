@@ -45,7 +45,7 @@ impl PreflightReport {
 pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> PreflightReport {
     let mut checks = Vec::new();
     if let Some(registry) = &config.worker_registry {
-        match crate::run::resolved_worker_plan(config) {
+        match crate::run::resolved_worker_plan(config, &crate::run::RouteContext::default()) {
             Ok((_, _, records)) => {
                 for record in records {
                     let worker = &registry.workers[&record.selected_worker];

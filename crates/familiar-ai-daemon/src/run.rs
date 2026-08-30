@@ -10,7 +10,7 @@ use std::time::Instant;
 use chrono::Utc;
 use familiar_ai_agent::{
     builtin_adapter_factories, AgentExecutionError, CodingAgent, ExecutionBudget, ExecutionRequest,
-    ExecutionResult, RouteRequest, SelectionRecord, WorkerCapability, WorkerDescriptor,
+    ExecutionResult, RouteRequest, RouteRule, SelectionRecord, WorkerCapability, WorkerDescriptor,
     WorkerRegistry, WorkerStage,
 };
 use familiar_ai_context::{
@@ -20,9 +20,10 @@ use familiar_ai_context::{
 };
 use familiar_ai_core::config::WorkerCapabilityConfig;
 use familiar_ai_core::{
-    admit_run_prd, resolve_run_prd, validate_graph, AgentEntryConfig, AppPaths, BacklogDiscovery,
-    BacklogStatusStore, Config, ExecutionPrice, FilesystemBacklogDiscovery, ScopeClassPolicyConfig,
-    ScopeDeclarationModeConfig, ScopeFileClassName,
+    admit_run_prd, resolve_run_prd, structured_prd_metadata, validate_graph, AgentEntryConfig,
+    AppPaths, BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice,
+    FilesystemBacklogDiscovery, ScopeClassPolicyConfig, ScopeDeclarationModeConfig,
+    ScopeFileClassName,
 };
 use familiar_ai_review::{
     compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
@@ -125,7 +126,7 @@ pub fn resolved_remediation_entry(config: &Config) -> Result<AgentEntryConfig, S
     let Some(registry) = &config.worker_registry else {
         return resolved_agent_entries(config).map(|entries| entries.0);
     };
-    let (_, _, records) = resolved_worker_plan(config)?;
+    let (_, _, records) = resolved_worker_plan(config, &RouteContext::default())?;
     let selected = records
         .iter()
         .find(|record| record.stage == WorkerStage::Remediation)
@@ -140,7 +141,7 @@ pub fn resolved_agent_entries(
     config: &Config,
 ) -> Result<(AgentEntryConfig, AgentEntryConfig), String> {
     if config.worker_registry.is_some() {
-        let plan = resolved_worker_plan(config)?;
+        let plan = resolved_worker_plan(config, &RouteContext::default())?;
         return Ok((plan.0, plan.1));
     }
     match &config.agents {
@@ -152,16 +153,49 @@ pub fn resolved_agent_entries(
     }
 }
 
+/// Per-task inputs to route-rule matching: the target PRD's declared risk
+/// classes and expected file count. Default (empty/zero) before a specific
+/// PRD is bound, e.g. composition-root agent resolution ahead of execution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteContext {
+    pub risk_classes: Vec<String>,
+    pub expected_file_count: u64,
+}
+
+/// Derive routing inputs from the PRD that is about to be executed: its
+/// declared `risk_classes` and expected file count. PRDs without a
+/// structured front-matter contract declare neither, matching prior
+/// (unrouted) behavior.
+fn route_context_for_prd(prd_path: &Path) -> Result<RouteContext, RunError> {
+    let prd_bytes = std::fs::read_to_string(prd_path)
+        .map_err(|error| RunError::Config(format!("cannot read PRD for routing: {error}")))?;
+    let metadata =
+        structured_prd_metadata(&prd_bytes).map_err(|error| RunError::Config(error.to_string()))?;
+    Ok(match metadata {
+        Some(metadata) => RouteContext {
+            expected_file_count: metadata.expected_files.len() as u64,
+            risk_classes: metadata.risk_classes,
+        },
+        None => RouteContext::default(),
+    })
+}
+
 /// Resolve every stage before execution. Selection is pure: it neither probes
 /// executables nor invokes an adapter. Preflight performs those probes next.
 pub fn resolved_worker_plan(
     config: &Config,
+    route_context: &RouteContext,
 ) -> Result<(AgentEntryConfig, AgentEntryConfig, Vec<SelectionRecord>), String> {
     let configured = config
         .worker_registry
         .as_ref()
         .ok_or_else(|| "worker registry is not configured".to_owned())?;
-    configured.validate()?;
+    let risk_vocabulary: std::collections::BTreeSet<&str> = config
+        .repositories
+        .values()
+        .flat_map(|entry| entry.risk_vocabulary.iter().map(String::as_str))
+        .collect();
+    configured.validate(&risk_vocabulary)?;
     let mut registry = WorkerRegistry::default();
     for (id, worker) in &configured.workers {
         let capabilities = worker
@@ -178,6 +212,14 @@ pub fn resolved_worker_plan(
         registry.register(worker_descriptor(id, worker, capabilities))?;
     }
     let routing = &configured.routing;
+    for rule in &routing.rules {
+        registry.add_rule(RouteRule {
+            id: rule.id.clone(),
+            worker: rule.worker.clone(),
+            risk_classes: rule.risk_classes.iter().cloned().collect(),
+            max_expected_files: rule.max_expected_files,
+        })?;
+    }
     let select = |stage, pin: &Option<String>, independent_from| {
         registry
             .select(&RouteRequest {
@@ -187,6 +229,8 @@ pub fn resolved_worker_plan(
                 required_context_tokens: routing.required_context_tokens,
                 require_isolation: stage == WorkerStage::Review,
                 independent_from,
+                risk_classes: route_context.risk_classes.clone(),
+                expected_file_count: route_context.expected_file_count,
             })
             .map_err(|e| e.to_string())
     };
@@ -280,11 +324,14 @@ type OwnedAgentSet = (
     Box<dyn CodingAgent>,
 );
 
-fn build_selected_agents(config: &Config) -> Result<Option<OwnedAgentSet>, RunError> {
+fn build_selected_agents(
+    config: &Config,
+    route_context: &RouteContext,
+) -> Result<Option<OwnedAgentSet>, RunError> {
     let Some(registry) = &config.worker_registry else {
         return Ok(None);
     };
-    let (_, _, records) = resolved_worker_plan(config).map_err(RunError::Config)?;
+    let (_, _, records) = resolved_worker_plan(config, route_context).map_err(RunError::Config)?;
     let build_stage = |stage| -> Result<Box<dyn CodingAgent>, RunError> {
         let record = records
             .iter()
@@ -514,7 +561,8 @@ pub fn resume_implemented_checkpoint(
         execution_id: Some(execution_id.into()),
         retained_reason: None,
     };
-    let owned_agents = build_selected_agents(config)?;
+    let route_context = route_context_for_prd(&prd_path)?;
+    let owned_agents = build_selected_agents(config, &route_context)?;
     let selected_agents = owned_agents.as_ref().map(borrowed_agent_set);
     let agents = selected_agents.as_ref().unwrap_or(agents);
     let completed = finish_implementation(
@@ -658,13 +706,15 @@ fn execute_tracked_inner(
     let repository = discovery
         .resolve(current)
         .map_err(|e| RunError::Config(e.to_string()))?;
+    let route_context = route_context_for_prd(prd_path)?;
     let repository_config = config.repository(&repository.worktree);
     let effective = config.effective_execution(&repository.worktree);
     let mut effective_config = config.clone();
     effective_config.review = effective.review;
     effective_config.execution_context = effective.execution_context;
     if let Some(registry) = &effective_config.worker_registry {
-        let (_, _, records) = resolved_worker_plan(&effective_config).map_err(RunError::Config)?;
+        let (_, _, records) =
+            resolved_worker_plan(&effective_config, &route_context).map_err(RunError::Config)?;
         for (stage, identity) in [
             (
                 WorkerStage::Implementation,
@@ -688,7 +738,7 @@ fn execute_tracked_inner(
     // Registry selection owns construction of the executors it selected. This
     // prevents library callers from supplying a different trait object than
     // the one that passed routing and preflight.
-    let owned_agents = build_selected_agents(config)?;
+    let owned_agents = build_selected_agents(config, &route_context)?;
     let selected_agents = owned_agents.as_ref().map(borrowed_agent_set);
     let agents = selected_agents.as_ref().unwrap_or(agents);
     let profile = context_profile(&repository_config);
@@ -747,7 +797,8 @@ fn execute_tracked_inner(
     // regardless of which caller constructed the agents.
     let implementation_entry = resolved_agent_entries(config).map_err(RunError::Config)?.0;
     if config.worker_registry.is_some() {
-        let (_, _, records) = resolved_worker_plan(config).map_err(RunError::Config)?;
+        let (_, _, records) =
+            resolved_worker_plan(config, &route_context).map_err(RunError::Config)?;
         let selections = familiar_ai_storage::WorkerSelectionRepository::new(db.conn());
         for (index, record) in records.iter().enumerate() {
             let candidates = record.candidates.iter().map(|candidate| serde_json::json!({

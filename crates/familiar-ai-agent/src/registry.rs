@@ -139,6 +139,35 @@ pub struct RouteRequest {
     pub required_context_tokens: u64,
     pub require_isolation: bool,
     pub independent_from: Option<(String, String)>,
+    pub risk_classes: Vec<String>,
+    pub expected_file_count: u64,
+}
+
+/// Operator-authored route rule: first match wins, applied ahead of the
+/// lowest-cost-then-id tiebreak. `risk_classes` matches on a non-empty
+/// intersection with the request; `max_expected_files` matches when the
+/// request's expected file count is at or below the ceiling. A rule with
+/// both predicates requires both to hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteRule {
+    pub id: String,
+    pub worker: String,
+    pub risk_classes: BTreeSet<String>,
+    pub max_expected_files: Option<u64>,
+}
+
+impl RouteRule {
+    fn matches(&self, request: &RouteRequest) -> bool {
+        let risk_ok = self.risk_classes.is_empty()
+            || request
+                .risk_classes
+                .iter()
+                .any(|class| self.risk_classes.contains(class));
+        let size_ok = self
+            .max_expected_files
+            .map_or(true, |max| request.expected_file_count <= max);
+        risk_ok && size_ok
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +179,7 @@ pub enum RejectionReason {
     NoIsolation,
     NotIndependent,
     NotPinned,
+    NotRouted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +224,7 @@ impl std::error::Error for RouteError {}
 #[derive(Debug, Clone, Default)]
 pub struct WorkerRegistry {
     workers: BTreeMap<String, WorkerDescriptor>,
+    rules: Vec<RouteRule>,
 }
 
 impl WorkerRegistry {
@@ -212,6 +243,28 @@ impl WorkerRegistry {
         if self.workers.insert(worker.id.clone(), worker).is_some() {
             return Err("duplicate worker id".into());
         }
+        Ok(())
+    }
+
+    /// Appends an operator-authored route rule. Rules are matched in
+    /// registration order (first match wins).
+    pub fn add_rule(&mut self, rule: RouteRule) -> Result<(), String> {
+        if rule.id.trim().is_empty() || rule.worker.trim().is_empty() {
+            return Err("route rule id and worker must be non-empty".into());
+        }
+        if !self.workers.contains_key(&rule.worker) {
+            return Err(format!(
+                "route rule {:?} names unknown worker {:?}",
+                rule.id, rule.worker
+            ));
+        }
+        if rule.risk_classes.is_empty() && rule.max_expected_files.is_none() {
+            return Err(format!(
+                "route rule {:?} must declare risk_classes or max_expected_files",
+                rule.id
+            ));
+        }
+        self.rules.push(rule);
         Ok(())
     }
 
@@ -262,11 +315,30 @@ impl WorkerRegistry {
                 rejected,
             });
         }
-        let selected = candidates
-            .iter()
-            .filter(|c| c.rejected.is_empty())
-            .map(|c| self.workers.get(&c.worker_id).unwrap())
-            .min_by_key(|w| (w.estimated_cost_microusd, w.id.as_str()));
+
+        // Route rules apply only to automatic (unpinned) selection, first
+        // match wins, and only among workers otherwise eligible for the
+        // stage; an unreachable target rule falls through to the next rule.
+        let matched_rule = if request.pinned_worker.is_none() {
+            self.rules.iter().find(|rule| {
+                rule.matches(request)
+                    && candidates
+                        .iter()
+                        .any(|c| c.worker_id == rule.worker && c.rejected.is_empty())
+            })
+        } else {
+            None
+        };
+
+        let selected = if let Some(rule) = matched_rule {
+            self.workers.get(&rule.worker)
+        } else {
+            candidates
+                .iter()
+                .filter(|c| c.rejected.is_empty())
+                .map(|c| self.workers.get(&c.worker_id).unwrap())
+                .min_by_key(|w| (w.estimated_cost_microusd, w.id.as_str()))
+        };
         let Some(selected) = selected else {
             if let Some(pin) = &request.pinned_worker {
                 let reasons = candidates
@@ -285,14 +357,24 @@ impl WorkerRegistry {
             }
             return Err(RouteError::NoEligibleWorker(request.stage));
         };
+
+        if let Some(rule) = matched_rule {
+            for candidate in &mut candidates {
+                if candidate.worker_id != rule.worker && candidate.rejected.is_empty() {
+                    candidate.rejected.push(RejectionReason::NotRouted);
+                }
+            }
+        }
+
         Ok(SelectionRecord {
             stage: request.stage,
             rule: if request.pinned_worker.is_some() {
-                "user-pin"
+                "user-pin".into()
+            } else if let Some(rule) = matched_rule {
+                rule.id.clone()
             } else {
-                "lowest-cost-then-id"
-            }
-            .into(),
+                "lowest-cost-then-id".into()
+            },
             selected_worker: selected.id.clone(),
             candidates,
         })
@@ -329,19 +411,24 @@ mod tests {
             extra_args: Vec::new(),
         }
     }
-    #[test]
-    fn selection_is_cost_then_id_deterministic() {
-        let mut r = WorkerRegistry::default();
-        r.register(worker("z", 1)).unwrap();
-        r.register(worker("a", 1)).unwrap();
-        let q = RouteRequest {
+    fn base_request() -> RouteRequest {
+        RouteRequest {
             stage: WorkerStage::Implementation,
             pinned_worker: None,
             max_cost_microusd: 0,
             required_context_tokens: 0,
             require_isolation: false,
             independent_from: None,
-        };
+            risk_classes: Vec::new(),
+            expected_file_count: 0,
+        }
+    }
+    #[test]
+    fn selection_is_cost_then_id_deterministic() {
+        let mut r = WorkerRegistry::default();
+        r.register(worker("z", 1)).unwrap();
+        r.register(worker("a", 1)).unwrap();
+        let q = base_request();
         assert_eq!(r.select(&q).unwrap().selected_worker, "a");
     }
     #[test]
@@ -351,12 +438,8 @@ mod tests {
         w.available = false;
         r.register(w).unwrap();
         let q = RouteRequest {
-            stage: WorkerStage::Implementation,
             pinned_worker: Some("pinned".into()),
-            max_cost_microusd: 0,
-            required_context_tokens: 0,
-            require_isolation: false,
-            independent_from: None,
+            ..base_request()
         };
         assert!(matches!(
             r.select(&q),
@@ -369,11 +452,9 @@ mod tests {
         r.register(worker("same", 1)).unwrap();
         let q = RouteRequest {
             stage: WorkerStage::Review,
-            pinned_worker: None,
-            max_cost_microusd: 0,
-            required_context_tokens: 0,
             require_isolation: true,
             independent_from: Some(("p".into(), "same".into())),
+            ..base_request()
         };
         assert_eq!(r.select(&q), Err(RouteError::NoIndependentReviewer));
     }
@@ -385,5 +466,145 @@ mod tests {
         let mut descriptor = worker("custom-worker", 1);
         descriptor.adapter_id = "custom".into();
         assert!(factories.build(&descriptor).is_ok());
+    }
+
+    #[test]
+    fn risk_class_rule_selects_before_size_rule_and_cost_tiebreak() {
+        let mut r = WorkerRegistry::default();
+        r.register(worker("cheap", 1)).unwrap();
+        r.register(worker("careful", 5)).unwrap();
+        r.add_rule(RouteRule {
+            id: "high-risk".into(),
+            worker: "careful".into(),
+            risk_classes: BTreeSet::from(["security".to_string()]),
+            max_expected_files: None,
+        })
+        .unwrap();
+        r.add_rule(RouteRule {
+            id: "small-change".into(),
+            worker: "cheap".into(),
+            risk_classes: BTreeSet::new(),
+            max_expected_files: Some(10),
+        })
+        .unwrap();
+        let q = RouteRequest {
+            risk_classes: vec!["security".into()],
+            expected_file_count: 1,
+            ..base_request()
+        };
+        let selection = r.select(&q).unwrap();
+        assert_eq!(selection.selected_worker, "careful");
+        assert_eq!(selection.rule, "high-risk");
+        let rejected = selection
+            .candidates
+            .iter()
+            .find(|c| c.worker_id == "cheap")
+            .unwrap();
+        assert_eq!(rejected.rejected, vec![RejectionReason::NotRouted]);
+    }
+
+    #[test]
+    fn unmatched_rules_fall_back_to_lowest_cost_then_id() {
+        let mut r = WorkerRegistry::default();
+        r.register(worker("cheap", 1)).unwrap();
+        r.register(worker("careful", 5)).unwrap();
+        r.add_rule(RouteRule {
+            id: "high-risk".into(),
+            worker: "careful".into(),
+            risk_classes: BTreeSet::from(["security".to_string()]),
+            max_expected_files: None,
+        })
+        .unwrap();
+        let q = base_request();
+        let selection = r.select(&q).unwrap();
+        assert_eq!(selection.selected_worker, "cheap");
+        assert_eq!(selection.rule, "lowest-cost-then-id");
+    }
+
+    #[test]
+    fn rule_targeting_ineligible_worker_falls_through_to_next_match() {
+        let mut r = WorkerRegistry::default();
+        let mut unavailable = worker("careful", 5);
+        unavailable.available = false;
+        r.register(unavailable).unwrap();
+        r.register(worker("cheap", 1)).unwrap();
+        r.add_rule(RouteRule {
+            id: "high-risk".into(),
+            worker: "careful".into(),
+            risk_classes: BTreeSet::from(["security".to_string()]),
+            max_expected_files: None,
+        })
+        .unwrap();
+        let q = RouteRequest {
+            risk_classes: vec!["security".into()],
+            ..base_request()
+        };
+        let selection = r.select(&q).unwrap();
+        assert_eq!(selection.selected_worker, "cheap");
+        assert_eq!(selection.rule, "lowest-cost-then-id");
+    }
+
+    #[test]
+    fn pinned_worker_bypasses_route_rules() {
+        let mut r = WorkerRegistry::default();
+        r.register(worker("cheap", 1)).unwrap();
+        r.register(worker("careful", 5)).unwrap();
+        r.add_rule(RouteRule {
+            id: "high-risk".into(),
+            worker: "careful".into(),
+            risk_classes: BTreeSet::from(["security".to_string()]),
+            max_expected_files: None,
+        })
+        .unwrap();
+        let q = RouteRequest {
+            pinned_worker: Some("cheap".into()),
+            risk_classes: vec!["security".into()],
+            ..base_request()
+        };
+        let selection = r.select(&q).unwrap();
+        assert_eq!(selection.selected_worker, "cheap");
+        assert_eq!(selection.rule, "user-pin");
+    }
+
+    #[test]
+    fn selection_with_rules_is_reproducible() {
+        let mut r = WorkerRegistry::default();
+        r.register(worker("cheap", 1)).unwrap();
+        r.register(worker("careful", 5)).unwrap();
+        r.add_rule(RouteRule {
+            id: "high-risk".into(),
+            worker: "careful".into(),
+            risk_classes: BTreeSet::from(["security".to_string()]),
+            max_expected_files: None,
+        })
+        .unwrap();
+        let q = RouteRequest {
+            risk_classes: vec!["security".into()],
+            ..base_request()
+        };
+        assert_eq!(r.select(&q).unwrap(), r.select(&q).unwrap());
+    }
+
+    #[test]
+    fn add_rule_rejects_unknown_worker_and_predicate_free_rules() {
+        let mut r = WorkerRegistry::default();
+        r.register(worker("cheap", 1)).unwrap();
+        assert!(r
+            .add_rule(RouteRule {
+                id: "bad".into(),
+                worker: "missing".into(),
+                risk_classes: BTreeSet::from(["security".to_string()]),
+                max_expected_files: None,
+            })
+            .unwrap_err()
+            .contains("unknown worker"));
+        assert!(r
+            .add_rule(RouteRule {
+                id: "bad".into(),
+                worker: "cheap".into(),
+                risk_classes: BTreeSet::new(),
+                max_expected_files: None,
+            })
+            .is_err());
     }
 }
