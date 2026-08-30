@@ -20,7 +20,11 @@ use familiar_ai_storage::{
     Database, DeliveryRepository, DriverRepository, ExecutionHistoryRepository,
 };
 
-use crate::run::{execute_with_config_tracked_from_preflighted, AgentSet};
+use crate::run::{
+    execute_with_config_tracked_from_preflighted_with_route_context, resolved_worker_plan,
+    AgentSet, RouteContext,
+};
+use familiar_ai_agent::WorkerStage;
 
 /// Why a driver session stopped. Closed set; persisted verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,47 +298,30 @@ pub fn dependency_components(prds: &[DiscoveredPrd]) -> BTreeMap<PrdId, String> 
     result
 }
 
-fn conflict_scopes(repository: &Path, prd: &DiscoveredPrd) -> Result<Vec<String>, DriveError> {
-    let path = repository.join(prd.path.as_str());
-    let content = std::fs::read_to_string(&path).map_err(|error| {
-        DriveError::Config(format!(
-            "cannot read conflict scope from {}: {error}",
-            path.display()
-        ))
-    })?;
-    let scope_content = if prd.metadata.contract_version == Some(1) {
-        let bullets = prd
-            .metadata
-            .expected_files
-            .iter()
-            .map(|path| format!("- `{path}`\n"))
-            .collect::<String>();
-        format!("## Expected Files\n\n{bullets}")
+fn route_context(repository: &Path, prd: &DiscoveredPrd) -> Result<RouteContext, DriveError> {
+    let expected_file_count = if prd.metadata.contract_version == Some(1) {
+        prd.metadata.expected_files.len() as u64
     } else {
-        content
+        let path = repository.join(prd.path.as_str());
+        let content = std::fs::read_to_string(&path).map_err(|error| {
+            DriveError::Config(format!(
+                "cannot read routing scope from {}: {error}",
+                path.display()
+            ))
+        })?;
+        familiar_ai_review::parse_expected_files(&content)
+            .map_err(|error| {
+                DriveError::Config(format!(
+                    "cannot parse routing scope from {}: {error}",
+                    path.display()
+                ))
+            })?
+            .len() as u64
     };
-    let entries = familiar_ai_review::parse_expected_files(&scope_content).map_err(|error| {
-        DriveError::Config(format!(
-            "cannot parse conflict scope from {}: {error}",
-            path.display()
-        ))
-    })?;
-    Ok(entries.into_iter().map(|entry| entry.normalized).collect())
-}
-
-fn routed_model(config: &Config, scope_count: usize) -> Option<String> {
-    config
-        .driver
-        .model_routes
-        .iter()
-        .find(|route| scope_count <= route.max_expected_files)
-        .map(|route| route.model.clone())
-        .or_else(|| {
-            config
-                .agents
-                .as_ref()
-                .and_then(|agents| agents.implementation.model.clone())
-        })
+    Ok(RouteContext {
+        risk_classes: prd.metadata.risk_classes.clone(),
+        expected_file_count,
+    })
 }
 
 /// Execute eligible backlog PRDs until a closed termination condition is met.
@@ -547,12 +534,27 @@ pub fn drive(
                     break;
                 }
                 let mut execution_config = config.clone();
-                let scope_count = conflict_scopes(&repository.worktree, &target)?.len();
-                if let Some(model) = routed_model(config, scope_count) {
-                    if let Some(entries) = &mut execution_config.agents {
-                        entries.implementation.model = Some(model.clone());
-                        execution_config.review.implementation_agent.model = Some(model);
-                    }
+                let route_context = route_context(&repository.worktree, &target)?;
+                let selections = if execution_config.worker_registry.is_some() {
+                    let (_, _, selections) =
+                        resolved_worker_plan(&execution_config, &route_context)
+                            .map_err(DriveError::Config)?;
+                    Some(selections)
+                } else {
+                    None
+                };
+                if let (Some(registry), Some(selections)) =
+                    (&mut execution_config.worker_registry, selections)
+                {
+                    let routing = &mut registry.routing;
+                    routing.implementation_pin = selections
+                        .iter()
+                        .find(|record| record.stage == WorkerStage::Implementation)
+                        .map(|record| record.selected_worker.clone());
+                    routing.remediation_pin = selections
+                        .iter()
+                        .find(|record| record.stage == WorkerStage::Remediation)
+                        .map(|record| record.selected_worker.clone());
                 }
                 let use_worktree = parallelism > 1;
                 let worktree = if use_worktree {
@@ -639,6 +641,7 @@ pub fn drive(
                     execution_root,
                     execution_config,
                     routed_model,
+                    route_context,
                     worktree,
                     worktree_heartbeat,
                     component_id,
@@ -656,6 +659,7 @@ pub fn drive(
                     execution_root,
                     execution_config,
                     routed_model,
+                    route_context,
                     worktree,
                     worktree_heartbeat,
                     component_id,
@@ -666,13 +670,14 @@ pub fn drive(
                         let prd_path = execution_root.join(target.path.as_str());
                         let execution =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                execute_with_config_tracked_from_preflighted(
+                                execute_with_config_tracked_from_preflighted_with_route_context(
                                     &execution_root,
                                     &prd_path,
                                     agents,
                                     &execution_config,
                                     paths,
                                     true,
+                                    Some(route_context),
                                 )
                             }));
                         let duration_ms =
@@ -1313,27 +1318,15 @@ mod tests {
     }
 
     #[test]
-    fn model_routes_are_deterministic_and_fall_back_to_configured_model() {
+    fn model_routes_name_registry_replacement() {
         let mut config = Config::default();
-        config.driver.model_routes = vec![
-            familiar_ai_core::DriverModelRouteConfig {
-                max_expected_files: 2,
-                model: "local-narrow".into(),
-            },
-            familiar_ai_core::DriverModelRouteConfig {
-                max_expected_files: 8,
-                model: "strong-medium".into(),
-            },
-        ];
-        config.agents = Some(familiar_ai_core::AgentsConfig {
-            implementation: familiar_ai_core::AgentEntryConfig {
-                model: Some("strong-broad".into()),
-                ..Default::default()
-            },
-            reviewer: Default::default(),
-        });
-        assert_eq!(routed_model(&config, 1).as_deref(), Some("local-narrow"));
-        assert_eq!(routed_model(&config, 5).as_deref(), Some("strong-medium"));
-        assert_eq!(routed_model(&config, 20).as_deref(), Some("strong-broad"));
+        config.driver.max_prds_per_session = 1;
+        config.driver.model_routes = vec![familiar_ai_core::DriverModelRouteConfig {
+            max_expected_files: 2,
+            model: "local-narrow".into(),
+        }];
+        let error = config.driver.validate().unwrap_err();
+        assert!(error.contains("driver.model_routes"));
+        assert!(error.contains("worker_registry.routing.rules"));
     }
 }

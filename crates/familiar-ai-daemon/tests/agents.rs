@@ -7,8 +7,9 @@ use std::path::Path;
 
 use familiar_ai_agent::{ExecutionRequest, FilesystemPolicy, IsolationCapability};
 use familiar_ai_core::{
-    config::ReviewAgentConfig, AgentAdapterKind, AgentEntryConfig, AgentPermissionMode,
-    AgentsConfig, Config,
+    config::{ReviewAgentConfig, WorkerRouteRuleConfig},
+    AgentAdapterKind, AgentEntryConfig, AgentPermissionMode, AgentsConfig, Config,
+    RepositoryConfig,
 };
 use familiar_ai_daemon::run::{
     build_agent, resolved_agent_entries, resolved_worker_plan, RouteContext,
@@ -64,6 +65,83 @@ estimated_cost_microusd = 2
         .candidates
         .iter()
         .any(|candidate| candidate.worker_id == "codex" && !candidate.rejected.is_empty()));
+}
+
+#[test]
+fn risk_rule_overrides_one_file_tiebreak_and_reviewer_stays_independent() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        temp.path(),
+        r#"
+[worker_registry.workers.cheap]
+adapter = "codex"
+provider = "openai"
+model = "small"
+capabilities = ["implementation", "review", "remediation"]
+fresh_process_isolation = true
+context_tokens = 2000
+estimated_cost_microusd = 1
+
+[worker_registry.workers.high-risk]
+adapter = "claude-code"
+provider = "anthropic"
+model = "strong"
+capabilities = ["implementation", "review", "remediation"]
+fresh_process_isolation = true
+context_tokens = 2000
+estimated_cost_microusd = 2
+"#,
+    )
+    .unwrap();
+    let mut config = Config::load(Some(temp.path())).unwrap();
+    config.repositories.insert(
+        "/unused".into(),
+        RepositoryConfig {
+            risk_vocabulary: vec!["security".into()],
+            ..RepositoryConfig::default()
+        },
+    );
+    config
+        .worker_registry
+        .as_mut()
+        .unwrap()
+        .routing
+        .rules
+        .push(WorkerRouteRuleConfig {
+            id: "high-risk".into(),
+            worker: "high-risk".into(),
+            risk_classes: vec!["security".into()],
+            max_expected_files: None,
+        });
+    config.review.enabled = true;
+
+    let (_, reviewer, records) = resolved_worker_plan(
+        &config,
+        &RouteContext {
+            risk_classes: vec!["security".into()],
+            expected_file_count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(records[0].selected_worker, "high-risk");
+    assert_eq!(records[0].rule, "high-risk");
+    assert_eq!(reviewer.model.as_deref(), Some("small"));
+    let review = records
+        .iter()
+        .find(|record| record.stage == familiar_ai_agent::WorkerStage::Review)
+        .unwrap();
+    assert_eq!(review.selected_worker, "cheap");
+
+    let (_, _, ordinary_records) = resolved_worker_plan(
+        &config,
+        &RouteContext {
+            risk_classes: vec![],
+            expected_file_count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(ordinary_records[0].selected_worker, "cheap");
+    assert_ne!(ordinary_records[0], records[0]);
 }
 
 #[test]

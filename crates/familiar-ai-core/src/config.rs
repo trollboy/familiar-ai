@@ -485,8 +485,8 @@ pub struct DriverConfig {
     /// Optional worktree parent. Empty uses the driver-owned state directory.
     #[serde(default)]
     pub worktree_root: String,
-    /// Ordered deterministic implementation routes. The first route whose
-    /// maximum scope count covers a PRD wins; no inference call selects it.
+    /// Removed legacy implementation routes. Retained only so stale
+    /// configuration can fail with an actionable replacement path.
     #[serde(default)]
     pub model_routes: Vec<DriverModelRouteConfig>,
     /// Finite implementation-stage token ceiling. Zero disables this ceiling.
@@ -547,19 +547,11 @@ impl DriverConfig {
                     .into(),
             );
         }
-        let mut prior = 0;
-        for (index, route) in self.model_routes.iter().enumerate() {
-            if route.max_expected_files == 0 || route.model.trim().is_empty() {
-                return Err(format!(
-                    "driver.model_routes[{index}] requires a positive max_expected_files and non-empty model"
-                ));
-            }
-            if index > 0 && route.max_expected_files <= prior {
-                return Err(
-                    "driver.model_routes must be ordered by increasing max_expected_files".into(),
-                );
-            }
-            prior = route.max_expected_files;
+        if !self.model_routes.is_empty() {
+            return Err(
+                "driver.model_routes has been removed; configure worker_registry.routing.rules instead"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -2282,6 +2274,12 @@ impl Config {
     }
 
     fn validate_execution(&self) -> crate::Result<()> {
+        if !self.driver.model_routes.is_empty() {
+            return Err(FamiliarError::Config(
+                "driver.model_routes has been removed; configure worker_registry.routing.rules instead"
+                    .into(),
+            ));
+        }
         if self.agents.is_some() && self.worker_registry.is_some() {
             return Err(FamiliarError::Config(
                 "[agents] and [worker_registry] are mutually exclusive".into(),
@@ -2432,6 +2430,23 @@ mod tests {
         assert_eq!(config.worker.max_prds_per_run, 1);
         assert_eq!(config.worker.restart_throttle_secs, 10);
         assert_eq!(config.review.max_review_attempts, 3);
+    }
+
+    #[test]
+    fn legacy_driver_model_routes_name_registry_replacement() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            r#"
+[[driver.model_routes]]
+max_expected_files = 1
+model = "legacy"
+"#,
+        )
+        .unwrap();
+        let error = Config::load(Some(file.path())).unwrap_err().to_string();
+        assert!(error.contains("driver.model_routes"), "{error}");
+        assert!(error.contains("worker_registry.routing.rules"), "{error}");
     }
 
     #[test]

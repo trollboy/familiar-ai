@@ -427,6 +427,28 @@ pub fn execute_with_config_tracked_from_preflighted(
     paths: &AppPaths,
     prerequisites_preflighted: bool,
 ) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
+    execute_with_config_tracked_from_preflighted_with_route_context(
+        current,
+        prd_path,
+        agents,
+        config,
+        paths,
+        prerequisites_preflighted,
+        None,
+    )
+}
+
+/// Driver-only entry point that preserves the routing inputs derived during
+/// backlog discovery, including legacy document expected-file declarations.
+pub fn execute_with_config_tracked_from_preflighted_with_route_context(
+    current: &Path,
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+    prerequisites_preflighted: bool,
+    route_context: Option<RouteContext>,
+) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
     let mut trace = AttemptTrace::default();
     let result = execute_tracked_inner(
         current,
@@ -435,6 +457,7 @@ pub fn execute_with_config_tracked_from_preflighted(
         config,
         paths,
         prerequisites_preflighted,
+        route_context,
         &mut trace,
     );
     (result, trace)
@@ -703,13 +726,17 @@ fn execute_tracked_inner(
     config: &Config,
     paths: &AppPaths,
     prerequisites_preflighted: bool,
+    route_context: Option<RouteContext>,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let discovery = FilesystemBacklogDiscovery;
     let repository = discovery
         .resolve(current)
         .map_err(|e| RunError::Config(e.to_string()))?;
-    let route_context = route_context_for_prd(prd_path)?;
+    let route_context = match route_context {
+        Some(route_context) => route_context,
+        None => route_context_for_prd(prd_path)?,
+    };
     let repository_config = config.repository(&repository.worktree);
     let effective = config.effective_execution(&repository.worktree);
     let mut effective_config = config.clone();
@@ -808,15 +835,24 @@ fn execute_tracked_inner(
                 "worker_id": candidate.worker_id,
                 "rejected_reasons": candidate.rejected.iter().map(|reason| format!("{reason:?}")).collect::<Vec<_>>()
             })).collect::<Vec<_>>();
+            let selection_id = format!("{id}:worker:{index}");
+            let stage = format!("{:?}", record.stage).to_ascii_lowercase();
+            let candidates_json =
+                serde_json::to_string(&candidates).map_err(|e| RunError::Storage(e.to_string()))?;
+            let risk_classes_json = serde_json::to_string(&route_context.risk_classes)
+                .map_err(|e| RunError::Storage(e.to_string()))?;
             selections
                 .record(
-                    &format!("{id}:worker:{index}"),
-                    Some(&id),
-                    &format!("{:?}", record.stage).to_ascii_lowercase(),
-                    &record.rule,
-                    &record.selected_worker,
-                    &serde_json::to_string(&candidates)
-                        .map_err(|e| RunError::Storage(e.to_string()))?,
+                    &familiar_ai_storage::repos::worker_selection::WorkerSelectionRecord {
+                        selection_id: &selection_id,
+                        execution_id: Some(&id),
+                        stage: &stage,
+                        rule: &record.rule,
+                        selected_identity: &record.selected_worker,
+                        candidates_json: &candidates_json,
+                        risk_classes_json: &risk_classes_json,
+                        expected_file_count: route_context.expected_file_count,
+                    },
                 )
                 .map_err(|e| RunError::Storage(e.to_string()))?;
         }

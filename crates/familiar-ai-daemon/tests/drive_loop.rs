@@ -15,7 +15,12 @@ use std::time::Duration;
 use familiar_ai_agent::{
     AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult, IsolationCapability,
 };
-use familiar_ai_core::{AppPaths, Config};
+use familiar_ai_core::{
+    config::{
+        RegistryWorkerConfig, WorkerCapabilityConfig, WorkerRegistryConfig, WorkerRouteRuleConfig,
+    },
+    AgentAdapterKind, AppPaths, Config,
+};
 use familiar_ai_daemon::drive::{drive, DriveTermination, DriveWarrant};
 use familiar_ai_daemon::run::AgentSet;
 use familiar_ai_storage::{Database, DriverRepository};
@@ -206,6 +211,11 @@ fn permissions_fixup(path: &Path) {
     fs::set_permissions(path, permissions).unwrap();
 }
 
+fn write_executable(path: &Path, script: &str) {
+    fs::write(path, script).unwrap();
+    permissions_fixup(path);
+}
+
 #[test]
 fn warrant_without_a_finite_ceiling_is_refused_before_any_session_opens() {
     let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
@@ -281,6 +291,94 @@ fn loop_attempts_every_independent_prd_once_and_records_each() {
         // No pricing configured: cost stays unknown, never zero.
         assert_eq!(attempt.known_cost_microusd, None);
     }
+}
+
+#[test]
+fn legacy_prd_document_scope_routes_and_persists_the_derived_file_count() {
+    let _guard = WORKING_DIRECTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let (temp, paths, mut config) = fixture(1, false);
+    let repository = temp.path().join("repo");
+    let prd_path = repository.join("docs/prds/PRD-001.md");
+    let content = fs::read_to_string(&prd_path).unwrap().replace(
+        "- `src/`",
+        "- `src/one.rs`\n- `src/two.rs`\n- `src/three.rs`",
+    );
+    fs::write(&prd_path, content).unwrap();
+    git(&repository, &["add", "-A"]);
+    git(&repository, &["commit", "-qm", "three-file legacy scope"]);
+
+    let worker = temp.path().join("worker");
+    write_executable(
+        &worker,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
+    );
+    let registry_worker = |model: &str| RegistryWorkerConfig {
+        adapter: AgentAdapterKind::Codex,
+        provider: "test".into(),
+        model: model.into(),
+        executable: Some(worker.to_string_lossy().into_owned()),
+        capabilities: vec![
+            WorkerCapabilityConfig::Implementation,
+            WorkerCapabilityConfig::Remediation,
+        ],
+        fresh_process_isolation: true,
+        context_tokens: 100_000,
+        estimated_cost_microusd: 1,
+        available: true,
+        effort: None,
+        permission_mode: None,
+        extra_args: Vec::new(),
+    };
+    let mut registry = WorkerRegistryConfig::default();
+    registry
+        .workers
+        .insert("small".into(), registry_worker("small"));
+    registry
+        .workers
+        .insert("large".into(), registry_worker("large"));
+    registry.routing.rules = vec![
+        WorkerRouteRuleConfig {
+            id: "one-file".into(),
+            worker: "small".into(),
+            risk_classes: Vec::new(),
+            max_expected_files: Some(1),
+        },
+        WorkerRouteRuleConfig {
+            id: "three-files".into(),
+            worker: "large".into(),
+            risk_classes: Vec::new(),
+            max_expected_files: Some(3),
+        },
+    ];
+    config.worker_registry = Some(registry);
+
+    let fallback = RecordingAgent {
+        calls: Mutex::new(Vec::new()),
+    };
+    let summary = with_working_directory(&repository, || {
+        drive(
+            &agents(&fallback),
+            &config,
+            &paths,
+            DriveWarrant {
+                max_prds: 1,
+                ..DriveWarrant::default()
+            },
+        )
+        .unwrap()
+    });
+    assert_eq!(summary.attempted, 1);
+
+    let db = Database::open(config.database.path.as_ref().unwrap()).unwrap();
+    let stored: (String, String, u64) = db
+        .conn()
+        .query_row(
+            "SELECT rule, selected_identity, expected_file_count FROM worker_selections WHERE stage = 'implementation'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, ("user-pin".into(), "large".into(), 3));
 }
 
 #[test]
@@ -433,10 +531,6 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     config.driver.max_concurrency = 2;
     config.driver.max_parallel_components = 2;
     config.driver.isolated_worktrees = true;
-    config.driver.model_routes = vec![familiar_ai_core::config::DriverModelRouteConfig {
-        max_expected_files: 1,
-        model: "ollama/qwen3:8b".into(),
-    }];
     config.agents = Some(familiar_ai_core::config::AgentsConfig::default());
     let agent = ConcurrencyAgent {
         active: AtomicUsize::new(0),
@@ -467,9 +561,7 @@ fn independent_scopes_execute_with_bounded_parallelism() {
     let attempts = DriverRepository::new(db.conn())
         .attempts(&summary.session_id)
         .unwrap();
-    assert!(attempts
-        .iter()
-        .all(|attempt| attempt.model.as_deref() == Some("ollama/qwen3:8b")));
+    assert!(attempts.iter().all(|attempt| attempt.model.is_none()));
 }
 
 #[test]
