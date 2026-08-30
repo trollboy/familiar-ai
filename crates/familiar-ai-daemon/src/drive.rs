@@ -82,13 +82,15 @@ impl DriveTermination {
 }
 
 /// The session's budget ceilings. Zero means "no ceiling of this kind"; at
-/// least one must be finite for a session to start.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// least one must be finite for a session to start. An allowlist, when
+/// present, is the immutable approved PRD set: selection may never leave it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DriveWarrant {
     pub max_prds: u64,
     pub max_cost_microusd: u64,
     pub max_tokens: u64,
     pub max_duration_ms: u64,
+    pub prd_allowlist: Option<BTreeSet<PrdId>>,
 }
 
 impl DriveWarrant {
@@ -98,7 +100,24 @@ impl DriveWarrant {
             max_cost_microusd: config.driver.max_session_cost_microusd,
             max_tokens: config.driver.max_session_tokens,
             max_duration_ms: config.driver.max_session_duration_ms,
+            prd_allowlist: None,
         }
+    }
+
+    /// Bind the warrant to an explicit approved PRD set. An allowlist may only
+    /// ever shrink an inherited one — widening is refused, like every other
+    /// warrant loosening.
+    pub fn with_prd_allowlist(mut self, prds: BTreeSet<PrdId>) -> Result<Self, String> {
+        if prds.is_empty() {
+            return Err("an explicit PRD allowlist must not be empty".into());
+        }
+        if let Some(existing) = &self.prd_allowlist {
+            if !prds.is_subset(existing) {
+                return Err("a PRD allowlist may only tighten the inherited set".into());
+            }
+        }
+        self.prd_allowlist = Some(prds);
+        Ok(self)
     }
 
     /// Command-line ceilings may only tighten configuration: a supplied value
@@ -117,6 +136,7 @@ impl DriveWarrant {
             max_cost_microusd: tighten(self.max_cost_microusd, cost),
             max_tokens: self.max_tokens,
             max_duration_ms: tighten(self.max_duration_ms, duration),
+            prd_allowlist: self.prd_allowlist,
         }
     }
 
@@ -132,8 +152,20 @@ impl DriveWarrant {
     }
 
     fn as_json(&self) -> String {
+        let allowlist = self
+            .prd_allowlist
+            .as_ref()
+            .map(|prds| {
+                let rendered = prds
+                    .iter()
+                    .map(|id| format!("\"{id}\""))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(",\"prd_allowlist\":[{rendered}]")
+            })
+            .unwrap_or_default();
         format!(
-            "{{\"max_prds\":{},\"max_cost_microusd\":{},\"max_tokens\":{},\"max_duration_ms\":{}}}",
+            "{{\"max_prds\":{},\"max_cost_microusd\":{},\"max_tokens\":{},\"max_duration_ms\":{}{allowlist}}}",
             self.max_prds, self.max_cost_microusd, self.max_tokens, self.max_duration_ms
         )
     }
@@ -196,14 +228,88 @@ enum Selection {
     NothingEligible,
 }
 
+/// One selection or deferral decision for a ready PRD, persisted durably so an
+/// operator can always answer "why did/didn't this run?".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionDecision {
+    pub prd_id: PrdId,
+    pub decision: &'static str,
+    pub detail: String,
+}
+
+/// The mutable expected-file scope of one PRD under the closed Expected Files
+/// grammar (exact file, or directory prefix from `dir/` / `dir/**`).
+fn prd_scope(
+    repository_worktree: &Path,
+    prd: &DiscoveredPrd,
+) -> Result<Vec<(String, familiar_ai_review::ExpectedMatchKind)>, String> {
+    use familiar_ai_review::ExpectedMatchKind;
+    if prd.metadata.contract_version == Some(1) {
+        prd.metadata
+            .expected_files
+            .iter()
+            .map(|expression| {
+                familiar_ai_review::normalize_scope_path(expression)
+                    .map_err(|rule| format!("{expression}: {rule}"))
+            })
+            .collect()
+    } else {
+        let path = repository_worktree.join(prd.path.as_str());
+        let content = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        Ok(familiar_ai_review::parse_expected_files(&content)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|entry| (entry.normalized, entry.match_kind))
+            .collect::<Vec<(String, ExpectedMatchKind)>>())
+    }
+}
+
+/// Whether two normalized scope entries can authorize writes to one path.
+fn scope_entries_overlap(
+    (left, left_kind): &(String, familiar_ai_review::ExpectedMatchKind),
+    (right, right_kind): &(String, familiar_ai_review::ExpectedMatchKind),
+) -> bool {
+    use familiar_ai_review::ExpectedMatchKind::*;
+    match (left_kind, right_kind) {
+        (ExactFile, ExactFile) => left == right,
+        (ExactFile, Directory) => left.starts_with(right.as_str()),
+        (Directory, ExactFile) => right.starts_with(left.as_str()),
+        (Directory, Directory) => {
+            left.starts_with(right.as_str()) || right.starts_with(left.as_str())
+        }
+    }
+}
+
+/// The first overlapping pattern pair between two PRD scopes, if any.
+fn scope_overlap(
+    left: &[(String, familiar_ai_review::ExpectedMatchKind)],
+    right: &[(String, familiar_ai_review::ExpectedMatchKind)],
+) -> Option<(String, String)> {
+    left.iter().find_map(|a| {
+        right
+            .iter()
+            .find(|b| scope_entries_overlap(a, b))
+            .map(|b| (a.0.clone(), b.0.clone()))
+    })
+}
+
+/// Schedule from the current ready set. Dependencies are admission gates, not
+/// mutual-exclusion edges: every pending PRD whose dependencies are completed
+/// is admitted up to `limit`, and two ready PRDs serialize only for an
+/// overlapping mutable expected-file scope. A PRD completed earlier in this
+/// session whose work still sits undelivered in an isolated worktree defers
+/// its dependents — a fresh worktree branches from the main HEAD and would
+/// not contain that work.
+#[allow(clippy::too_many_arguments)]
 fn select_batch(
     repository: &RepositoryIdentity,
     discovered: &[DiscoveredPrd],
     db: &mut Database,
     attempted: &BTreeSet<PrdId>,
-    components: &BTreeMap<PrdId, String>,
-    stopped_components: &BTreeSet<String>,
+    allowlist: Option<&BTreeSet<PrdId>>,
+    session_undelivered: &BTreeSet<PrdId>,
     limit: usize,
+    decisions: &mut Vec<SelectionDecision>,
 ) -> Result<Selection, DriveError> {
     if discovered.is_empty() {
         return Ok(Selection::BacklogEmpty);
@@ -221,8 +327,9 @@ fn select_batch(
         .iter()
         .map(|entry| (entry.prd.id.clone(), entry.status))
         .collect();
-    let mut selected = Vec::new();
-    let mut selected_components = BTreeSet::new();
+    let mut selected: Vec<DiscoveredPrd> = Vec::new();
+    let mut selected_scopes: Vec<(PrdId, Vec<(String, familiar_ai_review::ExpectedMatchKind)>)> =
+        Vec::new();
     for entry in entries {
         // An attempt that failed before claim leaves the PRD pending; without
         // this exclusion the session would select it forever.
@@ -234,17 +341,71 @@ fn select_batch(
             .dependencies
             .iter()
             .all(|id| statuses.get(id) == Some(&BacklogStatus::Completed));
-        if entry.status == BacklogStatus::Pending && dependencies_met {
-            let component = &components[&entry.prd.id];
-            if !stopped_components.contains(component)
-                && selected_components.insert(component.clone())
-            {
-                selected.push(entry.prd);
-                if selected.len() == limit.max(1) {
-                    break;
-                }
+        if entry.status != BacklogStatus::Pending || !dependencies_met {
+            continue;
+        }
+        if let Some(allowlist) = allowlist {
+            if !allowlist.contains(&entry.prd.id) {
+                decisions.push(SelectionDecision {
+                    prd_id: entry.prd.id.clone(),
+                    decision: "excluded_allowlist",
+                    detail: "ready but outside the session's approved PRD set".into(),
+                });
+                continue;
             }
         }
+        if let Some(undelivered) = entry
+            .prd
+            .dependencies
+            .iter()
+            .find(|id| session_undelivered.contains(id))
+        {
+            decisions.push(SelectionDecision {
+                prd_id: entry.prd.id.clone(),
+                decision: "deferred_dependency_undelivered",
+                detail: format!(
+                    "dependency {undelivered} completed this session in an isolated worktree not yet delivered to the base branch"
+                ),
+            });
+            continue;
+        }
+        if selected.len() >= limit.max(1) {
+            decisions.push(SelectionDecision {
+                prd_id: entry.prd.id.clone(),
+                decision: "deferred_width",
+                detail: format!("ready, but the warrant width of {} is exhausted", limit.max(1)),
+            });
+            continue;
+        }
+        let scope = match prd_scope(&repository.worktree, &entry.prd) {
+            Ok(scope) => scope,
+            Err(error) => {
+                decisions.push(SelectionDecision {
+                    prd_id: entry.prd.id.clone(),
+                    decision: "deferred_scope_unavailable",
+                    detail: format!("expected-file scope cannot be resolved: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Some((holder, (left, right))) = selected_scopes
+            .iter()
+            .find_map(|(id, held)| scope_overlap(&scope, held).map(|pair| (id.clone(), pair)))
+        {
+            decisions.push(SelectionDecision {
+                prd_id: entry.prd.id.clone(),
+                decision: "deferred_scope_overlap",
+                detail: format!("scope '{left}' overlaps '{right}' held by {holder}"),
+            });
+            continue;
+        }
+        decisions.push(SelectionDecision {
+            prd_id: entry.prd.id.clone(),
+            decision: "ready_selected",
+            detail: String::new(),
+        });
+        selected_scopes.push((entry.prd.id.clone(), scope));
+        selected.push(entry.prd);
     }
     if selected.is_empty() {
         Ok(Selection::NothingEligible)
@@ -255,6 +416,8 @@ fn select_batch(
 
 /// Deterministically partition the validated, profile-neutral dependency graph
 /// into weakly connected components. Component identity is its least PRD id.
+/// Since PRD-065 this is a reporting label only — admission is decided by the
+/// ready set in `select_batch`, never by component membership.
 pub fn dependency_components(prds: &[DiscoveredPrd]) -> BTreeMap<PrdId, String> {
     let mut neighbors = BTreeMap::<PrdId, BTreeSet<PrdId>>::new();
     for prd in prds {
@@ -354,7 +517,9 @@ pub fn drive(
             .map_err(|error| {
                 DriveError::Config(format!("cannot acquire driver ownership: {error}"))
             })?;
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|error| DriveError::Config(error.to_string()))?;
     let delivery_policy = repository_config.delivery.as_ref();
     if delivery_policy.is_some_and(|policy| policy.mode != familiar_ai_core::DeliveryMode::Disabled)
         && parallelism == 1
@@ -427,8 +592,14 @@ pub fn drive(
     let mut known_tokens = 0_u64;
     let mut delivered = 0_u64;
     let mut poc_risks_accepted = 0_u64;
-    let mut stopped_components = BTreeSet::new();
-    let mut component_worktrees = BTreeMap::<String, crate::worktree::WorktreeLease>::new();
+    // PRDs completed this session whose work sits in an isolated worktree not
+    // yet delivered to the base branch: their dependents must not start from a
+    // fresh worktree that lacks that work.
+    let mut session_undelivered = BTreeSet::<PrdId>::new();
+    // Each (prd, decision) pair is persisted once per session, not once per
+    // scheduling pass.
+    let mut recorded_decisions = BTreeSet::<(PrdId, &'static str)>::new();
+    let mut width_reported = false;
 
     let session_preflight = crate::preflight::run(agents, config, &repository.worktree);
     let termination = if !session_preflight.is_valid() {
@@ -467,19 +638,63 @@ pub fn drive(
                     .unwrap_or(usize::MAX)
                     .min(parallelism)
             };
-            let targets = match select_batch(
+            let mut decisions = Vec::new();
+            let selection = select_batch(
                 &repository,
                 &discovered,
                 &mut db,
                 &attempted_ids,
-                &components,
-                &stopped_components,
+                warrant.prd_allowlist.as_ref(),
+                &session_undelivered,
                 remaining,
-            )? {
+                &mut decisions,
+            )?;
+            let mut decision_storage_failed = false;
+            for decision in &decisions {
+                if !recorded_decisions.insert((decision.prd_id.clone(), decision.decision)) {
+                    continue;
+                }
+                if decision.decision != "ready_selected" {
+                    eprintln!(
+                        "drive: {} {} {}",
+                        decision.decision, decision.prd_id, decision.detail
+                    );
+                }
+                if let Err(error) = DriverRepository::new(db.conn()).record_selection_decision(
+                    &session_id,
+                    &decision.prd_id.to_string(),
+                    decision.decision,
+                    &decision.detail,
+                ) {
+                    eprintln!("drive: cannot persist selection decision: {error}");
+                    decision_storage_failed = true;
+                    break;
+                }
+            }
+            if decision_storage_failed {
+                break DriveTermination::StorageFailure;
+            }
+            let targets = match selection {
                 Selection::Eligible(prds) => prds,
                 Selection::BacklogEmpty => break DriveTermination::BacklogEmpty,
                 Selection::NothingEligible => break DriveTermination::NothingEligible,
             };
+            if !width_reported {
+                width_reported = true;
+                if targets.len() < remaining {
+                    let detail = format!(
+                        "achievable_width={} requested_width={remaining}",
+                        targets.len()
+                    );
+                    eprintln!("drive: {detail}");
+                    if let Err(error) =
+                        DriverRepository::new(db.conn()).record_session_detail(&session_id, &detail)
+                    {
+                        eprintln!("drive: cannot persist width report: {error}");
+                        break DriveTermination::StorageFailure;
+                    }
+                }
+            }
             let mut jobs = Vec::new();
             let mut preparation_failed = false;
             for target in targets {
@@ -495,21 +710,8 @@ pub fn drive(
                         review_configuration_source,
                         execution_context_configuration_source,
                         (parallelism > 1).then_some(component_id.as_str()),
-                        (parallelism > 1)
-                            .then(|| {
-                                component_worktrees
-                                    .get(&component_id)
-                                    .map(|lease| lease.path().to_string_lossy())
-                            })
-                            .flatten()
-                            .as_deref(),
-                        (parallelism > 1)
-                            .then(|| {
-                                component_worktrees
-                                    .get(&component_id)
-                                    .map(crate::worktree::WorktreeLease::branch)
-                            })
-                            .flatten(),
+                        None,
+                        None,
                     ) {
                     Ok(sequence) => sequence,
                     Err(error) => {
@@ -558,59 +760,53 @@ pub fn drive(
                 }
                 let use_worktree = parallelism > 1;
                 let worktree = if use_worktree {
-                    if let Some(lease) = component_worktrees.remove(&component_id) {
-                        Some(lease)
-                    } else {
-                        match crate::worktree::WorktreeLease::create_component(
-                            &repository.worktree,
-                            &paths.state_dir,
-                            &session_id,
-                            &component_id,
-                            (!config.driver.worktree_root.is_empty())
-                                .then(|| Path::new(&config.driver.worktree_root)),
-                        ) {
-                            Ok(lease) => {
-                                let path = lease.path().to_string_lossy().into_owned();
-                                let branch = lease.branch().to_owned();
-                                match DriverRepository::new(db.conn()).record_attempt_workspace(
-                                    &session_id,
-                                    sequence,
-                                    &component_id,
-                                    &path,
-                                    &branch,
-                                ) {
-                                    Ok(()) => Some(lease),
-                                    Err(error) => {
-                                        let _ = DriverRepository::new(db.conn())
-                                            .record_attempt_finished(
-                                                &session_id,
-                                                sequence,
-                                                "retained",
-                                                Some("workspace_evidence_failed"),
-                                                None,
-                                                None,
-                                            );
-                                        eprintln!(
-                                            "drive: cannot persist component workspace evidence: {error}"
+                    match crate::worktree::WorktreeLease::create_component(
+                        &repository.worktree,
+                        &paths.state_dir,
+                        &session_id,
+                        &target.id.to_string(),
+                        (!config.driver.worktree_root.is_empty())
+                            .then(|| Path::new(&config.driver.worktree_root)),
+                    ) {
+                        Ok(lease) => {
+                            let path = lease.path().to_string_lossy().into_owned();
+                            let branch = lease.branch().to_owned();
+                            match DriverRepository::new(db.conn()).record_attempt_workspace(
+                                &session_id,
+                                sequence,
+                                &component_id,
+                                &path,
+                                &branch,
+                            ) {
+                                Ok(()) => Some(lease),
+                                Err(error) => {
+                                    let _ = DriverRepository::new(db.conn())
+                                        .record_attempt_finished(
+                                            &session_id,
+                                            sequence,
+                                            "retained",
+                                            Some("workspace_evidence_failed"),
+                                            None,
+                                            None,
                                         );
-                                        stopped_components.insert(component_id.clone());
-                                        continue;
-                                    }
+                                    eprintln!(
+                                        "drive: cannot persist workspace evidence: {error}"
+                                    );
+                                    continue;
                                 }
                             }
-                            Err(error) => {
-                                let _ = DriverRepository::new(db.conn()).record_attempt_finished(
-                                    &session_id,
-                                    sequence,
-                                    "retained",
-                                    Some("worktree_failed"),
-                                    None,
-                                    None,
-                                );
-                                eprintln!("drive: isolated worktree creation failed: {error}");
-                                stopped_components.insert(component_id.clone());
-                                continue;
-                            }
+                        }
+                        Err(error) => {
+                            let _ = DriverRepository::new(db.conn()).record_attempt_finished(
+                                &session_id,
+                                sequence,
+                                "retained",
+                                Some("worktree_failed"),
+                                None,
+                                None,
+                            );
+                            eprintln!("drive: isolated worktree creation failed: {error}");
+                            continue;
                         }
                     }
                 } else {
@@ -876,8 +1072,10 @@ pub fn drive(
                         trace.retained_reason.or(Some("unclassified_result")),
                     ),
                 };
-                if result.is_err() {
-                    stopped_components.insert(component_id.clone());
+                if result.is_ok() && worktree.is_some() {
+                    // Completed in an isolated worktree: dependents defer until
+                    // this work is delivered to the base branch.
+                    session_undelivered.insert(target.id.clone());
                 }
                 if let Some(lease) = &mut worktree {
                     let state = if result.is_ok() {
@@ -916,6 +1114,7 @@ pub fn drive(
                             match delivery_result {
                                 Ok(delivery) => {
                                     delivered = delivered.saturating_add(1);
+                                    session_undelivered.remove(&target.id);
                                     if let Err(error) = lease.mark_state(&delivery.phase) {
                                         eprintln!(
                                             "drive: cannot persist delivered worktree state: {error}"
@@ -970,9 +1169,10 @@ pub fn drive(
                         }
                     }
                 }
-                if let Some(lease) = worktree {
-                    component_worktrees.insert(component_id, lease);
-                }
+                // The lease is dropped, not retired: the worktree and its
+                // ownership record survive on disk as durable evidence.
+                drop(worktree);
+                let _ = component_id;
                 if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
                     &session_id,
                     sequence,
@@ -1129,25 +1329,27 @@ mod tests {
             max_cost_microusd: 500,
             max_tokens: 700,
             max_duration_ms: 1_000,
+            prd_allowlist: None,
         };
         // Lower values win.
-        let tightened = configured.tightened_by(Some(3), Some(100), Some(250));
+        let tightened = configured.clone().tightened_by(Some(3), Some(100), Some(250));
         assert_eq!(
             tightened,
             DriveWarrant {
                 max_prds: 3,
                 max_cost_microusd: 100,
                 max_tokens: 700,
-                max_duration_ms: 250
+                max_duration_ms: 250,
+                prd_allowlist: None,
             }
         );
         // Higher values are ignored — a flag can never loosen configuration.
         assert_eq!(
-            configured.tightened_by(Some(99), Some(9_999), Some(9_999)),
+            configured.clone().tightened_by(Some(99), Some(9_999), Some(9_999)),
             configured
         );
         // Absent flags leave configuration alone.
-        assert_eq!(configured.tightened_by(None, None, None), configured);
+        assert_eq!(configured.clone().tightened_by(None, None, None), configured);
         // A flag may set a ceiling where configuration had none.
         assert_eq!(
             DriveWarrant::default().tightened_by(Some(5), None, None),
@@ -1165,6 +1367,7 @@ mod tests {
             max_cost_microusd: 100,
             max_tokens: 200,
             max_duration_ms: 1_000,
+            prd_allowlist: None,
         };
         assert_eq!(warrant.exhausted(0, 0, 0, 0), None);
         assert_eq!(
@@ -1255,6 +1458,7 @@ mod tests {
             max_cost_microusd: 0,
             max_tokens: 0,
             max_duration_ms: 60_000,
+            prd_allowlist: None,
         };
         assert_eq!(
             warrant.as_json(),
@@ -1306,6 +1510,7 @@ mod tests {
             max_cost_microusd: 0,
             max_tokens: 0,
             max_duration_ms: 60_000,
+            prd_allowlist: None,
         };
         assert_eq!(component_parallelism(&config, &warrant), 1);
         config.driver.max_parallel_components = 7;
@@ -1315,6 +1520,256 @@ mod tests {
         warrant.max_tokens = 0;
         warrant.max_cost_microusd = 1;
         assert_eq!(component_parallelism(&config, &warrant), 1);
+    }
+
+    fn contract_prd(
+        number: u64,
+        dependencies: &[u64],
+        location: familiar_ai_core::PrdLocation,
+        expected_files: &[&str],
+    ) -> DiscoveredPrd {
+        DiscoveredPrd {
+            id: PrdId::new(number),
+            number,
+            path: familiar_ai_core::RepositoryPath::new(if location
+                == familiar_ai_core::PrdLocation::Archived
+            {
+                format!("docs/prds/done/PRD-{number:03}.md")
+            } else {
+                format!("docs/prds/PRD-{number:03}.md")
+            })
+            .unwrap(),
+            location,
+            title: format!("PRD {number}"),
+            dependencies: dependencies.iter().copied().map(PrdId::new).collect(),
+            metadata: familiar_ai_core::PrdMetadata {
+                contract_version: Some(1),
+                status: Some("ready".into()),
+                expected_files: expected_files.iter().map(|s| s.to_string()).collect(),
+                acceptance_criteria: vec!["x".into()],
+                risk_classes: vec!["scheduling".into()],
+                external_gates: Vec::new(),
+            },
+            content_hash: format!("hash-{number}"),
+        }
+    }
+
+    fn test_repository() -> (tempfile::TempDir, RepositoryIdentity) {
+        let temp = tempfile::tempdir().unwrap();
+        let identity = RepositoryIdentity {
+            worktree: temp.path().to_path_buf(),
+            key: format!("{}/.git", temp.path().display()),
+        };
+        (temp, identity)
+    }
+
+    fn select(
+        repository: &RepositoryIdentity,
+        discovered: &[DiscoveredPrd],
+        db: &mut Database,
+        allowlist: Option<&BTreeSet<PrdId>>,
+        session_undelivered: &BTreeSet<PrdId>,
+        limit: usize,
+    ) -> (Vec<PrdId>, Vec<SelectionDecision>) {
+        let mut decisions = Vec::new();
+        let selected = match select_batch(
+            repository,
+            discovered,
+            db,
+            &BTreeSet::new(),
+            allowlist,
+            session_undelivered,
+            limit,
+            &mut decisions,
+        )
+        .unwrap()
+        {
+            Selection::Eligible(prds) => prds.into_iter().map(|prd| prd.id).collect(),
+            _ => Vec::new(),
+        };
+        (selected, decisions)
+    }
+
+    /// PRD-065 defect-1 regression: the recorded Wave 1 graph — six pending
+    /// PRDs whose dependencies are completed shared ancestors, all one
+    /// weakly connected component — must select all six in one batch under a
+    /// width-six warrant. The pre-065 component scheduler collapsed this to
+    /// width one.
+    #[test]
+    fn wave_one_graph_selects_all_six_ready_prds_at_width_six() {
+        use familiar_ai_core::PrdLocation::{Active, Archived};
+        let (_temp, repository) = test_repository();
+        let discovered = vec![
+            // Completed ancestors, exactly as recorded in docs/prds/done/.
+            contract_prd(19, &[], Archived, &["a/19.rs"]),
+            contract_prd(20, &[19], Archived, &["a/20.rs"]),
+            contract_prd(21, &[], Archived, &["a/21.rs"]),
+            contract_prd(24, &[], Archived, &["a/24.rs"]),
+            contract_prd(26, &[], Archived, &["a/26.rs"]),
+            contract_prd(28, &[24], Archived, &["a/28.rs"]),
+            contract_prd(30, &[], Archived, &["a/30.rs"]),
+            contract_prd(31, &[], Archived, &["a/31.rs"]),
+            contract_prd(33, &[], Archived, &["a/33.rs"]),
+            contract_prd(34, &[], Archived, &["a/34.rs"]),
+            contract_prd(39, &[], Archived, &["a/39.rs"]),
+            contract_prd(42, &[30], Archived, &["a/42.rs"]),
+            contract_prd(43, &[], Archived, &["a/43.rs"]),
+            // Wave 1 as it was pending on 2026-08-30, with its real
+            // dependency edges and disjoint scopes.
+            contract_prd(36, &[19, 26, 30, 31, 33, 39], Active, &["w/36/"]),
+            contract_prd(37, &[21, 24, 33, 34, 39], Active, &["w/37/"]),
+            contract_prd(44, &[39, 43], Active, &["w/44/"]),
+            contract_prd(45, &[28, 42], Active, &["w/45/"]),
+            contract_prd(46, &[43], Active, &["w/46/"]),
+            contract_prd(47, &[31, 43], Active, &["w/47/"]),
+        ];
+        // The whole graph is one weakly connected component — the exact
+        // shape that used to serialize.
+        let components = dependency_components(&discovered);
+        let distinct: BTreeSet<_> = components.values().collect();
+        assert_eq!(distinct.len(), 1, "wave 1 shares one component");
+
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let (selected, decisions) =
+            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        assert_eq!(
+            selected,
+            vec![
+                PrdId::new(36),
+                PrdId::new(37),
+                PrdId::new(44),
+                PrdId::new(45),
+                PrdId::new(46),
+                PrdId::new(47)
+            ],
+            "every ready wave-1 PRD is admitted in one batch"
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| decision.decision == "ready_selected")
+                .count(),
+            6
+        );
+    }
+
+    #[test]
+    fn overlapping_scopes_serialize_with_recorded_reason() {
+        use familiar_ai_core::PrdLocation::Active;
+        let (_temp, repository) = test_repository();
+        let discovered = vec![
+            contract_prd(1, &[], Active, &["src/lib.rs", "src/a/"]),
+            contract_prd(2, &[], Active, &["src/a/deep.rs"]),
+            contract_prd(3, &[], Active, &["docs/other.md"]),
+        ];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let (selected, decisions) =
+            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        assert_eq!(selected, vec![PrdId::new(1), PrdId::new(3)]);
+        let deferred = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(2))
+            .unwrap();
+        assert_eq!(deferred.decision, "deferred_scope_overlap");
+        assert!(deferred.detail.contains("src/a/"), "{}", deferred.detail);
+        assert!(deferred.detail.contains("PRD-1"), "{}", deferred.detail);
+    }
+
+    #[test]
+    fn allowlist_confines_selection_to_the_approved_set() {
+        use familiar_ai_core::PrdLocation::Active;
+        let (_temp, repository) = test_repository();
+        let discovered = vec![
+            contract_prd(1, &[], Active, &["a.rs"]),
+            contract_prd(2, &[], Active, &["b.rs"]),
+        ];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let allowlist: BTreeSet<PrdId> = [PrdId::new(2)].into_iter().collect();
+        let (selected, decisions) = select(
+            &repository,
+            &discovered,
+            &mut db,
+            Some(&allowlist),
+            &BTreeSet::new(),
+            6,
+        );
+        assert_eq!(selected, vec![PrdId::new(2)]);
+        let excluded = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(1))
+            .unwrap();
+        assert_eq!(excluded.decision, "excluded_allowlist");
+    }
+
+    #[test]
+    fn undelivered_session_dependency_defers_dependent() {
+        use familiar_ai_core::PrdLocation::{Active, Archived};
+        let (_temp, repository) = test_repository();
+        let discovered = vec![
+            contract_prd(1, &[], Archived, &["a.rs"]),
+            contract_prd(2, &[1], Active, &["b.rs"]),
+        ];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let undelivered: BTreeSet<PrdId> = [PrdId::new(1)].into_iter().collect();
+        let (selected, decisions) =
+            select(&repository, &discovered, &mut db, None, &undelivered, 6);
+        assert!(selected.is_empty());
+        let deferred = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(2))
+            .unwrap();
+        assert_eq!(deferred.decision, "deferred_dependency_undelivered");
+    }
+
+    #[test]
+    fn width_exhaustion_defers_with_recorded_reason() {
+        use familiar_ai_core::PrdLocation::Active;
+        let (_temp, repository) = test_repository();
+        let discovered = vec![
+            contract_prd(1, &[], Active, &["a.rs"]),
+            contract_prd(2, &[], Active, &["b.rs"]),
+        ];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let (selected, decisions) =
+            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 1);
+        assert_eq!(selected, vec![PrdId::new(1)]);
+        let deferred = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(2))
+            .unwrap();
+        assert_eq!(deferred.decision, "deferred_width");
+    }
+
+    #[test]
+    fn allowlist_only_tightens_and_is_recorded_in_the_warrant_snapshot() {
+        let warrant = DriveWarrant {
+            max_prds: 4,
+            ..DriveWarrant::default()
+        };
+        let narrow: BTreeSet<PrdId> = [PrdId::new(65)].into_iter().collect();
+        let wide: BTreeSet<PrdId> = [PrdId::new(65), PrdId::new(66)].into_iter().collect();
+        // Setting where none exists is allowed; widening is refused.
+        let bound = warrant.clone().with_prd_allowlist(narrow.clone()).unwrap();
+        assert!(bound.clone().with_prd_allowlist(wide.clone()).is_err());
+        // Shrinking is allowed.
+        let rebound = warrant
+            .clone()
+            .with_prd_allowlist(wide)
+            .unwrap()
+            .with_prd_allowlist(narrow)
+            .unwrap();
+        assert_eq!(rebound.prd_allowlist, bound.prd_allowlist);
+        // An empty allowlist is not "no allowlist".
+        assert!(warrant.with_prd_allowlist(BTreeSet::new()).is_err());
+        assert_eq!(
+            bound.as_json(),
+            r#"{"max_prds":4,"max_cost_microusd":0,"max_tokens":0,"max_duration_ms":0,"prd_allowlist":["PRD-65"]}"#
+        );
     }
 
     #[test]

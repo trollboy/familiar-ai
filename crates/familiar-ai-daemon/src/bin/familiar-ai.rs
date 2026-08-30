@@ -62,6 +62,11 @@ enum Command {
         max_parallel_components: Option<usize>,
         #[arg(long)]
         worktree_root: Option<PathBuf>,
+        /// Approved PRD identifier (repeatable, e.g. --prd PRD-065). When
+        /// given, the session may select ONLY these PRDs; selection can never
+        /// escape the recorded set.
+        #[arg(long = "prd")]
+        prd: Vec<String>,
     },
     /// List recent standalone executions.
     History {
@@ -315,6 +320,22 @@ enum BacklogCommand {
         #[arg(long)]
         reason: String,
     },
+    /// Complete one reviewed retained checkpoint in a single transaction,
+    /// binding the approved candidate hash and the resulting commit. Accepts
+    /// an entry left pending (after a release) or in_progress.
+    ApproveAndComplete {
+        prd_path: PathBuf,
+        /// Mandatory explicit human authority in the form human:<identity>.
+        #[arg(long)]
+        actor: String,
+        /// Mandatory non-empty audit reason for the approval.
+        #[arg(long)]
+        reason: String,
+        /// The commit the approved candidate landed as. Defaults to the
+        /// repository's current HEAD.
+        #[arg(long)]
+        commit: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -402,12 +423,14 @@ fn main() -> ExitCode {
             max_duration_ms,
             max_parallel_components,
             worktree_root,
+            prd,
         } => match drive_command(
             max_prds,
             max_cost_microusd,
             max_duration_ms,
             max_parallel_components,
             worktree_root,
+            prd,
         ) {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => fail(error),
@@ -588,7 +611,9 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
     if !dry_run {
         db.run_migrations().map_err(|e| e.to_string())?;
     }
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|e| e.to_string())?;
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| e.to_string())?;
@@ -856,7 +881,7 @@ fn worker_command(command: WorkerCommand) -> Result<(), String> {
             max_prds,
         } => {
             std::env::set_current_dir(&repository).map_err(|error| error.to_string())?;
-            let summary = drive_command(Some(max_prds), None, None, None, None)?;
+            let summary = drive_command(Some(max_prds), None, None, None, None, Vec::new())?;
             report_command(Some(&summary.session_id))?;
             if summary.termination.worker_should_restart() {
                 return Err(format!(
@@ -904,7 +929,9 @@ fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {
     .map_err(|e| format!("cannot acquire mutating orchestrator ownership: {e}"))?;
     let config =
         Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e| e.to_string())?;
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|e| e.to_string())?;
     let policy = repository_config.delivery_policy()?;
     let result = familiar_ai_daemon::delivery::deliver(ownership_record, policy)?;
     println!(
@@ -1121,12 +1148,36 @@ fn handle_attached_review(
 
 /// Composition root for the unattended driver: same agent construction as
 /// `run`, plus a warrant that flags may only tighten.
+/// Parse an approved-PRD flag value: `PRD-65`, `prd-065`, `65`, or any of
+/// those with a single trailing lowercase suffix letter.
+fn parse_prd_flag(value: &str) -> Result<familiar_ai_core::PrdId, String> {
+    let trimmed = value.trim();
+    let body = trimmed
+        .strip_prefix("PRD-")
+        .or_else(|| trimmed.strip_prefix("prd-"))
+        .unwrap_or(trimmed);
+    let (digits, suffix) = match body.strip_suffix(|c: char| c.is_ascii_lowercase()) {
+        Some(prefix) => (prefix, body.chars().last()),
+        None => (body, None),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "invalid --prd value '{value}': expected PRD-<number> with an optional lowercase suffix"
+        ));
+    }
+    let number: u64 = digits
+        .parse()
+        .map_err(|_| format!("invalid --prd value '{value}': number out of range"))?;
+    Ok(familiar_ai_core::PrdId::with_suffix(number, suffix))
+}
+
 fn drive_command(
     max_prds: Option<u64>,
     max_cost_microusd: Option<u64>,
     max_duration_ms: Option<u64>,
     max_parallel_components: Option<usize>,
     worktree_root: Option<PathBuf>,
+    prd_flags: Vec<String>,
 ) -> Result<DriveSummary, String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
     let mut config =
@@ -1144,11 +1195,18 @@ fn drive_command(
     let implementation = build_agent(&implementation_entry);
     let reviewer = build_agent(&reviewer_entry);
     let remediation = build_agent(&resolved_remediation_entry(&config)?);
-    let warrant = DriveWarrant::from_config(&config).tightened_by(
+    let mut warrant = DriveWarrant::from_config(&config).tightened_by(
         max_prds,
         max_cost_microusd,
         max_duration_ms,
     );
+    if !prd_flags.is_empty() {
+        let allowlist = prd_flags
+            .iter()
+            .map(|value| parse_prd_flag(value))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        warrant = warrant.with_prd_allowlist(allowlist)?;
+    }
     let summary = drive(
         &AgentSet {
             implementation: implementation.as_ref(),
@@ -1270,7 +1328,9 @@ fn next() -> Result<(), String> {
     let repository = FilesystemBacklogDiscovery
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|e| e.to_string())?;
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| e.to_string())?;
@@ -1379,7 +1439,9 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
     let repository = FilesystemBacklogDiscovery
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|e| e.to_string())?;
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| e.to_string())?;
@@ -1483,8 +1545,125 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
             &actor,
             &reason,
         )?,
+        BacklogCommand::ApproveAndComplete {
+            prd_path,
+            actor,
+            reason,
+            commit,
+        } => approve_and_complete_backlog(
+            &mut db,
+            &repository,
+            &discovered,
+            &prd_path,
+            &actor,
+            &reason,
+            commit.as_deref(),
+        )?,
     }
     Ok(())
+}
+
+/// PRD-065: complete a reviewed retained checkpoint transactionally, binding
+/// the approved candidate hash and the resulting commit. Errors print only
+/// commands valid for the entry's current persisted state.
+fn approve_and_complete_backlog(
+    db: &mut Database,
+    repository: &familiar_ai_core::RepositoryIdentity,
+    discovered: &[familiar_ai_core::DiscoveredPrd],
+    supplied_path: &std::path::Path,
+    actor: &str,
+    reason: &str,
+    commit: Option<&str>,
+) -> Result<(), String> {
+    validate_recovery_attribution(BacklogRecoveryAction::ApproveAndComplete, actor, reason)
+        .map_err(|e| e.to_string())?;
+    let target =
+        resolve_run_prd(repository, discovered, supplied_path).map_err(|e| e.to_string())?;
+    let checkpoint = familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .get(&repository.key, &target.id.to_string())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "no durable checkpoint exists for {}; approve-and-complete acts only on reviewed checkpoints.\nvalid next commands: familiar-ai run {} (fresh attempt), familiar-ai resume {} (inspect partials)",
+                target.id,
+                target.path,
+                target.id
+            )
+        })?;
+    let commit = match commit {
+        Some(value) => value.to_owned(),
+        None => {
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repository.worktree)
+                .output()
+                .map_err(|e| format!("cannot resolve HEAD: {e}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "cannot resolve HEAD: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+    };
+    SqliteBacklogRepository::new(db.conn_mut())
+        .reconcile_and_snapshot(repository, discovered)
+        .map_err(|e| e.to_string())?;
+    let result = SqliteBacklogRepository::new(db.conn_mut())
+        .approve_and_complete(
+            repository,
+            &target,
+            actor,
+            reason,
+            &checkpoint.diff_hash,
+            &commit,
+        )
+        .map_err(|error| {
+            format!(
+                "{error}\n{}",
+                backlog_next_commands(db, repository, &target)
+            )
+        })?;
+    println!(
+        "backlog approve-and-complete: {} {} -> {} approved_hash={} commit={} actor={} reason={}",
+        result.prd.id,
+        result.prd.path,
+        result.status.as_str(),
+        checkpoint.diff_hash,
+        commit,
+        escape_output(actor.trim()),
+        escape_output(reason.trim())
+    );
+    Ok(())
+}
+
+/// The commands valid for one backlog entry's current persisted state.
+fn backlog_next_commands(
+    db: &mut Database,
+    repository: &familiar_ai_core::RepositoryIdentity,
+    target: &familiar_ai_core::DiscoveredPrd,
+) -> String {
+    let status: Option<String> =
+        familiar_ai_storage::list_backlog_entries(db.conn(), &repository.key, None, None, usize::MAX)
+            .ok()
+            .and_then(|rows| {
+                rows.into_iter()
+                    .find(|row| row.prd_path == target.path.as_str())
+                    .map(|row| row.status)
+            });
+    let id = &target.id;
+    let path = &target.path;
+    match status.as_deref() {
+        Some("completed") => format!("valid next commands: none — {id} is already completed"),
+        Some("blocked") => format!(
+            "valid next commands: familiar-ai backlog release {path} --actor ... --reason ..."
+        ),
+        Some("pending") | Some("in_progress") => format!(
+            "valid next commands: familiar-ai backlog approve-and-complete {path} --actor human:<identity> --reason ... (reviewed checkpoint), familiar-ai resume {id} (continue the partial), familiar-ai run {path} (fresh attempt)"
+        ),
+        _ => format!("valid next commands: familiar-ai run {path} (entry is not tracked yet)"),
+    }
 }
 
 fn recover_backlog(
@@ -1660,6 +1839,42 @@ fn fail(error: impl std::fmt::Display) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prd_flags_parse_canonically_and_reject_garbage() {
+        use familiar_ai_core::PrdId;
+        for value in ["PRD-65", "prd-65", "65", "PRD-065"] {
+            assert_eq!(parse_prd_flag(value).unwrap(), PrdId::new(65), "{value}");
+        }
+        assert_eq!(
+            parse_prd_flag("PRD-65a").unwrap(),
+            PrdId::with_suffix(65, Some('a'))
+        );
+        for value in ["", "PRD-", "sixty-five", "PRD-65A", "65.1", "PRD-65 66"] {
+            assert!(parse_prd_flag(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn drive_accepts_repeatable_prd_allowlist_flags() {
+        let Command::Drive { prd, .. } = Cli::try_parse_from([
+            "familiar-ai",
+            "drive",
+            "--max-prds",
+            "1",
+            "--prd",
+            "PRD-065",
+            "--prd",
+            "PRD-041",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected drive command");
+        };
+        assert_eq!(prd, vec!["PRD-065", "PRD-041"]);
+    }
+
     #[test]
     fn parses_commands() {
         assert!(matches!(

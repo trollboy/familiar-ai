@@ -14,26 +14,29 @@ scope-conformant work.
 [`../wave1_afteraction_report.md`](../wave1_afteraction_report.md) for delivery
 evidence and the orchestration defects observed during execution.
 
-**HARD GATE (2026-08-30): PRD-065 blocks Wave 2.** Wave 1 exposed four
-orchestration defects (after-action defects 1–3 and 7) that make parallel
-execution untrustworthy: the scheduler serializes to width one, the warrant
-cannot confine a session to an approved PRD set, lease worktrees lose
-policy resolution, and reviewed checkpoints cannot complete
-transactionally. PRD-065 (ready-set scheduling and session warrant
-integrity) must be implemented, reviewed, and merged before any Wave 2
-PRD is claimed. No other work runs concurrently with it.
+**GATE SATISFIED (2026-08-30): PRD-065 merged; Wave 2 is unblocked.**
+Wave 1 exposed four orchestration defects (after-action defects 1–3 and 7);
+PRD-065 fixed all four: the scheduler now admits the full ready set
+(dependencies are admission gates, not mutual-exclusion edges; two ready
+PRDs serialize only on overlapping expected-file scopes, with every
+selection/deferral persisted in `driver_selection_decisions`), the session
+warrant accepts a repeatable `--prd` allowlist selection can never escape,
+worktrees resolve repository policy through Git common-directory identity,
+and `backlog approve-and-complete` completes a reviewed checkpoint in one
+transaction binding the approved hash and commit. A width-six regression
+test on the recorded Wave 1 graph pins the fix.
 
-The remaining graph resolves into the waves below. A PRD may start only
-when its dependencies are complete AND it is inside the session's approved
-allowlist — the earlier "wave boundaries are guidance, not barriers"
-language is retracted; it authorized the Wave 1 boundary escape (defect 2).
-Until PRD-065's `--prd` allowlist exists, each drive session must be
-warranted for exactly one wave's PRD set.
+A PRD may start only when its dependencies are complete AND it is inside
+the session's approved allowlist — the earlier "wave boundaries are
+guidance, not barriers" language is retracted; it authorized the Wave 1
+boundary escape (defect 2). Warrant each wave's session with its PRD set:
+`familiar-ai drive --max-prds 4 --prd PRD-041 --prd PRD-048 --prd PRD-049
+--prd PRD-051` for Wave 2.
 
 | Wave | PRDs | Width |
 |------|------|-------|
 | 1 | 036, 037, 044, 045, 046, 047 — **completed 2026-08-30** | 6 |
-| gate | 065 — orchestration reliability, runs alone | 1 |
+| gate | 065 — orchestration reliability — **completed 2026-08-30** | 1 |
 | 2 | 041, 048, 049, 051 | 4 |
 | 3 | 050, 052, 054, 057, 064 | 5 |
 | 4 | 032, 055, 056, 062 | 4 |

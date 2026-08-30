@@ -501,7 +501,9 @@ pub fn resume_implemented_checkpoint(
             checkpoint.phase
         )));
     }
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|e| RunError::Config(e.to_string()))?;
     let discovered = discovery
         .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| RunError::Config(e.to_string()))?;
@@ -641,7 +643,9 @@ pub fn accept_review_risk(
     let repository = discovery
         .resolve(current)
         .map_err(|e| RunError::Config(e.to_string()))?;
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|e| RunError::Config(e.to_string()))?;
     let discovered = discovery
         .discover_with_layout(&repository, &repository_config.layout())
         .map_err(|e| RunError::Config(e.to_string()))?;
@@ -737,7 +741,9 @@ fn execute_tracked_inner(
         Some(route_context) => route_context,
         None => route_context_for_prd(prd_path)?,
     };
-    let repository_config = config.repository(&repository.worktree);
+    let repository_config = config
+        .repository_checked(&repository.worktree)
+        .map_err(|e| RunError::Config(e.to_string()))?;
     let effective = config.effective_execution(&repository.worktree);
     let mut effective_config = config.clone();
     effective_config.review = effective.review;

@@ -306,6 +306,45 @@ impl<'a> DriverRepository<'a> {
         Ok(())
     }
 
+    /// PRD-065: one durable scheduling decision — why a ready PRD was
+    /// selected, deferred, or excluded in this session.
+    pub fn record_selection_decision(
+        &self,
+        session_id: &str,
+        prd_id: &str,
+        decision: &str,
+        detail: &str,
+    ) -> familiar_ai_core::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO driver_selection_decisions(session_id,prd_id,decision,detail,recorded_at) VALUES(?1,?2,?3,?4,?5)",
+                params![session_id, prd_id, decision, detail, Utc::now().to_rfc3339()],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    /// Recorded scheduling decisions for one session, in decision order.
+    pub fn selection_decisions(
+        &self,
+        session_id: &str,
+    ) -> familiar_ai_core::Result<Vec<(String, String, String)>> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT prd_id,decision,detail FROM driver_selection_decisions WHERE session_id=?1 ORDER BY decision_id",
+            )
+            .map_err(db)?;
+        let rows = statement
+            .query_map([session_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        Ok(rows)
+    }
+
     pub fn get_session(&self, session_id: &str) -> familiar_ai_core::Result<Option<DriverSession>> {
         self.conn
             .query_row(

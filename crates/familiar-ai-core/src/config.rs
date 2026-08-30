@@ -1784,6 +1784,24 @@ pub struct EffectiveExecutionConfig {
     pub execution_context_source: ConfigurationSource,
 }
 
+/// The canonical Git common-directory identity of a worktree — the same key
+/// `FilesystemBacklogDiscovery::resolve` computes — or None when the path is
+/// not inside a Git repository (or git is unavailable).
+fn git_common_directory(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let canonical = Path::new(value.trim()).canonicalize().ok()?;
+    Some(canonical.to_str()?.replace('\\', "/"))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionHistoryConfig {
     #[serde(default)]
@@ -2389,27 +2407,78 @@ impl Config {
         Ok(())
     }
 
-    pub fn repository(&self, canonical_worktree: &Path) -> RepositoryConfig {
-        self.repositories
-            .iter()
-            .find_map(|(path, entry)| {
-                Path::new(path)
-                    .canonicalize()
-                    .ok()
-                    .filter(|p| p == canonical_worktree)
-                    .map(|_| entry.clone())
-            })
-            .unwrap_or_default()
+    /// Resolve one repository entry for a worktree. An exact canonical-path
+    /// match wins (a drive session's injected execution-root entry must shadow
+    /// identity resolution); otherwise entries are matched by Git
+    /// common-directory repository identity, so a linked worktree (an isolated
+    /// lease created in a prior process, say) resolves the same policy as the
+    /// main worktree it belongs to without any path-specific configuration
+    /// entry (PRD-065).
+    fn repository_entry(&self, canonical_worktree: &Path) -> Option<&RepositoryConfig> {
+        self.repository_entry_checked(canonical_worktree)
+            .ok()
+            .flatten()
     }
 
-    pub fn effective_execution(&self, canonical_worktree: &Path) -> EffectiveExecutionConfig {
-        let entry = self.repositories.iter().find_map(|(path, entry)| {
+    /// Like `repository_entry`, but conflicting identity matches fail closed
+    /// with a diagnostic naming the entries instead of silently picking one.
+    fn repository_entry_checked(
+        &self,
+        canonical_worktree: &Path,
+    ) -> crate::Result<Option<&RepositoryConfig>> {
+        if let Some(entry) = self.repositories.iter().find_map(|(path, entry)| {
             Path::new(path)
                 .canonicalize()
                 .ok()
                 .filter(|path| path == canonical_worktree)
                 .map(|_| entry)
-        });
+        }) {
+            return Ok(Some(entry));
+        }
+        let Some(identity) = git_common_directory(canonical_worktree) else {
+            return Ok(None);
+        };
+        let matches: Vec<(&String, &RepositoryConfig)> = self
+            .repositories
+            .iter()
+            .filter(|(path, _)| {
+                Path::new(path)
+                    .canonicalize()
+                    .ok()
+                    .and_then(|canonical| git_common_directory(&canonical))
+                    .is_some_and(|candidate| candidate == identity)
+            })
+            .collect();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [(_, entry)] => Ok(Some(entry)),
+            conflicting => Err(FamiliarError::Config(format!(
+                "repository entries {} resolve to the same repository identity {identity}; keep exactly one",
+                conflicting
+                    .iter()
+                    .map(|(path, _)| format!("'{path}'"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ))),
+        }
+    }
+
+    pub fn repository(&self, canonical_worktree: &Path) -> RepositoryConfig {
+        self.repository_entry(canonical_worktree)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// `repository`, with identity conflicts surfaced instead of ignored.
+    pub fn repository_checked(&self, canonical_worktree: &Path) -> crate::Result<RepositoryConfig> {
+        Ok(self
+            .repository_entry_checked(canonical_worktree)?
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub fn effective_execution(&self, canonical_worktree: &Path) -> EffectiveExecutionConfig {
+        let entry = self.repository_entry(canonical_worktree);
         EffectiveExecutionConfig {
             review: entry
                 .and_then(|entry| entry.review.clone())
@@ -2688,6 +2757,87 @@ model = "legacy"
             resolved.layout().profile,
             crate::BacklogProfile::NumberedSlug
         );
+    }
+
+    /// PRD-065 defect-3 regression: a linked worktree resolves the policy of
+    /// the configured main worktree through Git common-directory identity,
+    /// with no path-specific configuration entry for the worktree itself.
+    #[test]
+    fn linked_worktree_resolves_policy_through_repository_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "test@example.invalid"]);
+        git(&main, &["config", "user.name", "Test"]);
+        std::fs::write(main.join("file"), "base").unwrap();
+        git(&main, &["add", "file"]);
+        git(&main, &["commit", "-qm", "base"]);
+        let lease = temp.path().join("lease");
+        git(
+            &main,
+            &["worktree", "add", "-q", lease.to_str().unwrap(), "HEAD"],
+        );
+
+        let mut config = Config::default();
+        config.repositories.insert(
+            main.display().to_string(),
+            RepositoryConfig {
+                profile: "numbered-slug".into(),
+                active_dir: "docs/prd/todo".into(),
+                archived_dir: "docs/prd/done".into(),
+                prd_metadata_policy: "incremental".into(),
+                reference_roots: vec![],
+                ..RepositoryConfig::default()
+            },
+        );
+        // The lease worktree has no entry of its own, yet resolves the main
+        // worktree's policy.
+        let resolved = config
+            .repository_checked(&lease.canonicalize().unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.layout().profile,
+            crate::BacklogProfile::NumberedSlug
+        );
+        // An unrelated repository still resolves the default.
+        let other = temp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        git(&other, &["init", "-q"]);
+        let fallback = config
+            .repository_checked(&other.canonicalize().unwrap())
+            .unwrap();
+        assert_eq!(fallback.layout().profile, crate::BacklogProfile::Canonical);
+        // Two entries naming the same repository identity fail closed with a
+        // diagnostic naming both.
+        config.repositories.insert(
+            lease.display().to_string(),
+            RepositoryConfig::default(),
+        );
+        // The exact-path match shadows identity resolution for the main
+        // worktree itself, so probe from a third worktree of the same repo.
+        let probe = temp.path().join("probe");
+        git(
+            &main,
+            &["worktree", "add", "-q", probe.to_str().unwrap(), "HEAD"],
+        );
+        let error = config
+            .repository_checked(&probe.canonicalize().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same repository identity"), "{error}");
     }
 
     #[test]

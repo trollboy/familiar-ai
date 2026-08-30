@@ -219,6 +219,7 @@ pub enum BacklogRecoveryAction {
     Release,
     ManualCompleteOverride,
     RecordedComplete,
+    ApproveAndComplete,
 }
 
 impl BacklogRecoveryAction {
@@ -227,6 +228,7 @@ impl BacklogRecoveryAction {
             Self::Release => BacklogStatus::Pending,
             Self::ManualCompleteOverride => BacklogStatus::Completed,
             Self::RecordedComplete => BacklogStatus::Completed,
+            Self::ApproveAndComplete => BacklogStatus::Completed,
         }
     }
 
@@ -235,6 +237,7 @@ impl BacklogRecoveryAction {
             Self::Release => "release",
             Self::ManualCompleteOverride => "manual_complete_override",
             Self::RecordedComplete => "recorded_complete",
+            Self::ApproveAndComplete => "approve_and_complete",
         }
     }
 }
@@ -254,7 +257,9 @@ pub fn validate_recovery_attribution(
     }
     if matches!(
         action,
-        BacklogRecoveryAction::ManualCompleteOverride | BacklogRecoveryAction::RecordedComplete
+        BacklogRecoveryAction::ManualCompleteOverride
+            | BacklogRecoveryAction::RecordedComplete
+            | BacklogRecoveryAction::ApproveAndComplete
     ) && !matches!(actor.strip_prefix("human:"), Some(identity) if !identity.trim().is_empty())
     {
         return Err(BacklogStoreError::HumanAuthorityRequired);

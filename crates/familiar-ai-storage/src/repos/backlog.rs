@@ -204,6 +204,138 @@ impl<'a> SqliteBacklogRepository<'a> {
         })
     }
 
+    /// PRD-065: complete a reviewed retained checkpoint in one transaction.
+    /// Binds the approved candidate hash and the resulting commit; accepts an
+    /// entry left `pending` (after a release) or `in_progress` (a retained
+    /// claim). An interruption leaves the entry in exactly its prior state —
+    /// both the backlog transition and the checkpoint transition commit
+    /// together or not at all.
+    #[allow(clippy::too_many_arguments)]
+    pub fn approve_and_complete(
+        &mut self,
+        repository: &RepositoryIdentity,
+        target: &DiscoveredPrd,
+        actor: &str,
+        reason: &str,
+        approved_diff_hash: &str,
+        commit: &str,
+    ) -> Result<BacklogEntry, BacklogStoreError> {
+        let (actor, reason) =
+            validate_recovery_attribution(BacklogRecoveryAction::ApproveAndComplete, actor, reason)?;
+        let commit = commit.trim();
+        if commit.is_empty() {
+            return Err(BacklogStoreError::Storage(
+                "approve-and-complete requires the resulting commit".into(),
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let row: Option<(String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT status,content_hash,missing_since FROM backlog_prds WHERE repository_key=?1 AND prd_path=?2",
+                params![repository.key, target.path.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let (status, hash, missing) =
+            row.ok_or_else(|| BacklogStoreError::NotFound(target.path.clone()))?;
+        if !matches!(status.as_str(), "pending" | "in_progress")
+            || hash != target.content_hash
+            || missing.is_some()
+        {
+            return Err(BacklogStoreError::Conflict {
+                path: target.path.clone(),
+                expected: "pending or in_progress",
+                actual: BacklogStatus::parse(&status)
+                    .map(|value| value.as_str())
+                    .unwrap_or("conflict"),
+            });
+        }
+        let checkpoint: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT checkpoint_id,phase,diff_hash FROM execution_checkpoints WHERE repository_key=?1 AND prd_id=?2",
+                params![repository.key, target.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let (checkpoint_id, phase, diff_hash) = checkpoint.ok_or_else(|| {
+            BacklogStoreError::Storage(format!(
+                "no durable checkpoint exists for {}; approve-and-complete acts only on reviewed checkpoints",
+                target.id
+            ))
+        })?;
+        if phase == "completed" {
+            return Err(BacklogStoreError::Storage(format!(
+                "checkpoint {checkpoint_id} is already completed"
+            )));
+        }
+        if diff_hash != approved_diff_hash {
+            return Err(BacklogStoreError::Storage(format!(
+                "approved candidate hash does not match checkpoint {checkpoint_id}: expected {diff_hash}, got {approved_diff_hash}"
+            )));
+        }
+        let changed = tx
+            .execute(
+                "UPDATE backlog_prds SET status='completed',updated_at=?4 WHERE repository_key=?1 AND prd_path=?2 AND status=?5 AND content_hash=?3 AND missing_since IS NULL",
+                params![repository.key, target.path.as_str(), target.content_hash, now, status],
+            )
+            .map_err(storage)?;
+        if changed != 1 {
+            return Err(BacklogStoreError::Conflict {
+                path: target.path.clone(),
+                expected: "pending or in_progress",
+                actual: "conflict",
+            });
+        }
+        tx.execute(
+            "INSERT INTO backlog_status_events(repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(?1,?2,?3,'completed',?4,?5)",
+            params![repository.key, target.path.as_str(), status, actor, now],
+        )
+        .map_err(storage)?;
+        let event_id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(?1,?2,?3)",
+            params![
+                event_id,
+                BacklogRecoveryAction::ApproveAndComplete.as_str(),
+                reason
+            ],
+        )
+        .map_err(storage)?;
+        let checkpoint_changed = tx
+            .execute(
+                "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2 AND phase=?3",
+                params![now, checkpoint_id, phase],
+            )
+            .map_err(storage)?;
+        if checkpoint_changed != 1 {
+            return Err(BacklogStoreError::Storage(format!(
+                "checkpoint {checkpoint_id} changed during approve-and-complete"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
+            params![
+                format!("{checkpoint_id}:approved"),
+                checkpoint_id,
+                phase,
+                format!("approve_and_complete actor={actor} approved_hash={approved_diff_hash} commit={commit}"),
+                now
+            ],
+        )
+        .map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(BacklogEntry {
+            prd: target.clone(),
+            status: BacklogStatus::Completed,
+        })
+    }
+
     pub fn claim_run(
         &mut self,
         repository: &RepositoryIdentity,
@@ -1259,6 +1391,161 @@ mod tests {
             metadata: familiar_ai_core::PrdMetadata::default(),
             content_hash: "def".into(),
         }
+    }
+
+    fn seed_checkpoint(db: &crate::Database, prd_id: &str, diff_hash: &str) {
+        crate::CheckpointRepository::new(db.conn())
+            .put(&crate::ExecutionCheckpoint {
+                checkpoint_id: format!("checkpoint-{prd_id}"),
+                repository_key: repo().key,
+                prd_id: prd_id.into(),
+                prd_path: format!("docs/prds/{prd_id}.md"),
+                execution_id: Some("exec".into()),
+                phase: "implemented_pending_review".into(),
+                base_revision: "base".into(),
+                worktree_path: "/tmp/worktree".into(),
+                branch_name: Some("familiar/session/prd".into()),
+                diff_hash: diff_hash.into(),
+                changed_files_json: "[]".into(),
+                agent_identity: "agent".into(),
+                usage_json: "{}".into(),
+                test_evidence_json: "{}".into(),
+                invalid_reason: None,
+            })
+            .unwrap();
+    }
+
+    /// PRD-065 defect-7 regression: one transactional operation completes a
+    /// reviewed retained checkpoint, binding the approved candidate hash and
+    /// commit, from either the post-release `pending` state or a retained
+    /// `in_progress` claim — the states that previously composed into a dead
+    /// end (`release` -> pending, `complete` demands in_progress).
+    #[test]
+    fn approve_and_complete_binds_checkpoint_and_completes_atomically() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        seed_checkpoint(&db, "PRD-9", "sha256:approved");
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+
+        // A wrong candidate hash is refused and nothing changes.
+        let mismatch = storage
+            .approve_and_complete(
+                &repo(),
+                &prd(),
+                "human:trollboy",
+                "reviewed and merged by hand",
+                "sha256:other",
+                "abc123",
+            )
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("does not match"));
+
+        // An empty commit is refused.
+        assert!(storage
+            .approve_and_complete(
+                &repo(),
+                &prd(),
+                "human:trollboy",
+                "reviewed and merged by hand",
+                "sha256:approved",
+                "  ",
+            )
+            .is_err());
+
+        // Machine actors are refused: this is a human authority operation.
+        assert!(storage
+            .approve_and_complete(
+                &repo(),
+                &prd(),
+                "system:familiar-ai-run:1",
+                "reviewed",
+                "sha256:approved",
+                "abc123",
+            )
+            .is_err());
+
+        let completed = storage
+            .approve_and_complete(
+                &repo(),
+                &prd(),
+                "human:trollboy",
+                "reviewed and merged by hand",
+                "sha256:approved",
+                "abc123",
+            )
+            .unwrap();
+        assert_eq!(completed.status, BacklogStatus::Completed);
+        let (status,): (String,) = storage
+            .connection
+            .query_row(
+                "SELECT status FROM backlog_prds WHERE prd_path='docs/prds/PRD-009.md'",
+                [],
+                |row| Ok((row.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        let (phase,): (String,) = storage
+            .connection
+            .query_row(
+                "SELECT phase FROM execution_checkpoints WHERE prd_id='PRD-9'",
+                [],
+                |row| Ok((row.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(phase, "completed");
+        let (action, detail): (String, String) = storage
+            .connection
+            .query_row(
+                "SELECT e.action, c.detail FROM backlog_recovery_events e, execution_checkpoint_events c WHERE c.event_type='phase_transition' ORDER BY c.recorded_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(action, "approve_and_complete");
+        assert!(detail.contains("approved_hash=sha256:approved"), "{detail}");
+        assert!(detail.contains("commit=abc123"), "{detail}");
+
+        // Idempotence boundary: a completed entry cannot be approved again.
+        assert!(storage
+            .approve_and_complete(
+                &repo(),
+                &prd(),
+                "human:trollboy",
+                "again",
+                "sha256:approved",
+                "abc123",
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn approve_and_complete_requires_a_durable_checkpoint() {
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+        let missing = storage
+            .approve_and_complete(
+                &repo(),
+                &prd(),
+                "human:trollboy",
+                "reviewed",
+                "sha256:any",
+                "abc123",
+            )
+            .unwrap_err();
+        assert!(missing.to_string().contains("no durable checkpoint"));
+        // Nothing changed: the entry is still pending.
+        let (status,): (String,) = storage
+            .connection
+            .query_row(
+                "SELECT status FROM backlog_prds WHERE prd_path='docs/prds/PRD-009.md'",
+                [],
+                |row| Ok((row.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[test]
