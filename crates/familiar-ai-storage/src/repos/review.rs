@@ -201,6 +201,15 @@ impl ReviewStore for ReviewRepository<'_> {
         {
             tx.execute("INSERT OR REPLACE INTO review_stage_executions(cycle_id,stage_id,stage_kind,observation_json) VALUES(?1,?2,?3,?4)",params![cycle.cycle_id,stage.stage_id,enum_json(&stage.kind)?,serde_json::to_string(stage).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
         }
+        // The evidence table is the CURRENT verification history of the
+        // cycle; a replayed cycle supersedes earlier rounds' rows entirely
+        // (stale higher-index phases otherwise wedge the completion
+        // completeness check forever, exactly like review_findings).
+        tx.execute(
+            "DELETE FROM review_verification_evidence WHERE cycle_id=?1",
+            params![cycle.cycle_id],
+        )
+        .map_err(|e| e.to_string())?;
         for (index, e) in cycle.verification_history.iter().enumerate() {
             let phase = format!("attempt-{index}");
             tx.execute("INSERT OR REPLACE INTO review_stage_executions(cycle_id,stage_id,stage_kind,observation_json) VALUES(?1,?2,'verification',?3)",params![cycle.cycle_id,format!("{phase}-{}",e.check_id),serde_json::to_string(e).map_err(|error|error.to_string())?]).map_err(|error|error.to_string())?;
