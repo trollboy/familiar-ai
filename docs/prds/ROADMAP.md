@@ -37,7 +37,8 @@ structured layout contract.
 - PRD-041 — verification-failure escalation. **Approved 2026-08-29.**
 - PRD-032 — model probation and empirical routing. Sequenced after PRD-041/044/045:
   its empirical scores require the reconciled registry routing and persisted
-  risk inputs those PRDs create.
+  risk inputs those PRDs create. Its cost-per-accepted-PRD scores read the
+  PRD-051 usage ledger (today 11 of 15 executions have unknown cost).
 - PRD-040 — superseded by PRD-042–045 (owner-approved decomposition, 2026-08-29);
   retained as the design record.
 
@@ -58,6 +59,36 @@ structured layout contract.
 - PRD-049 — shareable project configuration: checked-in familiar.toml
   under declare-and-bind with an approved-snapshot authority gate.
 - PRD-050 — cloud deploy targets (AWS/GCP/Azure/DO) as replaceable CLIs.
+
+## Usage and cost accounting track (drafted 2026-08-30, awaiting owner approval)
+
+A dependency-ordered decomposition of provider usage, cost ingestion,
+billing-source discovery, and reconciliation. Kept as three bounded PRDs
+because each has a distinct risk surface and delivery boundary: a
+persistence/ledger layer, the only network-facing collector (admin-credential
+security), and deterministic reconciliation plus the read surface.
+
+- PRD-051 — billing modes and the usage observation ledger: distinct
+  uncached/cache-read/cache-write/output categories, per-model observations,
+  retained raw terminal evidence, versioned price schedules, closed cost
+  provenance, subscription declarations. Depends on PRD-024/029/039/044.
+- PRD-052 — authoritative Anthropic organization cost collection:
+  `kind = "billing"` provider sources composing with PRD-047
+  (probe-before-persist via `/v1/organizations/me`, BYO-Auth, decision rows),
+  paginated UTC daily cost-report windows with exact string-decimal money,
+  independent multi-organization cursors, duplicate-binding rejection,
+  fail-closed individual-account and external-cloud modes. Depends on
+  PRD-047/051.
+- PRD-053 — cost reconciliation and attributed reporting: append-only
+  reconciliation with explicit unattributed/pending/mismatch states,
+  per-component warrant reservations, uncached-token/cost warrant
+  denominations, authority-labeled cost queries on the PRD-035 surfaces.
+  Depends on PRD-035/051/052.
+
+Ledger defect ownership: PRD-053 owns B1 and, with PRD-051, B8; PRD-051
+enables but does not fix B5, B6, and B13, whose stop-reason,
+review-checkpoint, and finalize-retry fixes remain execution/recovery work.
+PRD-051 supplies the trustworthy cost observations PRD-032 requires.
 
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to
@@ -81,6 +112,10 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
+- PRDs 051–053 were drafted 2026-08-30 by an autonomous specification run
+  as `status: draft`; owner approval flips them to `ready`. The provisional
+  PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
+  document's own superseded scheme, not the canonical sequence.
 
 No specification is deleted merely because it is old. A future deletion must
 name the duplicate or superseding PRD and preserve the decision in Git.
