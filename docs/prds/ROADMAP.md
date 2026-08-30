@@ -124,9 +124,11 @@ changing semantics.
   acceptance never requires PRD-055) plus the
   period/observed/ingested time envelope and discrete-never-cumulative
   facts; PRD-055 implements full registry resolution behind that
-  boundary. Depends on PRD-051 only — the full local surface (project
+  boundary. Depends on PRD-051/064 — both local-first: the full local
+  surface (project
   registry, local-execution attribution, usage/estimated-cost/token
-  series, sparse/dense buckets, drill-down) lands from ledger
+  series, sparse/dense buckets, drill-down, reserved-spend and
+  remaining-budget views over PRD-064 states) lands from ledger
   observations with no provider collector; authoritative and
   reconciliation dimensions are carried generically and gain rows
   when PRD-053 lands. Boundary: PRD-053 adds reconciliation facts and
@@ -141,8 +143,14 @@ changing semantics.
   explicit overrun, conservative unknown-consumption settlement) over
   typed capacities — nanoUSD, uncached tokens, total tokens,
   accelerator/system memory, inference and loading slots, exclusive
-  runtime claims. Consumed by PRD-053 (monetary warrants), PRD-056
-  (ceilings), and PRD-063 (hardware). Depends on PRD-024/039/051.
+  runtime claims. Recovery is governed by its own provider-neutral
+  ReservationOwnerIdentity/owner-liveness contract (live, provably
+  dead, or ambiguous — only provably dead releases); consumers supply
+  liveness evidence. Consumed by PRD-053 (monetary warrants), PRD-056
+  (ceilings, and the daemon/worker liveness evidence supplier), and
+  PRD-063 (hardware). Depends on PRD-024/039/051 — no PRD-056
+  dependency; the local-first order is 051 → 064 → 055 → 053, with
+  PRD-052 independent after 051.
 
 Ledger defect ownership: PRD-064 owns B1 and the mechanism half of B8
 (PRD-051 owns B8's data half); PRD-051
