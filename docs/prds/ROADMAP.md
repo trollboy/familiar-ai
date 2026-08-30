@@ -148,6 +148,19 @@ PRD-051 supplies the trustworthy cost observations PRD-032 requires.
   Depends on PRD-031/044/047/051; PRD-032 now scores spec identities.
   Eventual wording alignments identified in PRD-031/043/044/047/
   051/053/054/055/056.
+- PRD-058 — Familiar-owned raw-model agent runtime: the deterministic
+  conversation and tool-execution loop that makes PRD-057's raw
+  runtimes (hosted Anthropic/OpenAI/xAI APIs, local
+  Ollama/llama.cpp/MLX/vLLM) real workers — canonical tool
+  capabilities projected to MCP/native/local encodings (MCP is a
+  projection, not the domain model), validate→authorize→journaled
+  execution with side-effect classes and crash-safe resume, PRD-013
+  scope-bounded writes, sandboxed policy-gated commands, closed honest
+  stop reasons, PRD-029 stable-prefix caching, PRD-051 sanitized usage
+  envelopes, escalation only through pending human gates. Phase 1
+  ships the smallest viable raw worker: an independent
+  reviewer/narrow-task role with read-only tools and structured
+  output. Depends on PRD-013/029/051/056/057.
 
 ## Control plane track (drafted 2026-08-30, awaiting owner approval)
 
@@ -187,7 +200,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–057 were drafted 2026-08-30 by autonomous specification runs
+- PRDs 051–058 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
