@@ -30,6 +30,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage provider endpoints and enabled models without handling credentials.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Validate prerequisites without claiming a PRD or invoking a model.
     Preflight,
     /// Select the next eligible repository PRD without executing it.
@@ -104,6 +109,71 @@ enum Command {
         #[command(subcommand)]
         command: StewardshipCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommand,
+    },
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
+    /// Show durable configuration mutation decisions.
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommand {
+    Add {
+        name: String,
+        #[arg(long, default_value = "inference")]
+        kind: String,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        auth: Option<String>,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    Remove {
+        name: String,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    Verify {
+        name: String,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelCommand {
+    Enable {
+        model: String,
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        capabilities: Vec<String>,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    Disable {
+        model: String,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -290,6 +360,10 @@ enum BootstrapCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Config { command } => match config_command(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Preflight => match preflight_command() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
@@ -367,6 +441,47 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         },
     }
+}
+
+fn config_command(command: ConfigCommand) -> Result<(), String> {
+    use familiar_ai_daemon::config_cli::{execute, ConfigAction};
+    let action = match command {
+        ConfigCommand::Provider { command } => match command {
+            ProviderCommand::Add {
+                name,
+                kind,
+                host,
+                auth,
+                actor,
+            } => ConfigAction::ProviderAdd {
+                name,
+                kind,
+                host,
+                auth,
+                actor,
+            },
+            ProviderCommand::Remove { name, actor } => ConfigAction::ProviderRemove { name, actor },
+            ProviderCommand::Verify { name, actor } => ConfigAction::ProviderVerify { name, actor },
+            ProviderCommand::List { refresh, actor } => {
+                ConfigAction::ProviderList { refresh, actor }
+            }
+        },
+        ConfigCommand::Model { command } => match command {
+            ModelCommand::Enable {
+                model,
+                capabilities,
+                actor,
+            } => ConfigAction::ModelEnable {
+                model,
+                capabilities,
+                actor,
+            },
+            ModelCommand::Disable { model, actor } => ConfigAction::ModelDisable { model, actor },
+            ModelCommand::List => ConfigAction::ModelList,
+        },
+        ConfigCommand::History { limit } => ConfigAction::History { limit },
+    };
+    execute(action)
 }
 
 fn onboard(command: OnboardCommand) -> Result<(), String> {

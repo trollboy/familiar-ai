@@ -1,3 +1,4 @@
+pub mod config_cli;
 pub mod delivery;
 pub mod drive;
 pub mod launchd;

@@ -10,6 +10,7 @@ pub use repos::backlog::{
 };
 pub use repos::bootstrap::SqliteBootstrapRepository;
 pub use repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
+pub use repos::config_decision::{ConfigDecision, ConfigDecisionRepository};
 pub use repos::decision::DecisionRepository;
 pub use repos::delivery::{
     DeliveryAuthorityDecision, DeliveryDecisionRow, DeliveryEffect, DeliveryRepository,

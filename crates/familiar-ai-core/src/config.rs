@@ -15,6 +15,10 @@ pub struct Config {
     pub repositories_dir: Option<PathBuf>,
     #[serde(default)]
     pub repositories: BTreeMap<String, RepositoryConfig>,
+    /// Machine-global inference endpoints. Authentication values never cross
+    /// this boundary; `auth` only describes an operator-managed prerequisite.
+    #[serde(default)]
+    pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
@@ -60,6 +64,124 @@ pub struct Config {
     pub preflight: PreflightConfig,
     #[serde(default)]
     pub delivery: DeliveryConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    pub kind: InferenceProviderKind,
+    pub host: String,
+    pub auth: AuthDescriptor,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InferenceProviderKind {
+    Inference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "String", into = "String")]
+pub enum AuthDescriptor {
+    None,
+    CliLogin(String),
+    Env(String),
+    SshAgent,
+}
+
+impl TryFrom<String> for AuthDescriptor {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let value = value.trim();
+        if value == "none" {
+            Ok(Self::None)
+        } else if value == "ssh-agent" {
+            Ok(Self::SshAgent)
+        } else if let Some(command) = value.strip_prefix("cli-login: ") {
+            validate_identifier(command, "auth descriptor")?;
+            Ok(Self::CliLogin(command.to_owned()))
+        } else if let Some(name) = value.strip_prefix("env: ") {
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            {
+                Err(format!("invalid auth descriptor '{value}'"))
+            } else {
+                Ok(Self::Env(name.to_owned()))
+            }
+        } else {
+            Err(format!("invalid auth descriptor '{value}'"))
+        }
+    }
+}
+
+impl From<AuthDescriptor> for String {
+    fn from(value: AuthDescriptor) -> Self {
+        match value {
+            AuthDescriptor::None => "none".into(),
+            AuthDescriptor::CliLogin(command) => format!("cli-login: {command}"),
+            AuthDescriptor::Env(name) => format!("env: {name}"),
+            AuthDescriptor::SshAgent => "ssh-agent".into(),
+        }
+    }
+}
+
+fn validate_identifier(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        Err(format!("invalid {field} '{value}'"))
+    } else {
+        Ok(())
+    }
+}
+
+impl ProviderConfig {
+    pub fn validate(&self, name: &str) -> Result<(), String> {
+        validate_identifier(name, "provider name")?;
+        validate_host(&self.host)?;
+        for model in &self.models {
+            validate_model_identifier(model)?;
+        }
+        if let Some(value) = &self.verified_at {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| format!("invalid verified_at '{value}'"))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_model_identifier(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        Err(format!("invalid model '{value}'"))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_host(value: &str) -> Result<(), String> {
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return Err(format!("malformed host '{value}'"));
+    };
+    if host.is_empty()
+        || host.contains(['/', '@', ' '])
+        || port.parse::<u16>().ok().filter(|port| *port > 0).is_none()
+    {
+        return Err(format!("malformed host '{value}'"));
+    }
+    Ok(())
 }
 
 /// Portable user-supervisor settings. The worker deliberately inherits only
@@ -2354,6 +2476,12 @@ impl Config {
         }
         Ok(())
     }
+    fn validate_providers(&self) -> crate::Result<()> {
+        for (name, provider) in &self.providers {
+            provider.validate(name).map_err(FamiliarError::Config)?;
+        }
+        Ok(())
+    }
     pub fn load(config_path: Option<&Path>) -> crate::Result<Self> {
         reject_stale_env()?;
         let mut figment = Figment::from(Serialized::defaults(Config::default()));
@@ -2421,6 +2549,7 @@ impl Config {
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
+        config.validate_providers()?;
         config.validate_execution()?;
         config.validate_preflight()?;
         config.delivery.validate().map_err(FamiliarError::Config)?;
@@ -2448,6 +2577,7 @@ impl Config {
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
         config.validate_repositories()?;
+        config.validate_providers()?;
         config.validate_execution()?;
         config.validate_preflight()?;
         config.delivery.validate().map_err(FamiliarError::Config)?;
@@ -3372,5 +3502,26 @@ output_microusd_per_million = 300
             .unwrap_err()
             .to_string()
             .contains("defined more than once"));
+    }
+
+    #[test]
+    fn provider_validation_names_unknown_kind_and_malformed_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.test]\nkind = \"billing\"\nhost = \"localhost:1\"\nauth = \"none\"\n",
+        )
+        .unwrap();
+        let error = Config::load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("billing"), "{error}");
+
+        std::fs::write(
+            &path,
+            "[providers.test]\nkind = \"inference\"\nhost = \"https://bad/path\"\nauth = \"none\"\n",
+        )
+        .unwrap();
+        let error = Config::load(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("https://bad/path"), "{error}");
     }
 }
