@@ -40,7 +40,7 @@ structured layout contract.
 - PRD-046 — dogfooding bug ledger. **Completed 2026-08-30** with every
   observed defect fixed, transferred to its owning PRD, or explicitly closed.
 - PRD-044 — per-PRD worker selection; retires `model_routes`. **Completed 2026-08-30.**
-- PRD-045 — declared-risk review tiering. **Approved 2026-08-29.**
+- PRD-045 — declared-risk review tiering. **Completed 2026-08-30.**
 - PRD-041 — verification-failure escalation. **Approved 2026-08-29.**
 - PRD-032 — model probation and empirical routing. Sequenced after PRD-041/044/045:
   its empirical scores require the reconciled registry routing and persisted
