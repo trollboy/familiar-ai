@@ -168,13 +168,16 @@ PRD-051 supplies the trustworthy cost observations PRD-032 requires.
   Responses API (function-call items, cached-input and
   reasoning-output categories, resolved-model identity, Familiar-owned
   conversation state, reconciles PRD-054), and xAI Grok (own provider
-  semantics over PRD-060's verified transport where wire-compatible;
-  whole-chunk streaming tool calls recorded as a capability
+  semantics; may reuse a neutral internal Responses-compatible codec —
+  below provider semantics, carrying no OpenAI assumptions, needing no
+  enabled OpenAI adapter — where wire compatibility is proven at
+  implementation time; whole-chunk streaming tool calls recorded as a capability
   difference; usage fields and reasoning controls unknown until
   verified; no official admin billing API found — authoritative xAI
   spend explicitly unsupported, local-estimate only). No shared
   fourth adapter PRD: PRD-058 already owns the provider-neutral
-  contract. Each depends on PRD-057/058; PRD-061 also on PRD-060.
+  contract. Each depends on PRD-057/058 only; the three adapters
+  implement, test, enable, and disable independently.
   Provider details verified 2026-08-30 with re-verification required
   at implementation.
 
