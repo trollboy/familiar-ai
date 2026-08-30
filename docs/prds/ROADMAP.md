@@ -47,7 +47,7 @@ structured layout contract.
 - PRD-035 — execution-era API/MCP/dashboard state surface. **Completed 2026-08-30** —
   first fully autonomous finding→remediation→clean-review→completion cycle.
 
-## Provider and delivery track (drafted 2026-08-30, awaiting approval)
+## Provider and delivery track (approved 2026-08-30)
 
 - PRD-047 — provider/model configuration CLI: kind-tagged endpoints,
   BYO-Auth diagnostics, probe-before-persist, comment-preserving edits,
