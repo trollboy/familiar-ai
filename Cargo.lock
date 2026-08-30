@@ -660,6 +660,7 @@ dependencies = [
  "nix",
  "predicates",
  "ring",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

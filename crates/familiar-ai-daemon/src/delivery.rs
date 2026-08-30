@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use familiar_ai_core::{DeliveryConfig, DeliveryMode};
+use familiar_ai_core::{Config, DeliveryConfig, DeliveryMode, EndpointProviderKind};
+use familiar_ai_storage::DeliveryRepository;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use wait_timeout::ChildExt;
 
@@ -33,7 +35,7 @@ pub struct ProcessRunner {
 }
 
 impl ProcessRunner {
-    fn new(timeout_ms: u64) -> Self {
+    pub fn new(timeout_ms: u64) -> Self {
         Self {
             timeout: Duration::from_millis(timeout_ms),
         }
@@ -325,6 +327,240 @@ pub fn deliver_with(
     Ok(journal)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetDeliveryResult {
+    pub role: String,
+    pub target: String,
+    pub revision: String,
+    pub smoke_passed: bool,
+}
+
+/// Execute one repository-bound deploy target. SSH uses only the ambient
+/// agent and OpenSSH configuration: no identity file or credential value is
+/// accepted by this boundary.
+#[allow(clippy::too_many_arguments)]
+pub fn deliver_to_with(
+    config: &Config,
+    policy: &DeliveryConfig,
+    role: &str,
+    repository_key: &str,
+    session_id: &str,
+    prd_id: &str,
+    revision: &str,
+    external_gates: &[String],
+    conn: &Connection,
+    directory: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<TargetDeliveryResult, String> {
+    let target_name = policy
+        .targets
+        .get(role)
+        .ok_or_else(|| format!("delivery role '{role}' has no bound deploy target"))?;
+    let target = config.providers.get(target_name).ok_or_else(|| {
+        format!("delivery role '{role}' references unknown provider '{target_name}'")
+    })?;
+    if target.kind != EndpointProviderKind::DeployTarget {
+        return Err(format!("provider '{target_name}' is not a deploy-target"));
+    }
+    if role.eq_ignore_ascii_case("production") || role.eq_ignore_ascii_case("prod") {
+        if policy.mode != DeliveryMode::ReviewedPrManual {
+            return Err("production target requires manual authority; it is unreachable from PoC or automatic mode".into());
+        }
+    } else if policy.mode == DeliveryMode::ReviewedPrManual {
+        return Err("default reviewed-PR mode stops before target delivery; explicit PoC or automatic authority is required".into());
+    }
+    if policy.mode == DeliveryMode::PocSelfApproval {
+        let warrant = policy
+            .poc_warrant
+            .as_ref()
+            .ok_or("PoC self-approval warrant is missing")?;
+        let expiry = chrono::DateTime::parse_from_rfc3339(&warrant.expires_at)
+            .map_err(|_| "PoC self-approval warrant expiry is invalid")?;
+        if expiry <= chrono::Utc::now() {
+            return Err("PoC self-approval warrant has expired".into());
+        }
+    }
+    let repo = DeliveryRepository::new(conn);
+    for gate in external_gates {
+        let evidence = repo
+            .resolve_internal_gate(repository_key, gate)
+            .map_err(|e| e.to_string())?;
+        if !evidence.is_some_and(|e| e.passed) {
+            return Err(format!(
+                "internal external_gate '{gate}' is unresolved or failing"
+            ));
+        }
+    }
+    let recipe = target
+        .recipe
+        .as_ref()
+        .ok_or("deploy-target recipe is missing")?;
+    let preflight = vec![
+        "ssh".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        target.host.clone(),
+        "true".into(),
+    ];
+    run_effect(
+        &repo,
+        runner,
+        directory,
+        repository_key,
+        session_id,
+        prd_id,
+        role,
+        target_name,
+        revision,
+        "ssh_preflight",
+        &preflight,
+        false,
+    )?;
+    for (kind, remote) in [
+        ("sync", &recipe.sync_argv),
+        ("restart", &recipe.restart_argv),
+    ] {
+        let argv = ssh_argv(&target.host, remote);
+        run_effect(
+            &repo,
+            runner,
+            directory,
+            repository_key,
+            session_id,
+            prd_id,
+            role,
+            target_name,
+            revision,
+            kind,
+            &argv,
+            false,
+        )?;
+    }
+    let smoke = ssh_argv(&target.host, &recipe.smoke_argv);
+    run_effect(
+        &repo,
+        runner,
+        directory,
+        repository_key,
+        session_id,
+        prd_id,
+        role,
+        target_name,
+        revision,
+        "smoke",
+        &smoke,
+        true,
+    )?;
+    Ok(TargetDeliveryResult {
+        role: role.into(),
+        target: target_name.clone(),
+        revision: revision.into(),
+        smoke_passed: true,
+    })
+}
+
+fn ssh_argv(host: &str, remote: &[String]) -> Vec<String> {
+    let command = remote
+        .iter()
+        .map(|value| shell_quote(value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![
+        "ssh".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        host.into(),
+        command,
+    ]
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_effect(
+    repo: &DeliveryRepository<'_>,
+    runner: &dyn CommandRunner,
+    directory: &Path,
+    repository_key: &str,
+    session_id: &str,
+    prd_id: &str,
+    role: &str,
+    target: &str,
+    revision: &str,
+    kind: &str,
+    argv: &[String],
+    retain_output: bool,
+) -> Result<(), String> {
+    let key = format!("{session_id}:{prd_id}:{role}:{target}:{revision}:{kind}");
+    let effect_id = format!("effect-{}", hex_digest(key.as_bytes()));
+    let existing = repo
+        .begin_effect(&effect_id, repository_key, session_id, prd_id, kind, &key)
+        .map_err(|e| e.to_string())?;
+    if existing.status == "succeeded" {
+        return Ok(());
+    }
+    if existing.status == "failed" {
+        return Err(existing.detail.unwrap_or_else(|| {
+            "delivery previously stopped; operator intervention required".into()
+        }));
+    }
+    let output = runner.run(directory, argv);
+    match output {
+        Ok(output) => {
+            let mut retained = output.stdout.clone();
+            retained.extend_from_slice(&output.stderr);
+            let detail = if output.status.success() {
+                None
+            } else {
+                Some(familiar_ai_agent::redact_sensitive(format!("{kind} failed; restore SSH agent authentication/reachability, correct the target, then start a new delivery session: {}", String::from_utf8_lossy(&output.stderr).trim())))
+            };
+            if retain_output {
+                repo.finish_evidence(
+                    &key,
+                    output.status.success(),
+                    target,
+                    revision,
+                    &retained,
+                    detail.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+                // Role is the stable environment identity used by gate names.
+                repo.finish_effect(&key, output.status.success(), Some(role), detail.as_deref())
+                    .map_err(|e| e.to_string())?;
+            } else {
+                repo.finish_effect(&key, output.status.success(), Some(role), detail.as_deref())
+                    .map_err(|e| e.to_string())?;
+            }
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(detail.unwrap())
+            }
+        }
+        Err(error) => {
+            let detail = familiar_ai_agent::redact_sensitive(format!("{kind} could not run; restore SSH agent authentication/reachability, verify ~/.ssh/config, then start a new delivery session: {error}"));
+            repo.finish_effect(&key, false, Some(role), Some(&detail))
+                .map_err(|e| e.to_string())?;
+            Err(detail)
+        }
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    use ring::digest::{digest, SHA256};
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn reject_production_commands(policy: &DeliveryConfig) -> Result<(), String> {
     for arg in policy
         .deploy_argv
@@ -441,6 +677,8 @@ fn persist(path: &Path, journal: &DeliveryJournal) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use familiar_ai_core::config::{AuthDescriptor, ProviderConfig};
+    use familiar_ai_core::{DeployRecipeConfig, EndpointProviderKind};
     use std::os::unix::process::ExitStatusExt;
     use std::sync::Mutex;
 
@@ -681,5 +919,134 @@ mod tests {
             .run(temp.path(), &["/bin/sleep".into(), "5".into()])
             .unwrap_err();
         assert!(error.contains("exceeded delivery command timeout"));
+    }
+
+    fn target_fixture(
+        mode: DeliveryMode,
+    ) -> (Config, DeliveryConfig, familiar_ai_storage::Database) {
+        let mut config = Config::default();
+        config.providers.insert(
+            "box".into(),
+            ProviderConfig {
+                kind: EndpointProviderKind::DeployTarget,
+                host: "box.example".into(),
+                auth: AuthDescriptor::SshAgent,
+                models: vec![],
+                verified_at: Some("2026-01-01T00:00:00Z".into()),
+                capabilities: vec!["linux".into()],
+                recipe: Some(DeployRecipeConfig {
+                    sync_argv: vec!["sync".into()],
+                    restart_argv: vec!["restart".into()],
+                    smoke_argv: vec!["smoke".into()],
+                }),
+            },
+        );
+        let mut policy = DeliveryConfig {
+            mode,
+            ..DeliveryConfig::default()
+        };
+        policy.targets.insert("staging".into(), "box".into());
+        let db = familiar_ai_storage::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        (config, policy, db)
+    }
+
+    #[test]
+    fn target_recipe_records_all_effects_and_retains_smoke_identity_and_output() {
+        let (config, policy, db) = target_fixture(DeliveryMode::ReviewGatedAutomatic);
+        let runner = FakeRunner {
+            calls: Mutex::new(vec![]),
+            fail_deploy: false,
+            fail_smoke: false,
+            staged: "",
+        };
+        let result = deliver_to_with(
+            &config,
+            &policy,
+            "staging",
+            "repo",
+            "session",
+            "PRD-48",
+            "abc123",
+            &[],
+            db.conn(),
+            Path::new("."),
+            &runner,
+        )
+        .unwrap();
+        assert!(result.smoke_passed);
+        assert_eq!(runner.calls.lock().unwrap().len(), 4);
+        let rows: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM delivery_external_effects WHERE status='succeeded'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 4);
+        let (target, revision, output): (String, String, Vec<u8>) = db.conn().query_row("SELECT target,revision,output FROM delivery_external_effects WHERE effect_kind='smoke'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!((target.as_str(), revision.as_str()), ("box", "abc123"));
+        assert_eq!(output, Vec::<u8>::new());
+        let evidence = familiar_ai_storage::DeliveryRepository::new(db.conn())
+            .resolve_internal_gate("repo", "deploy:staging-smoke-passing")
+            .unwrap()
+            .unwrap();
+        assert!(evidence.passed);
+    }
+
+    #[test]
+    fn production_is_unreachable_from_poc_before_any_external_effect() {
+        let (config, mut policy, db) = target_fixture(DeliveryMode::PocSelfApproval);
+        policy.targets.insert("production".into(), "box".into());
+        let runner = FakeRunner {
+            calls: Mutex::new(vec![]),
+            fail_deploy: false,
+            fail_smoke: false,
+            staged: "",
+        };
+        let error = deliver_to_with(
+            &config,
+            &policy,
+            "production",
+            "repo",
+            "session",
+            "PRD-48",
+            "abc",
+            &[],
+            db.conn(),
+            Path::new("."),
+            &runner,
+        )
+        .unwrap_err();
+        assert!(error.contains("manual authority"));
+        assert!(runner.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unresolved_internal_gate_blocks_before_effects() {
+        let (config, policy, db) = target_fixture(DeliveryMode::ReviewGatedAutomatic);
+        let runner = FakeRunner {
+            calls: Mutex::new(vec![]),
+            fail_deploy: false,
+            fail_smoke: false,
+            staged: "",
+        };
+        assert!(deliver_to_with(
+            &config,
+            &policy,
+            "staging",
+            "repo",
+            "session",
+            "PRD-48",
+            "abc",
+            &["verification:missing".into()],
+            db.conn(),
+            Path::new("."),
+            &runner
+        )
+        .unwrap_err()
+        .contains("unresolved or failing"));
+        assert!(runner.calls.lock().unwrap().is_empty());
     }
 }

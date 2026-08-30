@@ -69,19 +69,35 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    pub kind: InferenceProviderKind,
+    pub kind: EndpointProviderKind,
     pub host: String,
     pub auth: AuthDescriptor,
     #[serde(default)]
     pub models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<String>,
+    /// Deploy-target-only capability discovery. Values are diagnostics, not
+    /// credentials, and are replaced on every explicit probe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Deploy-target-only, deliberately finite remote recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<DeployRecipeConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum InferenceProviderKind {
+pub enum EndpointProviderKind {
     Inference,
+    DeployTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeployRecipeConfig {
+    pub sync_argv: Vec<String>,
+    pub restart_argv: Vec<String>,
+    pub smoke_argv: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,9 +163,43 @@ fn validate_identifier(value: &str, field: &str) -> Result<(), String> {
 impl ProviderConfig {
     pub fn validate(&self, name: &str) -> Result<(), String> {
         validate_identifier(name, "provider name")?;
-        validate_host(&self.host)?;
+        match self.kind {
+            EndpointProviderKind::Inference => validate_host(&self.host)?,
+            EndpointProviderKind::DeployTarget => validate_ssh_host(&self.host)?,
+        }
         for model in &self.models {
             validate_model_identifier(model)?;
+        }
+        match self.kind {
+            EndpointProviderKind::Inference => {
+                if self.recipe.is_some() || !self.capabilities.is_empty() {
+                    return Err("inference provider has deploy-target extension fields".into());
+                }
+            }
+            EndpointProviderKind::DeployTarget => {
+                if self.auth != AuthDescriptor::SshAgent {
+                    return Err("deploy-target auth must be ssh-agent".into());
+                }
+                if !self.models.is_empty() {
+                    return Err("deploy-target provider cannot declare models".into());
+                }
+                let recipe = self
+                    .recipe
+                    .as_ref()
+                    .ok_or("deploy-target recipe is missing")?;
+                if recipe.sync_argv.is_empty()
+                    || recipe.restart_argv.is_empty()
+                    || recipe.smoke_argv.is_empty()
+                    || recipe
+                        .sync_argv
+                        .iter()
+                        .chain(&recipe.restart_argv)
+                        .chain(&recipe.smoke_argv)
+                        .any(|v| v.is_empty())
+                {
+                    return Err("deploy-target recipe commands must be non-empty".into());
+                }
+            }
         }
         if let Some(value) = &self.verified_at {
             chrono::DateTime::parse_from_rfc3339(value)
@@ -182,6 +232,18 @@ pub fn validate_host(value: &str) -> Result<(), String> {
         return Err(format!("malformed host '{value}'"));
     }
     Ok(())
+}
+
+pub fn validate_ssh_host(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.starts_with('-')
+        || value.contains(['/', '@', ' ', '\t', '\n'])
+        || value.chars().any(char::is_control)
+    {
+        Err(format!("malformed ssh host '{value}'"))
+    } else {
+        Ok(())
+    }
 }
 
 /// Portable user-supervisor settings. The worker deliberately inherits only
@@ -281,6 +343,9 @@ pub struct DeliveryConfig {
     pub poc_warrant: Option<PocSelfApprovalWarrant>,
     #[serde(default)]
     pub review_gate: Option<ReviewGateConfig>,
+    /// Repository-local environment role to machine-global deploy target.
+    #[serde(default)]
+    pub targets: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -317,6 +382,7 @@ impl Default for DeliveryConfig {
             credential_references: Vec::new(),
             poc_warrant: None,
             review_gate: None,
+            targets: BTreeMap::new(),
         }
     }
 }
@@ -359,6 +425,10 @@ impl DeliveryConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == DeliveryMode::Disabled {
             return Ok(());
+        }
+        for (role, target) in &self.targets {
+            validate_identifier(role, "delivery role")?;
+            validate_identifier(target, "deploy target")?;
         }
         if self.max_deliveries_per_session == 0 {
             return Err("delivery requires a finite max_deliveries_per_session".into());

@@ -11,6 +11,14 @@ pub struct DeliveryEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalEvidence {
+    pub passed: bool,
+    pub target: Option<String>,
+    pub revision: Option<String>,
+    pub output: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryAuthorityDecision {
     pub prd_id: String,
     pub mode: String,
@@ -94,6 +102,74 @@ impl<'a> DeliveryRepository<'a> {
     ) -> familiar_ai_core::Result<()> {
         self.conn.execute("UPDATE delivery_external_effects SET status=?1,external_reference=COALESCE(?2,external_reference),detail=?3,updated_at=?4 WHERE idempotency_key=?5",params![if succeeded {"succeeded"} else {"failed"},external_reference,detail,Utc::now().to_rfc3339(),idempotency_key]).map_err(db)?;
         Ok(())
+    }
+
+    pub fn finish_evidence(
+        &self,
+        idempotency_key: &str,
+        succeeded: bool,
+        target: &str,
+        revision: &str,
+        output: &[u8],
+        detail: Option<&str>,
+    ) -> familiar_ai_core::Result<()> {
+        self.conn.execute(
+            "UPDATE delivery_external_effects SET status=?1,target=?2,revision=?3,output=?4,detail=?5,updated_at=?6 WHERE idempotency_key=?7",
+            params![if succeeded {"succeeded"} else {"failed"},target,revision,output,detail,Utc::now().to_rfc3339(),idempotency_key],
+        ).map_err(db)?;
+        Ok(())
+    }
+
+    /// Resolve only Familiar-owned evidence. Unknown namespaces and missing
+    /// rows fail closed at the caller.
+    pub fn resolve_internal_gate(
+        &self,
+        repository_key: &str,
+        gate: &str,
+    ) -> familiar_ai_core::Result<Option<InternalEvidence>> {
+        if let Some(role) = gate
+            .strip_prefix("deploy:")
+            .and_then(|v| v.strip_suffix("-smoke-passing"))
+        {
+            return self.conn.query_row(
+                "SELECT status,target,revision,COALESCE(output,X'') FROM delivery_external_effects WHERE repository_key=?1 AND effect_kind='smoke' AND external_reference=?2 ORDER BY updated_at DESC LIMIT 1",
+                params![repository_key, role],
+                |row| Ok(InternalEvidence { passed: row.get::<_,String>(0)? == "succeeded", target: row.get(1)?, revision: row.get(2)?, output: row.get(3)? }),
+            ).optional().map_err(db);
+        }
+        if let Some(check_id) = gate.strip_prefix("verification:") {
+            // A verification from another repository must never satisfy this
+            // repository's delivery gate. Review evidence does not carry a
+            // repository key directly, so bind it through the driver attempt
+            // and session that created the review cycle. Evidence without
+            // that durable attribution fails closed.
+            return self.conn.query_row(
+                "SELECT evidence_json FROM review_verification_evidence evidence \
+                 JOIN review_cycles cycle ON cycle.cycle_id=evidence.cycle_id \
+                 JOIN driver_attempts attempt ON cycle.cycle_id LIKE attempt.execution_id || '-cycle-%' \
+                 JOIN driver_sessions session ON session.session_id=attempt.session_id \
+                 WHERE session.repository_key=?1 AND evidence.check_id=?2 \
+                 ORDER BY evidence.rowid DESC LIMIT 1",
+                params![repository_key, check_id],
+                |row| row.get::<_, String>(0),
+            ).optional().map_err(db).and_then(|value| {
+                value.map(|json| {
+                    let evidence: familiar_ai_review::VerificationEvidence =
+                        serde_json::from_str(&json).map_err(|error| {
+                            familiar_ai_core::FamiliarError::Database(format!(
+                                "invalid stored verification evidence: {error}"
+                            ))
+                        })?;
+                    Ok(InternalEvidence {
+                        passed: evidence.status == familiar_ai_review::VerificationStatus::Passed,
+                        target: None,
+                        revision: None,
+                        output: json.into_bytes(),
+                    })
+                }).transpose()
+            });
+        }
+        Ok(None)
     }
 
     pub fn effect(&self, key: &str) -> familiar_ai_core::Result<Option<DeliveryEffect>> {
@@ -196,6 +272,35 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         db
+    }
+
+    #[test]
+    fn verification_gate_never_accepts_evidence_from_another_repository() {
+        let db = database();
+        let evidence = r#"{"check_id":"verify","argv":[],"working_directory":".","environment_identity":{},"tool_identity":null,"tested_identity":"revision","started_at":"2026-01-01T00:00:00Z","ended_at":"2026-01-01T00:00:01Z","duration_ms":1,"exit_code":0,"signal":null,"status":"passed","required":true,"summary":"ok","stdout":null,"stderr":null,"truncated":false}"#;
+        db.conn()
+            .execute_batch(&format!(
+                "INSERT INTO driver_sessions(session_id,repository_key,started_at,warrant_json,created_at) VALUES('other-session','/other/.git','2026-01-01T00:00:00Z','{{}}','2026-01-01T00:00:00Z');
+                 INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at) VALUES('other-session',1,'PRD-1','docs/prds/PRD-001.md','other-execution','2026-01-01T00:00:00Z');
+                 INSERT INTO review_tasks(task_id,task_json,policy_json,created_at) VALUES('task','{{}}','{{}}','2026-01-01T00:00:00Z');
+                 INSERT INTO review_cycles(cycle_id,task_id,attempt,state,disposition,cycle_json,started_at) VALUES('other-execution-cycle-review-1','task',1,'complete','clean','{{}}','2026-01-01T00:00:00Z');
+                 INSERT INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json) VALUES('other-execution-cycle-review-1','verify','attempt-0','{}');",
+                evidence.replace('\'', "''")
+            ))
+            .unwrap();
+
+        let repository = DeliveryRepository::new(db.conn());
+        assert!(repository
+            .resolve_internal_gate("/repo/.git", "verification:verify")
+            .unwrap()
+            .is_none());
+        assert!(
+            repository
+                .resolve_internal_gate("/other/.git", "verification:verify")
+                .unwrap()
+                .unwrap()
+                .passed
+        );
     }
 
     #[test]

@@ -83,7 +83,12 @@ enum Command {
     Report { session_id: Option<String> },
     /// Publish, check, merge, deploy to staging, and smoke-test one reviewed
     /// worktree under the configured finite delivery policy.
-    Deliver { ownership_record: PathBuf },
+    Deliver {
+        ownership_record: PathBuf,
+        /// Resolve and execute the repository-bound environment role.
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Install and operate a bounded native-supervised worker.
     Worker {
         #[command(subcommand)]
@@ -447,7 +452,10 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
-        Command::Deliver { ownership_record } => match deliver_command(&ownership_record) {
+        Command::Deliver {
+            ownership_record,
+            to,
+        } => match deliver_command(&ownership_record, to.as_deref()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -916,7 +924,7 @@ fn worker_spec(
     Ok((spec, repository, paths))
 }
 
-fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {
+fn deliver_command(ownership_record: &std::path::Path, to: Option<&str>) -> Result<(), String> {
     let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
     let current = std::env::current_dir().map_err(|e| e.to_string())?;
     let repository = FilesystemBacklogDiscovery
@@ -933,6 +941,61 @@ fn deliver_command(ownership_record: &std::path::Path) -> Result<(), String> {
         .repository(&repository.worktree)
         .map_err(|e| e.to_string())?;
     let policy = repository_config.delivery_policy()?;
+    if let Some(role) = to {
+        let ownership: familiar_ai_daemon::worktree::WorktreeOwnership = serde_json::from_slice(
+            &std::fs::read(ownership_record)
+                .map_err(|e| format!("cannot read ownership record: {e}"))?,
+        )
+        .map_err(|e| format!("invalid ownership record: {e}"))?;
+        if ownership.state != "ready_for_delivery" {
+            return Err(format!(
+                "worktree is not reviewed and ready for delivery (state={})",
+                ownership.state
+            ));
+        }
+        let discovered = FilesystemBacklogDiscovery
+            .discover_with_layout(&repository, &repository_config.layout())
+            .map_err(|e| e.to_string())?;
+        let prd = discovered
+            .iter()
+            .find(|p| p.id.to_string() == ownership.prd_id)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not present in the repository backlog",
+                    ownership.prd_id
+                )
+            })?;
+        let revision = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ownership.worktree)
+            .output()
+            .map_err(|e| format!("cannot identify delivery revision: {e}"))?;
+        if !revision.status.success() {
+            return Err("cannot identify delivery revision".into());
+        }
+        let revision = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
+        let db_path = config.database.resolve_path(&paths.data_dir);
+        let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+        db.run_migrations().map_err(|e| e.to_string())?;
+        let result = familiar_ai_daemon::delivery::deliver_to_with(
+            &config,
+            policy,
+            role,
+            &repository.key,
+            &ownership.session_id,
+            &ownership.prd_id,
+            &revision,
+            &prd.metadata.external_gates,
+            db.conn(),
+            &ownership.worktree,
+            &familiar_ai_daemon::delivery::ProcessRunner::new(policy.command_timeout_ms),
+        )?;
+        println!(
+            "delivery_session={} prd={} role={} target={} revision={} smoke=passed",
+            ownership.session_id, ownership.prd_id, result.role, result.target, result.revision
+        );
+        return Ok(());
+    }
     let result = familiar_ai_daemon::delivery::deliver(ownership_record, policy)?;
     println!(
         "delivery_session={} prd={} phase={} pr={}",

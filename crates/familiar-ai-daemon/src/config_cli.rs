@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use familiar_ai_core::config::{
-    validate_host, AgentAdapterKind, AuthDescriptor, RegistryWorkerConfig, WorkerCapabilityConfig,
+    validate_host, validate_ssh_host, AgentAdapterKind, AuthDescriptor, EndpointProviderKind,
+    RegistryWorkerConfig, WorkerCapabilityConfig,
 };
 use familiar_ai_core::{AppPaths, Config};
 use familiar_ai_storage::{ConfigDecisionRepository, Database};
@@ -120,8 +121,11 @@ fn provider_add(
     supplied_actor: Option<&str>,
 ) -> Result<(), String> {
     validate_name(name, "provider")?;
-    if kind != "inference" {
+    if kind != "inference" && kind != "deploy-target" {
         return Err(format!("unknown provider kind '{kind}'"));
+    }
+    if kind == "deploy-target" {
+        return deploy_target_add(context, name, host, auth, supplied_actor);
     }
     let host = host.unwrap_or_else(|| {
         if name == "ollama" {
@@ -162,6 +166,74 @@ fn provider_add(
         models.len()
     );
     Ok(())
+}
+
+fn deploy_target_add(
+    context: &ConfigContext,
+    name: &str,
+    host: Option<&str>,
+    auth: Option<&str>,
+    supplied_actor: Option<&str>,
+) -> Result<(), String> {
+    let host = host.ok_or("deploy-target requires --host")?;
+    validate_ssh_host(host)?;
+    let descriptor = parse_auth(auth.unwrap_or("ssh-agent"))?;
+    if descriptor != AuthDescriptor::SshAgent {
+        return Err("deploy-target auth must be ssh-agent; identity stays in the operator agent and ~/.ssh/config".into());
+    }
+    if load_config(context)?.providers.contains_key(name) {
+        return Err(format!("provider '{name}' already exists"));
+    }
+    let capabilities =
+        probe_deploy_target(host).map_err(|error| format!("{name}: {error} — nothing added."))?;
+    let verified_at = Utc::now().to_rfc3339();
+    let actor = actor(supplied_actor)?;
+    mutate(
+        context,
+        "familiar-ai config provider add",
+        &actor,
+        |document| {
+            let table = provider_table(document, name);
+            table.decor_mut().set_prefix(format!(
+                "# added by familiar-ai config provider add — {actor} {verified_at}\n"
+            ));
+            table["kind"] = value("deploy-target");
+            table["host"] = value(host);
+            table["auth"] = value("ssh-agent");
+            table["capabilities"] = array_value(&capabilities);
+            table["verified_at"] = value(&verified_at);
+            let mut recipe = Table::new();
+            recipe["sync_argv"] = array_value(&["git".into(), "pull".into(), "--ff-only".into()]);
+            recipe["restart_argv"] = array_value(&["true".into()]);
+            recipe["smoke_argv"] = array_value(&["true".into()]);
+            table.insert("recipe", Item::Table(recipe));
+            Ok(())
+        },
+    )?;
+    println!(
+        "Added {name} (deploy-target) — ssh ok, {}.",
+        capabilities.join(", ")
+    );
+    Ok(())
+}
+
+fn probe_deploy_target(host: &str) -> Result<Vec<String>, String> {
+    let output = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
+            "uname -s -m; command -v docker >/dev/null && echo docker; command -v systemctl >/dev/null && echo systemd"])
+        .stdin(Stdio::null()).output()
+        .map_err(|error| format!("ssh unreachable ({error}); start ssh-agent, add the configured identity, and verify ~/.ssh/config"))?;
+    if !output.status.success() {
+        return Err("ssh unreachable; start ssh-agent, add the configured identity, and verify ~/.ssh/config".into());
+    }
+    let mut values = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .flat_map(|line| line.split_whitespace())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    Ok(values)
 }
 
 fn provider_remove(
@@ -210,6 +282,23 @@ fn provider_verify(
         .providers
         .get(name)
         .ok_or_else(|| format!("unknown provider '{name}'"))?;
+    if provider.kind == EndpointProviderKind::DeployTarget {
+        let capabilities =
+            probe_deploy_target(&provider.host).map_err(|error| format!("{name}: {error}"))?;
+        let verified_at = Utc::now().to_rfc3339();
+        let actor = actor(supplied_actor)?;
+        return mutate(
+            context,
+            "familiar-ai config provider verify",
+            &actor,
+            |document| {
+                let table = provider_table(document, name);
+                table["capabilities"] = array_value(&capabilities);
+                table["verified_at"] = value(&verified_at);
+                Ok(())
+            },
+        );
+    }
     let models =
         probe(name, &provider.host, &provider.auth).map_err(|error| format!("{name}: {error}"))?;
     let verified_at = Utc::now().to_rfc3339();
@@ -239,6 +328,12 @@ fn provider_list(
         let config = load_config(context)?;
         let mut discoveries = Vec::new();
         for (name, provider) in &config.providers {
+            if provider.kind == EndpointProviderKind::DeployTarget {
+                let capabilities = probe_deploy_target(&provider.host)
+                    .map_err(|error| format!("{name}: {error}"))?;
+                discoveries.push((name.clone(), capabilities, Utc::now().to_rfc3339()));
+                continue;
+            }
             let models = probe(name, &provider.host, &provider.auth)
                 .map_err(|error| format!("{name}: {error}"))?;
             discoveries.push((name.clone(), models, Utc::now().to_rfc3339()));
@@ -252,7 +347,13 @@ fn provider_list(
                 |document| {
                     for (name, models, verified_at) in &discoveries {
                         let table = provider_table(document, name);
-                        table["models"] = array_value(models);
+                        let field =
+                            if table.get("kind").and_then(Item::as_str) == Some("deploy-target") {
+                                "capabilities"
+                            } else {
+                                "models"
+                            };
+                        table[field] = array_value(models);
                         table["verified_at"] = value(verified_at);
                         stamp_value(
                             table,

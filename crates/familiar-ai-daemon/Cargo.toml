@@ -43,6 +43,7 @@ toml.workspace = true
 ring.workspace = true
 axum.workspace = true
 wait-timeout.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 familiar-ai-testutil = { path = "../familiar-ai-testutil" }

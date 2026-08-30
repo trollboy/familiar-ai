@@ -20,13 +20,14 @@ pub use backlog::{
 pub use bootstrap::*;
 pub use config::{
     AgentAdapterKind, AgentEffort, AgentEntryConfig, AgentPermissionMode, AgentsConfig,
-    BudgetProfile, Config, DashboardConfig, DeliveryConfig, DeliveryMode, DriverConfig,
-    DriverModelRouteConfig, ExecutionHistoryConfig, ExecutionPrice, InferenceConfig, InferenceMode,
-    PackerConfig, PlannerConfig, PocSelfApprovalWarrant, PreflightCommandConfig, PreflightConfig,
-    ProhibitedChangeConfig, ProviderKind, ReferenceKind, ReferenceRootConfig, RepositoryConfig,
-    ResolvedProhibitedRule, ReviewGateConfig, ReviewScopeConfig, RollupConfig,
-    ScopeClassPolicyConfig, ScopeClassificationConfig, ScopeDeclarationModeConfig,
-    ScopeFileClassName, SummaryConfig, TrayConfig, TypedProhibitedChange, WatcherConfig,
+    BudgetProfile, Config, DashboardConfig, DeliveryConfig, DeliveryMode, DeployRecipeConfig,
+    DriverConfig, DriverModelRouteConfig, EndpointProviderKind, ExecutionHistoryConfig,
+    ExecutionPrice, InferenceConfig, InferenceMode, PackerConfig, PlannerConfig,
+    PocSelfApprovalWarrant, PreflightCommandConfig, PreflightConfig, ProhibitedChangeConfig,
+    ProviderKind, ReferenceKind, ReferenceRootConfig, RepositoryConfig, ResolvedProhibitedRule,
+    ReviewGateConfig, ReviewScopeConfig, RollupConfig, ScopeClassPolicyConfig,
+    ScopeClassificationConfig, ScopeDeclarationModeConfig, ScopeFileClassName, SummaryConfig,
+    TrayConfig, TypedProhibitedChange, WatcherConfig,
 };
 pub use error::{FamiliarError, Result};
 pub use paths::AppPaths;

@@ -97,6 +97,50 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
             },
         });
     }
+    // Expire deploy-target authentication before an unattended claim. Only
+    // targets reachable through this repository's role bindings are probed.
+    match config.repository(repository) {
+        Ok(repository_config) => {
+            if let Some(delivery) = &repository_config.delivery {
+                for target_name in delivery.targets.values() {
+                    match config.providers.get(target_name) {
+                        Some(target)
+                            if target.kind
+                                == familiar_ai_core::EndpointProviderKind::DeployTarget =>
+                        {
+                            checks.push(command_check(
+                                &PreflightCommandConfig {
+                                    check_id: format!("deploy_target.{target_name}"),
+                                    argv: vec![
+                                        "ssh".into(),
+                                        "-o".into(),
+                                        "BatchMode=yes".into(),
+                                        "-o".into(),
+                                        "ConnectTimeout=10".into(),
+                                        target.host.clone(),
+                                        "true".into(),
+                                    ],
+                                    working_directory: String::new(),
+                                },
+                                repository,
+                            ));
+                        }
+                        _ => checks.push(PreflightCheck {
+                            check_id: format!("deploy_target.{target_name}"),
+                            status: PreflightStatus::Failed,
+                            detail: "role binding does not resolve to a deploy-target provider"
+                                .into(),
+                        }),
+                    }
+                }
+            }
+        }
+        Err(detail) => checks.push(PreflightCheck {
+            check_id: "repository.delivery_targets".into(),
+            status: PreflightStatus::Failed,
+            detail: detail.to_string(),
+        }),
+    }
     PreflightReport { checks }
 }
 

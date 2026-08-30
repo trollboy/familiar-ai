@@ -14,6 +14,7 @@ pub use repos::config_decision::{ConfigDecision, ConfigDecisionRepository};
 pub use repos::decision::DecisionRepository;
 pub use repos::delivery::{
     DeliveryAuthorityDecision, DeliveryDecisionRow, DeliveryEffect, DeliveryRepository,
+    InternalEvidence,
 };
 pub use repos::driver::{DriverAttempt, DriverRepository, DriverSession};
 pub use repos::execution_history::{
