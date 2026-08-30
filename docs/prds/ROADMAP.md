@@ -23,7 +23,7 @@ structured layout contract.
 6. PRD-020 — reconcile parallel scheduling with the canonical graph. **Completed.**
 7. PRD-034 — portable persistent worker. **Completed.**
 8. PRD-036 — repository onboarding. **Completed 2026-08-30.**
-9. PRD-037 — security and recovery burn-in.
+9. PRD-037 — security and recovery burn-in. **Completed 2026-08-30.**
 10. PRD-038 — multi-repository product acceptance.
 
 ## Economy track
