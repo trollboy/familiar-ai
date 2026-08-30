@@ -47,6 +47,18 @@ structured layout contract.
 - PRD-035 — execution-era API/MCP/dashboard state surface. **Completed 2026-08-30** —
   first fully autonomous finding→remediation→clean-review→completion cycle.
 
+## Provider and delivery track (drafted 2026-08-30, awaiting approval)
+
+- PRD-047 — provider/model configuration CLI: kind-tagged endpoints,
+  BYO-Auth diagnostics, probe-before-persist, comment-preserving edits,
+  decision-row audit.
+- PRD-048 — internal delivery targets: Familiar as its own CI/CD at
+  garage scale; deploy-target providers, recipes, smoke evidence, and the
+  first `external_gates` resolver (internal evidence).
+- PRD-049 — shareable project configuration: checked-in familiar.toml
+  under declare-and-bind with an approved-snapshot authority gate.
+- PRD-050 — cloud deploy targets (AWS/GCP/Azure/DO) as replaceable CLIs.
+
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to
 query consistently.
