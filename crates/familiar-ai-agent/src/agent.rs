@@ -2,6 +2,22 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
+/// Remove values supplied through secret-bearing environment variables before
+/// untrusted provider text crosses a logging or persistence boundary.
+pub fn redact_sensitive(mut value: String) -> String {
+    for (name, secret) in std::env::vars() {
+        let name = name.to_ascii_uppercase();
+        if secret.len() >= 4
+            && ["SECRET", "TOKEN", "PASSWORD", "API_KEY", "CANARY"]
+                .iter()
+                .any(|marker| name.contains(marker))
+        {
+            value = value.replace(&secret, "[REDACTED]");
+        }
+    }
+    value
+}
+
 pub trait CodingAgent: Send + Sync {
     fn execute(
         &self,

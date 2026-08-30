@@ -68,7 +68,7 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
     render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
     render_judgment(&mut out, &session, &stopped);
-    Ok(out)
+    Ok(familiar_ai_agent::redact_sensitive(out))
 }
 
 fn render_authority(db: &Database, out: &mut String, session_id: &str) -> Result<(), ReportError> {

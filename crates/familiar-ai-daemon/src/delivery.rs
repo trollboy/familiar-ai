@@ -388,12 +388,12 @@ fn checked_owned(
     if output.status.success() {
         Ok(output)
     } else {
-        Err(format!(
+        Err(familiar_ai_agent::redact_sensitive(format!(
             "{:?} exited {:?}: {}",
             values,
             output.status.code(),
             String::from_utf8_lossy(&output.stderr).trim()
-        ))
+        )))
     }
 }
 
@@ -405,12 +405,13 @@ fn comment_blocker(
     detail: &str,
 ) {
     if policy.comment_blockers {
+        let detail = familiar_ai_agent::redact_sensitive(detail.to_owned());
         let _ = checked_owned(
             runner,
             directory,
             &provider_argv(
                 policy,
-                &["pr", "comment", &pr.to_string(), "--body", detail],
+                &["pr", "comment", &pr.to_string(), "--body", &detail],
             ),
         );
     }
@@ -422,6 +423,7 @@ fn fail_journal(
     phase: &str,
     detail: String,
 ) -> Result<DeliveryJournal, String> {
+    let detail = familiar_ai_agent::redact_sensitive(detail);
     journal.phase = phase.into();
     journal.detail = Some(detail.clone());
     persist(path, &journal)?;

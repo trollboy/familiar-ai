@@ -5,8 +5,8 @@ mod isolation;
 mod registry;
 
 pub use agent::{
-    AgentExecutionError, BudgetCapability, BudgetDenomination, CodingAgent, ExecutionBudget,
-    ExecutionRequest, ExecutionResult, FilesystemPolicy, IsolationCapability,
+    redact_sensitive, AgentExecutionError, BudgetCapability, BudgetDenomination, CodingAgent,
+    ExecutionBudget, ExecutionRequest, ExecutionResult, FilesystemPolicy, IsolationCapability,
 };
 pub use claude_code::{ClaudeCodeAgent, ClaudeCodeSettings, READ_ONLY_RESTRICTIONS};
 pub use codex::CodexAgent;

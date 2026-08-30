@@ -3066,6 +3066,88 @@ mod tests {
         assert_eq!(error, "agent.implementation: fixture executable missing");
     }
 
+    struct RecoveryProbeAgent {
+        panic_preflight_once: std::sync::atomic::AtomicBool,
+        panic_execute_once: std::sync::atomic::AtomicBool,
+        invocations: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CodingAgent for RecoveryProbeAgent {
+        fn preflight(&self) -> Result<(), String> {
+            if self
+                .panic_preflight_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                panic!("injected termination before model invocation");
+            }
+            Ok(())
+        }
+
+        fn execute(
+            &self,
+            _request: ExecutionRequest<'_>,
+            _output: &mut dyn io::Write,
+        ) -> Result<ExecutionResult, AgentExecutionError> {
+            self.invocations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self
+                .panic_execute_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                panic!("injected termination after model invocation");
+            }
+            Ok(ExecutionResult {
+                exit_code: Some(0),
+                ..ExecutionResult::default()
+            })
+        }
+    }
+
+    #[test]
+    fn production_recovery_never_reinvokes_model_across_durable_claim() {
+        for terminate_after_invocation in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let repository = execution_fixture_repository(temp.path());
+            let prd = repository.join("docs/prds/PRD-001.md");
+            let mut config = Config::default();
+            config.database.path = Some(temp.path().join("recovery.db"));
+            let paths = test_paths(temp.path());
+            let agent = RecoveryProbeAgent {
+                panic_preflight_once: std::sync::atomic::AtomicBool::new(
+                    !terminate_after_invocation,
+                ),
+                panic_execute_once: std::sync::atomic::AtomicBool::new(terminate_after_invocation),
+                invocations: std::sync::atomic::AtomicUsize::new(0),
+            };
+
+            let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute_with_config_tracked_from(
+                    &repository,
+                    &prd,
+                    &same_agent(&agent),
+                    &config,
+                    &paths,
+                )
+            }));
+            assert!(first.is_err());
+
+            // This is a fresh production entry using only the persisted
+            // database/backlog state left by the interrupted process.
+            let _ = execute_with_config_tracked_from(
+                &repository,
+                &prd,
+                &same_agent(&agent),
+                &config,
+                &paths,
+            );
+            assert_eq!(
+                agent.invocations.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "restart must invoke once before a claim and never repeat an uncertain invocation"
+            );
+        }
+    }
+
     #[test]
     fn acceptance_criteria_accepts_case_and_qualified_spectra_heading() {
         let document = "# PRD\n\n## Measurable acceptance criteria\n\n- First criterion wraps\n  onto another line.\n- Second criterion.\n\n## Tests\nignored\n";

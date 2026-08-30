@@ -242,10 +242,10 @@ fn stream_json(
 ) -> io::Result<()> {
     stream_lines(reader, output, |line| {
         match parse_event(line, result, terminal_seen) {
-            Some(text) => StreamAction::Text(text),
+            Some(text) => StreamAction::Text(crate::redact_sensitive(text)),
             None if serde_json::from_str::<Value>(line).is_err() => {
                 *malformed_seen = true;
-                StreamAction::Forward
+                StreamAction::Text(crate::redact_sensitive(line.to_owned()))
             }
             None => StreamAction::Silent,
         }

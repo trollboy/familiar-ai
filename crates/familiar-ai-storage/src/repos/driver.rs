@@ -293,6 +293,7 @@ impl<'a> DriverRepository<'a> {
         session_id: &str,
         detail: &str,
     ) -> familiar_ai_core::Result<()> {
+        let detail = redact_sensitive(detail.to_owned());
         let changed = self.conn.execute(
             "UPDATE driver_sessions SET termination_detail=?1 WHERE session_id=?2 AND ended_at IS NULL",
             params![detail, session_id],
@@ -488,6 +489,20 @@ impl<'a> DriverRepository<'a> {
             }),
         ).optional().map_err(db)
     }
+}
+
+fn redact_sensitive(mut value: String) -> String {
+    for (name, secret) in std::env::vars() {
+        let name = name.to_ascii_uppercase();
+        if secret.len() >= 4
+            && ["SECRET", "TOKEN", "PASSWORD", "API_KEY", "CANARY"]
+                .iter()
+                .any(|marker| name.contains(marker))
+        {
+            value = value.replace(&secret, "[REDACTED]");
+        }
+    }
+    value
 }
 
 fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<DriverSession> {
