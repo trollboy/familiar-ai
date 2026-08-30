@@ -37,6 +37,8 @@ structured layout contract.
 - PRD-043 — risk-aware registry route rules. **Completed 2026-08-29** by the
   autopilot with reviewer-driven remediation; the remediation also delivered
   per-PRD route context, an advance on PRD-044.
+- PRD-046 — dogfooding bug ledger. **Completed 2026-08-30** with every
+  observed defect fixed, transferred to its owning PRD, or explicitly closed.
 - PRD-044 — per-PRD worker selection; retires `model_routes`. **Approved 2026-08-29.**
 - PRD-045 — declared-risk review tiering. **Approved 2026-08-29.**
 - PRD-041 — verification-failure escalation. **Approved 2026-08-29.**
