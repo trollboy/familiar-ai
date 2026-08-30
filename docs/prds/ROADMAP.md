@@ -98,6 +98,24 @@ security), and deterministic reconciliation plus the read surface.
   reasoning-output category and typed credit units) because PRD-052 is
   deliberately Anthropic-bounded and a merged collector PRD would couple
   two vendors' API risk into one delivery boundary.
+- PRD-055 — project attribution and historical usage series (drafted
+  2026-08-30): durable Familiar project identity above the path-bound
+  layers (wave-one `projects.repo_root`, `RepositoryIdentity.key`,
+  `execution_history.repository`), worktree rollup with explicit
+  degraded/fork states; project↔provider attribution bindings with the
+  attributed-plus-unattributed-equals-total invariant; the
+  provider-neutral `usage_series` query contract (arbitrary half-open
+  UTC ranges, hour/day/week/month buckets, sparse and dense series,
+  drill-down to observations); rebuildable rollups with indefinite raw
+  retention; provider capability matrix; future-server export
+  compatibility without any server in scope. PRD-051 gained the
+  foundational pieces (project identity on every observation; the
+  period/observed/ingested time envelope; discrete-never-cumulative
+  facts) and PRD-053 the reservation lifecycle
+  (acquire/commit/release/expire/crash-recover). Depends on
+  PRD-051/053. Boundary: PRD-053 keeps source-centric billing views
+  (month-to-date per source, variance); PRD-055 adds the
+  project-centric time axis over the same rows, counted once.
 
 Ledger defect ownership: PRD-053 owns B1 and, with PRD-051, B8; PRD-051
 enables but does not fix B5, B6, and B13, whose stop-reason,
@@ -126,7 +144,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–054 were drafted 2026-08-30 by autonomous specification runs
+- PRDs 051–055 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
