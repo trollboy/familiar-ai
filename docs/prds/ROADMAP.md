@@ -1,7 +1,12 @@
 # Familiar Product Backlog
 
-**Updated:** 2026-08-29
+**Updated:** 2026-08-30
 **Authority:** `docs/north-star.md`
+
+**2026-08-30:** all 26 pending PRDs (032, 036–038, 041, 044–064) are approved
+for implementation — adversarial review and sign-off by Sol 5.6, owner batch
+approval. Execution order, concurrency, and the unattended-approval policy
+live in `EXECUTION-PLAN.md`.
 
 This index reconciles the active backlog with current implementation. Location
 and explicit status must agree: completed specifications live in `done/`; active
