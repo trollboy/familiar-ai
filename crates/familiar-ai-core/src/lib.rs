@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod error;
 pub mod models;
+pub mod onboarding;
 pub mod paths;
 pub mod repository_path;
 pub mod status;

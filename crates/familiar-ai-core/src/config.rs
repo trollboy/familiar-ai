@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use figment::providers::{Env, Format, Serialized, Toml};
@@ -9,6 +9,10 @@ use crate::FamiliarError;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
+    /// Directory of operator-approved, one-repository policy fragments. A
+    /// relative path is resolved beside the main configuration file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories_dir: Option<PathBuf>,
     #[serde(default)]
     pub repositories: BTreeMap<String, RepositoryConfig>,
     #[serde(default)]
@@ -2314,6 +2318,57 @@ impl Config {
             }
         }
 
+        // Resolve fragment location from defaults + the main file only. The
+        // fragments themselves cannot redirect discovery, and repository
+        // content is never consulted while loading configuration.
+        let base: Self = figment
+            .clone()
+            .extract()
+            .map_err(|e| FamiliarError::Config(e.to_string()))?;
+        if let Some(main_path) = config_path {
+            let configured_dir = base
+                .repositories_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("repositories"));
+            let fragment_dir = if configured_dir.is_absolute() {
+                configured_dir
+            } else {
+                main_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(configured_dir)
+            };
+            if fragment_dir.is_dir() {
+                let mut fragments = std::fs::read_dir(&fragment_dir)
+                    .map_err(FamiliarError::Io)?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension().and_then(|value| value.to_str()) == Some("toml")
+                    })
+                    .collect::<Vec<_>>();
+                fragments.sort();
+                let mut owners = base.repositories.keys().cloned().collect::<BTreeSet<_>>();
+                for fragment in fragments {
+                    let parsed: Config = Figment::from(Serialized::defaults(Config::default()))
+                        .merge(Toml::file(&fragment))
+                        .extract()
+                        .map_err(|e| {
+                            FamiliarError::Config(format!("{}: {e}", fragment.display()))
+                        })?;
+                    for key in parsed.repositories.keys() {
+                        if !owners.insert(key.clone()) {
+                            return Err(FamiliarError::Config(format!(
+                                "repository key {key:?} is defined more than once (including {})",
+                                fragment.display()
+                            )));
+                        }
+                    }
+                    figment = figment.merge(Toml::file(&fragment));
+                }
+            }
+        }
+
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
 
         let config: Self = figment
@@ -3198,5 +3253,46 @@ output_microusd_per_million = 300
             ["FAMILIAR_AI_LOGGING__LEVEL".to_owned(), "HOME".to_owned()].into_iter()
         )
         .is_empty());
+    }
+
+    #[test]
+    fn generated_repository_fragments_merge_additively_and_refuse_collisions() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let main = config_dir.path().join("config.toml");
+        std::fs::write(
+            &main,
+            format!(
+                "[repositories.{:?}]\nprofile = \"canonical\"\n",
+                first.path().display().to_string()
+            ),
+        )
+        .unwrap();
+        let fragments = config_dir.path().join("repositories");
+        std::fs::create_dir(&fragments).unwrap();
+        std::fs::write(
+            fragments.join("second.toml"),
+            format!(
+                "[repositories.{:?}]\nprofile = \"canonical\"\n",
+                second.path().display().to_string()
+            ),
+        )
+        .unwrap();
+        let loaded = Config::load(Some(&main)).unwrap();
+        assert_eq!(loaded.repositories.len(), 2);
+
+        std::fs::write(
+            fragments.join("collision.toml"),
+            format!(
+                "[repositories.{:?}]\nprofile = \"canonical\"\n",
+                first.path().display().to_string()
+            ),
+        )
+        .unwrap();
+        assert!(Config::load(Some(&main))
+            .unwrap_err()
+            .to_string()
+            .contains("defined more than once"));
     }
 }
