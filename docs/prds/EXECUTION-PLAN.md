@@ -26,46 +26,70 @@ and `backlog approve-and-complete` completes a reviewed checkpoint in one
 transaction binding the approved hash and commit. A width-six regression
 test on the recorded Wave 1 graph pins the fix.
 
+**Wave 2 completed 2026-08-30.** See
+[`../wave2_afteraction_report.md`](../wave2_afteraction_report.md): all four
+PRDs integrated, but at achievable width ONE (every wave-2 PRD overlapped in
+configuration, storage, or run surfaces), with stale-base composition
+defects (duplicate migration numbers, completion before integration) and
+substantial manual landing work.
+
+**GATE (2026-08-30): PRD-066 blocks Wave 3.** Integration-aware parallel
+orchestration — the merge queue (parallel execution, ordered landing; scope
+release and completion at integration, not review), continuous admission
+replacing batch lockstep, authoring-time achievable-width validation,
+migration-number allocation, hash-bound scope decisions, reconciled
+recovery, and live worker heartbeats. Covers wave-2 defects 1–4 and 13–15.
+Execute it as a single-PRD warranted session:
+`familiar-ai drive --max-prds 1 --prd PRD-066`.
+
 A PRD may start only when its dependencies are complete AND it is inside
 the session's approved allowlist — the earlier "wave boundaries are
 guidance, not barriers" language is retracted; it authorized the Wave 1
-boundary escape (defect 2). Warrant each wave's session with its PRD set:
-`familiar-ai drive --max-prds 4 --prd PRD-041 --prd PRD-048 --prd PRD-049
---prd PRD-051` for Wave 2.
+boundary escape (defect 2). Warrant each wave's session with its PRD set.
 
-| Wave | PRDs | Width |
-|------|------|-------|
-| 1 | 036, 037, 044, 045, 046, 047 — **completed 2026-08-30** | 6 |
-| gate | 065 — orchestration reliability — **completed 2026-08-30** | 1 |
-| 2 | 041, 048, 049, 051 | 4 |
-| 3 | 050, 052, 054, 057, 064 | 5 |
-| 4 | 032, 055, 056, 062 | 4 |
-| 5 | 038, 053, 058 | 3 |
-| 6 | 059, 060, 061, 063 | 4 |
+The width columns are honest per wave-2 defect 1: **graph width** is what
+the dependency graph permits; **achievable width** is what the declared
+expected-file scopes and resources permit under the PRD-065 conflict rules.
+Until PRD-066's plan validation computes achievable width automatically,
+the achievable column is estimated from the authored scopes and marked (~).
+Narrowing a wave's `expected_files` raises its achievable width; coarse
+whole-crate declarations forfeit concurrency by design.
+
+| Wave | PRDs | Graph width | Achievable width |
+|------|------|-------------|------------------|
+| 1 | 036, 037, 044, 045, 046, 047 — **completed 2026-08-30** | 6 | 1 (measured) |
+| gate | 065 — orchestration reliability — **completed 2026-08-30** | 1 | 1 |
+| 2 | 041, 048, 049, 051 — **completed 2026-08-30** | 4 | 1 (measured) |
+| gate | 066 — integration-aware parallel orchestration | 1 | 1 |
+| 3 | 050, 052, 054, 057, 064 | 5 | ~2–3 (pipeline via merge queue) |
+| 4 | 032, 055, 056, 062 | 4 | ~2 |
+| 5 | 038, 053, 058 | 3 | ~2 |
+| 6 | 059, 060, 061, 063 | 4 | ~3–4 (per-adapter files are disjoint) |
 
 ## Critical path
 
-**065 → 051 → 064 → 056 → 058 → {059, 060, 061, 063}** (044 completed) —
-still six PRDs deep with the gate; no
-amount of parallelism shortens it. PRD-044 starts first and PRD-051 is the
-widest gate (ten downstream PRDs). Within any wave, schedule the
-critical-path member ahead of its siblings.
+**066 → 064 → 056 → 058 → {059, 060, 061, 063}** (044, 051 completed) —
+five PRDs deep with the gate; no amount of parallelism shortens it. Within
+any wave, schedule the critical-path member ahead of its siblings.
 
-Secondary chains: 044 → 041 → 032 → 038 (have-at-it acceptance) and
-047 → 057 → 062 → 063 (local-model execution).
+Secondary chains: 032 → 038 (have-at-it acceptance; 041 completed) and
+057 → 062 → 063 (local-model execution).
 
 ## Scheduling guidance
 
-- Peak useful concurrency is 6 workers (wave 1); average ready-set width is
-  ~4. Use one worktree per PRD; merge back to `main` on completion so
-  downstream waves build on integrated state.
-- Estimated duration at full parallelism: 6–8 working days of
-  implementation; ~10–12 calendar working days including review,
-  remediation, and merge friction. Serial execution would be 4–6 weeks.
-- Heavy items that will pace their waves: 037 (burn-in), 038 (multi-repo
-  acceptance), 058 (raw runtime).
-- Run `familiar-ai backlog metadata-check` before starting a wave; the
-  frontmatter is authoritative for status and dependencies.
+- Use one worktree per PRD. After PRD-066, candidates land through the
+  session merge queue in review order and successors branch from the
+  session integration revision; do not merge worktrees to `main` by hand
+  mid-session.
+- Real concurrency is bounded by the achievable-width column, not the graph
+  column. Authors who want width declare file-level `expected_files` and
+  explicit `resources`, not whole-crate directories.
+- Heavy items that will pace their waves: 038 (multi-repo acceptance),
+  058 (raw runtime), 056 (control-plane migration).
+- `familiar-ai backlog metadata-check` exits nonzero on the 41 legacy PRDs
+  under `policy=incremental` (wave-2 defect 18); treat that specific
+  failure as advisory migration debt, and any structured-v1 diagnostic as
+  blocking.
 
 ## Human-approval policy for unattended execution
 
