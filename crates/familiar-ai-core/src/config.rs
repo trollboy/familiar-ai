@@ -1026,8 +1026,36 @@ pub struct ReviewTierPolicyConfig {
     pub independent_review_required: bool,
     #[serde(default)]
     pub standard_reviewer_agent: ReviewAgentConfig,
+    /// Declared PRD risk classes that always require full review.
+    #[serde(default)]
+    pub full_review_risk_classes: Vec<String>,
     #[serde(default)]
     pub rules: Vec<ReviewTierRuleConfig>,
+}
+
+impl ReviewTierPolicyConfig {
+    fn validate_risk_vocabulary(&self, risk_vocabulary: &BTreeSet<&str>) -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        for class in &self.full_review_risk_classes {
+            if class.trim().is_empty() || class.trim() != class {
+                return Err(
+                    "tier_policy.full_review_risk_classes entries must be non-empty and trimmed"
+                        .into(),
+                );
+            }
+            if !seen.insert(class.as_str()) {
+                return Err(format!(
+                    "tier_policy.full_review_risk_classes contains duplicate class '{class}'"
+                ));
+            }
+            if !risk_vocabulary.contains(class.as_str()) {
+                return Err(format!(
+                    "tier_policy.full_review_risk_classes names risk class '{class}' outside the configured repository risk vocabulary"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2197,6 +2225,16 @@ impl Config {
                 review.validate().map_err(|error| {
                     FamiliarError::Config(format!("repositories.{worktree}.review: {error}"))
                 })?;
+                if let Some(policy) = &review.tier_policy {
+                    let vocabulary = entry.risk_vocabulary.iter().map(String::as_str).collect();
+                    policy
+                        .validate_risk_vocabulary(&vocabulary)
+                        .map_err(|error| {
+                            FamiliarError::Config(format!(
+                                "repositories.{worktree}.review: {error}"
+                            ))
+                        })?;
+                }
                 if let Some(agents) = &self.agents {
                     agents.validate(review).map_err(|error| {
                         FamiliarError::Config(format!("repositories.{worktree}.review: {error}"))
@@ -2286,6 +2324,16 @@ impl Config {
             ));
         }
         self.review.validate().map_err(FamiliarError::Config)?;
+        if let Some(policy) = &self.review.tier_policy {
+            let risk_vocabulary: BTreeSet<&str> = self
+                .repositories
+                .values()
+                .flat_map(|entry| entry.risk_vocabulary.iter().map(String::as_str))
+                .collect();
+            policy
+                .validate_risk_vocabulary(&risk_vocabulary)
+                .map_err(FamiliarError::Config)?;
+        }
         if let Some(agents) = &self.agents {
             agents
                 .validate(&self.review)
@@ -2838,6 +2886,7 @@ output_microusd_per_million = 300
         review.tier_policy = Some(ReviewTierPolicyConfig {
             independent_review_required: true,
             standard_reviewer_agent: ReviewAgentConfig::default(),
+            full_review_risk_classes: vec![],
             rules: vec![ReviewTierRuleConfig {
                 id: "tiny".into(),
                 tier: ReviewTierConfig::ChecksOnly,
@@ -2865,6 +2914,20 @@ output_microusd_per_million = 300
             scope_classes: vec![],
         });
         assert!(review.validate().unwrap_err().contains("contradict"));
+    }
+
+    #[test]
+    fn full_review_risk_class_outside_repository_vocabulary_fails_validation() {
+        let policy = ReviewTierPolicyConfig {
+            independent_review_required: false,
+            standard_reviewer_agent: ReviewAgentConfig::default(),
+            full_review_risk_classes: vec!["unknown-class".into()],
+            rules: vec![],
+        };
+        let vocabulary = BTreeSet::from(["review-policy"]);
+        let error = policy.validate_risk_vocabulary(&vocabulary).unwrap_err();
+        assert!(error.contains("unknown-class"));
+        assert!(error.contains("outside the configured repository risk vocabulary"));
     }
 
     fn registry_worker(id: &str) -> RegistryWorkerConfig {

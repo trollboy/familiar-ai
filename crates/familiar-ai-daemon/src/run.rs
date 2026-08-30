@@ -1582,8 +1582,9 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
     });
     let criteria = familiar_ai_core::structured_prd_metadata(&context.prd.content)
         .map_err(|error| RunError::Config(error.to_string()))?
-        .map(|metadata| metadata.acceptance_criteria)
-        .unwrap_or_else(|| acceptance_criteria(&context.prd.content));
+        .map(|metadata| (metadata.acceptance_criteria, metadata.risk_classes));
+    let (criteria, declared_risk_classes) =
+        criteria.unwrap_or_else(|| (acceptance_criteria(&context.prd.content), Vec::new()));
     if criteria.is_empty() {
         return Err(RunError::Config(
             "enabled review requires an explicit PRD Acceptance Criteria section".into(),
@@ -1686,6 +1687,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         reviewer,
         standard_reviewer,
         tier_policy: configured_tier_policy(&config.review),
+        declared_risk_classes,
         contracts,
         invariants: Vec::new(),
         verification_plan: VerificationPlan {
@@ -1764,6 +1766,7 @@ fn configured_tier_policy(config: &familiar_ai_core::config::ReviewConfig) -> Re
         return ReviewTierPolicy::default();
     };
     ReviewTierPolicy {
+        full_review_risk_classes: policy.full_review_risk_classes.clone(),
         rules: policy
             .rules
             .iter()

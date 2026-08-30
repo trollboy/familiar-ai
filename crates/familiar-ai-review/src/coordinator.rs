@@ -63,6 +63,7 @@ pub struct CoordinationRequest {
     pub reviewer: AgentAssignment,
     pub standard_reviewer: Option<AgentAssignment>,
     pub tier_policy: ReviewTierPolicy,
+    pub declared_risk_classes: Vec<String>,
     pub contracts: Vec<BoundedDocument>,
     pub invariants: Vec<BoundedInvariant>,
     pub verification_plan: VerificationPlan,
@@ -172,6 +173,7 @@ impl ReviewCoordinator<'_> {
         ));
         cycle.tier_selection = Some(select_review_tier(
             &request.tier_policy,
+            &request.declared_risk_classes,
             &captured.changed_files,
             captured.diff.byte_size,
             cycle
@@ -589,6 +591,7 @@ impl ReviewCoordinator<'_> {
             cycle.scope_evaluations.push(scope.clone());
             let selection = select_review_tier(
                 &request.tier_policy,
+                &request.declared_risk_classes,
                 &captured.changed_files,
                 captured.diff.byte_size,
                 &scope,
@@ -1238,6 +1241,7 @@ mod tests {
             reviewer: assignment(AgentRole::Review, "review"),
             standard_reviewer: None,
             tier_policy: ReviewTierPolicy::default(),
+            declared_risk_classes: vec![],
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {
@@ -1530,6 +1534,7 @@ mod tests {
             reviewer: assignment(AgentRole::Review, "review"),
             standard_reviewer: None,
             tier_policy: ReviewTierPolicy::default(),
+            declared_risk_classes: vec![],
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {
@@ -1610,6 +1615,7 @@ mod tests {
             reviewer: assignment(AgentRole::Review, "review"),
             standard_reviewer: None,
             tier_policy: ReviewTierPolicy::default(),
+            declared_risk_classes: vec![],
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {

@@ -23,6 +23,7 @@ pub struct ReviewTierRule {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewTierPolicy {
+    pub full_review_risk_classes: Vec<String>,
     pub rules: Vec<ReviewTierRule>,
 }
 
@@ -45,6 +46,7 @@ pub struct ReviewTierSelection {
 
 pub fn select_review_tier(
     policy: &ReviewTierPolicy,
+    declared_risk_classes: &[String],
     files: &[ChangedFile],
     changed_bytes: u64,
     scope: &ScopeCheckResult,
@@ -66,6 +68,17 @@ pub fn select_review_tier(
         change_kinds: kinds,
         scope_classes: classes,
     };
+    if let Some(class) = declared_risk_classes
+        .iter()
+        .find(|class| policy.full_review_risk_classes.contains(class))
+    {
+        return ReviewTierSelection {
+            tier: ReviewTier::Full,
+            selecting_rule: None,
+            reason: format!("declared risk class '{class}' requires full review"),
+            footprint,
+        };
+    }
     let unknown_or_risky = files.is_empty()
         || scope.findings.len() != files.len()
         || scope.findings.iter().any(|finding| {
@@ -186,6 +199,7 @@ mod tests {
     fn absent_and_unmatched_policy_is_full() {
         let selected = select_review_tier(
             &ReviewTierPolicy::default(),
+            &[],
             &[file()],
             10,
             &scope(ScopeFileClass::Test),
@@ -198,8 +212,10 @@ mod tests {
     fn matching_rule_selects_checks_only_with_exact_footprint() {
         let selected = select_review_tier(
             &ReviewTierPolicy {
+                full_review_risk_classes: vec![],
                 rules: vec![rule(ReviewTier::ChecksOnly)],
             },
+            &[],
             &[file()],
             10,
             &scope(ScopeFileClass::Test),
@@ -215,13 +231,32 @@ mod tests {
         permissive.scope_classes = vec![ScopeFileClass::Migration];
         let selected = select_review_tier(
             &ReviewTierPolicy {
+                full_review_risk_classes: vec![],
                 rules: vec![permissive],
             },
+            &[],
             &[file()],
             10,
             &scope(ScopeFileClass::Migration),
         );
         assert_eq!(selected.tier, ReviewTier::Full);
         assert_eq!(selected.selecting_rule, None);
+    }
+
+    #[test]
+    fn declared_full_review_risk_overrides_matching_reduced_tier() {
+        let selected = select_review_tier(
+            &ReviewTierPolicy {
+                full_review_risk_classes: vec!["review-policy".into()],
+                rules: vec![rule(ReviewTier::ChecksOnly)],
+            },
+            &["review-policy".into()],
+            &[file()],
+            10,
+            &scope(ScopeFileClass::Test),
+        );
+        assert_eq!(selected.tier, ReviewTier::Full);
+        assert_eq!(selected.selecting_rule, None);
+        assert!(selected.reason.contains("review-policy"));
     }
 }
