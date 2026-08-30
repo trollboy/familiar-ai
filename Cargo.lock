@@ -603,6 +603,7 @@ version = "0.1.0"
 dependencies = [
  "landlock",
  "libc",
+ "ring",
  "serde_json",
  "tempfile",
 ]
@@ -741,6 +742,7 @@ dependencies = [
  "chrono",
  "familiar-ai-core",
  "familiar-ai-review",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

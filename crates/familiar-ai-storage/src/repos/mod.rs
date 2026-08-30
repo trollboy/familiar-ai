@@ -39,3 +39,4 @@ pub(crate) fn vec_to_json(v: &[String]) -> familiar_ai_core::Result<String> {
 pub(crate) fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
+pub mod accounting;

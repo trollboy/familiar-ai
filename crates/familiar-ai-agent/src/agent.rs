@@ -143,6 +143,13 @@ pub struct ExecutionResult {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,
+    /// Cache creation/write tokens. Kept distinct from uncached and cache-read input.
+    pub cache_write_tokens: Option<u64>,
+    /// Provider-reported reasoning output, when it is a separate category.
+    pub reasoning_output_tokens: Option<u64>,
+    /// Per-model usage as reported by the adapter. Empty means only aggregate
+    /// usage (or no credible usage) was available.
+    pub model_usage: Vec<ModelUsage>,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     /// Vendor session identity, recorded as provenance only. `None` for
@@ -152,6 +159,23 @@ pub struct ExecutionResult {
     /// pricing-config estimation remains the sole source of
     /// `estimated_cost_microusd` in execution history.
     pub reported_cost_microusd: Option<u64>,
+    /// Exact provider spelling of a reported USD amount. Accounting code must
+    /// normalize this without floating point and retain this value verbatim.
+    pub reported_cost_usd_lexical: Option<String>,
+    /// Hash of the sanitized terminal accounting event, never of terminal text.
+    pub accounting_source_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelUsage {
+    pub model: String,
+    pub uncached_input_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub service_tier: Option<String>,
+    pub provider_request_id: Option<String>,
 }
 
 #[derive(Debug)]

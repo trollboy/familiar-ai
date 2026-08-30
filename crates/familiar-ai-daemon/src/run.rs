@@ -37,8 +37,8 @@ use familiar_ai_review::{
     StructuredReviewAdapter, VerificationCheck, VerificationPlan, WorkflowLimits,
 };
 use familiar_ai_storage::{
-    Database, ExecutionFinalization, ExecutionHistoryRepository, ExecutionStart, ReviewRepository,
-    SqliteBacklogRepository,
+    AccountingRepository, Database, ExecutionFinalization, ExecutionHistoryRepository,
+    ExecutionStart, ReviewRepository, SqliteBacklogRepository, UsageObservation,
 };
 
 const EXECUTION_CONSTRAINTS: &str = r#"- Implement the supplied PRD exactly as written and do not broaden its scope.
@@ -606,6 +606,7 @@ pub fn resume_implemented_checkpoint(
         signal: record.signal,
         session_id: None,
         reported_cost_microusd: None,
+        ..ExecutionResult::default()
     };
     let finalization = ExecutionFinalization {
         ended_at: record.ended_at.unwrap_or_default(),
@@ -1030,7 +1031,7 @@ fn execute_tracked_inner(
     ExecutionHistoryRepository::new(db.conn())
         .insert_running(&ExecutionStart {
             execution_id: id.clone(),
-            started_at,
+            started_at: started_at.clone(),
             repository: slash(&context.repository.repository),
             worktree: slash(&context.repository.worktree),
             git_commit: context.repository.git_commit.clone(),
@@ -1090,6 +1091,17 @@ fn execute_tracked_inner(
     let finalization = terminal(&timer, result, outcome, unavailable, config);
     finalize(&db, &id, &finalization)
         .map_err(|e| retained_traced(trace, &target, "history_failed", e))?;
+    persist_accounting_observations(
+        &db,
+        &id,
+        &started_at,
+        result,
+        outcome,
+        implementation_entry.adapter.as_str(),
+        &context.repository.worktree,
+        &finalization,
+    )
+    .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
     let result = execution
         .map_err(|e| retained_traced(trace, &target, agent_reason(&e), RunError::Agent(e)))?;
     if result.exit_code == Some(0) && result.signal.is_none() {
@@ -2055,6 +2067,117 @@ fn finalize(db: &Database, id: &str, value: &ExecutionFinalization) -> Result<()
         })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn persist_accounting_observations(
+    db: &Database,
+    execution_id: &str,
+    period_start: &str,
+    result: &ExecutionResult,
+    terminal_status: &str,
+    adapter: &str,
+    worktree: &Path,
+    finalization: &ExecutionFinalization,
+) -> Result<(), RunError> {
+    let period_end = Utc::now().to_rfc3339();
+    let evidence = git_common_directory_evidence(worktree);
+    let worker = format!(
+        "{}/{}",
+        adapter,
+        result.model.as_deref().unwrap_or("unknown")
+    );
+    let rows: Vec<familiar_ai_agent::ModelUsage> = if result.model_usage.is_empty() {
+        vec![familiar_ai_agent::ModelUsage {
+            model: result.model.clone().unwrap_or_else(|| "unknown".into()),
+            uncached_input_tokens: result.input_tokens,
+            cache_read_tokens: result.cached_tokens,
+            cache_write_tokens: result.cache_write_tokens,
+            output_tokens: result.output_tokens,
+            reasoning_output_tokens: result.reasoning_output_tokens,
+            ..Default::default()
+        }]
+    } else {
+        result.model_usage.clone()
+    };
+    for (index, usage) in rows.iter().enumerate() {
+        let has_usage = [
+            usage.uncached_input_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            usage.output_tokens,
+            usage.reasoning_output_tokens,
+        ]
+        .into_iter()
+        .any(|v| v.is_some());
+        let base_hash = result
+            .accounting_source_hash
+            .as_deref()
+            .unwrap_or(execution_id);
+        let repo = AccountingRepository::new(db.conn());
+        let observation_id = repo
+            .append_observation(&UsageObservation {
+                execution_id,
+                attempt_id: execution_id,
+                stage: "implementation",
+                session_id: result.session_id.as_deref(),
+                worker_identity: &worker,
+                adapter,
+                cli_version: result.agent_version.as_deref(),
+                model_identity: (usage.model != "unknown").then_some(usage.model.as_str()),
+                service_tier: usage.service_tier.as_deref(),
+                provider_request_id: usage.provider_request_id.as_deref(),
+                uncached_input_tokens: usage.uncached_input_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                output_tokens: usage.output_tokens,
+                reasoning_output_tokens: usage.reasoning_output_tokens,
+                unknown_reason: (!has_usage).then_some("usage_not_reported"),
+                period_start,
+                period_end: &period_end,
+                terminal_status,
+                source_event_hash: &format!("{base_hash}:model:{index}"),
+                provider_cost_lexical: result.reported_cost_usd_lexical.as_deref(),
+                project_resolution_evidence: evidence.as_deref(),
+            })
+            .map_err(|e| RunError::Storage(e.to_string()))?;
+        if let Some(observation_id) = observation_id {
+            if let Some(lexical) = result.reported_cost_usd_lexical.as_deref() {
+                // The terminal total belongs to the aggregate envelope; only
+                // attach it once when multiple model rows were reported.
+                if index == 0 {
+                    repo.append_vendor_estimate(&observation_id, lexical)
+                        .map_err(|e| RunError::Storage(e.to_string()))?;
+                }
+            } else if index == 0 {
+                if let Some(amount) = finalization.estimated_cost_microusd {
+                    let rates = serde_json::json!({"input":finalization.input_rate,"cache_read":finalization.cached_input_rate,"output":finalization.output_rate}).to_string();
+                    repo.append_legacy_configured_estimate(
+                        &observation_id,
+                        &usage.model,
+                        amount,
+                        &rates,
+                    )
+                    .map_err(|e| RunError::Storage(e.to_string()))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn git_common_directory_evidence(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    std::fs::canonicalize(value.trim()).ok().map(|p| slash(&p))
+}
+
 fn terminal(
     timer: &Instant,
     result: &ExecutionResult,
@@ -2179,10 +2302,7 @@ pub fn calculate_cost(
     let (Some(i), Some(c), Some(o)) = (input, cached, output) else {
         return (None, rates, "usage_incomplete");
     };
-    let Some(u) = i.checked_sub(c) else {
-        return (None, rates, "usage_incomplete");
-    };
-    let numerator = u
+    let numerator = i
         .checked_mul(ir)
         .and_then(|x| c.checked_mul(cr).and_then(|y| x.checked_add(y)))
         .and_then(|x| o.checked_mul(or).and_then(|y| x.checked_add(y)));
@@ -2396,6 +2516,7 @@ mod tests {
                 signal: None,
                 session_id: None,
                 reported_cost_microusd: None,
+                ..ExecutionResult::default()
             },
         };
 
@@ -2546,6 +2667,7 @@ mod tests {
                 signal: None,
                 session_id: None,
                 reported_cost_microusd: None,
+                ..ExecutionResult::default()
             },
         }
     }
@@ -2571,7 +2693,7 @@ mod tests {
         };
         assert_eq!(
             calculate_cost(Some(10), Some(4), Some(2), Some(&p)).0,
-            Some(22)
+            Some(30)
         );
     }
     #[test]
@@ -2679,6 +2801,7 @@ mod tests {
                 signal: None,
                 session_id: None,
                 reported_cost_microusd: None,
+                ..ExecutionResult::default()
             })
         }
     }
@@ -2835,6 +2958,7 @@ mod tests {
                     signal: None,
                     session_id: None,
                     reported_cost_microusd: None,
+                    ..ExecutionResult::default()
                 },
                 implementation_finalization: &finalization,
                 implementation_agent: &agent,
@@ -2923,6 +3047,7 @@ mod tests {
                 signal: None,
                 session_id: None,
                 reported_cost_microusd: None,
+                ..ExecutionResult::default()
             },
             implementation_finalization: &finalization,
             implementation_agent: &implementer,
@@ -2981,6 +3106,7 @@ mod tests {
                 signal: None,
                 session_id: None,
                 reported_cost_microusd: None,
+                ..ExecutionResult::default()
             },
             implementation_finalization: &finalization,
             implementation_agent: &agent,
@@ -3025,6 +3151,7 @@ mod tests {
                 signal: None,
                 session_id: None,
                 reported_cost_microusd: None,
+                ..ExecutionResult::default()
             },
             implementation_finalization: &finalization,
             implementation_agent: &agent,

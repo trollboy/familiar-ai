@@ -1962,6 +1962,32 @@ fn history(limit: u8, verbose: bool) -> Result<(), String> {
 }
 fn usage() -> Result<(), String> {
     let db = database()?;
+    let ledger = familiar_ai_storage::AccountingRepository::new(db.conn())
+        .usage()
+        .map_err(|e| e.to_string())?;
+    println!("Ledger observations: {}", ledger.observations);
+    println!(
+        "Ledger observations with unknown usage: {}",
+        ledger.unknown_observations
+    );
+    println!(
+        "Ledger uncached input tokens: {}",
+        ledger.uncached_input_tokens
+    );
+    println!("Ledger cache-read tokens: {}", ledger.cache_read_tokens);
+    println!("Ledger cache-write tokens: {}", ledger.cache_write_tokens);
+    println!("Ledger output tokens: {}", ledger.output_tokens);
+    println!(
+        "Ledger reasoning-output tokens: {}",
+        ledger.reasoning_output_tokens
+    );
+    println!("Ledger local-estimate nanoUSD: {}", ledger.known_nanousd);
+    println!(
+        "Ledger provenance vendor-reported={} configured-rate={} known-zero={}",
+        ledger.vendor_reported_estimates,
+        ledger.configured_rate_estimates,
+        ledger.known_zero_estimates
+    );
     let u = ExecutionHistoryRepository::new(db.conn())
         .usage()
         .map_err(|e| e.to_string())?;

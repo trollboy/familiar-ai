@@ -4,6 +4,7 @@ pub mod repos;
 pub(crate) mod sql;
 
 pub use db::Database;
+pub use repos::accounting::{AccountingRepository, LedgerUsageSummary, UsageObservation};
 pub use repos::backlog::{
     list_entries as list_backlog_entries, list_recovery_events, BacklogEntryRow, RecoveryEventRow,
     SqliteBacklogRepository,

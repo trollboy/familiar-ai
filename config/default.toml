@@ -86,6 +86,11 @@
 # [execution_history.pricing]; without pricing configured every run's cost is
 # unknown and a cost ceiling ends the session after the first attempt
 # (unknown is never treated as zero).
+# Optional versioned schedules live at
+# [execution_history.price_schedules."schedule-id"] and declare effective_at,
+# currency = "USD", calculation_version, and per-model nanoUSD rates. Operator
+# subscription declarations are separate availability/fee facts under
+# [execution_history.subscriptions."provider/model"] and never imply spend.
 [driver]
 max_prds_per_session = 0      # 0 = unlimited
 max_session_cost_microusd = 0 # 0 = no cost ceiling

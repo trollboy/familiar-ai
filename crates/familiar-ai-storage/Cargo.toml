@@ -13,6 +13,7 @@ serde_json.workspace = true
 serde.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

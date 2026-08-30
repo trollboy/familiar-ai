@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 use crate::isolation::{isolated_command, stream_lines, StreamAction};
-use crate::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
+use crate::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult, ModelUsage};
 
 /// Adapter-owned tool restrictions guaranteeing that a `ReadOnly` execution
 /// cannot edit files or run repository-modifying commands, independent of the
@@ -256,7 +256,9 @@ struct ClaudeStream {
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
-    total_cost_usd: Option<f64>,
+    total_cost_usd_lexical: Option<String>,
+    model_usage: Vec<ModelUsage>,
+    source_hash: Option<String>,
     terminal_seen: bool,
     malformed_seen: bool,
     budget_stopped: bool,
@@ -272,32 +274,61 @@ impl ClaudeStream {
             .init_session
             .clone()
             .or_else(|| self.result_session.clone());
-        result.input_tokens = match (
-            self.input_tokens,
-            self.cache_creation_input_tokens,
-            self.cache_read_input_tokens,
-        ) {
-            (Some(direct), Some(created), Some(read)) => direct
-                .checked_add(created)
-                .and_then(|sum| sum.checked_add(read)),
-            _ => None,
-        };
+        result.input_tokens = self.input_tokens;
         result.cached_tokens = self.cache_read_input_tokens;
+        result.cache_write_tokens = self.cache_creation_input_tokens;
         result.output_tokens = self.output_tokens;
-        result.reported_cost_microusd = self.total_cost_usd.and_then(cost_to_microusd);
+        result.model_usage = self.model_usage.clone();
+        result.reported_cost_usd_lexical = self.total_cost_usd_lexical.clone();
+        result.reported_cost_microusd = self
+            .total_cost_usd_lexical
+            .as_deref()
+            .and_then(cost_to_microusd);
+        result.accounting_source_hash = self.source_hash.clone();
     }
 }
 
 /// Convert dollars to micro-USD with half-up rounding and checked range.
-fn cost_to_microusd(cost_usd: f64) -> Option<u64> {
-    if !cost_usd.is_finite() || cost_usd < 0.0 {
+fn cost_to_microusd(value: &str) -> Option<u64> {
+    decimal_to_scaled(value, 6)
+}
+
+/// Decimal normalization with round-half-to-even at the requested scale.
+fn decimal_to_scaled(value: &str, scale: usize) -> Option<u64> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
-    let micro = (cost_usd * 1_000_000.0).round();
-    if !micro.is_finite() || micro < 0.0 || micro > i64::MAX as f64 {
-        return None;
+    let mut out = whole
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(10_u64.pow(scale as u32))?;
+    let kept = &fraction[..fraction.len().min(scale)];
+    if !kept.is_empty() {
+        out = out.checked_add(
+            kept.parse::<u64>()
+                .ok()?
+                .checked_mul(10_u64.pow((scale - kept.len()) as u32))?,
+        )?;
     }
-    Some(micro as u64)
+    let discarded = fraction.as_bytes().get(scale).copied();
+    let round = match discarded {
+        Some(b'0'..=b'4') | None => false,
+        Some(b'6'..=b'9') => true,
+        Some(b'5') => {
+            fraction
+                .as_bytes()
+                .get(scale + 1..)
+                .is_some_and(|tail| tail.iter().any(|b| *b != b'0'))
+                || out % 2 == 1
+        }
+        _ => return None,
+    };
+    out.checked_add(u64::from(round))
+        .filter(|v| *v <= i64::MAX as u64)
 }
 
 fn uint(value: Option<&Value>) -> Option<u64> {
@@ -358,6 +389,7 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
                 return StreamAction::Forward;
             }
             stream.terminal_seen = true;
+            stream.source_hash = Some(hash_accounting_event(&value));
             if let Some(usage) = value.get("usage").and_then(Value::as_object) {
                 stream.input_tokens = uint(usage.get("input_tokens"));
                 stream.cache_creation_input_tokens = uint(usage.get("cache_creation_input_tokens"));
@@ -394,10 +426,15 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
                     stream.output_tokens = None;
                 }
             }
-            stream.total_cost_usd = value
+            stream.total_cost_usd_lexical = value
                 .get("total_cost_usd")
-                .and_then(Value::as_f64)
-                .filter(|cost| cost.is_finite() && *cost >= 0.0);
+                .and_then(|v| match v {
+                    Value::Number(n) => Some(n.to_string()),
+                    Value::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .filter(|v| decimal_to_scaled(v, 9).is_some());
+            stream.model_usage = parse_model_usage(&value);
             stream.result_session = string(value.get("session_id"));
             if stream.result_model.is_none() {
                 stream.result_model = single_result_model(&value);
@@ -421,6 +458,60 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
         }
         _ => StreamAction::Silent,
     }
+}
+
+fn parse_model_usage(value: &Value) -> Vec<ModelUsage> {
+    value
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .map(|models| {
+            models
+                .iter()
+                .map(|(model, v)| {
+                    let u = v.as_object();
+                    ModelUsage {
+                        model: model.clone(),
+                        uncached_input_tokens: uint(
+                            u.and_then(|x| x.get("inputTokens").or_else(|| x.get("input_tokens"))),
+                        ),
+                        cache_read_tokens: uint(u.and_then(|x| {
+                            x.get("cacheReadInputTokens")
+                                .or_else(|| x.get("cache_read_input_tokens"))
+                        })),
+                        cache_write_tokens: uint(u.and_then(|x| {
+                            x.get("cacheCreationInputTokens")
+                                .or_else(|| x.get("cache_creation_input_tokens"))
+                        })),
+                        output_tokens: uint(u.and_then(|x| {
+                            x.get("outputTokens").or_else(|| x.get("output_tokens"))
+                        })),
+                        reasoning_output_tokens: uint(u.and_then(|x| {
+                            x.get("reasoningOutputTokens")
+                                .or_else(|| x.get("reasoning_output_tokens"))
+                        })),
+                        service_tier: u.and_then(|x| {
+                            string(x.get("serviceTier").or_else(|| x.get("service_tier")))
+                        }),
+                        provider_request_id: u.and_then(|x| {
+                            string(x.get("requestId").or_else(|| x.get("request_id")))
+                        }),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn hash_accounting_event(value: &Value) -> String {
+    let safe = serde_json::json!({"usage": value.get("usage"), "modelUsage": value.get("modelUsage"), "session_id": value.get("session_id"), "total_cost_usd": value.get("total_cost_usd"), "subtype": value.get("subtype")});
+    let hash = ring::digest::digest(&ring::digest::SHA256, safe.to_string().as_bytes());
+    format!(
+        "sha256:{}",
+        hash.as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
 }
 
 fn aggregate_model_usage(value: &Value) -> Option<(u64, u64, u64, u64)> {
@@ -558,8 +649,9 @@ mod tests {
         stream.apply(&mut result);
         assert_eq!(result.model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(result.session_id.as_deref(), Some("s-1"));
-        assert_eq!(result.input_tokens, Some(15));
+        assert_eq!(result.input_tokens, Some(10));
         assert_eq!(result.cached_tokens, Some(3));
+        assert_eq!(result.cache_write_tokens, Some(2));
         assert_eq!(result.output_tokens, Some(4));
         assert_eq!(result.reported_cost_microusd, Some(250_000));
     }
@@ -640,7 +732,8 @@ mod tests {
         let mut result = ExecutionResult::default();
         stream.apply(&mut result);
         assert!(stream.budget_stopped);
-        assert_eq!(result.input_tokens, Some(41));
+        assert_eq!(result.input_tokens, Some(30));
+        assert_eq!(result.cache_write_tokens, Some(3));
         assert_eq!(result.cached_tokens, Some(8));
         assert_eq!(result.output_tokens, Some(10));
     }
@@ -666,13 +759,13 @@ mod tests {
 
     #[test]
     fn cost_conversion_rounds_half_up_with_checked_range() {
-        assert_eq!(cost_to_microusd(0.0000005), Some(1));
-        assert_eq!(cost_to_microusd(0.0000004), Some(0));
-        assert_eq!(cost_to_microusd(1.25), Some(1_250_000));
-        assert_eq!(cost_to_microusd(f64::NAN), None);
-        assert_eq!(cost_to_microusd(f64::INFINITY), None);
-        assert_eq!(cost_to_microusd(-0.01), None);
-        assert_eq!(cost_to_microusd(1e300), None);
+        assert_eq!(cost_to_microusd("0.0000005"), Some(0));
+        assert_eq!(cost_to_microusd("0.0000015"), Some(2));
+        assert_eq!(cost_to_microusd("0.0000004"), Some(0));
+        assert_eq!(cost_to_microusd("1.25"), Some(1_250_000));
+        assert_eq!(cost_to_microusd("NaN"), None);
+        assert_eq!(cost_to_microusd("inf"), None);
+        assert_eq!(cost_to_microusd("-0.01"), None);
     }
 
     #[test]
@@ -784,7 +877,8 @@ mod tests {
         assert_eq!(result.agent_version.as_deref(), Some("Claude Code 2.1"));
         assert_eq!(result.model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(result.session_id.as_deref(), Some("sess-9"));
-        assert_eq!(result.input_tokens, Some(150));
+        assert_eq!(result.input_tokens, Some(100));
+        assert_eq!(result.cache_write_tokens, Some(20));
         assert_eq!(result.cached_tokens, Some(30));
         assert_eq!(result.output_tokens, Some(40));
         assert_eq!(result.reported_cost_microusd, Some(31_415));

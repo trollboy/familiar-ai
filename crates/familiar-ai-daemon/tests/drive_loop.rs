@@ -60,6 +60,7 @@ impl CodingAgent for RecordingAgent {
             signal: None,
             session_id: None,
             reported_cost_microusd: None,
+            ..ExecutionResult::default()
         })
     }
 }
