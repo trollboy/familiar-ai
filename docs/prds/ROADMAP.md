@@ -130,6 +130,22 @@ enables but does not fix B5, B6, and B13, whose stop-reason,
 review-checkpoint, and finalize-retry fixes remain execution/recovery work.
 PRD-051 supplies the trustworthy cost observations PRD-032 requires.
 
+## Control plane track (drafted 2026-08-30, awaiting owner approval)
+
+- PRD-056 — daemon-owned multi-project control plane: one deterministic
+  application-service layer (routing, policy, warrants, transitions,
+  accounting, authorization, queries) hosted by a persistent daemon
+  that owns projects, per-project durable queues, scheduling, detached
+  executions, and recovery; CLI/MCP/dashboard (and a later tray client)
+  become adapters over a same-user Unix-socket protocol with versioning,
+  idempotent submission, and reconnect cursors; capability-scoped MCP
+  sessions with a least-authority matrix; phased migration
+  (extract services → host behind socket → daemon-owned execution →
+  MCP re-homed) with exactly one mutating orchestrator at all times.
+  Retires the multi-writer SQLite contention class (B13's environment)
+  and absorbs the wave-one daemon; the PRD-034 supervisor shifts to
+  keeping the daemon alive. Depends on PRD-034/035/039/044/051.
+
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to
 query consistently.
@@ -152,7 +168,7 @@ query consistently.
   `origin/prd-023-location-is-truth`; divergent old implementation commits were
   not merged.
 - Historical wave-one documents in `done/` retain their legacy naming.
-- PRDs 051–055 were drafted 2026-08-30 by autonomous specification runs
+- PRDs 051–056 were drafted 2026-08-30 by autonomous specification runs
   as `status: draft`; owner approval flips them to `ready`. The provisional
   PRD-051+ numbering inside `docs/architecture/delivery-backlog.md` is that
   document's own superseded scheme, not the canonical sequence.
