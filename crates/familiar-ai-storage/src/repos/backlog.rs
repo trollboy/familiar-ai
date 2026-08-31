@@ -472,7 +472,7 @@ impl<'a> SqliteBacklogRepository<'a> {
                 "persisted review cycle columns are inconsistent".into(),
             ));
         }
-        validate_completion_cycle(&cycle, execution_id, required_checks)?;
+        validate_completion_cycle(&tx, &cycle, execution_id, required_checks)?;
         validate_persisted_review_request(&tx, &cycle)?;
         validate_persisted_evidence(&tx, &cycle)?;
         validate_persisted_findings(&tx, &cycle)?;
@@ -566,11 +566,11 @@ fn validate_persisted_evidence(
     let mut statement = tx
         .prepare(
             "SELECT check_id,phase,evidence_json FROM review_verification_evidence \
-             WHERE cycle_id=?1 ORDER BY phase,check_id",
+             WHERE cycle_id=?1 AND repository_key=?2 ORDER BY phase,check_id",
         )
         .map_err(storage)?;
     let rows = statement
-        .query_map([&cycle.cycle_id], |row| {
+        .query_map(params![cycle.cycle_id, cycle.repository_key], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -688,6 +688,7 @@ fn validate_run_actor(actor: &str) -> Result<(), BacklogStoreError> {
 }
 
 fn validate_completion_cycle(
+    tx: &Transaction<'_>,
     cycle: &ReviewCycle,
     execution_id: &str,
     required_checks: &[String],
@@ -702,16 +703,40 @@ fn validate_completion_cycle(
             "review cycle is not a clean terminal result".into(),
         ));
     }
-    if match cycle.review_result.as_ref() {
-        Some(result) => result
-            .findings
-            .iter()
-            .any(|f| f.blocking && f.status == FindingStatus::Open),
-        None => true,
-    } {
-        return Err(BacklogStoreError::Storage(
-            "terminal review has open blocking findings".into(),
-        ));
+    let result = cycle
+        .review_result
+        .as_ref()
+        .ok_or_else(|| BacklogStoreError::Storage("terminal review result is missing".into()))?;
+    for finding in result.findings.iter().filter(|f| {
+        f.status == FindingStatus::Open && (f.blocking || f.acceptance_criterion_id.is_some())
+    }) {
+        let durable: Option<(String, String, String, String, String, String)> = tx
+            .query_row(
+                "SELECT waiver_id,cycle_id,finding_id,actor,reason,created_at FROM review_finding_waivers WHERE cycle_id=?1 AND finding_id=?2",
+                params![cycle.cycle_id, finding.finding_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let waiver = durable.map(|row| familiar_ai_review::ReviewWaiver {
+            waiver_id: row.0,
+            cycle_id: row.1,
+            finding_id: row.2,
+            actor: row.3,
+            reason: row.4,
+            created_at: row.5,
+        });
+        if waiver.as_ref().is_none_or(|waiver| {
+            !waiver.actor.starts_with("human:")
+                || waiver.actor.trim() == "human:"
+                || waiver.reason.trim().is_empty()
+                || !cycle.waivers.contains(waiver)
+        }) {
+            return Err(BacklogStoreError::Storage(format!(
+                "terminal review retains open finding {} without a durable human waiver",
+                finding.finding_id
+            )));
+        }
     }
     let current = if cycle.verification_after_remediation.is_empty() {
         &cycle.verification_before_review
@@ -1125,6 +1150,7 @@ mod tests {
         ReviewCycle {
             cycle_id: "cycle".into(),
             task_id: "task".into(),
+            repository_key: repo().key,
             attempt: 1,
             state: ReviewCycleState::Completed,
             implementation: observation,
@@ -1141,6 +1167,7 @@ mod tests {
             verification_before_review: vec![evidence.clone()],
             verification_after_remediation: Vec::new(),
             verification_history: vec![evidence],
+            waivers: vec![],
             scope_policy_snapshot: None,
             scope_evaluations: Vec::new(),
             tier_selection: None,
@@ -1857,12 +1884,13 @@ mod tests {
         db.conn().execute_batch("PRAGMA foreign_keys=OFF").unwrap();
         let tx = db.conn_mut().transaction().unwrap();
         tx.execute(
-            "INSERT INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json) \
-             VALUES(?1,?2,'attempt-0',?3)",
+            "INSERT INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json,repository_key) \
+             VALUES(?1,?2,'attempt-0',?3,?4)",
             params![
                 cycle.cycle_id,
                 cycle.verification_history[0].check_id,
-                serde_json::to_string(&cycle.verification_history[0]).unwrap()
+                serde_json::to_string(&cycle.verification_history[0]).unwrap(),
+                cycle.repository_key,
             ],
         )
         .unwrap();

@@ -1423,6 +1423,11 @@ fn review_retained_reason(cycle: &ReviewCycle) -> &'static str {
         .contains(&ReviewStopReason::VerificationUnsuccessful)
     {
         "verification_failed"
+    } else if cycle
+        .stop_reasons
+        .contains(&ReviewStopReason::EnvironmentDenied)
+    {
+        "environment_denied"
     } else if cycle.stop_reasons.contains(&ReviewStopReason::Interrupted) {
         "interrupted"
     } else {
@@ -1821,6 +1826,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         .collect();
     let request = CoordinationRequest {
         cycle_id: format!("{execution_id}-cycle"),
+        repository_key: slash(&context.repository.repository),
         task,
         implementation: AgentObservation {
             assignment: implementation,
@@ -1896,8 +1902,9 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         .run(&context.repository.worktree, request, &mut io::stdout())
         .map_err(|e| RunError::Storage(format!("review workflow failed: {e}")))?;
     println!(
-        "Review disposition: {:?}; independence: {:?}; stop reasons: {:?}",
+        "Review disposition: {:?}; waivers: {:?}; independence: {:?}; stop reasons: {:?}",
         cycle.disposition,
+        cycle.waivers,
         cycle.independence.as_ref().map(|value| value.kind),
         cycle.stop_reasons
     );
@@ -2820,6 +2827,7 @@ mod tests {
                         remediation: "write the corrected value".into(),
                         status,
                         supersedes: None,
+                        acceptance_criterion_id: None,
                     }]
                 } else {
                     vec![]

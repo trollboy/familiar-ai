@@ -67,7 +67,20 @@ impl VerificationRunner for CommandVerificationRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) if environment_denied(&error) => {
+                return Ok(denied_evidence(
+                    check,
+                    repository,
+                    tested_identity,
+                    started,
+                    timer,
+                    error,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut child_stdout = child.stdout.take().ok_or(VerificationError::MissingPipe)?;
         let mut child_stderr = child.stderr.take().ok_or(VerificationError::MissingPipe)?;
         let stdout_thread = thread::spawn(move || {
@@ -132,6 +145,13 @@ impl VerificationRunner for CommandVerificationRunner {
                 .environment
                 .iter()
                 .map(|(k, v)| (k.clone(), content_hash(v.as_bytes())))
+                .chain([
+                    ("executor".into(), "local-process".into()),
+                    (
+                        "repository".into(),
+                        content_hash(repository.to_string_lossy().as_bytes()),
+                    ),
+                ])
                 .collect(),
             tool_identity: None,
             tested_identity: tested_identity.into(),
@@ -155,6 +175,49 @@ impl VerificationRunner for CommandVerificationRunner {
                 || stdout_redacted
                 || stderr_redacted,
         })
+    }
+}
+
+fn environment_denied(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+    )
+}
+
+fn denied_evidence(
+    check: &VerificationCheck,
+    repository: &Path,
+    tested_identity: &str,
+    started: chrono::DateTime<Utc>,
+    timer: Instant,
+    error: std::io::Error,
+) -> VerificationEvidence {
+    VerificationEvidence {
+        check_id: check.check_id.clone(),
+        argv: check.argv.clone(),
+        working_directory: check.working_directory.clone(),
+        environment_identity: [
+            ("executor".into(), "local-process".into()),
+            (
+                "repository".into(),
+                content_hash(repository.to_string_lossy().as_bytes()),
+            ),
+        ]
+        .into(),
+        tool_identity: None,
+        tested_identity: tested_identity.into(),
+        started_at: started.to_rfc3339(),
+        ended_at: Utc::now().to_rfc3339(),
+        duration_ms: u64::try_from(timer.elapsed().as_millis()).unwrap_or(u64::MAX),
+        exit_code: None,
+        signal: None,
+        status: VerificationStatus::EnvironmentDenied,
+        required: check.required,
+        summary: format!("environment denied check {}: {error}", check.check_id),
+        stdout: None,
+        stderr: None,
+        truncated: false,
     }
 }
 fn artifact(

@@ -58,6 +58,7 @@ impl WorkflowLimits {
 #[derive(Debug, Clone)]
 pub struct CoordinationRequest {
     pub cycle_id: String,
+    pub repository_key: String,
     pub task: ReviewTask,
     pub implementation: AgentObservation,
     pub reviewer: AgentAssignment,
@@ -97,6 +98,7 @@ impl ReviewCoordinator<'_> {
         let mut cycle = ReviewCycle {
             cycle_id: request.cycle_id.clone(),
             task_id: request.task.task_id.clone(),
+            repository_key: request.repository_key.clone(),
             attempt: 0,
             state: ReviewCycleState::CollectingEvidence,
             implementation: request.implementation.clone(),
@@ -121,6 +123,7 @@ impl ReviewCoordinator<'_> {
             verification_before_review: vec![],
             verification_after_remediation: vec![],
             verification_history: vec![],
+            waivers: vec![],
             scope_policy_snapshot: None,
             scope_evaluations: vec![],
             tier_selection: None,
@@ -230,7 +233,16 @@ impl ReviewCoordinator<'_> {
             }
         }
         if required_failed(&cycle.verification_before_review) {
-            return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful);
+            let reason = if cycle
+                .verification_before_review
+                .iter()
+                .any(|e| e.required && e.status == VerificationStatus::EnvironmentDenied)
+            {
+                ReviewStopReason::EnvironmentDenied
+            } else {
+                ReviewStopReason::VerificationUnsuccessful
+            };
+            return self.stop(cycle, reason);
         }
         if cycle
             .tier_selection
@@ -415,7 +427,10 @@ impl ReviewCoordinator<'_> {
                 result
                     .findings
                     .iter()
-                    .filter(|f| f.blocking && f.status == FindingStatus::Open)
+                    .filter(|f| {
+                        f.status == FindingStatus::Open
+                            && (f.blocking || f.acceptance_criterion_id.is_some())
+                    })
                     .cloned()
                     .collect(),
             );
@@ -1124,6 +1139,7 @@ mod tests {
                     remediation: "correct the result".into(),
                     status,
                     supersedes: None,
+                    acceptance_criterion_id: None,
                 }],
                 reviewed_manifest_hash: request.manifest.manifest_hash.clone(),
                 usage: known_usage(),
@@ -1223,6 +1239,7 @@ mod tests {
     fn base_request() -> CoordinationRequest {
         CoordinationRequest {
             cycle_id: "scenario".into(),
+            repository_key: "repo/.git".into(),
             task: ReviewTask {
                 task_id: "task".into(),
                 objective: "objective".into(),
@@ -1409,6 +1426,7 @@ mod tests {
                     remediation: "remove".into(),
                     status: FindingStatus::Open,
                     supersedes: None,
+                    acceptance_criterion_id: None,
                 },
                 ReviewFinding {
                     finding_id: "b".into(),
@@ -1421,6 +1439,7 @@ mod tests {
                     remediation: "keep".into(),
                     status: FindingStatus::Open,
                     supersedes: None,
+                    acceptance_criterion_id: None,
                 },
             ];
             Ok(result)
@@ -1516,6 +1535,7 @@ mod tests {
         };
         let req = CoordinationRequest {
             cycle_id: "c".into(),
+            repository_key: "repo/.git".into(),
             task: ReviewTask {
                 task_id: "t".into(),
                 objective: "o".into(),
@@ -1597,6 +1617,7 @@ mod tests {
         };
         let request = CoordinationRequest {
             cycle_id: "remediation-cycle".into(),
+            repository_key: "repo/.git".into(),
             task: ReviewTask {
                 task_id: "task".into(),
                 objective: "objective".into(),

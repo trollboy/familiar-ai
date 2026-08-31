@@ -1250,6 +1250,9 @@ fn preflight_command() -> Result<(), String> {
         let status = match check.status {
             familiar_ai_daemon::preflight::PreflightStatus::Passed => "passed",
             familiar_ai_daemon::preflight::PreflightStatus::Failed => "failed",
+            familiar_ai_daemon::preflight::PreflightStatus::EnvironmentDenied => {
+                "environment_denied"
+            }
         };
         println!("{status}\t{}\t{}", check.check_id, check.detail);
     }
