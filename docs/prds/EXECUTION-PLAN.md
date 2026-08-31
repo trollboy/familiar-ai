@@ -1,8 +1,11 @@
 # Backlog Execution Plan — 2026-08-30
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
-**Approval:** All 29 pending PRDs (032, 036–038, 041, 044–064, 066–068) are
-approved for implementation. The 046 and 051–064 family received adversarial
+**Approval:** All 30 pending PRDs (032, 036–038, 041, 044–064, 066–069) are
+approved for implementation. PRD-069 (native token compression — caveman
+functionality replicated first-party, owner-directed 2026-08-30, no
+external caveman dependency) joins Wave 3; its measured experiment verdict
+governs any default-on promotion. The 046 and 051–064 family received adversarial
 review and sign-off by Sol 5.6; owner batch-approved the full set 2026-08-30. Every
 frontmatter PRD is `status: ready`. This document is the owner's standing
 authorization: workers must not pause for per-PRD plan sign-off on
@@ -79,7 +82,7 @@ whole-crate declarations forfeit concurrency by design.
 | 2 | 041, 048, 049, 051 — **completed 2026-08-30** | 4 | 1 (measured) |
 | gate | 066 — integration-aware parallel orchestration | 1 | 1 |
 | gate | 067, 068 — verification truth, driver hygiene | 2 | 2 (disjoint by construction) |
-| 3 | 050, 052, 054, 057, 064 | 5 | ~2–3 (pipeline via merge queue) |
+| 3 | 050, 052, 054, 057, 064, 069 | 6 | ~3 (pipeline via merge queue; 069's new crate is disjoint) |
 | 4 | 032, 055, 056, 062 | 4 | ~2 |
 | 5 | 038, 053, 058 | 3 | ~2 |
 | 6 | 059, 060, 061, 063 | 4 | ~3–4 (per-adapter files are disjoint) |
