@@ -74,7 +74,7 @@ rules the backlog they hold is currently a width-one chain, because four
 shared surfaces (`config.rs`, `providers.md`, the CLI binary, shared test
 directories) sit in nearly every declared scope.
 
-**GATE (2026-08-31): PRD-076 blocks everything below it.** Scope
+**GATE (2026-08-31): PRD-076 blocks everything below it — owner-approved and prioritized 2026-08-31; it is the next PRD to run, before any remaining backlog item.** Scope
 modularization for parallel authoring: split the four hot surfaces into
 per-feature files (behavior-preserving, proven by fixture equivalence),
 amend every pending PRD's expected_files to the narrowed forms under this
