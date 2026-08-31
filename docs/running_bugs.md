@@ -313,6 +313,23 @@ instead of deleting the history.
   Add a byte-exact regression using a provider followed immediately by another
   provider comment/table, and prove failed rendering never reaches persistence.
 
+### FAM-BUG-018 — Recovery commit invalidates the checkpoint it is meant to integrate
+
+- **Status:** Open; PRD-050 required an audited manual completion override
+- **Observed:** The preserved PRD-050 candidate was reviewed, tested, committed
+  in its owned worktree as `f8e55a6`, and cherry-picked to main as `016f641`.
+  `backlog approve-and-complete` then rejected the checkpoint as `stale_base`
+  because the worktree HEAD had advanced from the recorded base commit to the
+  candidate commit.
+- **Impact:** The normal Git operation required to integrate a dirty preserved
+  candidate destroys Familiar's proof predicate before Familiar can bind the
+  landed commit. Operators must choose between leaving changes uncommitted or
+  using a manual completion override after successful integration.
+- **Expected fix:** Recovery checkpoints must distinguish recorded base revision
+  from candidate revision. Accept a candidate commit whose parent is the
+  recorded base and whose tree/diff matches the recorded candidate manifest,
+  then bind its equivalent cherry-pick/merge commit by patch or tree evidence.
+
 ### FAM-FRICTION-001 — Provider registration does not imply execution readiness
 
 - **Status:** Open design/UX gap
