@@ -8,20 +8,243 @@
 //! `familiar-ai run` performs them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use std::time::Instant;
 
 use familiar_ai_core::{
-    validate_graph, AppPaths, BacklogDiscovery, BacklogStatus, BacklogStatusStore, Config,
-    DiscoveredPrd, FilesystemBacklogDiscovery, PrdId, RepositoryIdentity,
+    validate_graph, AppPaths, BacklogDiscovery, BacklogStatus, BacklogStatusStore,
+    BacklogStoreError, Config, DiscoveredPrd, FilesystemBacklogDiscovery, PrdId,
+    RepositoryIdentity,
 };
 use familiar_ai_storage::{
     Database, DeliveryRepository, DriverRepository, ExecutionHistoryRepository,
+    OrchestrationRepository,
 };
 
+/// Materialize a reviewed candidate as a real two-parent merge commit on the
+/// persisted integration revision. `git merge-tree --write-tree` performs the
+/// merge without moving the user's checkout; conflicts are returned for the
+/// bounded remediation path.
+pub fn merge_candidate(
+    repository: &Path,
+    integrated: &str,
+    candidate: &str,
+) -> Result<String, String> {
+    let tree = Command::new("git")
+        .args(["merge-tree", "--write-tree", integrated, candidate])
+        .current_dir(repository)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !tree.status.success() {
+        return Err(format!(
+            "integration conflict: {}",
+            String::from_utf8_lossy(&tree.stderr).trim()
+        ));
+    }
+    let tree = String::from_utf8_lossy(&tree.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if tree.is_empty() {
+        return Err("integration produced no tree".into());
+    }
+    let commit = Command::new("git")
+        .args([
+            "commit-tree",
+            &tree,
+            "-p",
+            integrated,
+            "-p",
+            candidate,
+            "-m",
+            "familiar: integrate reviewed candidate",
+        ])
+        .current_dir(repository)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !commit.status.success() {
+        return Err(format!(
+            "cannot commit integration: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&commit.stdout).trim().to_owned())
+}
+
+/// Continue a final human scope approval through the same durable landing
+/// boundary as an unattended worker. Integration revision advancement,
+/// candidate rebinding, checkpoint completion, and backlog completion are one
+/// transaction; none becomes visible without all the others.
+pub fn continue_scope_approved_candidate(
+    db: &mut Database,
+    repository: &RepositoryIdentity,
+    target: &DiscoveredPrd,
+    config: &Config,
+) -> Result<(), String> {
+    let checkpoint = familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .get(&repository.key, &target.id.to_string())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no checkpoint for {}", target.id))?;
+    if checkpoint.phase != "reviewed" {
+        return Ok(());
+    }
+    let (session_id, sequence, prior): (String, i64, String) = db
+        .conn()
+        .query_row(
+            "SELECT a.session_id,a.sequence,s.integration_revision FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.prd_id=?2 AND a.integrated_at IS NULL ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
+            rusqlite::params![repository.key, target.id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let checkpoint_worktree = Path::new(&checkpoint.worktree_path);
+    if !git_output(checkpoint_worktree, &["status", "--porcelain"])?.is_empty() {
+        git_output(checkpoint_worktree, &["add", "-A"])?;
+        git_output(
+            checkpoint_worktree,
+            &[
+                "commit",
+                "-m",
+                &format!("familiar: implement {}", target.id),
+            ],
+        )?;
+    }
+    let candidate = git_output(checkpoint_worktree, &["rev-parse", "HEAD"])?;
+    let merged = merge_candidate(&repository.worktree, &prior, &candidate)?;
+    let rebound_diff = Command::new("git")
+        .args(["diff", "--binary", &prior, &merged])
+        .current_dir(&repository.worktree)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !rebound_diff.status.success() {
+        return Err("cannot compute integrated candidate binding".into());
+    }
+    let rebound_hash = familiar_ai_review::content_hash(&rebound_diff.stdout);
+    let execution_id = checkpoint
+        .execution_id
+        .as_deref()
+        .ok_or_else(|| "scope-approved checkpoint has no execution id".to_string())?;
+    let actor = format!("system:familiar-ai-run:{execution_id}");
+    let required = config
+        .review
+        .verification
+        .iter()
+        .filter(|check| check.required)
+        .map(|check| check.check_id.clone())
+        .collect::<Vec<_>>();
+    let now = chrono::Utc::now().to_rfc3339();
+    familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
+        .complete_run_with(
+            repository,
+            target,
+            execution_id,
+            &actor,
+            &required,
+            |tx| {
+                let changed = tx.execute(
+                    "UPDATE driver_sessions SET integration_revision=?1 WHERE session_id=?2 AND integration_revision=?3",
+                    rusqlite::params![merged, session_id, prior],
+                ).map_err(|error| BacklogStoreError::Storage(error.to_string()))?;
+                if changed != 1 {
+                    return Err(BacklogStoreError::Storage("integration revision changed during scope-decision landing".into()));
+                }
+                let changed = tx.execute(
+                    "UPDATE driver_attempts SET candidate_revision=?1,integrated_at=?2,last_durable_phase='integrated' WHERE session_id=?3 AND sequence=?4 AND integrated_at IS NULL",
+                    rusqlite::params![merged, now, session_id, sequence],
+                ).map_err(|error| BacklogStoreError::Storage(error.to_string()))?;
+                if changed != 1 {
+                    return Err(BacklogStoreError::Storage("scope-decision attempt is missing or already integrated".into()));
+                }
+                let changed = tx.execute(
+                    "UPDATE execution_checkpoints SET phase='completed',diff_hash=?1,approved_diff_hash=CASE WHEN approved_diff_hash=?2 THEN ?1 ELSE approved_diff_hash END,approved_commit=?3,base_revision=?3,invalid_reason=NULL,updated_at=?4 WHERE checkpoint_id=?5 AND diff_hash=?2",
+                    rusqlite::params![rebound_hash, checkpoint.diff_hash, merged, now, checkpoint.checkpoint_id],
+                ).map_err(|error| BacklogStoreError::Storage(error.to_string()))?;
+                if changed != 1 {
+                    return Err(BacklogStoreError::Storage("scope-decision candidate binding changed during landing".into()));
+                }
+                tx.execute(
+                    "UPDATE scope_decisions SET candidate_hash=?1 WHERE checkpoint_id=?2",
+                    rusqlite::params![rebound_hash, checkpoint.checkpoint_id],
+                ).map_err(|error| BacklogStoreError::Storage(error.to_string()))?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+struct ProgressGuard {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+fn durable_attempt_phase(database_path: &Path, session_id: &str, sequence: i64) -> String {
+    Database::open(database_path)
+        .ok()
+        .and_then(|database| {
+            database
+                .conn()
+                .query_row(
+                    "SELECT last_durable_phase FROM driver_attempts WHERE session_id=?1 AND sequence=?2",
+                    rusqlite::params![session_id, sequence],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
+impl ProgressGuard {
+    fn start(
+        prd: String,
+        stage: &'static str,
+        database_path: std::path::PathBuf,
+        session_id: String,
+        sequence: i64,
+        interval: Duration,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let started = Instant::now();
+            while !flag.load(Ordering::Acquire) {
+                std::thread::park_timeout(interval);
+                if !flag.load(Ordering::Acquire) {
+                    let last_transition =
+                        durable_attempt_phase(&database_path, &session_id, sequence);
+                    eprintln!("drive: progress prd={prd} stage={stage} elapsed_ms={} last_durable_phase={last_transition}",started.elapsed().as_millis());
+                    let _ = std::io::stderr().flush();
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(t) = self.thread.take() {
+            t.thread().unpark();
+            let _ = t.join();
+        }
+    }
+}
+
 use crate::run::{
-    execute_with_config_tracked_from_preflighted_with_route_context,
     execute_with_config_tracked_from_preflighted_with_route_context_and_timeout,
     next_implementation_worker, resolved_worker_plan, AgentSet, RouteContext,
 };
@@ -238,6 +461,84 @@ pub struct SelectionDecision {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidthReport {
+    pub graph_width: usize,
+    pub achievable_width: usize,
+    pub conflicts: Vec<(PrdId, PrdId, String)>,
+}
+
+/// Compute the maximum simultaneously admissible subset using the exact
+/// scope/resource authority used by runtime selection.
+pub fn achievable_width(repository: &Path, prds: &[DiscoveredPrd]) -> Result<WidthReport, String> {
+    let scopes = prds
+        .iter()
+        .map(|p| prd_scope(repository, p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut conflicts = Vec::new();
+    let mut edges = vec![vec![false; prds.len()]; prds.len()];
+    for i in 0..prds.len() {
+        for j in i + 1..prds.len() {
+            let scope = scope_overlap(&scopes[i], &scopes[j])
+                .map(|(a, b)| format!("scope '{a}' overlaps '{b}'"));
+            let resource = prds[i]
+                .metadata
+                .resources
+                .iter()
+                .find(|r| prds[j].metadata.resources.contains(r))
+                .map(|r| format!("resource '{r}'"));
+            if let Some(reason) = scope.or(resource) {
+                edges[i][j] = true;
+                edges[j][i] = true;
+                conflicts.push((prds[i].id.clone(), prds[j].id.clone(), reason));
+            }
+        }
+    }
+    fn search(index: usize, picked: &mut Vec<usize>, edges: &[Vec<bool>], best: &mut usize) {
+        if index == edges.len() {
+            *best = (*best).max(picked.len());
+            return;
+        }
+        if picked.len() + edges.len() - index <= *best {
+            return;
+        }
+        if picked.iter().all(|&p| !edges[p][index]) {
+            picked.push(index);
+            search(index + 1, picked, edges, best);
+            picked.pop();
+        }
+        search(index + 1, picked, edges, best);
+    }
+    let mut best = 0;
+    search(0, &mut Vec::new(), &edges, &mut best);
+    Ok(WidthReport {
+        graph_width: prds.len(),
+        achievable_width: best,
+        conflicts,
+    })
+}
+
+pub fn validate_claimed_width(
+    repository: &Path,
+    prds: &[DiscoveredPrd],
+    claimed: usize,
+) -> Result<WidthReport, String> {
+    let report = achievable_width(repository, prds)?;
+    if claimed > report.achievable_width {
+        let pairs = report
+            .conflicts
+            .iter()
+            .map(|(a, b, r)| format!("{a}<->{b}: {r}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "claimed width {claimed} exceeds achievable width {}: {pairs}",
+            report.achievable_width
+        ));
+    }
+    Ok(report)
+}
+
 /// The mutable expected-file scope of one PRD under the closed Expected Files
 /// grammar (exact file, or directory prefix from `dir/` / `dir/**`).
 fn prd_scope(
@@ -287,9 +588,14 @@ fn scope_overlap(
     right: &[(String, familiar_ai_review::ExpectedMatchKind)],
 ) -> Option<(String, String)> {
     left.iter().find_map(|a| {
+        if a.0 == "crates/familiar-ai-storage/migrations/" {
+            return None;
+        }
         right
             .iter()
-            .find(|b| scope_entries_overlap(a, b))
+            .find(|b| {
+                b.0 != "crates/familiar-ai-storage/migrations/" && scope_entries_overlap(a, b)
+            })
             .map(|b| (a.0.clone(), b.0.clone()))
     })
 }
@@ -297,10 +603,9 @@ fn scope_overlap(
 /// Schedule from the current ready set. Dependencies are admission gates, not
 /// mutual-exclusion edges: every pending PRD whose dependencies are completed
 /// is admitted up to `limit`, and two ready PRDs serialize only for an
-/// overlapping mutable expected-file scope. A PRD completed earlier in this
-/// session whose work still sits undelivered in an isolated worktree defers
-/// its dependents — a fresh worktree branches from the main HEAD and would
-/// not contain that work.
+/// overlapping mutable expected-file scope. Completed dependencies are safe
+/// immediately after integration because subsequently admitted workers branch
+/// from the persisted integration revision; delivery is independent.
 #[allow(clippy::too_many_arguments)]
 fn select_batch(
     repository: &RepositoryIdentity,
@@ -308,7 +613,6 @@ fn select_batch(
     db: &mut Database,
     attempted: &BTreeSet<PrdId>,
     allowlist: Option<&BTreeSet<PrdId>>,
-    session_undelivered: &BTreeSet<PrdId>,
     limit: usize,
     decisions: &mut Vec<SelectionDecision>,
 ) -> Result<Selection, DriveError> {
@@ -355,21 +659,6 @@ fn select_batch(
                 });
                 continue;
             }
-        }
-        if let Some(undelivered) = entry
-            .prd
-            .dependencies
-            .iter()
-            .find(|id| session_undelivered.contains(id))
-        {
-            decisions.push(SelectionDecision {
-                prd_id: entry.prd.id.clone(),
-                decision: "deferred_dependency_undelivered",
-                detail: format!(
-                    "dependency {undelivered} completed this session in an isolated worktree not yet delivered to the base branch"
-                ),
-            });
-            continue;
         }
         if selected.len() >= limit.max(1) {
             decisions.push(SelectionDecision {
@@ -595,6 +884,11 @@ pub fn drive(
     DriverRepository::new(db.conn())
         .open_session(&session_id, &repository.key, &warrant.as_json())
         .map_err(|error| DriveError::Storage(error.to_string()))?;
+    let session_base =
+        git_output(&repository.worktree, &["rev-parse", "HEAD"]).map_err(DriveError::Config)?;
+    OrchestrationRepository::new(db.conn())
+        .initialize_integration(&session_id, &session_base)
+        .map_err(|error| DriveError::Storage(error.to_string()))?;
     eprintln!(
         "drive: session {session_id} started warrant={}",
         warrant.as_json()
@@ -616,10 +910,6 @@ pub fn drive(
     let mut known_tokens = 0_u64;
     let mut delivered = 0_u64;
     let mut poc_risks_accepted = 0_u64;
-    // PRDs completed this session whose work sits in an isolated worktree not
-    // yet delivered to the base branch: their dependents must not start from a
-    // fresh worktree that lacks that work.
-    let mut session_undelivered = BTreeSet::<PrdId>::new();
     // Each (prd, decision) pair is persisted once per session, not once per
     // scheduling pass.
     let mut recorded_decisions = BTreeSet::<(PrdId, &'static str)>::new();
@@ -634,250 +924,306 @@ pub fn drive(
         eprintln!("drive: session preflight failed: {detail}");
         DriveTermination::PreflightFailed
     } else {
-        loop {
-            if heartbeat.failed() {
-                break DriveTermination::WorkerHeartbeatLost;
-            }
-            let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-            if let Some(reason) = warrant.exhausted(attempted, known_cost, known_tokens, elapsed) {
-                break reason;
-            }
-            let discovered =
-                match discovery.discover_with_layout(&repository, &repository_config.layout()) {
+        std::thread::scope(|scope| -> Result<DriveTermination, DriveError> {
+            let (result_sender, result_receiver) = std::sync::mpsc::channel();
+            let mut active_workers = 0_usize;
+            let mut stop_after_drain = None;
+            let termination = loop {
+                if active_workers == 0 {
+                    if let Some(reason) = stop_after_drain {
+                        break reason;
+                    }
+                }
+                if heartbeat.failed() {
+                    stop_after_drain = Some(DriveTermination::WorkerHeartbeatLost);
+                }
+                let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                if let Some(reason) =
+                    warrant.exhausted(attempted, known_cost, known_tokens, elapsed)
+                {
+                    stop_after_drain.get_or_insert(reason);
+                    if active_workers == 0 {
+                        break reason;
+                    }
+                }
+                let discovered = match discovery
+                    .discover_with_layout(&repository, &repository_config.layout())
+                {
                     Ok(discovered) => discovered,
                     Err(error) => {
                         eprintln!("drive: discovery failed: {error}");
                         break DriveTermination::StorageFailure;
                     }
                 };
-            if let Err(error) = validate_graph(&discovered) {
-                eprintln!("drive: backlog graph invalid: {error}");
-                break DriveTermination::StorageFailure;
-            }
-            let components = dependency_components(&discovered);
-            let remaining = if warrant.max_prds == 0 {
-                parallelism
-            } else {
-                usize::try_from(warrant.max_prds.saturating_sub(attempted))
-                    .unwrap_or(usize::MAX)
-                    .min(parallelism)
-            };
-            let mut decisions = Vec::new();
-            let selection = select_batch(
-                &repository,
-                &discovered,
-                &mut db,
-                &attempted_ids,
-                warrant.prd_allowlist.as_ref(),
-                &session_undelivered,
-                remaining,
-                &mut decisions,
-            )?;
-            let mut decision_storage_failed = false;
-            for decision in &decisions {
-                if !recorded_decisions.insert((decision.prd_id.clone(), decision.decision)) {
-                    continue;
+                if let Err(error) = validate_graph(&discovered) {
+                    eprintln!("drive: backlog graph invalid: {error}");
+                    break DriveTermination::StorageFailure;
                 }
-                if decision.decision != "ready_selected" {
-                    eprintln!(
-                        "drive: {} {} {}",
-                        decision.decision, decision.prd_id, decision.detail
-                    );
+                let components = dependency_components(&discovered);
+                let remaining = if stop_after_drain.is_some() {
+                    0
+                } else if warrant.max_prds == 0 {
+                    parallelism
+                } else {
+                    usize::try_from(warrant.max_prds.saturating_sub(attempted))
+                        .unwrap_or(usize::MAX)
+                        .min(parallelism)
                 }
-                if let Err(error) = DriverRepository::new(db.conn()).record_selection_decision(
-                    &session_id,
-                    &decision.prd_id.to_string(),
-                    decision.decision,
-                    &decision.detail,
-                ) {
-                    eprintln!("drive: cannot persist selection decision: {error}");
-                    decision_storage_failed = true;
-                    break;
-                }
-            }
-            if decision_storage_failed {
-                break DriveTermination::StorageFailure;
-            }
-            let targets = match selection {
-                Selection::Eligible(prds) => prds,
-                Selection::BacklogEmpty => break DriveTermination::BacklogEmpty,
-                Selection::NothingEligible => break DriveTermination::NothingEligible,
-            };
-            if !width_reported {
-                width_reported = true;
-                if targets.len() < remaining {
-                    let detail = format!(
-                        "achievable_width={} requested_width={remaining}",
-                        targets.len()
-                    );
-                    eprintln!("drive: {detail}");
-                    if let Err(error) =
-                        DriverRepository::new(db.conn()).record_session_detail(&session_id, &detail)
-                    {
-                        eprintln!("drive: cannot persist width report: {error}");
-                        break DriveTermination::StorageFailure;
+                .min(parallelism.saturating_sub(active_workers));
+                let mut decisions = Vec::new();
+                let selection = select_batch(
+                    &repository,
+                    &discovered,
+                    &mut db,
+                    &attempted_ids,
+                    warrant.prd_allowlist.as_ref(),
+                    remaining,
+                    &mut decisions,
+                )?;
+                let mut decision_storage_failed = false;
+                for decision in &decisions {
+                    if !recorded_decisions.insert((decision.prd_id.clone(), decision.decision)) {
+                        continue;
+                    }
+                    if decision.decision != "ready_selected" {
+                        eprintln!(
+                            "drive: {} {} {}",
+                            decision.decision, decision.prd_id, decision.detail
+                        );
+                    }
+                    if let Err(error) = DriverRepository::new(db.conn()).record_selection_decision(
+                        &session_id,
+                        &decision.prd_id.to_string(),
+                        decision.decision,
+                        &decision.detail,
+                    ) {
+                        eprintln!("drive: cannot persist selection decision: {error}");
+                        decision_storage_failed = true;
+                        break;
                     }
                 }
-            }
-            let mut jobs = Vec::new();
-            let mut preparation_failed = false;
-            for target in targets {
-                let component_id = components[&target.id].clone();
-                attempted_ids.insert(target.id.clone());
-                attempted += 1;
-                let sequence = match DriverRepository::new(db.conn())
-                    .record_component_attempt_started_with_sources(
+                if decision_storage_failed {
+                    break DriveTermination::StorageFailure;
+                }
+                let targets = match selection {
+                    Selection::Eligible(prds) => prds,
+                    Selection::BacklogEmpty if active_workers == 0 => {
+                        break DriveTermination::BacklogEmpty
+                    }
+                    Selection::NothingEligible if active_workers == 0 => {
+                        break DriveTermination::NothingEligible
+                    }
+                    Selection::BacklogEmpty | Selection::NothingEligible => Vec::new(),
+                };
+                if !width_reported {
+                    width_reported = true;
+                    if targets.len() < remaining {
+                        let detail = format!(
+                            "achievable_width={} requested_width={remaining}",
+                            targets.len()
+                        );
+                        eprintln!("drive: {detail}");
+                        if let Err(error) = DriverRepository::new(db.conn())
+                            .record_session_detail(&session_id, &detail)
+                        {
+                            eprintln!("drive: cannot persist width report: {error}");
+                            break DriveTermination::StorageFailure;
+                        }
+                    }
+                }
+                let mut jobs = Vec::new();
+                let mut preparation_failed = false;
+                for target in targets {
+                    let component_id = components[&target.id].clone();
+                    attempted_ids.insert(target.id.clone());
+                    attempted += 1;
+                    let sequence = match DriverRepository::new(db.conn())
+                        .record_component_attempt_started_with_sources(
+                            &session_id,
+                            &target.id.to_string(),
+                            target.path.as_str(),
+                            None,
+                            review_configuration_source,
+                            execution_context_configuration_source,
+                            (parallelism > 1).then_some(component_id.as_str()),
+                            None,
+                            None,
+                        ) {
+                        Ok(sequence) => sequence,
+                        Err(error) => {
+                            eprintln!("drive: cannot record attempt: {error}");
+                            preparation_failed = true;
+                            break;
+                        }
+                    };
+                    let migration_version =
+                        if prd_scope(&repository.worktree, &target).is_ok_and(|scope| {
+                            scope.iter().any(|(path, kind)| {
+                                path == "crates/familiar-ai-storage/migrations/"
+                                    && *kind == familiar_ai_review::ExpectedMatchKind::Directory
+                            })
+                        }) {
+                            let first = next_migration_version(&repository.worktree);
+                            match OrchestrationRepository::new(db.conn()).reserve_migration(
+                                &repository.key,
+                                &session_id,
+                                &target.id.to_string(),
+                                first,
+                            ) {
+                                Ok(reservation) => Some(reservation.version),
+                                Err(error) => {
+                                    eprintln!(
+                                        "drive: cannot reserve migration version for {}: {error}",
+                                        target.id
+                                    );
+                                    preparation_failed = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                    eprintln!("drive: attempt {sequence} {} {}", target.id, target.path);
+                    if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
                         &session_id,
-                        &target.id.to_string(),
-                        target.path.as_str(),
+                        sequence,
                         None,
-                        review_configuration_source,
-                        execution_context_configuration_source,
-                        (parallelism > 1).then_some(component_id.as_str()),
+                        Some(adapter_id),
+                        configured_model,
                         None,
                         None,
+                        "preflight",
                     ) {
-                    Ok(sequence) => sequence,
-                    Err(error) => {
-                        eprintln!("drive: cannot record attempt: {error}");
+                        eprintln!("drive: cannot record attempt phase: {error}");
                         preparation_failed = true;
                         break;
                     }
-                };
-                eprintln!("drive: attempt {sequence} {} {}", target.id, target.path);
-                if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
-                    &session_id,
-                    sequence,
-                    None,
-                    Some(adapter_id),
-                    configured_model,
-                    None,
-                    None,
-                    "preflight",
-                ) {
-                    eprintln!("drive: cannot record attempt phase: {error}");
-                    preparation_failed = true;
-                    break;
-                }
-                let mut execution_config = config.clone();
-                let route_context = route_context(&repository.worktree, &target)?;
-                let escalation_worker =
-                    next_implementation_worker(&execution_config, &route_context)
-                        .map_err(DriveError::Config)?;
-                let selections = if execution_config.worker_registry.is_some() {
-                    let (_, _, selections) =
-                        resolved_worker_plan(&execution_config, &route_context)
+                    let mut execution_config = config.clone();
+                    let route_context = route_context(&repository.worktree, &target)?;
+                    let escalation_worker =
+                        next_implementation_worker(&execution_config, &route_context)
                             .map_err(DriveError::Config)?;
-                    Some(selections)
-                } else {
-                    None
-                };
-                if let (Some(registry), Some(selections)) =
-                    (&mut execution_config.worker_registry, selections)
-                {
-                    let routing = &mut registry.routing;
-                    routing.implementation_pin = selections
-                        .iter()
-                        .find(|record| record.stage == WorkerStage::Implementation)
-                        .map(|record| record.selected_worker.clone());
-                    routing.remediation_pin = selections
-                        .iter()
-                        .find(|record| record.stage == WorkerStage::Remediation)
-                        .map(|record| record.selected_worker.clone());
-                }
-                // A potentially escalatable attempt must not dirty the base
-                // tree: its retry is required to start from this same clean
-                // original state, not from the cheap worker's failed tree.
-                let use_worktree = parallelism > 1 || escalation_worker.is_some();
-                let worktree = if use_worktree {
-                    match crate::worktree::WorktreeLease::create_component(
-                        &repository.worktree,
-                        &paths.state_dir,
-                        &session_id,
-                        &target.id.to_string(),
-                        (!config.driver.worktree_root.is_empty())
-                            .then(|| Path::new(&config.driver.worktree_root)),
-                    ) {
-                        Ok(lease) => {
-                            let path = lease.path().to_string_lossy().into_owned();
-                            let branch = lease.branch().to_owned();
-                            match DriverRepository::new(db.conn()).record_attempt_workspace(
-                                &session_id,
-                                sequence,
-                                &component_id,
-                                &path,
-                                &branch,
-                            ) {
-                                Ok(()) => Some(lease),
-                                Err(error) => {
-                                    let _ = DriverRepository::new(db.conn())
-                                        .record_attempt_finished(
-                                            &session_id,
-                                            sequence,
-                                            "retained",
-                                            Some("workspace_evidence_failed"),
-                                            None,
-                                            None,
+                    let selections = if execution_config.worker_registry.is_some() {
+                        let (_, _, selections) =
+                            resolved_worker_plan(&execution_config, &route_context)
+                                .map_err(DriveError::Config)?;
+                        Some(selections)
+                    } else {
+                        None
+                    };
+                    if let (Some(registry), Some(selections)) =
+                        (&mut execution_config.worker_registry, selections)
+                    {
+                        let routing = &mut registry.routing;
+                        routing.implementation_pin = selections
+                            .iter()
+                            .find(|record| record.stage == WorkerStage::Implementation)
+                            .map(|record| record.selected_worker.clone());
+                        routing.remediation_pin = selections
+                            .iter()
+                            .find(|record| record.stage == WorkerStage::Remediation)
+                            .map(|record| record.selected_worker.clone());
+                    }
+                    // A potentially escalatable attempt must not dirty the base
+                    // tree: its retry is required to start from this same clean
+                    // original state, not from the cheap worker's failed tree.
+                    // Integration-gated completion requires every candidate to
+                    // remain isolated, including configured width one.
+                    let use_worktree = true;
+                    let worktree = if use_worktree {
+                        let integration_revision = OrchestrationRepository::new(db.conn())
+                            .integration_revision(&session_id)
+                            .map_err(|error| DriveError::Storage(error.to_string()))?;
+                        match crate::worktree::WorktreeLease::create_component_at(
+                            &repository.worktree,
+                            &paths.state_dir,
+                            &session_id,
+                            &target.id.to_string(),
+                            (!config.driver.worktree_root.is_empty())
+                                .then(|| Path::new(&config.driver.worktree_root)),
+                            &integration_revision,
+                        ) {
+                            Ok(lease) => {
+                                let path = lease.path().to_string_lossy().into_owned();
+                                let branch = lease.branch().to_owned();
+                                match DriverRepository::new(db.conn()).record_attempt_workspace(
+                                    &session_id,
+                                    sequence,
+                                    &component_id,
+                                    &path,
+                                    &branch,
+                                ) {
+                                    Ok(()) => Some(lease),
+                                    Err(error) => {
+                                        let _ = DriverRepository::new(db.conn())
+                                            .record_attempt_finished(
+                                                &session_id,
+                                                sequence,
+                                                "retained",
+                                                Some("workspace_evidence_failed"),
+                                                None,
+                                                None,
+                                            );
+                                        eprintln!(
+                                            "drive: cannot persist workspace evidence: {error}"
                                         );
-                                    eprintln!("drive: cannot persist workspace evidence: {error}");
-                                    continue;
+                                        continue;
+                                    }
                                 }
                             }
+                            Err(error) => {
+                                let _ = DriverRepository::new(db.conn()).record_attempt_finished(
+                                    &session_id,
+                                    sequence,
+                                    "retained",
+                                    Some("worktree_failed"),
+                                    None,
+                                    None,
+                                );
+                                eprintln!("drive: isolated worktree creation failed: {error}");
+                                continue;
+                            }
                         }
-                        Err(error) => {
-                            let _ = DriverRepository::new(db.conn()).record_attempt_finished(
-                                &session_id,
-                                sequence,
-                                "retained",
-                                Some("worktree_failed"),
-                                None,
-                                None,
-                            );
-                            eprintln!("drive: isolated worktree creation failed: {error}");
-                            continue;
-                        }
+                    } else {
+                        None
+                    };
+                    let execution_root = worktree
+                        .as_ref()
+                        .map(|lease| lease.path().to_path_buf())
+                        .unwrap_or_else(|| repository.worktree.clone());
+                    let worktree_heartbeat = worktree.as_ref().map(|lease| {
+                        lease.start_heartbeat(Duration::from_secs(
+                            config.daemon.heartbeat_interval_secs.max(1),
+                        ))
+                    });
+                    if worktree.is_some() {
+                        execution_config.repositories.insert(
+                            execution_root.display().to_string(),
+                            repository_config.clone(),
+                        );
                     }
-                } else {
-                    None
-                };
-                let execution_root = worktree
-                    .as_ref()
-                    .map(|lease| lease.path().to_path_buf())
-                    .unwrap_or_else(|| repository.worktree.clone());
-                let worktree_heartbeat = worktree.as_ref().map(|lease| {
-                    lease.start_heartbeat(Duration::from_secs(
-                        config.daemon.heartbeat_interval_secs.max(1),
-                    ))
-                });
-                if worktree.is_some() {
-                    execution_config.repositories.insert(
-                        execution_root.display().to_string(),
-                        repository_config.clone(),
-                    );
+                    let routed_model = execution_config
+                        .agents
+                        .as_ref()
+                        .and_then(|entries| entries.implementation.model.clone());
+                    jobs.push((
+                        target,
+                        sequence,
+                        execution_root,
+                        execution_config,
+                        routed_model,
+                        route_context,
+                        worktree,
+                        worktree_heartbeat,
+                        component_id,
+                        escalation_worker,
+                        migration_version,
+                    ));
                 }
-                let routed_model = execution_config
-                    .agents
-                    .as_ref()
-                    .and_then(|entries| entries.implementation.model.clone());
-                jobs.push((
-                    target,
-                    sequence,
-                    execution_root,
-                    execution_config,
-                    routed_model,
-                    route_context,
-                    worktree,
-                    worktree_heartbeat,
-                    component_id,
-                    escalation_worker,
-                ));
-            }
-            if preparation_failed {
-                break DriveTermination::StorageFailure;
-            }
+                if preparation_failed {
+                    break DriveTermination::StorageFailure;
+                }
 
-            let mut results = std::thread::scope(|scope| {
-                let mut handles = Vec::new();
                 for (
                     target,
                     sequence,
@@ -889,26 +1235,42 @@ pub fn drive(
                     worktree_heartbeat,
                     component_id,
                     escalation_worker,
+                    migration_version,
                 ) in jobs
                 {
-                    handles.push(scope.spawn(move || {
+                    let sender = result_sender.clone();
+                    let progress_database_path = database_path.clone();
+                    let progress_session_id = session_id.clone();
+                    active_workers = active_workers.saturating_add(1);
+                    scope.spawn(move || {
                         let attempt_timer = Instant::now();
+                        let _progress = ProgressGuard::start(
+                            target.id.to_string(),
+                            "execution",
+                            progress_database_path,
+                            progress_session_id,
+                            sequence,
+                            Duration::from_secs(
+                                execution_config.daemon.heartbeat_interval_secs.max(1),
+                            ),
+                        );
                         let prd_path = execution_root.join(target.path.as_str());
                         let execution =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                execute_with_config_tracked_from_preflighted_with_route_context(
+                                crate::run::execute_reviewed_candidate(
                                     &execution_root,
                                     &prd_path,
                                     agents,
                                     &execution_config,
                                     paths,
-                                    true,
                                     Some(route_context.clone()),
+                                    None,
+                                    migration_version,
                                 )
                             }));
                         let duration_ms =
                             attempt_timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                        (
+                        let _ = sender.send((
                             target,
                             sequence,
                             routed_model,
@@ -919,374 +1281,549 @@ pub fn drive(
                             component_id,
                             escalation_worker,
                             route_context,
-                        )
-                    }));
+                            migration_version,
+                        ));
+                    });
                 }
-                handles
-                    .into_iter()
-                    .map(|handle| handle.join())
-                    .collect::<Vec<_>>()
-            });
-            let mut batch_stop = None;
-            for joined in results.drain(..) {
-                let (
-                    target,
-                    sequence,
-                    routed_model,
-                    mut worktree,
-                    execution,
-                    duration_ms,
-                    worktree_heartbeat,
-                    component_id,
-                    escalation_worker,
-                    route_context,
-                ) = joined.unwrap();
-                let heartbeat_failed = worktree_heartbeat
-                    .as_ref()
-                    .is_some_and(crate::worktree::WorktreeHeartbeatGuard::failed);
-                drop(worktree_heartbeat);
-                let (mut result, trace) = match execution {
-                    Ok(value) => value,
-                    Err(_) => {
-                        eprintln!("drive: attempt worker panicked for {}", target.id);
-                        if let Some(lease) = &mut worktree {
-                            if let Err(error) = lease.mark_state("retained_unclassified") {
-                                eprintln!("drive: cannot persist panicked worktree state: {error}");
-                                batch_stop = Some(DriveTermination::StorageFailure);
+                let mut batch_stop = None;
+                if active_workers == 0 {
+                    break DriveTermination::NothingEligible;
+                }
+                let joined = match result_receiver.recv() {
+                    Ok(joined) => joined,
+                    Err(error) => {
+                        eprintln!("drive: worker result channel failed: {error}");
+                        break DriveTermination::StorageFailure;
+                    }
+                };
+                active_workers = active_workers.saturating_sub(1);
+                for joined in std::iter::once(joined) {
+                    let (
+                        target,
+                        sequence,
+                        routed_model,
+                        mut worktree,
+                        execution,
+                        duration_ms,
+                        worktree_heartbeat,
+                        component_id,
+                        escalation_worker,
+                        route_context,
+                        migration_version,
+                    ) = joined;
+                    let heartbeat_failed = worktree_heartbeat
+                        .as_ref()
+                        .is_some_and(crate::worktree::WorktreeHeartbeatGuard::failed);
+                    drop(worktree_heartbeat);
+                    let (mut result, trace) = match execution {
+                        Ok(value) => value,
+                        Err(_) => {
+                            eprintln!("drive: attempt worker panicked for {}", target.id);
+                            if let Some(lease) = &mut worktree {
+                                if let Err(error) = lease.mark_state("retained_unclassified") {
+                                    eprintln!(
+                                        "drive: cannot persist panicked worktree state: {error}"
+                                    );
+                                    batch_stop = Some(DriveTermination::StorageFailure);
+                                }
                             }
-                        }
-                        if let Err(error) = DriverRepository::new(db.conn())
-                            .record_attempt_diagnostics(
-                                &session_id,
-                                sequence,
-                                None,
-                                Some(adapter_id),
-                                routed_model.as_deref().or(configured_model),
-                                None,
-                                None,
-                                "retained",
-                            )
-                            .and_then(|()| {
-                                DriverRepository::new(db.conn()).record_attempt_finished(
+                            if let Err(error) = DriverRepository::new(db.conn())
+                                .record_attempt_diagnostics(
                                     &session_id,
                                     sequence,
-                                    "retained",
-                                    Some("unclassified_result"),
                                     None,
-                                    Some(duration_ms),
+                                    Some(adapter_id),
+                                    routed_model.as_deref().or(configured_model),
+                                    None,
+                                    None,
+                                    "retained",
                                 )
-                            })
-                        {
-                            eprintln!("drive: cannot terminalize panicked attempt: {error}");
-                            batch_stop = Some(DriveTermination::StorageFailure);
-                        } else {
-                            batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                                .and_then(|()| {
+                                    DriverRepository::new(db.conn()).record_attempt_finished(
+                                        &session_id,
+                                        sequence,
+                                        "retained",
+                                        Some("unclassified_result"),
+                                        None,
+                                        Some(duration_ms),
+                                    )
+                                })
+                            {
+                                eprintln!("drive: cannot terminalize panicked attempt: {error}");
+                                batch_stop = Some(DriveTermination::StorageFailure);
+                            } else {
+                                batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                };
-                if let Err(crate::run::RunError::HumanReviewRequired {
-                    result: implementation,
-                    cycle,
-                    prd_id,
-                }) = &result
-                {
-                    if let Some(policy) = delivery_policy.filter(|policy| {
-                        policy.mode == familiar_ai_core::DeliveryMode::PocSelfApproval
-                    }) {
-                        let warrant = policy.poc_warrant.as_ref().expect("validated PoC warrant");
-                        let unexpired = chrono::DateTime::parse_from_rfc3339(&warrant.expires_at)
-                            .is_ok_and(|expiry| expiry > chrono::Utc::now());
-                        if unexpired && poc_risks_accepted < warrant.max_prds {
-                            let accepted_implementation = implementation.as_ref().clone();
-                            let findings=serde_json::json!({"review":cycle.review_result.as_ref().map(|review| &review.findings),"scope":cycle.scope_evaluations.iter().flat_map(|evaluation| &evaluation.findings).collect::<Vec<_>>()}).to_string();
-                            let stops = serde_json::to_string(&cycle.stop_reasons)
-                                .unwrap_or_else(|_| "[]".into());
-                            let acceptance_root = worktree
-                                .as_ref()
-                                .map_or(repository.worktree.as_path(), |lease| lease.path());
-                            match crate::run::accept_review_risk(
-                                acceptance_root,
-                                prd_id,
-                                &warrant.actor,
-                                cycle,
-                                config,
-                                paths,
-                            ) {
-                                Ok(()) => {
-                                    poc_risks_accepted = poc_risks_accepted.saturating_add(1);
-                                    let warrant_json = serde_json::to_string(warrant)
-                                        .unwrap_or_else(|_| "{}".into());
-                                    let _ = DeliveryRepository::new(db.conn())
-                                        .record_authority_decision(
-                                            &format!("poc-risk:{session_id}:{prd_id}"),
+                    };
+                    if let Err(crate::run::RunError::HumanReviewRequired {
+                        result: implementation,
+                        cycle,
+                        prd_id,
+                    }) = &result
+                    {
+                        if let Ok(Some(checkpoint)) =
+                            familiar_ai_storage::CheckpointRepository::new(db.conn())
+                                .get(&repository.key, prd_id)
+                        {
+                            for finding in cycle
+                                .scope_evaluations
+                                .iter()
+                                .flat_map(|evaluation| &evaluation.findings)
+                            {
+                                if let Ok(json) = serde_json::to_string(finding) {
+                                    let hash = familiar_ai_review::content_hash(json.as_bytes());
+                                    let _ = OrchestrationRepository::new(db.conn())
+                                        .record_scope_finding(
                                             &repository.key,
-                                            &session_id,
+                                            &checkpoint.checkpoint_id,
                                             prd_id,
-                                            "poc_self_approval",
-                                            &warrant.actor,
-                                            "accepted_reviewed_risk",
-                                            Some(&warrant.assurance_label),
-                                            &findings,
-                                            &stops,
-                                            Some(&warrant_json),
-                                            poc_risks_accepted,
+                                            &checkpoint.diff_hash,
+                                            &hash,
+                                            &json,
                                         );
-                                    result = Ok(crate::run::RunWorkflowResult {
-                                        implementation: accepted_implementation,
-                                    });
                                 }
-                                Err(error) => eprintln!(
-                                    "drive: PoC risk acceptance failed for {prd_id}: {error}"
-                                ),
+                            }
+                        }
+                        if let Some(policy) = delivery_policy.filter(|policy| {
+                            policy.mode == familiar_ai_core::DeliveryMode::PocSelfApproval
+                        }) {
+                            let warrant =
+                                policy.poc_warrant.as_ref().expect("validated PoC warrant");
+                            let unexpired =
+                                chrono::DateTime::parse_from_rfc3339(&warrant.expires_at)
+                                    .is_ok_and(|expiry| expiry > chrono::Utc::now());
+                            if unexpired && poc_risks_accepted < warrant.max_prds {
+                                let accepted_implementation = implementation.as_ref().clone();
+                                let findings=serde_json::json!({"review":cycle.review_result.as_ref().map(|review| &review.findings),"scope":cycle.scope_evaluations.iter().flat_map(|evaluation| &evaluation.findings).collect::<Vec<_>>()}).to_string();
+                                let stops = serde_json::to_string(&cycle.stop_reasons)
+                                    .unwrap_or_else(|_| "[]".into());
+                                let acceptance_root = worktree
+                                    .as_ref()
+                                    .map_or(repository.worktree.as_path(), |lease| lease.path());
+                                match crate::run::accept_review_risk(
+                                    acceptance_root,
+                                    prd_id,
+                                    &warrant.actor,
+                                    cycle,
+                                    config,
+                                    paths,
+                                ) {
+                                    Ok(()) => {
+                                        poc_risks_accepted = poc_risks_accepted.saturating_add(1);
+                                        let warrant_json = serde_json::to_string(warrant)
+                                            .unwrap_or_else(|_| "{}".into());
+                                        let _ = DeliveryRepository::new(db.conn())
+                                            .record_authority_decision(
+                                                &format!("poc-risk:{session_id}:{prd_id}"),
+                                                &repository.key,
+                                                &session_id,
+                                                prd_id,
+                                                "poc_self_approval",
+                                                &warrant.actor,
+                                                "accepted_reviewed_risk",
+                                                Some(&warrant.assurance_label),
+                                                &findings,
+                                                &stops,
+                                                Some(&warrant_json),
+                                                poc_risks_accepted,
+                                            );
+                                        result = Ok(crate::run::RunWorkflowResult {
+                                            implementation: accepted_implementation,
+                                        });
+                                    }
+                                    Err(error) => eprintln!(
+                                        "drive: PoC risk acceptance failed for {prd_id}: {error}"
+                                    ),
+                                }
                             }
                         }
                     }
-                }
-                if heartbeat_failed {
-                    eprintln!("drive: worktree heartbeat failed for {}", target.id);
-                    batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
-                }
-                let terminal = match &result {
-                    Ok(workflow) => Some(&workflow.implementation),
-                    Err(crate::run::RunError::Agent(error)) => Some(error.result()),
-                    Err(crate::run::RunError::Workflow {
-                        result: Some(result),
-                        ..
-                    }) => Some(result.as_ref()),
-                    _ => None,
-                };
-                if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
-                    &session_id,
-                    sequence,
-                    trace.execution_id.as_deref(),
-                    Some(adapter_id),
-                    terminal
-                        .and_then(|value| value.model.as_deref())
-                        .or(routed_model.as_deref())
-                        .or(configured_model),
-                    terminal.and_then(|value| value.exit_code),
-                    terminal.and_then(|value| value.signal),
-                    if result.is_ok() {
-                        "completed"
-                    } else {
-                        "retained"
-                    },
-                ) {
-                    eprintln!("drive: cannot record terminal diagnostics: {error}");
-                    batch_stop = Some(DriveTermination::StorageFailure);
-                    continue;
-                }
-
-                let cost = trace
-                    .execution_id
-                    .as_deref()
-                    .and_then(|id| attempt_cost(&db, id));
-                if let Some(value) = cost {
-                    known_cost = known_cost.saturating_add(value);
-                }
-                let tokens = trace
-                    .execution_id
-                    .as_deref()
-                    .and_then(|id| attempt_tokens(&db, id));
-                if let Some(value) = tokens {
-                    known_tokens = known_tokens.saturating_add(value);
-                }
-                let unclassified = result.is_err() && trace.retained_reason.is_none();
-                if let Err(error) = &result {
-                    eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
-                }
-                let (outcome, retained_reason) = match &result {
-                    Ok(_) => {
-                        completed += 1;
-                        ("completed", None)
+                    if heartbeat_failed {
+                        eprintln!("drive: worktree heartbeat failed for {}", target.id);
+                        batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
                     }
-                    Err(_) => (
-                        "retained",
-                        trace.retained_reason.or(Some("unclassified_result")),
-                    ),
-                };
-                if result.is_ok() && worktree.is_some() {
-                    // Completed in an isolated worktree: dependents defer until
-                    // this work is delivered to the base branch.
-                    session_undelivered.insert(target.id.clone());
-                }
-                if let Some(lease) = &mut worktree {
-                    let state = if result.is_ok() {
-                        "ready_for_delivery"
-                    } else {
-                        "retained"
+                    let terminal = match &result {
+                        Ok(workflow) => Some(&workflow.implementation),
+                        Err(crate::run::RunError::Agent(error)) => Some(error.result()),
+                        Err(crate::run::RunError::Workflow {
+                            result: Some(result),
+                            ..
+                        }) => Some(result.as_ref()),
+                        _ => None,
                     };
-                    if let Err(error) = lease.mark_state(state) {
-                        eprintln!("drive: cannot persist worktree state: {error}");
+                    if let Err(error) = DriverRepository::new(db.conn()).record_attempt_diagnostics(
+                        &session_id,
+                        sequence,
+                        trace.execution_id.as_deref(),
+                        Some(adapter_id),
+                        terminal
+                            .and_then(|value| value.model.as_deref())
+                            .or(routed_model.as_deref())
+                            .or(configured_model),
+                        terminal.and_then(|value| value.exit_code),
+                        terminal.and_then(|value| value.signal),
+                        if result.is_ok() {
+                            "completed"
+                        } else {
+                            "retained"
+                        },
+                    ) {
+                        eprintln!("drive: cannot record terminal diagnostics: {error}");
                         batch_stop = Some(DriveTermination::StorageFailure);
                         continue;
                     }
-                    if result.is_ok()
-                        && delivery_policy.is_some_and(|policy| {
-                            policy.mode != familiar_ai_core::DeliveryMode::Disabled
-                        })
-                    {
-                        let policy = delivery_policy.expect("checked delivery policy");
-                        if delivered >= policy.max_deliveries_per_session {
-                            batch_stop.get_or_insert(DriveTermination::BudgetDeliveriesExhausted);
-                        } else {
-                            let delivery_heartbeat = lease.start_heartbeat(Duration::from_secs(
-                                config.daemon.heartbeat_interval_secs.max(1),
-                            ));
-                            let delivery_result =
-                                crate::delivery::deliver(lease.ownership_path(), policy);
-                            let delivery_heartbeat_failed = delivery_heartbeat.failed();
-                            drop(delivery_heartbeat);
-                            if delivery_heartbeat_failed {
-                                eprintln!(
-                                    "drive: delivery worktree heartbeat failed for {}",
-                                    target.id
-                                );
-                                batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
+
+                    let cost = trace
+                        .execution_id
+                        .as_deref()
+                        .and_then(|id| attempt_cost(&db, id));
+                    if let Some(value) = cost {
+                        known_cost = known_cost.saturating_add(value);
+                    }
+                    let tokens = trace
+                        .execution_id
+                        .as_deref()
+                        .and_then(|id| attempt_tokens(&db, id));
+                    if let Some(value) = tokens {
+                        known_tokens = known_tokens.saturating_add(value);
+                    }
+                    let unclassified = result.is_err() && trace.retained_reason.is_none();
+                    if let Err(error) = &result {
+                        eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
+                    }
+                    // Review success is not completion. Commit the candidate,
+                    // land it against the latest persisted integration revision,
+                    // then atomically expose completion to dependency selection.
+                    let mut integration_ok = result.is_ok();
+                    if integration_ok {
+                        let integration = (|| -> Result<(), String> {
+                            let root = worktree.as_ref().map(|w| w.path()).ok_or_else(|| {
+                                "reviewed candidate has no isolated worktree".to_string()
+                            })?;
+                            git_output(root, &["add", "-A"])?;
+                            let status = git_output(root, &["status", "--porcelain"])?;
+                            if !status.is_empty() {
+                                git_output(
+                                    root,
+                                    &[
+                                        "commit",
+                                        "-m",
+                                        &format!("familiar: implement {}", target.id),
+                                    ],
+                                )?;
                             }
-                            match delivery_result {
-                                Ok(delivery) => {
-                                    delivered = delivered.saturating_add(1);
-                                    session_undelivered.remove(&target.id);
-                                    if let Err(error) = lease.mark_state(&delivery.phase) {
-                                        eprintln!(
+                            let candidate = git_output(root, &["rev-parse", "HEAD"])?;
+                            if let Some(version) = migration_version {
+                                validate_reserved_migration(root, &candidate, version)?;
+                            }
+                            DriverRepository::new(db.conn())
+                                .record_attempt_diagnostics(
+                                    &session_id,
+                                    sequence,
+                                    trace.execution_id.as_deref(),
+                                    Some(adapter_id),
+                                    routed_model.as_deref().or(configured_model),
+                                    None,
+                                    None,
+                                    "review_complete",
+                                )
+                                .map_err(|e| e.to_string())?;
+                            let prior = OrchestrationRepository::new(db.conn())
+                                .integration_revision(&session_id)
+                                .map_err(|e| e.to_string())?;
+                            let merged = merge_candidate(&repository.worktree, &prior, &candidate)?;
+                            let execution_id = trace.execution_id.as_deref().ok_or_else(|| {
+                                "reviewed candidate has no execution id".to_string()
+                            })?;
+                            let required = config
+                                .review
+                                .verification
+                                .iter()
+                                .filter(|c| c.required)
+                                .map(|c| c.check_id.clone())
+                                .collect::<Vec<_>>();
+                            let actor = format!("system:familiar-ai-run:{execution_id}");
+                            let checkpoint =
+                                familiar_ai_storage::CheckpointRepository::new(db.conn())
+                                    .get(&repository.key, &target.id.to_string())
+                                    .map_err(|e| e.to_string())?;
+                            let now = chrono::Utc::now().to_rfc3339();
+                            familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
+                            .complete_run_with(
+                                &repository,
+                                &target,
+                                execution_id,
+                                &actor,
+                                &required,
+                                |tx| {
+                                    let changed = tx.execute(
+                                        "UPDATE driver_sessions SET integration_revision=?1 WHERE session_id=?2 AND integration_revision=?3 AND ended_at IS NULL",
+                                        rusqlite::params![merged, session_id, prior],
+                                    ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                    if changed != 1 {
+                                        return Err(BacklogStoreError::Storage(
+                                            "integration revision changed during landing".into(),
+                                        ));
+                                    }
+                                    let changed = tx.execute(
+                                        "UPDATE driver_attempts SET candidate_revision=?1,integrated_at=?2,last_durable_phase='integrated' WHERE session_id=?3 AND sequence=?4 AND integrated_at IS NULL",
+                                        rusqlite::params![merged, now, session_id, sequence],
+                                    ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                    if changed != 1 {
+                                        return Err(BacklogStoreError::Storage(
+                                            "attempt was already integrated or is missing".into(),
+                                        ));
+                                    }
+                                    if let Some(checkpoint) = &checkpoint {
+                                        tx.execute(
+                                            "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2",
+                                            rusqlite::params![now, checkpoint.checkpoint_id],
+                                        ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                        tx.execute(
+                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
+                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
+                                        ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                    }
+                                    let changed = tx.execute(
+                                        "UPDATE migration_version_reservations SET state='consumed',resolved_at=?1 WHERE session_id=?2 AND prd_id=?3 AND state='reserved'",
+                                        rusqlite::params![now, session_id, target.id.to_string()],
+                                    ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                    if migration_version.is_some() && changed != 1 {
+                                        return Err(BacklogStoreError::Storage(
+                                            "active migration reservation is missing".into(),
+                                        ));
+                                    }
+                                    Ok(())
+                                },
+                            )
+                            .map_err(|e| e.to_string())?;
+                            Ok(())
+                        })();
+                        if let Err(error) = integration {
+                            if OrchestrationRepository::new(db.conn())
+                                .reservation(&session_id, &target.id.to_string())
+                                .ok()
+                                .flatten()
+                                .is_some_and(|r| r.state == "reserved")
+                            {
+                                let _ = OrchestrationRepository::new(db.conn()).resolve_migration(
+                                    &session_id,
+                                    &target.id.to_string(),
+                                    false,
+                                );
+                            }
+                            eprintln!(
+                                "drive: integration remediation required for {}: {error}",
+                                target.id
+                            );
+                            integration_ok = false;
+                        }
+                    }
+                    let (outcome, retained_reason) = match (&result, integration_ok) {
+                        (Ok(_), true) => {
+                            completed += 1;
+                            ("completed", None)
+                        }
+                        _ => (
+                            "retained",
+                            trace.retained_reason.or(Some(if result.is_ok() {
+                                "integration_failed"
+                            } else {
+                                "unclassified_result"
+                            })),
+                        ),
+                    };
+                    if let Some(lease) = &mut worktree {
+                        let state = if integration_ok {
+                            "ready_for_delivery"
+                        } else {
+                            "retained"
+                        };
+                        if let Err(error) = lease.mark_state(state) {
+                            eprintln!("drive: cannot persist worktree state: {error}");
+                            batch_stop = Some(DriveTermination::StorageFailure);
+                            continue;
+                        }
+                        if integration_ok
+                            && delivery_policy.is_some_and(|policy| {
+                                policy.mode != familiar_ai_core::DeliveryMode::Disabled
+                            })
+                        {
+                            let policy = delivery_policy.expect("checked delivery policy");
+                            if delivered >= policy.max_deliveries_per_session {
+                                batch_stop
+                                    .get_or_insert(DriveTermination::BudgetDeliveriesExhausted);
+                            } else {
+                                let delivery_heartbeat =
+                                    lease.start_heartbeat(Duration::from_secs(
+                                        config.daemon.heartbeat_interval_secs.max(1),
+                                    ));
+                                let delivery_result =
+                                    crate::delivery::deliver(lease.ownership_path(), policy);
+                                let delivery_heartbeat_failed = delivery_heartbeat.failed();
+                                drop(delivery_heartbeat);
+                                if delivery_heartbeat_failed {
+                                    eprintln!(
+                                        "drive: delivery worktree heartbeat failed for {}",
+                                        target.id
+                                    );
+                                    batch_stop = Some(DriveTermination::WorkerHeartbeatLost);
+                                }
+                                match delivery_result {
+                                    Ok(delivery) => {
+                                        delivered = delivered.saturating_add(1);
+                                        if let Err(error) = lease.mark_state(&delivery.phase) {
+                                            eprintln!(
                                             "drive: cannot persist delivered worktree state: {error}"
                                         );
-                                        batch_stop = Some(DriveTermination::StorageFailure);
+                                            batch_stop = Some(DriveTermination::StorageFailure);
+                                        }
+                                        if let Err(error) = DriverRepository::new(db.conn())
+                                            .record_attempt_diagnostics(
+                                                &session_id,
+                                                sequence,
+                                                trace.execution_id.as_deref(),
+                                                Some(adapter_id),
+                                                terminal
+                                                    .and_then(|value| value.model.as_deref())
+                                                    .or(routed_model.as_deref())
+                                                    .or(configured_model),
+                                                terminal.and_then(|value| value.exit_code),
+                                                terminal.and_then(|value| value.signal),
+                                                &delivery.phase,
+                                            )
+                                        {
+                                            eprintln!(
+                                                "drive: cannot persist delivery phase: {error}"
+                                            );
+                                            batch_stop = Some(DriveTermination::StorageFailure);
+                                        }
                                     }
-                                    if let Err(error) = DriverRepository::new(db.conn())
-                                        .record_attempt_diagnostics(
-                                            &session_id,
-                                            sequence,
-                                            trace.execution_id.as_deref(),
-                                            Some(adapter_id),
-                                            terminal
-                                                .and_then(|value| value.model.as_deref())
-                                                .or(routed_model.as_deref())
-                                                .or(configured_model),
-                                            terminal.and_then(|value| value.exit_code),
-                                            terminal.and_then(|value| value.signal),
-                                            &delivery.phase,
-                                        )
-                                    {
-                                        eprintln!("drive: cannot persist delivery phase: {error}");
-                                        batch_stop = Some(DriveTermination::StorageFailure);
-                                    }
-                                }
-                                Err(error) => {
-                                    eprintln!("drive: delivery blocked for {}: {error}", target.id);
-                                    if let Err(storage_error) = DriverRepository::new(db.conn())
-                                        .record_attempt_diagnostics(
-                                            &session_id,
-                                            sequence,
-                                            trace.execution_id.as_deref(),
-                                            Some(adapter_id),
-                                            terminal
-                                                .and_then(|value| value.model.as_deref())
-                                                .or(routed_model.as_deref())
-                                                .or(configured_model),
-                                            terminal.and_then(|value| value.exit_code),
-                                            terminal.and_then(|value| value.signal),
-                                            "delivery_blocked",
-                                        )
-                                    {
+                                    Err(error) => {
                                         eprintln!(
+                                            "drive: delivery blocked for {}: {error}",
+                                            target.id
+                                        );
+                                        if let Err(storage_error) = DriverRepository::new(db.conn())
+                                            .record_attempt_diagnostics(
+                                                &session_id,
+                                                sequence,
+                                                trace.execution_id.as_deref(),
+                                                Some(adapter_id),
+                                                terminal
+                                                    .and_then(|value| value.model.as_deref())
+                                                    .or(routed_model.as_deref())
+                                                    .or(configured_model),
+                                                terminal.and_then(|value| value.exit_code),
+                                                terminal.and_then(|value| value.signal),
+                                                "delivery_blocked",
+                                            )
+                                        {
+                                            eprintln!(
                                             "drive: cannot persist delivery blocker: {storage_error}"
                                         );
-                                        batch_stop = Some(DriveTermination::StorageFailure);
-                                    } else {
-                                        batch_stop = Some(DriveTermination::DeliveryBlocked);
+                                            batch_stop = Some(DriveTermination::StorageFailure);
+                                        } else {
+                                            batch_stop = Some(DriveTermination::DeliveryBlocked);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                // The lease is dropped, not retired: the worktree and its
-                // ownership record survive on disk as durable evidence.
-                drop(worktree);
-                let _ = component_id;
-                if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
-                    &session_id,
-                    sequence,
-                    outcome,
-                    retained_reason,
-                    cost,
-                    Some(duration_ms),
-                ) {
-                    eprintln!("drive: cannot record attempt outcome: {error}");
-                    batch_stop = Some(DriveTermination::StorageFailure);
-                    continue;
-                }
-                if retained_reason == Some("verification_failed") {
-                    if let Some((stronger_id, stronger_entry)) = escalation_worker {
-                        let estimated_cost = config
-                            .worker_registry
-                            .as_ref()
-                            .and_then(|registry| registry.workers.get(&stronger_id))
-                            .map_or(0, |worker| worker.estimated_cost_microusd);
-                        let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                        let duration_reservation = remaining_duration_ms(&warrant, elapsed)
-                            .unwrap_or(stronger_entry.max_execution_duration_ms)
-                            .max(stronger_entry.max_execution_duration_ms);
-                        if escalation_admitted(
-                            &warrant,
-                            known_cost,
-                            known_tokens,
-                            elapsed,
-                            estimated_cost,
-                            config.driver.max_implementation_tokens,
-                            duration_reservation,
-                        ) && (warrant.max_cost_microusd == 0 || cost.is_some())
-                            && (warrant.max_tokens == 0 || tokens.is_some())
-                        {
-                            let escalation_component =
-                                format!("{component_id}-escalation-{sequence}");
-                            match crate::worktree::WorktreeLease::create_component(
-                                &repository.worktree,
-                                &paths.state_dir,
-                                &session_id,
-                                &escalation_component,
-                                (!config.driver.worktree_root.is_empty())
-                                    .then(|| Path::new(&config.driver.worktree_root)),
-                            ) {
-                                Ok(mut escalation_tree) => {
-                                    let escalation_root = escalation_tree.path().to_path_buf();
-                                    let escalation_sequence = DriverRepository::new(db.conn())
-                                        .record_escalated_attempt_started_with_sources(
-                                            &session_id,
-                                            &target.id.to_string(),
-                                            target.path.as_str(),
-                                            None,
-                                            review_configuration_source,
-                                            execution_context_configuration_source,
-                                            Some(&escalation_component),
-                                            Some(&escalation_root.to_string_lossy()),
-                                            Some(escalation_tree.branch()),
-                                            Some(sequence),
-                                            Some("required_verification_failed"),
-                                        );
-                                    match escalation_sequence {
-                                        Ok(escalation_sequence) => {
-                                            let mut escalation_config = config.clone();
-                                            if let Some(registry) =
-                                                &mut escalation_config.worker_registry
-                                            {
-                                                registry.routing.implementation_pin =
-                                                    Some(stronger_id.clone());
-                                            }
-                                            escalation_config.repositories.insert(
-                                                escalation_root.display().to_string(),
-                                                repository_config.clone(),
+                    // The lease is dropped, not retired: the worktree and its
+                    // ownership record survive on disk as durable evidence.
+                    drop(worktree);
+                    let _ = component_id;
+                    if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
+                        &session_id,
+                        sequence,
+                        outcome,
+                        retained_reason,
+                        cost,
+                        Some(duration_ms),
+                    ) {
+                        eprintln!("drive: cannot record attempt outcome: {error}");
+                        batch_stop = Some(DriveTermination::StorageFailure);
+                        continue;
+                    }
+                    if retained_reason == Some("verification_failed") {
+                        if let Some((stronger_id, stronger_entry)) = escalation_worker {
+                            let estimated_cost = config
+                                .worker_registry
+                                .as_ref()
+                                .and_then(|registry| registry.workers.get(&stronger_id))
+                                .map_or(0, |worker| worker.estimated_cost_microusd);
+                            let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                            let duration_reservation = remaining_duration_ms(&warrant, elapsed)
+                                .unwrap_or(stronger_entry.max_execution_duration_ms)
+                                .max(stronger_entry.max_execution_duration_ms);
+                            if escalation_admitted(
+                                &warrant,
+                                known_cost,
+                                known_tokens,
+                                elapsed,
+                                estimated_cost,
+                                config.driver.max_implementation_tokens,
+                                duration_reservation,
+                            ) && (warrant.max_cost_microusd == 0 || cost.is_some())
+                                && (warrant.max_tokens == 0 || tokens.is_some())
+                            {
+                                let escalation_component =
+                                    format!("{component_id}-escalation-{sequence}");
+                                let escalation_base = OrchestrationRepository::new(db.conn())
+                                    .integration_revision(&session_id)
+                                    .map_err(|error| DriveError::Storage(error.to_string()))?;
+                                match crate::worktree::WorktreeLease::create_component_at(
+                                    &repository.worktree,
+                                    &paths.state_dir,
+                                    &session_id,
+                                    &escalation_component,
+                                    (!config.driver.worktree_root.is_empty())
+                                        .then(|| Path::new(&config.driver.worktree_root)),
+                                    &escalation_base,
+                                ) {
+                                    Ok(mut escalation_tree) => {
+                                        let escalation_root = escalation_tree.path().to_path_buf();
+                                        let escalation_sequence = DriverRepository::new(db.conn())
+                                            .record_escalated_attempt_started_with_sources(
+                                                &session_id,
+                                                &target.id.to_string(),
+                                                target.path.as_str(),
+                                                None,
+                                                review_configuration_source,
+                                                execution_context_configuration_source,
+                                                Some(&escalation_component),
+                                                Some(&escalation_root.to_string_lossy()),
+                                                Some(escalation_tree.branch()),
+                                                Some(sequence),
+                                                Some("required_verification_failed"),
                                             );
-                                            let escalation_timer = Instant::now();
-                                            let escalation_timeout_ms = remaining_duration_ms(
-                                                &warrant,
-                                                timer.elapsed().as_millis().min(u64::MAX as u128)
-                                                    as u64,
-                                            );
-                                            let (escalated, escalation_trace) =
+                                        match escalation_sequence {
+                                            Ok(escalation_sequence) => {
+                                                let mut escalation_config = config.clone();
+                                                if let Some(registry) =
+                                                    &mut escalation_config.worker_registry
+                                                {
+                                                    registry.routing.implementation_pin =
+                                                        Some(stronger_id.clone());
+                                                }
+                                                escalation_config.repositories.insert(
+                                                    escalation_root.display().to_string(),
+                                                    repository_config.clone(),
+                                                );
+                                                let escalation_timer = Instant::now();
+                                                let escalation_timeout_ms = remaining_duration_ms(
+                                                    &warrant,
+                                                    timer
+                                                        .elapsed()
+                                                        .as_millis()
+                                                        .min(u64::MAX as u128)
+                                                        as u64,
+                                                );
+                                                let (escalated, escalation_trace) =
                                                 execute_with_config_tracked_from_preflighted_with_route_context_and_timeout(
                                                     &escalation_root,
                                                     &escalation_root.join(target.path.as_str()),
@@ -1297,162 +1834,318 @@ pub fn drive(
                                                     Some(route_context.clone()),
                                                     escalation_timeout_ms,
                                                 );
-                                            let escalation_duration = escalation_timer
-                                                .elapsed()
-                                                .as_millis()
-                                                .min(u64::MAX as u128)
-                                                as u64;
-                                            let escalation_cost = escalation_trace
-                                                .execution_id
-                                                .as_deref()
-                                                .and_then(|id| attempt_cost(&db, id));
-                                            let escalation_tokens = escalation_trace
-                                                .execution_id
-                                                .as_deref()
-                                                .and_then(|id| attempt_tokens(&db, id));
-                                            if let Some(value) = escalation_cost {
-                                                known_cost = known_cost.saturating_add(value);
-                                            }
-                                            if let Some(value) = escalation_tokens {
-                                                known_tokens = known_tokens.saturating_add(value);
-                                            }
-                                            let escalation_terminal = match &escalated {
-                                                Ok(workflow) => Some(&workflow.implementation),
-                                                Err(crate::run::RunError::Agent(error)) => {
-                                                    Some(error.result())
+                                                let escalation_duration = escalation_timer
+                                                    .elapsed()
+                                                    .as_millis()
+                                                    .min(u64::MAX as u128)
+                                                    as u64;
+                                                let escalation_cost = escalation_trace
+                                                    .execution_id
+                                                    .as_deref()
+                                                    .and_then(|id| attempt_cost(&db, id));
+                                                let escalation_tokens = escalation_trace
+                                                    .execution_id
+                                                    .as_deref()
+                                                    .and_then(|id| attempt_tokens(&db, id));
+                                                if let Some(value) = escalation_cost {
+                                                    known_cost = known_cost.saturating_add(value);
                                                 }
-                                                Err(crate::run::RunError::Workflow {
-                                                    result: Some(result),
-                                                    ..
-                                                }) => Some(result.as_ref()),
-                                                _ => None,
-                                            };
-                                            let escalation_outcome = if escalated.is_ok() {
-                                                "completed"
-                                            } else {
-                                                "retained"
-                                            };
-                                            let escalation_reason = if escalated.is_ok() {
-                                                None
-                                            } else {
-                                                escalation_trace
-                                                    .retained_reason
-                                                    .or(Some("unclassified_result"))
-                                            };
-                                            let diagnostic = DriverRepository::new(db.conn())
-                                                .record_attempt_diagnostics(
-                                                    &session_id,
-                                                    escalation_sequence,
-                                                    escalation_trace.execution_id.as_deref(),
-                                                    Some(stronger_entry.adapter.as_str()),
-                                                    escalation_terminal
-                                                        .and_then(|value| value.model.as_deref())
-                                                        .or(stronger_entry.model.as_deref()),
-                                                    escalation_terminal
-                                                        .and_then(|value| value.exit_code),
-                                                    escalation_terminal
-                                                        .and_then(|value| value.signal),
-                                                    escalation_outcome,
-                                                )
-                                                .and_then(|()| {
-                                                    DriverRepository::new(db.conn())
-                                                        .record_attempt_finished(
-                                                            &session_id,
-                                                            escalation_sequence,
-                                                            escalation_outcome,
-                                                            escalation_reason,
-                                                            escalation_cost,
-                                                            Some(escalation_duration),
-                                                        )
-                                                });
-                                            if let Err(error) = diagnostic {
-                                                eprintln!("drive: cannot persist escalated attempt: {error}");
-                                                batch_stop = Some(DriveTermination::StorageFailure);
-                                            } else if escalated.is_ok() {
-                                                completed = completed.saturating_add(1);
-                                                session_undelivered.insert(target.id.clone());
-                                                let _ = escalation_tree
-                                                    .mark_state("ready_for_delivery");
-                                                if let Some(policy) =
-                                                    delivery_policy.filter(|policy| {
-                                                        policy.mode
-                                                        != familiar_ai_core::DeliveryMode::Disabled
-                                                    })
+                                                if let Some(value) = escalation_tokens {
+                                                    known_tokens =
+                                                        known_tokens.saturating_add(value);
+                                                }
+                                                let escalation_terminal = match &escalated {
+                                                    Ok(workflow) => Some(&workflow.implementation),
+                                                    Err(crate::run::RunError::Agent(error)) => {
+                                                        Some(error.result())
+                                                    }
+                                                    Err(crate::run::RunError::Workflow {
+                                                        result: Some(result),
+                                                        ..
+                                                    }) => Some(result.as_ref()),
+                                                    _ => None,
+                                                };
+                                                // Escalated review success has the same completion
+                                                // boundary as a primary attempt: commit and merge the
+                                                // candidate, then expose integration and backlog
+                                                // completion in one transaction.
+                                                let mut escalation_integration_ok =
+                                                    escalated.is_ok();
+                                                if escalation_integration_ok {
+                                                    let integration = (|| -> Result<(), String> {
+                                                        git_output(
+                                                            &escalation_root,
+                                                            &["add", "-A"],
+                                                        )?;
+                                                        let status = git_output(
+                                                            &escalation_root,
+                                                            &["status", "--porcelain"],
+                                                        )?;
+                                                        if !status.is_empty() {
+                                                            git_output(
+                                                                &escalation_root,
+                                                                &[
+                                                                    "commit",
+                                                                    "-m",
+                                                                    &format!(
+                                                                        "familiar: implement {}",
+                                                                        target.id
+                                                                    ),
+                                                                ],
+                                                            )?;
+                                                        }
+                                                        let candidate = git_output(
+                                                            &escalation_root,
+                                                            &["rev-parse", "HEAD"],
+                                                        )?;
+                                                        if let Some(version) = migration_version {
+                                                            validate_reserved_migration(
+                                                                &escalation_root,
+                                                                &candidate,
+                                                                version,
+                                                            )?;
+                                                        }
+                                                        let prior =
+                                                            OrchestrationRepository::new(db.conn())
+                                                                .integration_revision(&session_id)
+                                                                .map_err(|e| e.to_string())?;
+                                                        let merged = merge_candidate(
+                                                            &repository.worktree,
+                                                            &prior,
+                                                            &candidate,
+                                                        )?;
+                                                        let execution_id = escalation_trace
+                                                            .execution_id
+                                                            .as_deref()
+                                                            .ok_or_else(|| {
+                                                                "reviewed escalated candidate has no execution id"
+                                                                    .to_string()
+                                                            })?;
+                                                        let required = config
+                                                            .review
+                                                            .verification
+                                                            .iter()
+                                                            .filter(|check| check.required)
+                                                            .map(|check| check.check_id.clone())
+                                                            .collect::<Vec<_>>();
+                                                        let actor = format!(
+                                                            "system:familiar-ai-run:{execution_id}"
+                                                        );
+                                                        let checkpoint = familiar_ai_storage::CheckpointRepository::new(db.conn())
+                                                            .get(&repository.key, &target.id.to_string())
+                                                            .map_err(|e| e.to_string())?;
+                                                        let now = chrono::Utc::now().to_rfc3339();
+                                                        familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
+                                                            .complete_run_with(
+                                                                &repository,
+                                                                &target,
+                                                                execution_id,
+                                                                &actor,
+                                                                &required,
+                                                                |tx| {
+                                                                    let changed = tx.execute(
+                                                                        "UPDATE driver_sessions SET integration_revision=?1 WHERE session_id=?2 AND integration_revision=?3 AND ended_at IS NULL",
+                                                                        rusqlite::params![merged, session_id, prior],
+                                                                    ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                    if changed != 1 {
+                                                                        return Err(BacklogStoreError::Storage("integration revision changed during escalated landing".into()));
+                                                                    }
+                                                                    let changed = tx.execute(
+                                                                        "UPDATE driver_attempts SET candidate_revision=?1,integrated_at=?2,last_durable_phase='integrated' WHERE session_id=?3 AND sequence=?4 AND integrated_at IS NULL",
+                                                                        rusqlite::params![merged, now, session_id, escalation_sequence],
+                                                                    ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                    if changed != 1 {
+                                                                        return Err(BacklogStoreError::Storage("escalated attempt was already integrated or is missing".into()));
+                                                                    }
+                                                                    if let Some(checkpoint) = &checkpoint {
+                                                                        tx.execute(
+                                                                            "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2",
+                                                                            rusqlite::params![now, checkpoint.checkpoint_id],
+                                                                        ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                        tx.execute(
+                                                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
+                                                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
+                                                                        ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                    }
+                                                                    let changed = tx.execute(
+                                                                        "UPDATE migration_version_reservations SET state='consumed',resolved_at=?1 WHERE session_id=?2 AND prd_id=?3 AND state='reserved'",
+                                                                        rusqlite::params![now, session_id, target.id.to_string()],
+                                                                    ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                    if migration_version.is_some() && changed != 1 {
+                                                                        return Err(BacklogStoreError::Storage("active migration reservation is missing".into()));
+                                                                    }
+                                                                    Ok(())
+                                                                },
+                                                            )
+                                                            .map_err(|e| e.to_string())?;
+                                                        Ok(())
+                                                    })(
+                                                    );
+                                                    if let Err(error) = integration {
+                                                        if OrchestrationRepository::new(db.conn())
+                                                            .reservation(
+                                                                &session_id,
+                                                                &target.id.to_string(),
+                                                            )
+                                                            .ok()
+                                                            .flatten()
+                                                            .is_some_and(|reservation| {
+                                                                reservation.state == "reserved"
+                                                            })
+                                                        {
+                                                            let _ = OrchestrationRepository::new(
+                                                                db.conn(),
+                                                            )
+                                                            .resolve_migration(
+                                                                &session_id,
+                                                                &target.id.to_string(),
+                                                                false,
+                                                            );
+                                                        }
+                                                        eprintln!(
+                                                            "drive: escalated integration remediation required for {}: {error}",
+                                                            target.id
+                                                        );
+                                                        escalation_integration_ok = false;
+                                                    }
+                                                }
+                                                let escalation_outcome =
+                                                    if escalation_integration_ok {
+                                                        "completed"
+                                                    } else {
+                                                        "retained"
+                                                    };
+                                                let escalation_reason = if escalation_integration_ok
                                                 {
-                                                    if delivered
-                                                        >= policy.max_deliveries_per_session
+                                                    None
+                                                } else if escalated.is_ok() {
+                                                    Some("integration_failed")
+                                                } else {
+                                                    escalation_trace
+                                                        .retained_reason
+                                                        .or(Some("unclassified_result"))
+                                                };
+                                                let diagnostic = DriverRepository::new(db.conn())
+                                                    .record_attempt_diagnostics(
+                                                        &session_id,
+                                                        escalation_sequence,
+                                                        escalation_trace.execution_id.as_deref(),
+                                                        Some(stronger_entry.adapter.as_str()),
+                                                        escalation_terminal
+                                                            .and_then(|value| {
+                                                                value.model.as_deref()
+                                                            })
+                                                            .or(stronger_entry.model.as_deref()),
+                                                        escalation_terminal
+                                                            .and_then(|value| value.exit_code),
+                                                        escalation_terminal
+                                                            .and_then(|value| value.signal),
+                                                        escalation_outcome,
+                                                    )
+                                                    .and_then(|()| {
+                                                        DriverRepository::new(db.conn())
+                                                            .record_attempt_finished(
+                                                                &session_id,
+                                                                escalation_sequence,
+                                                                escalation_outcome,
+                                                                escalation_reason,
+                                                                escalation_cost,
+                                                                Some(escalation_duration),
+                                                            )
+                                                    });
+                                                if let Err(error) = diagnostic {
+                                                    eprintln!("drive: cannot persist escalated attempt: {error}");
+                                                    batch_stop =
+                                                        Some(DriveTermination::StorageFailure);
+                                                } else if escalation_integration_ok {
+                                                    completed = completed.saturating_add(1);
+                                                    let _ = escalation_tree
+                                                        .mark_state("ready_for_delivery");
+                                                    if let Some(policy) =
+                                                        delivery_policy.filter(|policy| {
+                                                            policy.mode
+                                                        != familiar_ai_core::DeliveryMode::Disabled
+                                                        })
                                                     {
-                                                        batch_stop = Some(
+                                                        if delivered
+                                                            >= policy.max_deliveries_per_session
+                                                        {
+                                                            batch_stop = Some(
                                                             DriveTermination::BudgetDeliveriesExhausted,
                                                         );
-                                                    } else {
-                                                        match crate::delivery::deliver(
-                                                            escalation_tree.ownership_path(),
-                                                            policy,
-                                                        ) {
-                                                            Ok(delivery) => {
-                                                                delivered =
-                                                                    delivered.saturating_add(1);
-                                                                session_undelivered
-                                                                    .remove(&target.id);
-                                                                let _ = escalation_tree
-                                                                    .mark_state(&delivery.phase);
-                                                            }
-                                                            Err(error) => {
-                                                                eprintln!("drive: escalated delivery blocked for {}: {error}", target.id);
-                                                                batch_stop = Some(
+                                                        } else {
+                                                            match crate::delivery::deliver(
+                                                                escalation_tree.ownership_path(),
+                                                                policy,
+                                                            ) {
+                                                                Ok(delivery) => {
+                                                                    delivered =
+                                                                        delivered.saturating_add(1);
+                                                                    let _ = escalation_tree
+                                                                        .mark_state(
+                                                                            &delivery.phase,
+                                                                        );
+                                                                }
+                                                                Err(error) => {
+                                                                    eprintln!("drive: escalated delivery blocked for {}: {error}", target.id);
+                                                                    batch_stop = Some(
                                                                     DriveTermination::DeliveryBlocked,
                                                                 );
+                                                                }
                                                             }
                                                         }
                                                     }
+                                                } else {
+                                                    let _ = escalation_tree.mark_state("retained");
                                                 }
-                                            } else {
-                                                let _ = escalation_tree.mark_state("retained");
+                                                eprintln!("drive: escalation {escalation_sequence} {} worker={stronger_id} outcome={escalation_outcome}", target.id);
                                             }
-                                            eprintln!("drive: escalation {escalation_sequence} {} worker={stronger_id} outcome={escalation_outcome}", target.id);
-                                        }
-                                        Err(error) => {
-                                            eprintln!("drive: cannot record escalation: {error}");
-                                            batch_stop = Some(DriveTermination::StorageFailure);
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "drive: cannot record escalation: {error}"
+                                                );
+                                                batch_stop = Some(DriveTermination::StorageFailure);
+                                            }
                                         }
                                     }
+                                    Err(error) => eprintln!(
+                                        "drive: escalation clean worktree unavailable: {error}"
+                                    ),
                                 }
-                                Err(error) => eprintln!(
-                                    "drive: escalation clean worktree unavailable: {error}"
-                                ),
+                            } else {
+                                eprintln!("drive: escalation retained for {} because the remaining warrant cannot admit it", target.id);
                             }
-                        } else {
-                            eprintln!("drive: escalation retained for {} because the remaining warrant cannot admit it", target.id);
                         }
                     }
+                    eprintln!(
+                        "drive: attempt {sequence} {} outcome={outcome}{}",
+                        target.id,
+                        retained_reason
+                            .map(|reason| format!(" reason={reason}"))
+                            .unwrap_or_default()
+                    );
+                    if unclassified {
+                        batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                    }
+                    if warrant.max_cost_microusd > 0 && cost.is_none() {
+                        batch_stop.get_or_insert(DriveTermination::CostUnknown);
+                    }
+                    if warrant.max_tokens > 0 && tokens.is_none() {
+                        batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                    }
                 }
-                eprintln!(
-                    "drive: attempt {sequence} {} outcome={outcome}{}",
-                    target.id,
-                    retained_reason
-                        .map(|reason| format!(" reason={reason}"))
-                        .unwrap_or_default()
-                );
-                if unclassified {
-                    batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
+                if let Some(reason) = batch_stop {
+                    stop_after_drain.get_or_insert(reason);
                 }
-                if warrant.max_cost_microusd > 0 && cost.is_none() {
-                    batch_stop.get_or_insert(DriveTermination::CostUnknown);
+                if let Err(error) =
+                    DriverRepository::new(db.conn()).heartbeat(&session_id, &session_id)
+                {
+                    eprintln!("drive: heartbeat persistence failed: {error}");
+                    break DriveTermination::StorageFailure;
                 }
-                if warrant.max_tokens > 0 && tokens.is_none() {
-                    batch_stop.get_or_insert(DriveTermination::UnclassifiedResult);
-                }
-            }
-            if let Some(reason) = batch_stop {
-                break reason;
-            }
-            if let Err(error) = DriverRepository::new(db.conn()).heartbeat(&session_id, &session_id)
-            {
-                eprintln!("drive: heartbeat persistence failed: {error}");
-                break DriveTermination::StorageFailure;
-            }
-        }
+            };
+            Ok(termination)
+        })?
     };
 
     DriverRepository::new(db.conn())
@@ -1470,6 +2163,69 @@ pub fn drive(
         known_cost_microusd: known_cost,
         known_tokens,
     })
+}
+
+fn git_output(repository: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repository)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn next_migration_version(repository: &Path) -> u64 {
+    std::fs::read_dir(repository.join("crates/familiar-ai-storage/migrations"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .split('_')
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn validate_reserved_migration(
+    repository: &Path,
+    candidate: &str,
+    reserved: u64,
+) -> Result<(), String> {
+    let parent = git_output(repository, &["rev-parse", &format!("{candidate}^")])?;
+    let changes = git_output(repository, &["diff", "--name-status", &parent, candidate])?;
+    let authored = changes
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let status = fields.next()?;
+            let path = fields.next_back()?;
+            (status.starts_with('A') && path.starts_with("crates/familiar-ai-storage/migrations/"))
+                .then_some(path)
+        })
+        .collect::<Vec<_>>();
+    let expected = format!("{reserved:03}_");
+    if authored.len() != 1
+        || !authored[0]
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with(&expected))
+    {
+        return Err(format!(
+            "candidate must consume reserved migration {reserved:03} exactly once; authored={authored:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn component_parallelism(config: &Config, warrant: &DriveWarrant) -> usize {
@@ -1569,6 +2325,54 @@ fn attempt_tokens(db: &Database, execution_id: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_heartbeat_observes_latest_durable_phase_on_later_tick() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("heartbeat.sqlite3");
+        let database = Database::open(&database_path).unwrap();
+        database.run_migrations().unwrap();
+        let driver = DriverRepository::new(database.conn());
+        driver.open_session("timed", "repo", "{}").unwrap();
+        let sequence = driver
+            .record_attempt_started("timed", "PRD-66", "docs/prds/PRD-066.md", None)
+            .unwrap();
+        driver
+            .record_attempt_diagnostics(
+                "timed",
+                sequence,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "preflight",
+            )
+            .unwrap();
+        let update_path = database_path.clone();
+        let updater = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            let database = Database::open(&update_path).unwrap();
+            DriverRepository::new(database.conn())
+                .record_attempt_diagnostics(
+                    "timed",
+                    sequence,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "review_complete",
+                )
+                .unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(75));
+        assert_eq!(
+            durable_attempt_phase(&database_path, "timed", sequence),
+            "review_complete"
+        );
+        updater.join().unwrap();
+    }
 
     #[test]
     fn escalation_admission_reserves_every_finite_warrant() {
@@ -1869,7 +2673,6 @@ mod tests {
         discovered: &[DiscoveredPrd],
         db: &mut Database,
         allowlist: Option<&BTreeSet<PrdId>>,
-        session_undelivered: &BTreeSet<PrdId>,
         limit: usize,
     ) -> (Vec<PrdId>, Vec<SelectionDecision>) {
         let mut decisions = Vec::new();
@@ -1879,7 +2682,6 @@ mod tests {
             db,
             &BTreeSet::new(),
             allowlist,
-            session_undelivered,
             limit,
             &mut decisions,
         )
@@ -1932,8 +2734,7 @@ mod tests {
 
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        let (selected, decisions) =
-            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        let (selected, decisions) = select(&repository, &discovered, &mut db, None, 6);
         assert_eq!(
             selected,
             vec![
@@ -2061,8 +2862,7 @@ mod tests {
         ];
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        let (selected, decisions) =
-            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        let (selected, decisions) = select(&repository, &discovered, &mut db, None, 6);
         assert_eq!(
             selected,
             vec![PrdId::new(36)],
@@ -2108,8 +2908,7 @@ mod tests {
         let discovered = vec![first, second, third];
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        let (selected, decisions) =
-            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        let (selected, decisions) = select(&repository, &discovered, &mut db, None, 6);
         assert_eq!(selected, vec![PrdId::new(1), PrdId::new(3)]);
         let deferred = decisions
             .iter()
@@ -2131,8 +2930,7 @@ mod tests {
         ];
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        let (selected, decisions) =
-            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 6);
+        let (selected, decisions) = select(&repository, &discovered, &mut db, None, 6);
         assert_eq!(selected, vec![PrdId::new(1), PrdId::new(3)]);
         let deferred = decisions
             .iter()
@@ -2154,14 +2952,7 @@ mod tests {
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         let allowlist: BTreeSet<PrdId> = [PrdId::new(2)].into_iter().collect();
-        let (selected, decisions) = select(
-            &repository,
-            &discovered,
-            &mut db,
-            Some(&allowlist),
-            &BTreeSet::new(),
-            6,
-        );
+        let (selected, decisions) = select(&repository, &discovered, &mut db, Some(&allowlist), 6);
         assert_eq!(selected, vec![PrdId::new(2)]);
         let excluded = decisions
             .iter()
@@ -2171,7 +2962,7 @@ mod tests {
     }
 
     #[test]
-    fn undelivered_session_dependency_defers_dependent() {
+    fn integrated_dependency_admits_dependent_when_delivery_is_disabled() {
         use familiar_ai_core::PrdLocation::{Active, Archived};
         let (_temp, repository) = test_repository();
         let discovered = vec![
@@ -2180,15 +2971,11 @@ mod tests {
         ];
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        let undelivered: BTreeSet<PrdId> = [PrdId::new(1)].into_iter().collect();
-        let (selected, decisions) =
-            select(&repository, &discovered, &mut db, None, &undelivered, 6);
-        assert!(selected.is_empty());
-        let deferred = decisions
-            .iter()
-            .find(|decision| decision.prd_id == PrdId::new(2))
-            .unwrap();
-        assert_eq!(deferred.decision, "deferred_dependency_undelivered");
+        let (selected, decisions) = select(&repository, &discovered, &mut db, None, 6);
+        assert_eq!(selected, vec![PrdId::new(2)]);
+        assert!(decisions.iter().all(|decision| {
+            decision.prd_id != PrdId::new(2) || decision.decision == "ready_selected"
+        }));
     }
 
     #[test]
@@ -2201,8 +2988,7 @@ mod tests {
         ];
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
-        let (selected, decisions) =
-            select(&repository, &discovered, &mut db, None, &BTreeSet::new(), 1);
+        let (selected, decisions) = select(&repository, &discovered, &mut db, None, 1);
         assert_eq!(selected, vec![PrdId::new(1)]);
         let deferred = decisions
             .iter()

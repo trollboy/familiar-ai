@@ -7,8 +7,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use chrono::Utc;
 use familiar_ai_agent::{CodingAgent, ExecutionBudget, ExecutionRequest, FilesystemPolicy};
 use familiar_ai_core::{
-    validate_graph, BacklogDiscovery, Config, FilesystemBacklogDiscovery, PlannerConfig,
-    RepositoryIdentity,
+    structured_prd_metadata, validate_graph, BacklogDiscovery, Config, DiscoveredPrd,
+    FilesystemBacklogDiscovery, PlannerConfig, PrdId, PrdLocation, RepositoryIdentity,
+    RepositoryPath,
 };
 use familiar_ai_review::parse_expected_files;
 use familiar_ai_storage::{
@@ -26,6 +27,15 @@ const REQUIRED: [&str; 7] = [
     "Definition of Done",
 ];
 
+/// Plan authoring uses the scheduler's single conflict implementation.
+pub fn validate_wave_width(
+    root: &Path,
+    prds: &[familiar_ai_core::DiscoveredPrd],
+    claimed: usize,
+) -> Result<crate::drive::WidthReport, String> {
+    crate::drive::validate_claimed_width(root, prds, claimed)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
     pub filename: String,
@@ -37,6 +47,8 @@ pub struct DraftSummary {
     pub title: String,
     pub dependencies: Vec<String>,
     pub expected_files: usize,
+    pub graph_width: usize,
+    pub achievable_width: usize,
 }
 
 fn diagnostic(file: &str, line: usize, rule: &str, detail: impl std::fmt::Display) -> String {
@@ -317,6 +329,8 @@ pub fn validate_batch(
             title: title(&draft.filename, &draft.content)?,
             dependencies: deps,
             expected_files: parse_expected_files(&draft.content).unwrap().len(),
+            graph_width: 0,
+            achievable_width: 0,
         });
     }
     fn visit(
@@ -369,6 +383,61 @@ pub fn validate_batch(
                 "dependencies.order",
                 format!("in-batch dependency PRD-{later:03} must precede its dependent"),
             ));
+        }
+    }
+    let mut remaining = batch_ids.clone();
+    let mut placed = BTreeSet::new();
+    while !remaining.is_empty() {
+        let wave_ids = remaining
+            .iter()
+            .copied()
+            .filter(|id| {
+                graph[id]
+                    .iter()
+                    .all(|dep| !batch_ids.contains(dep) || placed.contains(dep))
+            })
+            .collect::<Vec<_>>();
+        let wave = wave_ids
+            .iter()
+            .map(|id| {
+                let draft = drafts
+                    .iter()
+                    .find(|draft| number(&draft.filename) == *id)
+                    .expect("wave ids come from drafts");
+                let metadata = structured_prd_metadata(&draft.content)
+                    .map_err(|error| error.to_string())?
+                    .unwrap_or_else(|| familiar_ai_core::PrdMetadata {
+                        contract_version: Some(1),
+                        expected_files: parse_expected_files(&draft.content)
+                            .expect("expected-files grammar was validated")
+                            .into_iter()
+                            .map(|entry| entry.normalized)
+                            .collect(),
+                        ..Default::default()
+                    });
+                Ok(DiscoveredPrd {
+                    id: PrdId::new(*id),
+                    number: *id,
+                    path: RepositoryPath::new(format!("docs/prds/{}", draft.filename))
+                        .map_err(|error| error.to_string())?,
+                    location: PrdLocation::Active,
+                    title: title(&draft.filename, &draft.content)?,
+                    dependencies: graph[id].iter().copied().map(PrdId::new).collect(),
+                    metadata,
+                    content_hash: familiar_ai_review::content_hash(draft.content.as_bytes()),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let widths = validate_wave_width(root, &wave, wave.len())?;
+        for id in &wave_ids {
+            let summary = summaries
+                .iter_mut()
+                .find(|summary| number(&summary.filename) == *id)
+                .expect("wave ids have summaries");
+            summary.graph_width = widths.graph_width;
+            summary.achievable_width = widths.achievable_width;
+            remaining.remove(id);
+            placed.insert(*id);
         }
     }
     Ok(summaries)
@@ -673,7 +742,7 @@ pub fn print_summary(id: &str, s: &[DraftSummary]) {
     println!("Batch {id}");
     for d in s {
         println!(
-            "{}\t{}\tdeps={}\texpected-files={}",
+            "{}\t{}\tdeps={}\texpected-files={}\tgraph-width={}\tachievable-width={}",
             d.filename,
             d.title,
             if d.dependencies.is_empty() {
@@ -681,7 +750,9 @@ pub fn print_summary(id: &str, s: &[DraftSummary]) {
             } else {
                 d.dependencies.join(",")
             },
-            d.expected_files
+            d.expected_files,
+            d.graph_width,
+            d.achievable_width
         )
     }
 }
@@ -769,6 +840,20 @@ mod tests {
         let e = validate_batch(root.path(), &[d], &limits, None).unwrap_err();
         assert!(e.contains("expected_files.grammar"));
         assert!(e.contains(":17:"), "{e}")
+    }
+
+    #[test]
+    fn authored_wave_rejects_overclaimed_width_and_names_conflicting_pair() {
+        let root = repository();
+        let error = validate_batch(
+            root.path(),
+            &[valid(1, "none"), valid(2, "none")],
+            &limits(),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("claimed width 2 exceeds achievable width 1"));
+        assert!(error.contains("PRD-1<->PRD-2"), "{error}");
     }
 
     #[test]

@@ -499,6 +499,7 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context(
 
 /// Driver-only variant that constrains the implementation process to a
 /// caller-computed remainder of a session duration warrant.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_with_config_tracked_from_preflighted_with_route_context_and_timeout(
     current: &Path,
     prd_path: &Path,
@@ -519,6 +520,37 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context_and_timeo
         prerequisites_preflighted,
         route_context,
         implementation_timeout_ms,
+        false,
+        None,
+        &mut trace,
+    );
+    (result, trace)
+}
+
+/// Merge-queue worker entry point. A clean review stops at `reviewed`; the
+/// driver alone may integrate and then commit backlog completion.
+pub fn execute_reviewed_candidate(
+    current: &Path,
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+    route_context: Option<RouteContext>,
+    implementation_timeout_ms: Option<u64>,
+    migration_version: Option<u64>,
+) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
+    let mut trace = AttemptTrace::default();
+    let result = execute_tracked_inner(
+        current,
+        prd_path,
+        agents,
+        config,
+        paths,
+        true,
+        route_context,
+        implementation_timeout_ms,
+        true,
+        migration_version,
         &mut trace,
     );
     (result, trace)
@@ -668,6 +700,7 @@ pub fn resume_implemented_checkpoint(
         agents,
         config,
         paths,
+        false,
         &mut trace,
     )?;
     let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
@@ -785,6 +818,7 @@ pub struct AttemptTrace {
     pub retained_reason: Option<&'static str>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_tracked_inner(
     current: &Path,
     prd_path: &Path,
@@ -794,6 +828,8 @@ fn execute_tracked_inner(
     prerequisites_preflighted: bool,
     route_context: Option<RouteContext>,
     implementation_timeout_ms: Option<u64>,
+    defer_completion: bool,
+    migration_version: Option<u64>,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let discovery = FilesystemBacklogDiscovery;
@@ -884,7 +920,12 @@ fn execute_tracked_inner(
     };
     let stable_prefix = render_stable_prefix(&context, &profile, EXECUTION_CONSTRAINTS);
     let prompt_cache_key = familiar_ai_review::content_hash(stable_prefix.as_bytes());
-    let prompt = render_prompt_with_prefix(&context, &stable_prefix);
+    let mut prompt = render_prompt_with_prefix(&context, &stable_prefix);
+    if let Some(version) = migration_version {
+        prompt.push_str(&format!(
+            "\n## Reserved migration version\n\nThis attempt exclusively owns migration version {version:03}. Any authored storage migration MUST use that exact numeric filename prefix; do not choose or renumber a migration independently.\n"
+        ));
+    }
     let database_path = config.database.resolve_path(&paths.data_dir);
     let mut db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
     db.run_migrations()
@@ -1198,6 +1239,7 @@ fn execute_tracked_inner(
         agents,
         config,
         paths,
+        defer_completion,
         trace,
     )
 }
@@ -1216,6 +1258,7 @@ fn finish_implementation(
     agents: &AgentSet<'_>,
     config: &Config,
     paths: &AppPaths,
+    defer_completion: bool,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     if !config.review.enabled {
@@ -1272,6 +1315,25 @@ fn finish_implementation(
         .filter(|c| c.required)
         .map(|c| c.check_id.clone())
         .collect::<Vec<_>>();
+    if defer_completion {
+        if let Some(checkpoint) = familiar_ai_storage::CheckpointRepository::new(db.conn())
+            .get(&repository.key, &target.id.to_string())
+            .map_err(|e| RunError::Storage(e.to_string()))?
+        {
+            let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+            for (phase, detail) in [
+                ("verified", "required_verification_passed"),
+                ("reviewed", "independent_review_clean"),
+            ] {
+                checkpoints
+                    .transition(&checkpoint.checkpoint_id, phase, detail)
+                    .map_err(|e| RunError::Storage(e.to_string()))?;
+            }
+        }
+        return Ok(RunWorkflowResult {
+            implementation: result,
+        });
+    }
     SqliteBacklogRepository::new(db.conn_mut())
         .complete_run(repository, target, id, actor, &required_checks)
         .map_err(|e| {

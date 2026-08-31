@@ -66,8 +66,9 @@ boundary escape (defect 2). Warrant each wave's session with its PRD set.
 The width columns are honest per wave-2 defect 1: **graph width** is what
 the dependency graph permits; **achievable width** is what the declared
 expected-file scopes and resources permit under the PRD-065 conflict rules.
-Until PRD-066's plan validation computes achievable width automatically,
-the achievable column is estimated from the authored scopes and marked (~).
+PRD-066 plan validation computes achievable width with the scheduler's scope
+and resource conflict rules. Historical measured values remain labelled;
+future authored waves must validate their claimed width before admission.
 Narrowing a wave's `expected_files` raises its achievable width; coarse
 whole-crate declarations forfeit concurrency by design.
 

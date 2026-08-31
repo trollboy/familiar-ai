@@ -72,10 +72,14 @@ pub fn discover(db: &Database, repository_key: &str) -> Result<Vec<ResumeCandida
     if !checkpoints.schema_available().map_err(|e| e.to_string())? {
         return Ok(Vec::new());
     }
+    let terminal = familiar_ai_storage::OrchestrationRepository::new(db.conn())
+        .terminal_prds(repository_key)
+        .map_err(|e| e.to_string())?;
     checkpoints
         .resumable(repository_key)
         .map_err(|e| e.to_string())?
         .into_iter()
+        .filter(|checkpoint| !terminal.contains(&checkpoint.prd_id))
         .map(validate)
         .collect()
 }
