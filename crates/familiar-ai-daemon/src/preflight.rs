@@ -1,5 +1,6 @@
 //! Deterministic, side-effect-free prerequisite checks for unattended work.
 
+use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -18,6 +19,7 @@ pub struct PreflightCheck {
 pub enum PreflightStatus {
     Passed,
     Failed,
+    EnvironmentDenied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +37,7 @@ impl PreflightReport {
     pub fn failure_summary(&self) -> String {
         self.checks
             .iter()
-            .filter(|check| check.status == PreflightStatus::Failed)
+            .filter(|check| check.status != PreflightStatus::Passed)
             .map(|check| format!("{}: {}", check.check_id, check.detail))
             .collect::<Vec<_>>()
             .join("; ")
@@ -72,6 +74,8 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
         checks.push(command_check(command, repository));
     }
     for verification in config.review.verification.iter().filter(|v| v.required) {
+        let directory = repository.join(&verification.working_directory);
+        checks.push(writable_path_check(&verification.check_id, &directory));
         checks.push(command_check(
             &PreflightCommandConfig {
                 check_id: format!("verification.{}", verification.check_id),
@@ -142,6 +146,30 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
         }),
     }
     PreflightReport { checks }
+}
+
+fn writable_path_check(check_id: &str, path: &Path) -> PreflightCheck {
+    let probe = path.join(format!(".verification-write-probe-{}", std::process::id()));
+    let result = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .and_then(|_| fs::remove_file(&probe));
+    match result {
+        Ok(()) => PreflightCheck {
+            check_id: format!("writable.{check_id}"),
+            status: PreflightStatus::Passed,
+            detail: format!("writable: {}", path.display()),
+        },
+        Err(error) => PreflightCheck {
+            check_id: format!("writable.{check_id}"),
+            status: PreflightStatus::EnvironmentDenied,
+            detail: format!(
+                "environment denied writable path {}: {error}",
+                path.display()
+            ),
+        },
+    }
 }
 
 fn agent_check(check_id: &str, agent: &dyn familiar_ai_agent::CodingAgent) -> PreflightCheck {

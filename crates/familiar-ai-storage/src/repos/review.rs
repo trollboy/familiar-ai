@@ -2,7 +2,7 @@ use chrono::Utc;
 use familiar_ai_core::FamiliarError;
 use familiar_ai_review::{
     ArtifactRef, BlockingPolicy, EvidenceRef, LessonClassification, LessonProposal, LessonStatus,
-    ReviewCycle, ReviewStore, ReviewTask,
+    ReviewCycle, ReviewStore, ReviewTask, ReviewWaiver,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -33,6 +33,51 @@ impl<'a> ReviewRepository<'a> {
             .map_err(db)?;
         raw.map(|v| serde_json::from_str(&v).map_err(|e| FamiliarError::Database(e.to_string())))
             .transpose()
+    }
+    /// Attribute a human exception to one exact open finding. The row and the
+    /// reportable cycle snapshot are committed together.
+    pub fn waive_finding(
+        &self,
+        cycle_id: &str,
+        finding_id: &str,
+        actor: &str,
+        reason: &str,
+    ) -> familiar_ai_core::Result<ReviewWaiver> {
+        if !actor.starts_with("human:") || actor.trim() == "human:" || reason.trim().is_empty() {
+            return Err(FamiliarError::Database(
+                "waiver requires actor and reason".into(),
+            ));
+        }
+        let mut cycle = self
+            .get_cycle(cycle_id)?
+            .ok_or_else(|| FamiliarError::Database(format!("review cycle {cycle_id} not found")))?;
+        let open: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM review_findings WHERE cycle_id=?1 AND finding_id=?2 AND status='open' AND (blocking=1 OR acceptance_criterion_id IS NOT NULL))",
+            params![cycle_id, finding_id], |row| row.get(0)).map_err(db)?;
+        if !open {
+            return Err(FamiliarError::Database(format!(
+                "finding {finding_id} is not an open blocking or acceptance-criterion finding"
+            )));
+        }
+        let waiver = ReviewWaiver {
+            waiver_id: format!("{cycle_id}:{finding_id}"),
+            cycle_id: cycle_id.into(),
+            finding_id: finding_id.into(),
+            actor: actor.into(),
+            reason: reason.into(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        cycle.waivers.retain(|value| value.finding_id != finding_id);
+        cycle.waivers.push(waiver.clone());
+        let tx = self.conn.unchecked_transaction().map_err(db)?;
+        tx.execute("INSERT INTO review_finding_waivers(waiver_id,cycle_id,finding_id,actor,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(cycle_id,finding_id) DO UPDATE SET waiver_id=excluded.waiver_id,actor=excluded.actor,reason=excluded.reason,created_at=excluded.created_at", params![waiver.waiver_id, cycle_id, finding_id, actor, reason, waiver.created_at]).map_err(db)?;
+        tx.execute(
+            "UPDATE review_cycles SET cycle_json=?2 WHERE cycle_id=?1",
+            params![cycle_id, json(&cycle)?],
+        )
+        .map_err(db)?;
+        tx.commit().map_err(db)?;
+        Ok(waiver)
     }
     pub fn recover_incomplete(&self) -> familiar_ai_core::Result<usize> {
         let mut stmt=self.conn.prepare("SELECT cycle_id,cycle_json FROM review_cycles WHERE state NOT IN ('completed','human_review_required','interrupted')").map_err(db)?;
@@ -189,7 +234,7 @@ impl ReviewStore for ReviewRepository<'_> {
             )
             .map_err(|e| e.to_string())?;
             for f in &result.findings {
-                tx.execute("INSERT OR REPLACE INTO review_findings(finding_id,cycle_id,category,severity,blocking,status,finding_json) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![f.finding_id,cycle.cycle_id,enum_json(&f.category)?,enum_json(&f.severity)?,f.blocking,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+                tx.execute("INSERT OR REPLACE INTO review_findings(finding_id,cycle_id,category,severity,blocking,status,finding_json,acceptance_criterion_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![f.finding_id,cycle.cycle_id,enum_json(&f.category)?,enum_json(&f.severity)?,f.blocking,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?,f.acceptance_criterion_id]).map_err(|e|e.to_string())?;
                 tx.execute("INSERT OR IGNORE INTO review_finding_events(cycle_id,finding_id,review_attempt,status,finding_json) VALUES(?1,?2,?3,?4,?5)",params![cycle.cycle_id,f.finding_id,cycle.attempt,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
             }
         }
@@ -213,7 +258,10 @@ impl ReviewStore for ReviewRepository<'_> {
         for (index, e) in cycle.verification_history.iter().enumerate() {
             let phase = format!("attempt-{index}");
             tx.execute("INSERT OR REPLACE INTO review_stage_executions(cycle_id,stage_id,stage_kind,observation_json) VALUES(?1,?2,'verification',?3)",params![cycle.cycle_id,format!("{phase}-{}",e.check_id),serde_json::to_string(e).map_err(|error|error.to_string())?]).map_err(|error|error.to_string())?;
-            tx.execute("INSERT OR REPLACE INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json) VALUES(?1,?2,?3,?4)",params![cycle.cycle_id,e.check_id,phase,serde_json::to_string(e).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+            if cycle.repository_key.is_empty() {
+                return Err("verification evidence requires repository identity".into());
+            }
+            tx.execute("INSERT OR REPLACE INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json,repository_key,environment_identity_json,classification) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![cycle.cycle_id,e.check_id,phase,serde_json::to_string(e).map_err(|e|e.to_string())?,cycle.repository_key,serde_json::to_string(&e.environment_identity).map_err(|e|e.to_string())?,enum_json(&e.status)?]).map_err(|e|e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
@@ -275,6 +323,7 @@ mod tests {
         let cycle = ReviewCycle {
             cycle_id: "cycle".into(),
             task_id: task.task_id,
+            repository_key: "repo/.git".into(),
             attempt: 0,
             state: ReviewCycleState::Verifying,
             implementation: AgentObservation {
@@ -300,6 +349,7 @@ mod tests {
             verification_before_review: vec![],
             verification_after_remediation: vec![],
             verification_history: vec![],
+            waivers: vec![],
             scope_policy_snapshot: Some(
                 repository
                     .save_artifact(

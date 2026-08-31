@@ -171,6 +171,7 @@ pub struct VerificationEvidence {
 pub enum VerificationStatus {
     Passed,
     Failed,
+    EnvironmentDenied,
     TimedOut,
     Signaled,
     Unavailable,
@@ -244,6 +245,9 @@ pub struct ReviewFinding {
     pub remediation: String,
     pub status: FindingStatus,
     pub supersedes: Option<String>,
+    /// Exact task acceptance criterion this finding prevents satisfying.
+    #[serde(default)]
+    pub acceptance_criterion_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -605,6 +609,9 @@ pub enum IndependenceKind {
 pub struct ReviewCycle {
     pub cycle_id: String,
     pub task_id: String,
+    /// Canonical repository identity supplied by the creating driver session.
+    #[serde(default)]
+    pub repository_key: String,
     pub attempt: u32,
     pub state: ReviewCycleState,
     pub implementation: AgentObservation,
@@ -618,6 +625,9 @@ pub struct ReviewCycle {
     pub verification_before_review: Vec<VerificationEvidence>,
     pub verification_after_remediation: Vec<VerificationEvidence>,
     pub verification_history: Vec<VerificationEvidence>,
+    /// Human decisions which explicitly excuse otherwise terminal-blocking findings.
+    #[serde(default)]
+    pub waivers: Vec<ReviewWaiver>,
     #[serde(default)]
     pub scope_policy_snapshot: Option<ArtifactRef>,
     #[serde(default)]
@@ -632,6 +642,16 @@ pub struct ReviewCycle {
     pub stop_reasons: Vec<ReviewStopReason>,
     pub review_attempts: Vec<StageExecution>,
     pub remediation_attempts: Vec<StageExecution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewWaiver {
+    pub waiver_id: String,
+    pub cycle_id: String,
+    pub finding_id: String,
+    pub actor: String,
+    pub reason: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -691,6 +711,9 @@ pub enum ReviewStopReason {
     ScopeAmbiguous,
     ArchitecturalApprovalRequired,
     VerificationUnsuccessful,
+    EnvironmentDenied,
+    NarrationContradiction,
+    OpenFindingUnwaived,
     NoIndependentReviewer,
     MalformedReview,
     AgentFailure,

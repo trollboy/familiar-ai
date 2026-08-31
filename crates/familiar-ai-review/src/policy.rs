@@ -789,15 +789,26 @@ impl BlockingPolicy {
                 return Err(ReviewValidationError::PriorFindingNotDisposed);
             }
         }
-        result.disposition = if result
-            .findings
+        let failed_required_check = request
+            .verification
             .iter()
-            .any(|f| f.blocking && f.status == FindingStatus::Open)
-        {
+            .find(|e| e.required && e.status != VerificationStatus::Passed);
+        let durable_disposition = if failed_required_check.is_some()
+            || result.findings.iter().any(|f| {
+                f.status == FindingStatus::Open
+                    && (f.blocking || f.acceptance_criterion_id.is_some())
+            }) {
             ReviewDisposition::RemediationRequired
         } else {
             ReviewDisposition::ReadyForHumanApproval
         };
+        if result.disposition != ReviewDisposition::Pending
+            && result.disposition != durable_disposition
+        {
+            let check = failed_required_check.map_or("review findings", |e| e.check_id.as_str());
+            return Err(ReviewValidationError::NarrationContradiction(check.into()));
+        }
+        result.disposition = durable_disposition;
         Ok(result)
     }
 }
@@ -914,6 +925,8 @@ pub enum ReviewValidationError {
     PriorFindingNotDisposed,
     #[error("finding {0} does not contain the minimum evidence required for its category")]
     CategoryEvidenceMismatch(String),
+    #[error("agent narration contradicts durable check {0}")]
+    NarrationContradiction(String),
 }
 
 pub fn check_independence(

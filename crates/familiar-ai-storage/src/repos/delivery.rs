@@ -138,36 +138,38 @@ impl<'a> DeliveryRepository<'a> {
             ).optional().map_err(db);
         }
         if let Some(check_id) = gate.strip_prefix("verification:") {
-            // A verification from another repository must never satisfy this
-            // repository's delivery gate. Review evidence does not carry a
-            // repository key directly, so bind it through the driver attempt
-            // and session that created the review cycle. Evidence without
-            // that durable attribution fails closed.
-            return self.conn.query_row(
-                "SELECT evidence_json FROM review_verification_evidence evidence \
-                 JOIN review_cycles cycle ON cycle.cycle_id=evidence.cycle_id \
-                 JOIN driver_attempts attempt ON cycle.cycle_id LIKE attempt.execution_id || '-cycle-%' \
-                 JOIN driver_sessions session ON session.session_id=attempt.session_id \
-                 WHERE session.repository_key=?1 AND evidence.check_id=?2 \
+            // Exact check and canonical repository identity are persisted on
+            // the evidence row. Missing attribution therefore fails closed.
+            return self
+                .conn
+                .query_row(
+                    "SELECT evidence_json FROM review_verification_evidence evidence \
+                 WHERE evidence.repository_key=?1 AND evidence.check_id=?2 \
                  ORDER BY evidence.rowid DESC LIMIT 1",
-                params![repository_key, check_id],
-                |row| row.get::<_, String>(0),
-            ).optional().map_err(db).and_then(|value| {
-                value.map(|json| {
-                    let evidence: familiar_ai_review::VerificationEvidence =
-                        serde_json::from_str(&json).map_err(|error| {
-                            familiar_ai_core::FamiliarError::Database(format!(
-                                "invalid stored verification evidence: {error}"
-                            ))
-                        })?;
-                    Ok(InternalEvidence {
-                        passed: evidence.status == familiar_ai_review::VerificationStatus::Passed,
-                        target: None,
-                        revision: None,
-                        output: json.into_bytes(),
-                    })
-                }).transpose()
-            });
+                    params![repository_key, check_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(db)
+                .and_then(|value| {
+                    value
+                        .map(|json| {
+                            let evidence: familiar_ai_review::VerificationEvidence =
+                                serde_json::from_str(&json).map_err(|error| {
+                                    familiar_ai_core::FamiliarError::Database(format!(
+                                        "invalid stored verification evidence: {error}"
+                                    ))
+                                })?;
+                            Ok(InternalEvidence {
+                                passed: evidence.status
+                                    == familiar_ai_review::VerificationStatus::Passed,
+                                target: None,
+                                revision: None,
+                                output: json.into_bytes(),
+                            })
+                        })
+                        .transpose()
+                });
         }
         Ok(None)
     }
@@ -283,8 +285,8 @@ mod tests {
                 "INSERT INTO driver_sessions(session_id,repository_key,started_at,warrant_json,created_at) VALUES('other-session','/other/.git','2026-01-01T00:00:00Z','{{}}','2026-01-01T00:00:00Z');
                  INSERT INTO driver_attempts(session_id,sequence,prd_id,prd_path,execution_id,started_at) VALUES('other-session',1,'PRD-1','docs/prds/PRD-001.md','other-execution','2026-01-01T00:00:00Z');
                  INSERT INTO review_tasks(task_id,task_json,policy_json,created_at) VALUES('task','{{}}','{{}}','2026-01-01T00:00:00Z');
-                 INSERT INTO review_cycles(cycle_id,task_id,attempt,state,disposition,cycle_json,started_at) VALUES('other-execution-cycle-review-1','task',1,'complete','clean','{{}}','2026-01-01T00:00:00Z');
-                 INSERT INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json) VALUES('other-execution-cycle-review-1','verify','attempt-0','{}');",
+                 INSERT INTO review_cycles(cycle_id,task_id,attempt,state,disposition,cycle_json,started_at) VALUES('other-execution-cycle','task',1,'complete','clean','{{}}','2026-01-01T00:00:00Z');
+                 INSERT INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json,repository_key) VALUES('other-execution-cycle','verify','attempt-0','{}','/other/.git');",
                 evidence.replace('\'', "''")
             ))
             .unwrap();
