@@ -14,6 +14,15 @@ clean terminal result. Manual recovery then reconciled and integrated every
 candidate in dependency order because `resume all` was blocked by stale
 historical checkpoints.
 
+The dominant workflow failure must not be obscured by the eventual successful
+code delivery: the actual process was **`familiar-ai drive` → cascade of nine
+retained/failed attempts → individually finish every PRD outside Familiar**.
+Familiar integrated zero Wave 3 candidates. The operator and Codex performed
+the merge queue, conflict reconciliation, verification, backlog completion,
+and release closeout that the product was expected to perform. This is tracked
+as FAM-BUG-019 and remains open until a multi-PRD wave completes end to end
+using Familiar commands alone.
+
 ## Current durable state
 
 The driver admitted all nine requested PRDs but calculated

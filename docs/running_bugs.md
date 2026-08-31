@@ -403,3 +403,29 @@ identity and probe halves transfer to PRD-057; 013's typed deterministic
 classification and 015's socket-needs declaration extend PRD-067's
 contract; 010 is addressed by the corrected plan and owner-approved
 PRD-076.
+
+### FAM-BUG-019 — Dogfood workflow repeatedly collapses into manual per-PRD delivery
+
+- **Status:** Open; systemic release-blocking dogfood failure
+- **Observed:** The repeated delivery workflow is: (1) launch an allowlisted
+  `familiar-ai drive` wave, (2) encounter a cascade of retained or failed
+  attempts, and (3) finish, reconcile, test, integrate, and complete each PRD
+  individually outside Familiar. Wave 3 reproduced the full pattern: the
+  nine-PRD drive integrated zero candidates, after which all nine preserved
+  worktrees were landed manually in dependency order.
+- **Impact:** Familiar is acting as an expensive candidate generator rather
+  than an autonomous delivery system. Batch success, recovery, merge-queue,
+  review, verification, and completion claims are not credible while the
+  operator remains the actual orchestrator for every successful wave.
+- **Expected fix:** Treat a wave as successful only when Familiar itself
+  integrates and durably completes its candidates. A deterministic shared
+  failure must trip a session circuit breaker instead of cascading across the
+  allowlist; recoverable retained candidates must be resumed through Familiar;
+  dependency successors must consume the integrated session revision; and the
+  session must emit one actionable terminal recovery plan. Add an end-to-end
+  dogfood acceptance test proving a multi-PRD wave proceeds from drive through
+  integration and completion without manual Git or backlog operations.
+- **Exit criterion:** Complete one multi-PRD wave using only Familiar commands,
+  with no manual worktree edits, cherry-picks, backlog overrides, or per-PRD
+  completion commands. Until then, this bug remains open regardless of whether
+  the individual underlying defects are dispositioned elsewhere.
