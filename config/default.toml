@@ -102,8 +102,8 @@
 # [execution_history.subscriptions."provider/model"] and never imply spend.
 [driver]
 max_prds_per_session = 0      # 0 = unlimited
-max_session_cost_microusd = 0 # 0 = no cost ceiling
-max_session_tokens = 0        # 0 = no cumulative token ceiling
+max_session_cost_microusd = 0 # 0 = no cost ceiling; converted to canonical nanoUSD reservations
+max_session_tokens = 0        # 0 = no uncached-token ceiling; cache reads do not consume it
 max_session_duration_ms = 0   # 0 = no duration ceiling
 max_concurrency = 1
 isolated_worktrees = false

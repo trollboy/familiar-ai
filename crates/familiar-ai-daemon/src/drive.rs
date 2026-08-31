@@ -20,12 +20,13 @@ use std::time::Instant;
 
 use familiar_ai_core::{
     validate_graph, AppPaths, BacklogDiscovery, BacklogStatus, BacklogStatusStore,
-    BacklogStoreError, Config, DiscoveredPrd, FilesystemBacklogDiscovery, PrdId,
-    RepositoryIdentity,
+    BacklogStoreError, Config, DiscoveredPrd, FilesystemBacklogDiscovery, GrantMode, PrdId,
+    RepositoryIdentity, ReservationOwnerIdentity, ResourceRequest, ResourceType,
+    UnknownConsumptionPolicy,
 };
 use familiar_ai_storage::{
-    Database, DeliveryRepository, DriverRepository, ExecutionHistoryRepository,
-    OrchestrationRepository,
+    AcquireOutcome, Database, DeliveryRepository, DriverRepository, ExecutionHistoryRepository,
+    OrchestrationRepository, ReservationRepository, SettlementObservation,
 };
 
 /// Materialize a reviewed candidate as a real two-parent merge commit on the
@@ -389,8 +390,11 @@ impl DriveWarrant {
             })
             .unwrap_or_default();
         format!(
-            "{{\"max_prds\":{},\"max_cost_microusd\":{},\"max_tokens\":{},\"max_duration_ms\":{}{allowlist}}}",
-            self.max_prds, self.max_cost_microusd, self.max_tokens, self.max_duration_ms
+            "{{\"max_prds\":{},\"max_cost_nanousd\":{},\"max_uncached_tokens\":{},\"max_duration_ms\":{}{allowlist}}}",
+            self.max_prds,
+            self.max_cost_microusd.saturating_mul(1_000),
+            self.max_tokens,
+            self.max_duration_ms
         )
     }
 
@@ -808,8 +812,6 @@ pub fn drive(
     warrant.validate().map_err(DriveError::Config)?;
     // Component concurrency is an explicit opt-in independent of the legacy
     // PRD worker ceiling. A value of one preserves PRD-017's serial path.
-    // Finite cost/token session ceilings cannot be safely reserved from
-    // unknown future usage, so they deliberately retain serial admission.
     let parallelism = component_parallelism(config, &warrant);
     if parallelism == 0 {
         return Err(DriveError::Config(
@@ -885,6 +887,34 @@ pub fn drive(
     DriverRepository::new(db.conn())
         .open_session(&session_id, &repository.key, &warrant.as_json())
         .map_err(|error| DriveError::Storage(error.to_string()))?;
+    {
+        let mut reservations = ReservationRepository::new(db.conn_mut());
+        if warrant.max_cost_microusd > 0 {
+            reservations
+                .define_pool(
+                    &session_id,
+                    &ResourceType::NanousdBudget,
+                    warrant
+                        .max_cost_microusd
+                        .checked_mul(1_000)
+                        .ok_or_else(|| {
+                            DriveError::Config("cost warrant exceeds nanoUSD range".into())
+                        })?,
+                    false,
+                )
+                .map_err(|error| DriveError::Storage(error.to_string()))?;
+        }
+        if warrant.max_tokens > 0 {
+            reservations
+                .define_pool(
+                    &session_id,
+                    &ResourceType::UncachedTokens,
+                    warrant.max_tokens,
+                    false,
+                )
+                .map_err(|error| DriveError::Storage(error.to_string()))?;
+        }
+    }
     let session_base =
         git_output(&repository.worktree, &["rev-parse", "HEAD"]).map_err(DriveError::Config)?;
     OrchestrationRepository::new(db.conn())
@@ -1057,6 +1087,53 @@ pub fn drive(
                             break;
                         }
                     };
+                    let reservation_requests = component_warrant_requests(
+                        &session_id,
+                        &warrant,
+                        config.driver.max_implementation_tokens,
+                        parallelism,
+                    );
+                    let reservation_id = if reservation_requests.is_empty() {
+                        None
+                    } else {
+                        let identity = ReservationOwnerIdentity {
+                            owner_instance_id: format!("{session_id}:{sequence}"),
+                            installation_id: None,
+                            nonce_or_generation: session_id.clone(),
+                            owner_kind: "drive-component".into(),
+                            project_id: repository.key.clone(),
+                            execution_id: format!("{session_id}:{sequence}"),
+                            component_id: component_id.clone(),
+                        };
+                        match ReservationRepository::new(db.conn_mut()).acquire(
+                            &identity,
+                            &reservation_requests,
+                            GrantMode::AllOrNothing,
+                            None,
+                        ) {
+                            Ok(AcquireOutcome::Granted(grant)) => Some(grant.reservation_id),
+                            Ok(AcquireOutcome::Refused { unavailable }) => {
+                                eprintln!(
+                                    "drive: component {} refused: finite warrant reservation unavailable: {unavailable:?}",
+                                    target.id
+                                );
+                                DriverRepository::new(db.conn())
+                                    .record_attempt_finished(
+                                        &session_id,
+                                        sequence,
+                                        "retained",
+                                        Some("warrant_reservation_refused"),
+                                        None,
+                                        None,
+                                    )
+                                    .map_err(|error| DriveError::Storage(error.to_string()))?;
+                                continue;
+                            }
+                            Err(error) => {
+                                return Err(DriveError::Storage(error.to_string()));
+                            }
+                        }
+                    };
                     let migration_version =
                         if prd_scope(&repository.worktree, &target).is_ok_and(|scope| {
                             scope.iter().any(|(path, kind)| {
@@ -1219,6 +1296,7 @@ pub fn drive(
                         component_id,
                         escalation_worker,
                         migration_version,
+                        reservation_id,
                     ));
                 }
                 if preparation_failed {
@@ -1237,6 +1315,7 @@ pub fn drive(
                     component_id,
                     escalation_worker,
                     migration_version,
+                    reservation_id,
                 ) in jobs
                 {
                     let sender = result_sender.clone();
@@ -1285,6 +1364,7 @@ pub fn drive(
                             escalation_worker,
                             route_context,
                             migration_version,
+                            reservation_id,
                         ));
                     });
                 }
@@ -1313,6 +1393,7 @@ pub fn drive(
                         escalation_worker,
                         route_context,
                         migration_version,
+                        reservation_id,
                     ) = joined;
                     let heartbeat_failed = worktree_heartbeat
                         .as_ref()
@@ -1496,6 +1577,40 @@ pub fn drive(
                         .and_then(|id| attempt_tokens(&db, id));
                     if let Some(value) = tokens {
                         known_tokens = known_tokens.saturating_add(value);
+                    }
+                    if let Some(reservation_id) = reservation_id {
+                        let observation = if (warrant.max_cost_microusd == 0 || cost.is_some())
+                            && (warrant.max_tokens == 0 || tokens.is_some())
+                        {
+                            let mut observed = Vec::new();
+                            if let Some(value) = cost {
+                                observed.push(ResourceRequest {
+                                    pool_id: session_id.clone(),
+                                    resource_type: ResourceType::NanousdBudget,
+                                    amount: value.saturating_mul(1_000),
+                                });
+                            }
+                            if let Some(value) = tokens {
+                                observed.push(ResourceRequest {
+                                    pool_id: session_id.clone(),
+                                    resource_type: ResourceType::UncachedTokens,
+                                    amount: value,
+                                });
+                            }
+                            SettlementObservation::Known(observed)
+                        } else {
+                            SettlementObservation::Unknown {
+                                policy: UnknownConsumptionPolicy::SettleReservedAmount,
+                            }
+                        };
+                        if let Err(error) = ReservationRepository::new(db.conn_mut()).settle(
+                            &reservation_id,
+                            observation,
+                            &format!("{session_id}:{sequence}"),
+                        ) {
+                            eprintln!("drive: cannot settle component warrant: {error}");
+                            batch_stop = Some(DriveTermination::StorageFailure);
+                        }
                     }
                     let unclassified = result.is_err() && trace.retained_reason.is_none();
                     if let Err(error) = &result {
@@ -2237,11 +2352,43 @@ fn validate_reserved_migration(
 }
 
 fn component_parallelism(config: &Config, warrant: &DriveWarrant) -> usize {
-    if warrant.max_cost_microusd > 0 || warrant.max_tokens > 0 {
-        1
-    } else {
-        config.driver.max_parallel_components
+    let _ = warrant;
+    config.driver.max_parallel_components
+}
+
+fn component_warrant_requests(
+    pool_id: &str,
+    warrant: &DriveWarrant,
+    implementation_tokens: u64,
+    parallelism: usize,
+) -> Vec<ResourceRequest> {
+    let divisor = u64::try_from(parallelism.max(1)).unwrap_or(u64::MAX);
+    let mut requests = Vec::new();
+    if warrant.max_cost_microusd > 0 {
+        requests.push(ResourceRequest {
+            pool_id: pool_id.to_owned(),
+            resource_type: ResourceType::NanousdBudget,
+            amount: warrant
+                .max_cost_microusd
+                .saturating_mul(1_000)
+                .checked_div(divisor)
+                .unwrap_or(0)
+                .max(1),
+        });
     }
+    if warrant.max_tokens > 0 {
+        let fair_share = warrant.max_tokens.checked_div(divisor).unwrap_or(0).max(1);
+        requests.push(ResourceRequest {
+            pool_id: pool_id.to_owned(),
+            resource_type: ResourceType::UncachedTokens,
+            amount: if implementation_tokens > 0 {
+                implementation_tokens.min(fair_share)
+            } else {
+                fair_share
+            },
+        });
+    }
+    requests
 }
 
 fn escalation_admitted(
@@ -2327,7 +2474,7 @@ fn attempt_tokens(db: &Database, execution_id: &str) -> Option<u64> {
         .get(execution_id)
         .ok()
         .flatten()?
-        .total_tokens
+        .input_tokens
 }
 
 #[cfg(test)]
@@ -2574,7 +2721,7 @@ mod tests {
         };
         assert_eq!(
             warrant.as_json(),
-            r#"{"max_prds":4,"max_cost_microusd":0,"max_tokens":0,"max_duration_ms":60000}"#
+            r#"{"max_prds":4,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":60000}"#
         );
     }
 
@@ -2613,7 +2760,7 @@ mod tests {
     }
 
     #[test]
-    fn component_parallelism_preserves_serial_and_bounded_budget_modes() {
+    fn component_parallelism_composes_with_finite_warrants() {
         let mut config = Config::default();
         config.driver.max_concurrency = 15;
         config.driver.max_parallel_components = 1;
@@ -2628,10 +2775,10 @@ mod tests {
         config.driver.max_parallel_components = 7;
         assert_eq!(component_parallelism(&config, &warrant), 7);
         warrant.max_tokens = 1;
-        assert_eq!(component_parallelism(&config, &warrant), 1);
+        assert_eq!(component_parallelism(&config, &warrant), 7);
         warrant.max_tokens = 0;
         warrant.max_cost_microusd = 1;
-        assert_eq!(component_parallelism(&config, &warrant), 1);
+        assert_eq!(component_parallelism(&config, &warrant), 7);
     }
 
     fn contract_prd(
@@ -3028,7 +3175,7 @@ mod tests {
         assert!(warrant.with_prd_allowlist(BTreeSet::new()).is_err());
         assert_eq!(
             bound.as_json(),
-            r#"{"max_prds":4,"max_cost_microusd":0,"max_tokens":0,"max_duration_ms":0,"prd_allowlist":["PRD-65"]}"#
+            r#"{"max_prds":4,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":0,"prd_allowlist":["PRD-65"]}"#
         );
     }
 

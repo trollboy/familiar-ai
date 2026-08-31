@@ -37,6 +37,10 @@ pub use repos::orchestration::{MigrationReservation, OrchestrationRepository, Sc
 pub use repos::planner::{PlannerBatchRecord, PlannerBatchRepository};
 pub use repos::project::ProjectRepository;
 pub use repos::project_config::{FamiliarTomlDecision, FamiliarTomlRepository};
+pub use repos::reservation::{
+    AcquireOutcome, ReservationGrant, ReservationGrantItem, ReservationRepository,
+    SettlementObservation, SettlementResult,
+};
 pub use repos::review::ReviewRepository;
 pub use repos::session_rollup::SessionRollupRepository;
 pub use repos::stewardship::{

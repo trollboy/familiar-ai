@@ -6,6 +6,7 @@ pub mod models;
 pub mod onboarding;
 pub mod paths;
 pub mod repository_path;
+pub mod reservation;
 pub mod status;
 pub mod version;
 
@@ -32,5 +33,9 @@ pub use config::{
 pub use error::{FamiliarError, Result};
 pub use paths::AppPaths;
 pub use repository_path::{CanonicalFileIdentity, PathIdentityError};
+pub use reservation::{
+    GrantMode, OwnerLiveness, OwnerLivenessEvidence, ReservationOwnerIdentity, ResourceRequest,
+    ResourceType, UnknownConsumptionPolicy,
+};
 pub use status::AppStatus;
 pub use version::VersionInfo;
