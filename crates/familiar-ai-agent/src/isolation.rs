@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::AgentExecutionError;
 
-pub(crate) fn isolated_command(
+pub fn isolated_command(
     executable: &str,
     denied_read_path: Option<&std::path::Path>,
 ) -> Result<Command, AgentExecutionError> {

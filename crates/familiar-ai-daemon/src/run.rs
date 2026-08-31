@@ -124,6 +124,68 @@ pub struct AgentSet<'a> {
     pub remediation: &'a dyn CodingAgent,
 }
 
+/// Claim-holding shared application-service context for the legacy attached
+/// run workflow. Keeping construction here prevents CLI and daemon adapters
+/// from acquiring ownership, selecting workers, or interpreting policy.
+pub struct PreparedRun {
+    pub paths: AppPaths,
+    pub repository: std::path::PathBuf,
+    pub config: Config,
+    implementation: Box<dyn CodingAgent>,
+    reviewer: Box<dyn CodingAgent>,
+    remediation: Box<dyn CodingAgent>,
+    _ownership: crate::worker_lock::WorkerLock,
+}
+
+impl PreparedRun {
+    pub fn acquire() -> Result<Self, RunError> {
+        let paths = AppPaths::resolve().map_err(|error| RunError::Config(error.to_string()))?;
+        let current = std::env::current_dir().map_err(RunError::CurrentDirectory)?;
+        let identity = FilesystemBacklogDiscovery
+            .resolve(&current)
+            .map_err(|error| RunError::Config(error.to_string()))?;
+        let ownership =
+            crate::worker_lock::WorkerLock::acquire_repository(&paths.runtime_dir, &identity.key)
+                .map_err(|error| {
+                RunError::Config(format!(
+                    "cannot acquire mutating orchestrator ownership: {error}"
+                ))
+            })?;
+        let config = crate::config_cli::effective_config_for_repository(
+            &crate::config_cli::ConfigContext {
+                config_path: paths.config_dir.join("config.toml"),
+                data_dir: paths.data_dir.clone(),
+            },
+            &identity.worktree,
+        )
+        .map_err(RunError::Config)?;
+        let (implementation_entry, reviewer_entry) =
+            resolved_agent_entries(&config).map_err(RunError::Config)?;
+        let remediation_entry = resolved_remediation_entry(&config).map_err(RunError::Config)?;
+        Ok(Self {
+            paths,
+            repository: identity.worktree,
+            implementation: build_agent(&implementation_entry),
+            reviewer: build_agent(&reviewer_entry),
+            remediation: build_agent(&remediation_entry),
+            config,
+            _ownership: ownership,
+        })
+    }
+
+    pub fn agents(&self) -> AgentSet<'_> {
+        AgentSet {
+            implementation: self.implementation.as_ref(),
+            reviewer: self.reviewer.as_ref(),
+            remediation: self.remediation.as_ref(),
+        }
+    }
+
+    pub fn execute(&self, prd_path: &Path) -> Result<RunWorkflowResult, RunError> {
+        execute_with_config(prd_path, &self.agents(), &self.config, &self.paths)
+    }
+}
+
 struct RegisterAgent<'a> {
     inner: &'a dyn CodingAgent,
     register: Option<RegisterId>,

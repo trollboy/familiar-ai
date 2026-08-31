@@ -29,6 +29,85 @@ use familiar_ai_storage::{
     OrchestrationRepository, ReservationRepository, SettlementObservation,
 };
 
+/// Shared application-service entry point used by CLI fallback and daemon
+/// hosting. Argument parsing and rendering stay in adapters; routing and
+/// warrant construction do not.
+pub fn execute_configured(
+    paths: &AppPaths,
+    repository: &Path,
+    max_prds: Option<u64>,
+    max_cost_microusd: Option<u64>,
+    max_duration_ms: Option<u64>,
+    max_parallel_components: Option<usize>,
+    worktree_root: Option<&Path>,
+    prd_flags: &[String],
+) -> Result<DriveSummary, String> {
+    let mut config = crate::config_cli::effective_config_for_repository(
+        &crate::config_cli::ConfigContext {
+            config_path: paths.config_dir.join("config.toml"),
+            data_dir: paths.data_dir.clone(),
+        },
+        repository,
+    )?;
+    if let Some(value) = max_parallel_components {
+        if value == 0 {
+            return Err("--max-parallel-components must be positive".into());
+        }
+        config.driver.max_parallel_components = value;
+    }
+    if let Some(value) = worktree_root {
+        config.driver.worktree_root = value.to_string_lossy().into_owned();
+    }
+    let (implementation_entry, reviewer_entry) = crate::run::resolved_agent_entries(&config)?;
+    let implementation = crate::run::build_agent(&implementation_entry);
+    let reviewer = crate::run::build_agent(&reviewer_entry);
+    let remediation = crate::run::build_agent(&crate::run::resolved_remediation_entry(&config)?);
+    let mut warrant = DriveWarrant::from_config(&config).tightened_by(
+        max_prds,
+        max_cost_microusd,
+        max_duration_ms,
+    );
+    if !prd_flags.is_empty() {
+        let allowlist = prd_flags
+            .iter()
+            .map(|value| parse_prd_flag(value))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        warrant = warrant.with_prd_allowlist(allowlist)?;
+    }
+    drive(
+        &crate::run::AgentSet {
+            implementation: implementation.as_ref(),
+            reviewer: reviewer.as_ref(),
+            remediation: remediation.as_ref(),
+        },
+        &config,
+        paths,
+        warrant,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn parse_prd_flag(value: &str) -> Result<PrdId, String> {
+    let trimmed = value.trim();
+    let body = trimmed
+        .strip_prefix("PRD-")
+        .or_else(|| trimmed.strip_prefix("prd-"))
+        .unwrap_or(trimmed);
+    let (digits, suffix) = match body.strip_suffix(|c: char| c.is_ascii_lowercase()) {
+        Some(prefix) => (prefix, body.chars().last()),
+        None => (body, None),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "invalid --prd value '{value}': expected PRD-<number> with an optional lowercase suffix"
+        ));
+    }
+    let number: u64 = digits
+        .parse()
+        .map_err(|_| format!("invalid --prd value '{value}': number out of range"))?;
+    Ok(PrdId::with_suffix(number, suffix))
+}
+
 /// Materialize a reviewed candidate as a real two-parent merge commit on the
 /// persisted integration revision. `git merge-tree --write-tree` performs the
 /// merge without moving the user's checkout; conflicts are returned for the

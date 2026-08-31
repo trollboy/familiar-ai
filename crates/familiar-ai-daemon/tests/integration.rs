@@ -54,6 +54,10 @@ format = "json"
     // Start daemon with stderr piped so we can read logs
     let mut child = Command::new(&bin)
         .args(["--config", config_path.to_str().unwrap()])
+        .env("XDG_RUNTIME_DIR", tmp.path().join("runtime"))
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("HOME", tmp.path().join("home"))
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .spawn()
@@ -156,6 +160,10 @@ path = "{db}"
 
     let output = Command::new(&bin)
         .args(["--config", config_path.to_str().unwrap()])
+        .env("XDG_RUNTIME_DIR", tmp.path().join("runtime"))
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .env("HOME", tmp.path().join("home"))
         .output()
         .expect("failed to run daemon");
 

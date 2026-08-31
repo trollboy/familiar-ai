@@ -6,13 +6,113 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use familiar_ai_core::{Config, DeliveryConfig, DeliveryMode, EndpointProviderKind};
-use familiar_ai_storage::DeliveryRepository;
+use familiar_ai_core::{
+    AppPaths, BacklogDiscovery, Config, DeliveryConfig, DeliveryMode, EndpointProviderKind,
+    FilesystemBacklogDiscovery,
+};
+use familiar_ai_storage::{Database, DeliveryRepository};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use wait_timeout::ChildExt;
 
 use crate::worktree::WorktreeOwnership;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfiguredDeliveryOutcome {
+    Environment {
+        session_id: String,
+        prd_id: String,
+        role: String,
+        target: String,
+        revision: String,
+    },
+    Standard(DeliveryJournal),
+}
+
+/// Shared claim-holding delivery application service. Adapters supply only
+/// the operator arguments and render the typed outcome.
+pub fn execute_configured(
+    ownership_record: &Path,
+    role: Option<&str>,
+) -> Result<ConfiguredDeliveryOutcome, String> {
+    let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
+    let current = std::env::current_dir().map_err(|error| error.to_string())?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&current)
+        .map_err(|error| error.to_string())?;
+    let _ownership =
+        crate::worker_lock::WorkerLock::acquire_repository(&paths.runtime_dir, &repository.key)
+            .map_err(|error| format!("cannot acquire mutating orchestrator ownership: {error}"))?;
+    let config = crate::config_cli::effective_config_for_repository(
+        &crate::config_cli::ConfigContext {
+            config_path: paths.config_dir.join("config.toml"),
+            data_dir: paths.data_dir.clone(),
+        },
+        &repository.worktree,
+    )?;
+    let repository_config = config
+        .repository(&repository.worktree)
+        .map_err(|error| error.to_string())?;
+    let policy = repository_config.delivery_policy()?;
+    if let Some(role) = role {
+        let ownership: WorktreeOwnership = serde_json::from_slice(
+            &std::fs::read(ownership_record)
+                .map_err(|error| format!("cannot read ownership record: {error}"))?,
+        )
+        .map_err(|error| format!("invalid ownership record: {error}"))?;
+        if ownership.state != "ready_for_delivery" {
+            return Err(format!(
+                "worktree is not reviewed and ready for delivery (state={})",
+                ownership.state
+            ));
+        }
+        let discovered = FilesystemBacklogDiscovery
+            .discover_with_layout(&repository, &repository_config.layout())
+            .map_err(|error| error.to_string())?;
+        let prd = discovered
+            .iter()
+            .find(|prd| prd.id.to_string() == ownership.prd_id)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not present in the repository backlog",
+                    ownership.prd_id
+                )
+            })?;
+        let revision = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&ownership.worktree)
+            .output()
+            .map_err(|error| format!("cannot identify delivery revision: {error}"))?;
+        if !revision.status.success() {
+            return Err("cannot identify delivery revision".into());
+        }
+        let revision = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
+        let db = Database::open(&config.database.resolve_path(&paths.data_dir))
+            .map_err(|error| error.to_string())?;
+        db.run_migrations().map_err(|error| error.to_string())?;
+        let result = deliver_to_with(
+            &config,
+            policy,
+            role,
+            &repository.key,
+            &ownership.session_id,
+            &ownership.prd_id,
+            &revision,
+            &prd.metadata.external_gates,
+            db.conn(),
+            &ownership.worktree,
+            &ProcessRunner::new(policy.command_timeout_ms),
+        )?;
+        return Ok(ConfiguredDeliveryOutcome::Environment {
+            session_id: ownership.session_id,
+            prd_id: ownership.prd_id,
+            role: result.role,
+            target: result.target,
+            revision: result.revision,
+        });
+    }
+    deliver(ownership_record, policy).map(ConfiguredDeliveryOutcome::Standard)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeliveryJournal {

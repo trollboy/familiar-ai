@@ -37,6 +37,7 @@ use crate::shutdown::shutdown_signal;
 /// State assembled at startup, shared between daemon work and (optionally) tray.
 #[allow(dead_code)]
 struct DaemonState {
+    ownership: familiar_ai_daemon::worker_lock::WorkerLock,
     config: Config,
     config_path: PathBuf,
     paths: AppPaths,
@@ -44,6 +45,8 @@ struct DaemonState {
     status: Arc<Mutex<AppStatus>>,
     pid_path: PathBuf,
     router: Arc<InferenceRouter>,
+    control: familiar_ai_daemon::control_plane::ControlPlaneService,
+    control_socket: PathBuf,
 }
 
 fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::LogGuard)> {
@@ -51,7 +54,6 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
 
     let paths = AppPaths::resolve()?;
     paths.ensure_dirs()?;
-
     let config_path = cli
         .config
         .clone()
@@ -69,6 +71,47 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
     } else {
         Config::load(Some(&config_path))?
     };
+
+    // Claim before database mutation or socket binding. Its lifetime covers
+    // the entire host and it is released only after DaemonState drops.
+    let persistent_installation = paths.data_dir.join("installation-id");
+    let persistent_generation = paths.data_dir.join("control-plane.generation");
+    if persistent_installation.exists() {
+        std::fs::copy(
+            &persistent_installation,
+            paths.runtime_dir.join("installation-id"),
+        )?;
+    }
+    if persistent_generation.exists() {
+        std::fs::copy(
+            &persistent_generation,
+            paths.runtime_dir.join("control-plane.generation"),
+        )?;
+    }
+    let requested_socket = config
+        .daemon
+        .socket_path
+        .clone()
+        .unwrap_or_else(|| paths.runtime_dir.join("control-plane.sock"));
+    let ownership = familiar_ai_daemon::worker_lock::WorkerLock::acquire_with_socket(
+        &paths.runtime_dir,
+        &requested_socket,
+    )?;
+    std::fs::write(
+        &persistent_generation,
+        format!("{}\n", ownership.claim().generation),
+    )?;
+    if !persistent_installation.exists() {
+        std::fs::write(
+            &persistent_installation,
+            format!("{}\n", ownership.claim().installation_id),
+        )?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &persistent_installation,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+    }
 
     let log_guard = familiar_ai_logging::init_logging(&config.logging, Some(&paths.log_dir))?;
 
@@ -99,6 +142,22 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
         } else {
             tracing::info!("database schema up to date");
         }
+        db_lock.conn().execute(
+            "INSERT OR IGNORE INTO control_plane_installation(singleton,installation_id,created_at) VALUES(1,?1,datetime('now'))",
+            [&ownership.claim().installation_id],
+        ).map_err(|e| familiar_ai_core::FamiliarError::Database(e.to_string()))?;
+        let stored_installation: String = db_lock
+            .conn()
+            .query_row(
+                "SELECT installation_id FROM control_plane_installation WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| familiar_ai_core::FamiliarError::Database(e.to_string()))?;
+        if stored_installation != ownership.claim().installation_id {
+            return Err(familiar_ai_core::FamiliarError::Config("control-plane installation identity disagrees with the durable installation record; restore the matching identity or database backup".into()));
+        }
+        db_lock.conn().execute("UPDATE control_plane_claim_generations SET generation=?1 WHERE singleton=1 AND generation<?1",[ownership.claim().generation as i64]).map_err(|e|familiar_ai_core::FamiliarError::Database(e.to_string()))?;
     }
 
     let pid_path = config
@@ -136,8 +195,56 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
     // A future shared state store or IPC layer is out of scope for PRD-008.
     let router = Arc::new(InferenceRouter::new(&config.inference));
 
+    let control = familiar_ai_daemon::control_plane::ControlPlaneService::new(
+        db.clone(),
+        familiar_ai_core::control_plane::SchedulingPolicy {
+            global_ceiling: config.daemon.global_concurrency_ceiling,
+            default_project_ceiling: config.daemon.default_project_concurrency_ceiling,
+        },
+        ownership.claim().generation,
+    );
+    let survivors = familiar_ai_daemon::control_worker::verified_live_workers(&control)?;
+    control.recover(&survivors)?;
+    control.reconcile_filesystem()?;
+    let internal = familiar_ai_core::control_plane::CapabilityScope {
+        client_class: familiar_ai_core::control_plane::ClientClass::Internal,
+        project_id: None,
+        execution_id: None,
+        attempt: None,
+        worker_id: None,
+        authorities: vec![familiar_ai_core::control_plane::Authority::Control],
+    };
+    let operator = control.mint_session(
+        &internal,
+        familiar_ai_core::control_plane::CapabilityScope {
+            client_class: familiar_ai_core::control_plane::ClientClass::Operator,
+            project_id: None,
+            execution_id: None,
+            attempt: None,
+            worker_id: None,
+            authorities: vec![
+                familiar_ai_core::control_plane::Authority::Control,
+                familiar_ai_core::control_plane::Authority::Observe,
+            ],
+        },
+        24 * 60 * 60,
+    )?;
+    let credential_path = paths.runtime_dir.join("operator.credential");
+    std::fs::write(&credential_path, operator.credential.as_bytes())?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &credential_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
+    let control_socket = config
+        .daemon
+        .socket_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(&ownership.claim().socket_path));
+
     Ok((
         DaemonState {
+            ownership,
             config,
             config_path,
             paths,
@@ -145,6 +252,8 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
             status,
             pid_path,
             router,
+            control,
+            control_socket,
         },
         log_guard,
     ))
@@ -157,6 +266,24 @@ async fn daemon_run(
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
+    let _control_host = match familiar_ai_daemon::local_transport::LocalHost::bind(
+        &state.control_socket,
+        state.ownership.claim().owner_nonce.clone(),
+        state.control.clone(),
+    )
+    .await
+    {
+        Ok(host) => Some(host),
+        Err(error) => {
+            tracing::error!(error=%error, "control-plane socket failed closed");
+            return;
+        }
+    };
+    let control_worker = tokio::spawn(familiar_ai_daemon::control_worker::run(
+        state.control.clone(),
+        state.paths.runtime_dir.join("capabilities"),
+        shutdown_rx.clone(),
+    ));
     let command_state = Arc::new(Mutex::new(CommandState::new()));
 
     // If configured, try to load the LLM backend on startup. Failures are
@@ -292,6 +419,7 @@ async fn daemon_run(
     }
 
     let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(Duration::from_secs(5), control_worker).await;
     heartbeat_handle.abort();
     command_handle.abort();
 

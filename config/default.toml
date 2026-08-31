@@ -12,6 +12,9 @@
 # heartbeat_interval_secs = 60
 # pid_file = ""         # Default: platform-specific (see AppPaths)
 # socket_path = ""      # Default: platform-specific (see AppPaths)
+# global_concurrency_ceiling = 1
+# default_project_concurrency_ceiling = 1
+# health_timeout_ms = 5000
 
 [logging]
 # level = "info"        # Options: trace, debug, info, warn, error

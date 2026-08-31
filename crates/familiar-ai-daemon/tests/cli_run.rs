@@ -58,6 +58,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .current_dir(&repository)
         .args(["run", "docs/prds/PRD-001.md"])
         .env("HOME", temp.path())
+        .env("XDG_RUNTIME_DIR", temp.path().join("runtime"))
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
         .env("FAKE_CODEX_ARGS", &args)
         .env("FAKE_CODEX_PROMPT", &capture)
@@ -94,6 +95,13 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
     assert_eq!(rows[0].cached_tokens, Some(3));
     assert_eq!(rows[0].output_tokens, Some(4));
     assert_eq!(rows[0].total_tokens, Some(14));
+    assert!(
+        !temp
+            .path()
+            .join("runtime/familiar-ai/control-plane.claim")
+            .exists(),
+        "claim-holding in-process service must release ownership after legacy run"
+    );
 
     let history = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
         .args(["history", "--limit", "1", "--verbose"])

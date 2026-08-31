@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,12 +9,12 @@ use familiar_ai_core::{
     BacklogDiscovery, BacklogManager, BacklogRecoveryAction, BacklogStatusStore,
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
 };
-use familiar_ai_daemon::drive::{drive, DriveSummary, DriveWarrant};
+use familiar_ai_daemon::drive::DriveSummary;
 use familiar_ai_daemon::plan::{
     approve as approve_plan, generate as generate_plan, print_summary, reject as reject_plan,
 };
 use familiar_ai_daemon::run::{
-    build_agent, execute_with_config, resolved_agent_entries, resolved_remediation_entry, AgentSet,
+    build_agent, resolved_agent_entries, resolved_remediation_entry, AgentSet,
 };
 use familiar_ai_storage::{
     Database, ExecutionHistoryRepository, SqliteBacklogRepository, SqliteBootstrapRepository,
@@ -30,6 +29,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Submit and observe daemon-owned detached executions.
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
+    },
     /// Configure native compression or report a measured paired experiment.
     Compress {
         #[command(subcommand)]
@@ -161,6 +165,53 @@ enum Command {
     Stewardship {
         #[command(subcommand)]
         command: StewardshipCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ControlCommand {
+    Register {
+        project_id: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+        #[arg(long)]
+        ceiling: Option<usize>,
+    },
+    Submit {
+        project_id: String,
+        #[arg(long)]
+        idempotency_key: String,
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        #[arg(long, conflicts_with = "attached")]
+        foreground_only: bool,
+        #[arg(long, conflicts_with = "foreground_only")]
+        attached: bool,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+    Attach {
+        project_id: String,
+        execution_id: String,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+    },
+    Show {
+        project_id: String,
+        execution_id: String,
+    },
+    ProjectState {
+        project_id: String,
+        #[arg(value_parser=["active","paused","archived"])]
+        state: String,
+    },
+    Cancel {
+        project_id: String,
+        execution_id: String,
     },
 }
 
@@ -533,6 +584,10 @@ enum BootstrapCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Control { command } => match control_command(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Compress { command } => {
             let result = match command {
                 CompressCommand::OutputEnable {
@@ -762,6 +817,121 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
     execute(action)
 }
 
+fn control_command(command: ControlCommand) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async move {
+        use familiar_ai_daemon::local_transport::{ClientHello,ControlRequest,ControlResponse,LocalClient,MutationOwner,resolve_mutation_owner};
+        use familiar_ai_core::control_plane::{Authority,CapabilityScope,ClientClass,ExecutionMode,SchedulingPolicy,Submission,CONTROL_PROTOCOL_VERSION};
+        let paths=AppPaths::resolve().map_err(|e|e.to_string())?;
+        let persistent_installation=paths.data_dir.join("installation-id");
+        if persistent_installation.exists(){std::fs::copy(&persistent_installation,paths.runtime_dir.join("installation-id")).map_err(|e|e.to_string())?;}
+        let persistent_generation=paths.data_dir.join("control-plane.generation");
+        if persistent_generation.exists(){std::fs::copy(&persistent_generation,paths.runtime_dir.join("control-plane.generation")).map_err(|e|e.to_string())?;}
+        let base_config=Config::load(Some(&paths.config_dir.join("config.toml"))).map_err(|e|e.to_string())?;
+        let credential=std::fs::read_to_string(paths.runtime_dir.join("operator.credential")).ok().map(|v|v.trim().to_owned());
+        let resolved=resolve_mutation_owner(&paths.runtime_dir,credential.clone(),std::time::Duration::from_millis(base_config.daemon.health_timeout_ms)).await.map_err(|e|e.to_string())?;
+        let mut local_owner=None;let mut local_host=None;
+        let mut client=match resolved {
+            MutationOwner::Remote(client)=>client,
+            MutationOwner::InProcess(lock)=>{
+                if !persistent_installation.exists(){std::fs::write(&persistent_installation,format!("{}\n",lock.claim().installation_id)).map_err(|e|e.to_string())?;}
+                std::fs::write(&persistent_generation,format!("{}\n",lock.claim().generation)).map_err(|e|e.to_string())?;
+                if matches!(&command,ControlCommand::Submit{foreground_only:false,..}) {return Err("detached submission requires the resident daemon; start `familiar-ai-daemon` and retry".into());}
+                let config=base_config.clone();let db=std::sync::Arc::new(std::sync::Mutex::new(Database::open(&config.database.resolve_path(&paths.data_dir)).map_err(|e|e.to_string())?));db.lock().unwrap().run_migrations().map_err(|e|e.to_string())?;
+                let service=familiar_ai_daemon::control_plane::ControlPlaneService::new(db,SchedulingPolicy{global_ceiling:config.daemon.global_concurrency_ceiling,default_project_ceiling:config.daemon.default_project_concurrency_ceiling},lock.claim().generation);let internal=CapabilityScope{client_class:ClientClass::Internal,project_id:None,execution_id:None,attempt:None,worker_id:None,authorities:vec![Authority::Control]};let grant=service.mint_session(&internal,CapabilityScope{client_class:ClientClass::Operator,project_id:None,execution_id:None,attempt:None,worker_id:None,authorities:vec![Authority::Control,Authority::Observe]},300).map_err(|e|e.to_string())?;
+                let socket=std::path::PathBuf::from(&lock.claim().socket_path);let host=familiar_ai_daemon::local_transport::LocalHost::bind(&socket,lock.claim().owner_nonce.clone(),service).await.map_err(|e|e.to_string())?;let connected=LocalClient::connect(&socket,ClientHello{protocol_version:CONTROL_PROTOCOL_VERSION,request_id:format!("cli-fallback-{}",std::process::id()),session_reference:Some(grant.credential),owner_nonce:Some(lock.claim().owner_nonce.clone())}).await.map_err(|e|e.to_string())?;local_host=Some(host);local_owner=Some(lock);connected
+            }
+        };
+        match command {
+            ControlCommand::Register{project_id,root,priority,ceiling}=>{
+                let root=root.canonicalize().map_err(|e|format!("cannot resolve project root: {e}"))?;
+                expect_ok(client.call(ControlRequest::RegisterProject{project_id,root:root.to_string_lossy().into_owned(),priority,ceiling}).await.map_err(|e|e.to_string())?)?;
+            }
+            ControlCommand::Submit{project_id,idempotency_key,priority,timeout_ms,foreground_only,attached,command}=>{
+                let execution_id=format!("exec-{}-{}",chrono::Utc::now().timestamp_micros(),std::process::id());
+                let command_json=serde_json::to_string(&serde_json::json!({"argv":command,"timeout_ms":timeout_ms})).map_err(|e|e.to_string())?;
+                let mode=if foreground_only{ExecutionMode::ForegroundOnly}else if attached{ExecutionMode::Attached}else{ExecutionMode::Detached};
+                match client.call(ControlRequest::Submit{submission:Submission{execution_id,project_id:project_id.clone(),idempotency_key,mode,priority,command_json}}).await.map_err(|e|e.to_string())? {
+                    ControlResponse::Submission(ack)=>{
+                        println!("execution_id={} duplicate={} cursor={}",ack.execution_id,ack.duplicate,ack.event_cursor);
+                        if attached {
+                            attach_control(&mut client, &project_id, &ack.execution_id, 0).await?;
+                        }
+                    }, other=>expect_ok(other)?,
+                }
+            }
+            ControlCommand::Attach{project_id,execution_id,after}=>attach_control(&mut client,&project_id,&execution_id,after).await?,
+            ControlCommand::Show{project_id,execution_id}=>match client.call(ControlRequest::Execution{execution_id,project_id}).await.map_err(|e|e.to_string())? {ControlResponse::Execution(row)=>println!("{}",serde_json::to_string(&row).map_err(|e|e.to_string())?),other=>expect_ok(other)?},
+            ControlCommand::ProjectState{project_id,state}=>expect_ok(client.call(ControlRequest::SetProjectState{project_id,state}).await.map_err(|e|e.to_string())?)?,
+            ControlCommand::Cancel{project_id,execution_id}=>expect_ok(client.call(ControlRequest::Cancel{project_id,execution_id}).await.map_err(|e|e.to_string())?)?,
+        }
+        drop(local_host);drop(local_owner);
+        Ok(())
+    })
+}
+
+async fn attach_control(
+    client: &mut familiar_ai_daemon::local_transport::LocalClient,
+    project_id: &str,
+    execution_id: &str,
+    mut after: i64,
+) -> Result<(), String> {
+    use familiar_ai_core::control_plane::ExecutionState;
+    use familiar_ai_daemon::local_transport::{ControlRequest, ControlResponse};
+    loop {
+        match client
+            .call(ControlRequest::Observe {
+                execution_id: execution_id.to_owned(),
+                project_id: project_id.to_owned(),
+                after,
+                limit: 1000,
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            ControlResponse::Events(events) => {
+                for event in events {
+                    after = event.cursor;
+                    println!("{} {} {}", event.cursor, event.kind, event.payload_json);
+                }
+            }
+            other => expect_ok(other)?,
+        }
+        match client
+            .call(ControlRequest::Execution {
+                execution_id: execution_id.to_owned(),
+                project_id: project_id.to_owned(),
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            ControlResponse::Execution(Some(row))
+                if !matches!(
+                    row.state,
+                    ExecutionState::Queued | ExecutionState::Running | ExecutionState::Paused
+                ) =>
+            {
+                break
+            }
+            ControlResponse::Execution(None) => return Err("execution not found".into()),
+            ControlResponse::Error(error) => return Err(error),
+            _ => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
+}
+
+fn expect_ok(response: familiar_ai_daemon::local_transport::ControlResponse) -> Result<(), String> {
+    match response {
+        familiar_ai_daemon::local_transport::ControlResponse::Error(e) => Err(e),
+        _ => Ok(()),
+    }
+}
+
 fn billing_command(command: BillingCommand) -> Result<(), String> {
     use chrono::{Datelike, NaiveDate, Utc};
     use familiar_ai_core::config::EndpointProviderKind;
@@ -923,200 +1093,17 @@ fn onboard(command: OnboardCommand) -> Result<(), String> {
 }
 
 fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
-    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let current = std::env::current_dir().map_err(|e| e.to_string())?;
-    let config = effective_repository_config(&paths, &current)?;
-    let repository = FilesystemBacklogDiscovery
-        .resolve(&current)
-        .map_err(|e| e.to_string())?;
-    let db_path = config.database.resolve_path(&paths.data_dir);
-    let _ownership = if dry_run {
-        None
-    } else {
-        Some(
-            familiar_ai_daemon::worker_lock::WorkerLock::acquire_repository(
-                &paths.runtime_dir,
-                &repository.key,
-            )
-            .map_err(|e| format!("cannot acquire mutating orchestrator ownership: {e}"))?,
-        )
-    };
-    let db = Database::open(&db_path).map_err(|e| e.to_string())?;
-    if !dry_run {
-        db.run_migrations().map_err(|e| e.to_string())?;
+    let lines = familiar_ai_daemon::resume::execute_configured(
+        prd,
+        dry_run,
+        |error, worktree, config, paths, agents| {
+            handle_attached_review(Err(error), worktree, config, paths, agents)
+        },
+    )?;
+    for line in lines {
+        println!("{line}");
     }
-    let repository_config = config
-        .repository(&repository.worktree)
-        .map_err(|e| e.to_string())?;
-    let discovered = FilesystemBacklogDiscovery
-        .discover_with_layout(&repository, &repository_config.layout())
-        .map_err(|e| e.to_string())?;
-    validate_graph(&discovered).map_err(|e| e.to_string())?;
-    let dependencies = discovered
-        .iter()
-        .map(|entry| {
-            (
-                entry.id.to_string(),
-                entry.dependencies.iter().map(ToString::to_string).collect(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    // FAM-BUG-016: completion authority is the durable backlog status, not
-    // file location — a completed PRD whose document still sits in the active
-    // directory (the wave-2 shape) must satisfy dependencies here.
-    let mut completed = discovered
-        .iter()
-        .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Archived)
-        .map(|entry| entry.id.to_string())
-        .collect::<BTreeSet<_>>();
-    completed.extend(
-        familiar_ai_storage::OrchestrationRepository::new(db.conn())
-            .terminal_prds(&repository.key)
-            .map_err(|e| e.to_string())?,
-    );
-    let active_prds = discovered
-        .iter()
-        .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Active)
-        .map(|entry| (entry.id.to_string(), entry.path.to_string()))
-        .collect::<BTreeMap<_, _>>();
-    let candidates = if prd == "all" {
-        familiar_ai_daemon::resume::discover_with_legacy(
-            &db,
-            &repository.key,
-            &paths.state_dir,
-            &active_prds,
-            !dry_run,
-        )?
-    } else {
-        vec![familiar_ai_daemon::resume::one(&db, &repository.key, prd)?]
-    };
-    print!("{}", familiar_ai_daemon::resume::render(&candidates));
-    let (waves, blocked) = if prd == "all" {
-        familiar_ai_daemon::resume::plan_waves(
-            &candidates,
-            &dependencies,
-            &completed,
-            config.driver.max_concurrency,
-        )
-    } else if candidates[0].valid {
-        (vec![vec![0]], Vec::new())
-    } else {
-        (
-            Vec::new(),
-            vec![(0, candidates[0].reason.clone().unwrap_or_default())],
-        )
-    };
-    for (wave, indexes) in waves.iter().enumerate() {
-        println!(
-            "wave={}\t{}",
-            wave + 1,
-            indexes
-                .iter()
-                .map(|index| candidates[*index].prd_id.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
-    }
-    for (index, reason) in &blocked {
-        println!("blocked\t{}\treason={reason}", candidates[*index].prd_id);
-    }
-    if dry_run {
-        return Ok(());
-    }
-    if let Some(invalid) = candidates.iter().find(|c| !c.valid) {
-        if prd != "all" {
-            return Err(format!(
-                "{}: {}",
-                invalid.prd_id,
-                invalid.reason.as_deref().unwrap_or("invalid_checkpoint")
-            ));
-        }
-    }
-    let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
-    let implementation = build_agent(&implementation_entry);
-    let reviewer = build_agent(&reviewer_entry);
-    let remediation = build_agent(&resolved_remediation_entry(&config)?);
-    let agents = AgentSet {
-        implementation: implementation.as_ref(),
-        reviewer: reviewer.as_ref(),
-        remediation: remediation.as_ref(),
-    };
-    let mut failures = blocked
-        .into_iter()
-        .map(|(index, reason)| format!("{}: {reason}", candidates[index].prd_id))
-        .collect::<Vec<_>>();
-    let mut failed_prds = BTreeSet::new();
-    for wave in waves {
-        let runnable = wave
-            .into_iter()
-            .filter(|index| {
-                let failed_dependencies = dependencies
-                    .get(&candidates[*index].prd_id)
-                    .into_iter()
-                    .flatten()
-                    .filter(|dependency| failed_prds.contains(*dependency))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if failed_dependencies.is_empty() {
-                    true
-                } else {
-                    failures.push(format!(
-                        "{}: dependency_failed: {}",
-                        candidates[*index].prd_id,
-                        failed_dependencies.join(",")
-                    ));
-                    failed_prds.insert(candidates[*index].prd_id.clone());
-                    false
-                }
-            })
-            .collect::<Vec<_>>();
-        let results = std::thread::scope(|scope| {
-            let handles = runnable
-                .iter()
-                .map(|index| {
-                    let candidate = &candidates[*index];
-                    scope.spawn(|| {
-                        let resumed = familiar_ai_daemon::run::resume_implemented_checkpoint(
-                            &candidate.worktree,
-                            &candidate.prd_id,
-                            &agents,
-                            &config,
-                            &paths,
-                        );
-                        (
-                            candidate.prd_id.clone(),
-                            candidate.worktree.clone(),
-                            resumed,
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join())
-                .collect::<Vec<_>>()
-        });
-        for result in results {
-            match result {
-                Ok((_, _, Ok(_))) => {}
-                Ok((id, worktree, Err(error))) => {
-                    match handle_attached_review(Err(error), &worktree, &config, &paths, &agents) {
-                        Ok(()) => {}
-                        Err(error) => {
-                            failed_prds.insert(id.clone());
-                            failures.push(format!("{id}: {error}"));
-                        }
-                    }
-                }
-                Err(_) => failures.push("resume_worker_panicked".into()),
-            }
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; "))
-    }
+    Ok(())
 }
 
 fn scope_decisions(
@@ -1375,87 +1362,27 @@ fn worker_spec(
 }
 
 fn deliver_command(ownership_record: &std::path::Path, to: Option<&str>) -> Result<(), String> {
-    let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
-    let current = std::env::current_dir().map_err(|e| e.to_string())?;
-    let repository = FilesystemBacklogDiscovery
-        .resolve(&current)
-        .map_err(|e| e.to_string())?;
-    let _ownership = familiar_ai_daemon::worker_lock::WorkerLock::acquire_repository(
-        &paths.runtime_dir,
-        &repository.key,
-    )
-    .map_err(|e| format!("cannot acquire mutating orchestrator ownership: {e}"))?;
-    let config = effective_repository_config(&paths, &repository.worktree)?;
-    let repository_config = config
-        .repository(&repository.worktree)
-        .map_err(|e| e.to_string())?;
-    let policy = repository_config.delivery_policy()?;
-    if let Some(role) = to {
-        let ownership: familiar_ai_daemon::worktree::WorktreeOwnership = serde_json::from_slice(
-            &std::fs::read(ownership_record)
-                .map_err(|e| format!("cannot read ownership record: {e}"))?,
-        )
-        .map_err(|e| format!("invalid ownership record: {e}"))?;
-        if ownership.state != "ready_for_delivery" {
-            return Err(format!(
-                "worktree is not reviewed and ready for delivery (state={})",
-                ownership.state
-            ));
-        }
-        let discovered = FilesystemBacklogDiscovery
-            .discover_with_layout(&repository, &repository_config.layout())
-            .map_err(|e| e.to_string())?;
-        let prd = discovered
-            .iter()
-            .find(|p| p.id.to_string() == ownership.prd_id)
-            .ok_or_else(|| {
-                format!(
-                    "{} is not present in the repository backlog",
-                    ownership.prd_id
-                )
-            })?;
-        let revision = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&ownership.worktree)
-            .output()
-            .map_err(|e| format!("cannot identify delivery revision: {e}"))?;
-        if !revision.status.success() {
-            return Err("cannot identify delivery revision".into());
-        }
-        let revision = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
-        let db_path = config.database.resolve_path(&paths.data_dir);
-        let db = Database::open(&db_path).map_err(|e| e.to_string())?;
-        db.run_migrations().map_err(|e| e.to_string())?;
-        let result = familiar_ai_daemon::delivery::deliver_to_with(
-            &config,
-            policy,
+    match familiar_ai_daemon::delivery::execute_configured(ownership_record, to)? {
+        familiar_ai_daemon::delivery::ConfiguredDeliveryOutcome::Environment {
+            session_id,
+            prd_id,
             role,
-            &repository.key,
-            &ownership.session_id,
-            &ownership.prd_id,
-            &revision,
-            &prd.metadata.external_gates,
-            db.conn(),
-            &ownership.worktree,
-            &familiar_ai_daemon::delivery::ProcessRunner::new(policy.command_timeout_ms),
-        )?;
-        println!(
-            "delivery_session={} prd={} role={} target={} revision={} smoke=passed",
-            ownership.session_id, ownership.prd_id, result.role, result.target, result.revision
-        );
-        return Ok(());
+            target,
+            revision,
+        } => println!(
+            "delivery_session={session_id} prd={prd_id} role={role} target={target} revision={revision} smoke=passed"
+        ),
+        familiar_ai_daemon::delivery::ConfiguredDeliveryOutcome::Standard(result) => println!(
+            "delivery_session={} prd={} phase={} pr={}",
+            result.session_id,
+            result.prd_id,
+            result.phase,
+            result
+                .pr_number
+                .map(|number| number.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        ),
     }
-    let result = familiar_ai_daemon::delivery::deliver(ownership_record, policy)?;
-    println!(
-        "delivery_session={} prd={} phase={} pr={}",
-        result.session_id,
-        result.prd_id,
-        result.phase,
-        result
-            .pr_number
-            .map(|number| number.to_string())
-            .unwrap_or_else(|| "unknown".into())
-    );
     Ok(())
 }
 
@@ -1499,48 +1426,14 @@ fn preflight_command() -> Result<(), String> {
 /// The CLI composition root: read validated configuration and construct the
 /// implementation and reviewer agents deterministically.
 fn run(prd_path: &std::path::Path) -> Result<(), familiar_ai_daemon::run::RunError> {
-    use familiar_ai_daemon::run::RunError;
-    let paths = AppPaths::resolve().map_err(|e| RunError::Config(e.to_string()))?;
-    let current = std::env::current_dir().map_err(RunError::CurrentDirectory)?;
-    let repository = FilesystemBacklogDiscovery
-        .resolve(&current)
-        .map_err(|e| RunError::Config(e.to_string()))?;
-    let _ownership = familiar_ai_daemon::worker_lock::WorkerLock::acquire_repository(
-        &paths.runtime_dir,
-        &repository.key,
-    )
-    .map_err(|e| {
-        RunError::Config(format!(
-            "cannot acquire mutating orchestrator ownership: {e}"
-        ))
-    })?;
-    let config =
-        effective_repository_config(&paths, &repository.worktree).map_err(RunError::Config)?;
-    let (implementation_entry, reviewer_entry) =
-        resolved_agent_entries(&config).map_err(RunError::Config)?;
-    let implementation = build_agent(&implementation_entry);
-    let reviewer = build_agent(&reviewer_entry);
-    let remediation = build_agent(&resolved_remediation_entry(&config).map_err(RunError::Config)?);
-    let result = execute_with_config(
-        prd_path,
-        &AgentSet {
-            implementation: implementation.as_ref(),
-            reviewer: reviewer.as_ref(),
-            remediation: remediation.as_ref(),
-        },
-        &config,
-        &paths,
-    );
+    let prepared = familiar_ai_daemon::run::PreparedRun::acquire()?;
+    let result = prepared.execute(prd_path);
     handle_attached_review(
         result,
-        &repository.worktree,
-        &config,
-        &paths,
-        &AgentSet {
-            implementation: implementation.as_ref(),
-            reviewer: reviewer.as_ref(),
-            remediation: remediation.as_ref(),
-        },
+        &prepared.repository,
+        &prepared.config,
+        &prepared.paths,
+        &prepared.agents(),
     )
 }
 
@@ -1660,31 +1553,6 @@ fn handle_attached_review(
     }
 }
 
-/// Composition root for the unattended driver: same agent construction as
-/// `run`, plus a warrant that flags may only tighten.
-/// Parse an approved-PRD flag value: `PRD-65`, `prd-065`, `65`, or any of
-/// those with a single trailing lowercase suffix letter.
-fn parse_prd_flag(value: &str) -> Result<familiar_ai_core::PrdId, String> {
-    let trimmed = value.trim();
-    let body = trimmed
-        .strip_prefix("PRD-")
-        .or_else(|| trimmed.strip_prefix("prd-"))
-        .unwrap_or(trimmed);
-    let (digits, suffix) = match body.strip_suffix(|c: char| c.is_ascii_lowercase()) {
-        Some(prefix) => (prefix, body.chars().last()),
-        None => (body, None),
-    };
-    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return Err(format!(
-            "invalid --prd value '{value}': expected PRD-<number> with an optional lowercase suffix"
-        ));
-    }
-    let number: u64 = digits
-        .parse()
-        .map_err(|_| format!("invalid --prd value '{value}': number out of range"))?;
-    Ok(familiar_ai_core::PrdId::with_suffix(number, suffix))
-}
-
 fn drive_command(
     max_prds: Option<u64>,
     max_cost_microusd: Option<u64>,
@@ -1695,43 +1563,16 @@ fn drive_command(
 ) -> Result<DriveSummary, String> {
     let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
     let current = std::env::current_dir().map_err(|e| e.to_string())?;
-    let mut config = effective_repository_config(&paths, &current)?;
-    if let Some(value) = max_parallel_components {
-        if value == 0 {
-            return Err("--max-parallel-components must be positive".into());
-        }
-        config.driver.max_parallel_components = value;
-    }
-    if let Some(value) = worktree_root {
-        config.driver.worktree_root = value.to_string_lossy().into_owned();
-    }
-    let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
-    let implementation = build_agent(&implementation_entry);
-    let reviewer = build_agent(&reviewer_entry);
-    let remediation = build_agent(&resolved_remediation_entry(&config)?);
-    let mut warrant = DriveWarrant::from_config(&config).tightened_by(
+    let summary = familiar_ai_daemon::drive::execute_configured(
+        &paths,
+        &current,
         max_prds,
         max_cost_microusd,
         max_duration_ms,
-    );
-    if !prd_flags.is_empty() {
-        let allowlist = prd_flags
-            .iter()
-            .map(|value| parse_prd_flag(value))
-            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-        warrant = warrant.with_prd_allowlist(allowlist)?;
-    }
-    let summary = drive(
-        &AgentSet {
-            implementation: implementation.as_ref(),
-            reviewer: reviewer.as_ref(),
-            remediation: remediation.as_ref(),
-        },
-        &config,
-        &paths,
-        warrant,
-    )
-    .map_err(|e| e.to_string())?;
+        max_parallel_components,
+        worktree_root.as_deref(),
+        &prd_flags,
+    )?;
     println!(
         "session={} termination={} attempted={} completed={} known_cost_microusd={}",
         summary.session_id,
@@ -2492,14 +2333,21 @@ mod tests {
     fn prd_flags_parse_canonically_and_reject_garbage() {
         use familiar_ai_core::PrdId;
         for value in ["PRD-65", "prd-65", "65", "PRD-065"] {
-            assert_eq!(parse_prd_flag(value).unwrap(), PrdId::new(65), "{value}");
+            assert_eq!(
+                familiar_ai_daemon::drive::parse_prd_flag(value).unwrap(),
+                PrdId::new(65),
+                "{value}"
+            );
         }
         assert_eq!(
-            parse_prd_flag("PRD-65a").unwrap(),
+            familiar_ai_daemon::drive::parse_prd_flag("PRD-65a").unwrap(),
             PrdId::with_suffix(65, Some('a'))
         );
         for value in ["", "PRD-", "sixty-five", "PRD-65A", "65.1", "PRD-65 66"] {
-            assert!(parse_prd_flag(value).is_err(), "{value}");
+            assert!(
+                familiar_ai_daemon::drive::parse_prd_flag(value).is_err(),
+                "{value}"
+            );
         }
     }
 

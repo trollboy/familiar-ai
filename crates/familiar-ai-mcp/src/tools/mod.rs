@@ -1,3 +1,4 @@
+pub mod control_plane;
 pub mod create_decision;
 pub mod get_file_summary;
 pub mod get_module_summary;

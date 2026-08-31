@@ -250,6 +250,109 @@ pub trait Storage: Send + Sync {
     }
 }
 
+/// MCP capability mode has no direct persistence handle. Any accidental use
+/// of a legacy database-backed tool fails closed instead of opening SQLite.
+pub struct UnavailableStorage;
+
+#[async_trait]
+impl Storage for UnavailableStorage {
+    async fn list_decisions_by_project(
+        &self,
+        _: i64,
+        _: usize,
+    ) -> Result<Vec<Decision>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled; use a capability-scoped control-plane tool"
+                .into(),
+        ))
+    }
+    async fn get_project_by_id(&self, _: i64) -> Result<Option<Project>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn get_project_by_repo_root(&self, _: &str) -> Result<Option<Project>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn list_active_projects(&self) -> Result<Vec<Project>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn create_session_rollup(
+        &self,
+        _: &NewSessionRollup,
+    ) -> Result<SessionRollup, StorageError> {
+        Err(StorageError::Other(
+            "authority denied: MCP cannot write control-plane storage directly".into(),
+        ))
+    }
+    async fn list_session_rollups_by_project(
+        &self,
+        _: i64,
+        _: usize,
+    ) -> Result<Vec<SessionRollup>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn create_decision(&self, _: &NewDecision) -> Result<Decision, StorageError> {
+        Err(StorageError::Other(
+            "authority denied: MCP cannot write control-plane storage directly".into(),
+        ))
+    }
+    async fn get_file_summary(&self, _: i64, _: &str) -> Result<Option<FileSummary>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn list_file_summaries_under(
+        &self,
+        _: i64,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<FileSummary>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn count_file_summaries_under(&self, _: i64, _: &str) -> Result<usize, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn search_file_summaries(
+        &self,
+        _: i64,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<FileSummary>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn search_decisions(
+        &self,
+        _: i64,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<Decision>, StorageError> {
+        Err(StorageError::Other(
+            "direct MCP storage access is disabled".into(),
+        ))
+    }
+    async fn create_or_update_file_summary(
+        &self,
+        _: &NewFileSummary,
+    ) -> Result<FileSummary, StorageError> {
+        Err(StorageError::Other(
+            "authority denied: MCP cannot write control-plane storage directly".into(),
+        ))
+    }
+}
+
 /// SQLite-backed Storage implementation.
 pub struct SqliteStorage {
     db: Arc<Mutex<Database>>,

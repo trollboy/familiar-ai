@@ -5,6 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use familiar_ai_core::{
+    validate_graph, AppPaths, BacklogDiscovery, Config, FilesystemBacklogDiscovery,
+};
 use familiar_ai_storage::{
     CheckpointRepository, Database, DriverRepository, ExecutionCheckpoint,
     ExecutionHistoryRepository,
@@ -12,6 +15,217 @@ use familiar_ai_storage::{
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::worktree::WorktreeOwnership;
+
+/// Shared resume orchestration. The adapter receives renderable lines and a
+/// callback only for the explicitly interactive human-review surface.
+pub fn execute_configured<F>(prd: &str, dry_run: bool, mut review: F) -> Result<Vec<String>, String>
+where
+    F: FnMut(
+        crate::run::RunError,
+        &Path,
+        &Config,
+        &AppPaths,
+        &crate::run::AgentSet<'_>,
+    ) -> Result<(), crate::run::RunError>,
+{
+    let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
+    let current = std::env::current_dir().map_err(|error| error.to_string())?;
+    let config = crate::config_cli::effective_config_for_repository(
+        &crate::config_cli::ConfigContext {
+            config_path: paths.config_dir.join("config.toml"),
+            data_dir: paths.data_dir.clone(),
+        },
+        &current,
+    )?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&current)
+        .map_err(|error| error.to_string())?;
+    let _ownership = if dry_run {
+        None
+    } else {
+        Some(
+            crate::worker_lock::WorkerLock::acquire_repository(&paths.runtime_dir, &repository.key)
+                .map_err(|error| {
+                    format!("cannot acquire mutating orchestrator ownership: {error}")
+                })?,
+        )
+    };
+    let db = Database::open(&config.database.resolve_path(&paths.data_dir))
+        .map_err(|error| error.to_string())?;
+    if !dry_run {
+        db.run_migrations().map_err(|error| error.to_string())?;
+    }
+    let repository_config = config
+        .repository(&repository.worktree)
+        .map_err(|error| error.to_string())?;
+    let discovered = FilesystemBacklogDiscovery
+        .discover_with_layout(&repository, &repository_config.layout())
+        .map_err(|error| error.to_string())?;
+    validate_graph(&discovered).map_err(|error| error.to_string())?;
+    let dependencies = discovered
+        .iter()
+        .map(|entry| {
+            (
+                entry.id.to_string(),
+                entry.dependencies.iter().map(ToString::to_string).collect(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut completed = discovered
+        .iter()
+        .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Archived)
+        .map(|entry| entry.id.to_string())
+        .collect::<BTreeSet<_>>();
+    completed.extend(
+        familiar_ai_storage::OrchestrationRepository::new(db.conn())
+            .terminal_prds(&repository.key)
+            .map_err(|error| error.to_string())?,
+    );
+    let active_prds = discovered
+        .iter()
+        .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Active)
+        .map(|entry| (entry.id.to_string(), entry.path.to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let candidates = if prd == "all" {
+        discover_with_legacy(
+            &db,
+            &repository.key,
+            &paths.state_dir,
+            &active_prds,
+            !dry_run,
+        )?
+    } else {
+        vec![one(&db, &repository.key, prd)?]
+    };
+    let mut output = render(&candidates)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let (waves, blocked) = if prd == "all" {
+        plan_waves(
+            &candidates,
+            &dependencies,
+            &completed,
+            config.driver.max_concurrency,
+        )
+    } else if candidates[0].valid {
+        (vec![vec![0]], Vec::new())
+    } else {
+        (
+            Vec::new(),
+            vec![(0, candidates[0].reason.clone().unwrap_or_default())],
+        )
+    };
+    for (wave, indexes) in waves.iter().enumerate() {
+        output.push(format!(
+            "wave={}\t{}",
+            wave + 1,
+            indexes
+                .iter()
+                .map(|index| candidates[*index].prd_id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    for (index, reason) in &blocked {
+        output.push(format!(
+            "blocked\t{}\treason={reason}",
+            candidates[*index].prd_id
+        ));
+    }
+    if dry_run {
+        return Ok(output);
+    }
+    if let Some(invalid) = candidates.iter().find(|candidate| !candidate.valid) {
+        if prd != "all" {
+            return Err(format!(
+                "{}: {}",
+                invalid.prd_id,
+                invalid.reason.as_deref().unwrap_or("invalid_checkpoint")
+            ));
+        }
+    }
+    let (implementation_entry, reviewer_entry) = crate::run::resolved_agent_entries(&config)?;
+    let implementation = crate::run::build_agent(&implementation_entry);
+    let reviewer = crate::run::build_agent(&reviewer_entry);
+    let remediation = crate::run::build_agent(&crate::run::resolved_remediation_entry(&config)?);
+    let agents = crate::run::AgentSet {
+        implementation: implementation.as_ref(),
+        reviewer: reviewer.as_ref(),
+        remediation: remediation.as_ref(),
+    };
+    let mut failures = blocked
+        .into_iter()
+        .map(|(index, reason)| format!("{}: {reason}", candidates[index].prd_id))
+        .collect::<Vec<_>>();
+    let mut failed_prds = BTreeSet::new();
+    for wave in waves {
+        let runnable = wave
+            .into_iter()
+            .filter(|index| {
+                let failed_dependencies = dependencies
+                    .get(&candidates[*index].prd_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|dependency| failed_prds.contains(*dependency))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if failed_dependencies.is_empty() {
+                    true
+                } else {
+                    failures.push(format!(
+                        "{}: dependency_failed: {}",
+                        candidates[*index].prd_id,
+                        failed_dependencies.join(",")
+                    ));
+                    failed_prds.insert(candidates[*index].prd_id.clone());
+                    false
+                }
+            })
+            .collect::<Vec<_>>();
+        let results = std::thread::scope(|scope| {
+            runnable
+                .iter()
+                .map(|index| {
+                    let candidate = &candidates[*index];
+                    scope.spawn(|| {
+                        (
+                            candidate.prd_id.clone(),
+                            candidate.worktree.clone(),
+                            crate::run::resume_implemented_checkpoint(
+                                &candidate.worktree,
+                                &candidate.prd_id,
+                                &agents,
+                                &config,
+                                &paths,
+                            ),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            match result {
+                Ok((_, _, Ok(_))) => {}
+                Ok((id, worktree, Err(error))) => {
+                    if let Err(error) = review(error, &worktree, &config, &paths, &agents) {
+                        failed_prds.insert(id.clone());
+                        failures.push(format!("{id}: {error}"));
+                    }
+                }
+                Err(_) => failures.push("resume_worker_panicked".into()),
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(output)
+    } else {
+        Err(failures.join("; "))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeCandidate {

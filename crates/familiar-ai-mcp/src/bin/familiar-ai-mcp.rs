@@ -2,12 +2,13 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use familiar_ai_core::config::{Config, LoggingConfig};
+use familiar_ai_core::control_plane::{OwnershipClaim, CONTROL_PROTOCOL_VERSION};
 use familiar_ai_core::{AppPaths, AppStatus};
-use familiar_ai_mcp::storage::SqliteStorage;
+use familiar_ai_daemon::local_transport::{ClientHello, LocalClient};
+use familiar_ai_mcp::storage::UnavailableStorage;
 use familiar_ai_mcp::tool::{ToolContext, ToolRegistry};
-use familiar_ai_mcp::tools::register_default_tools;
+use familiar_ai_mcp::tools::control_plane;
 use familiar_ai_mcp::{McpServer, StdioTransport, Storage};
-use familiar_ai_storage::Database;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -39,14 +40,39 @@ async fn run() -> familiar_ai_core::Result<()> {
 
     tracing::info!("familiar-ai-mcp starting");
 
-    // 4. Open database (read/write — remember_result needs writes)
-    let db_path = config.database.resolve_path(&paths.data_dir);
-    tracing::info!(db_path = %db_path.display(), "opening database");
-    let db = Arc::new(Mutex::new(Database::open(&db_path)?));
+    // 4. Connect with a host-created capability reference. Neither the raw
+    // credential nor the reference is emitted to model-visible output.
+    let reference_path=std::env::var_os("FAMILIAR_AI_MCP_SESSION_FILE").map(std::path::PathBuf::from).ok_or_else(||familiar_ai_core::FamiliarError::Mcp("capability session file is required; launch MCP through the daemon-owned worker adapter".into()))?;
+    #[cfg(unix)]
     {
-        let lock = db.lock().unwrap();
-        lock.run_migrations()?;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = std::fs::metadata(&reference_path)?;
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(familiar_ai_core::FamiliarError::Mcp(
+                "capability session file must be owned by the current user and mode 0600".into(),
+            ));
+        }
     }
+    let credential = std::fs::read_to_string(&reference_path)?;
+    let claim: OwnershipClaim = serde_json::from_str(&std::fs::read_to_string(
+        paths.runtime_dir.join("control-plane.claim"),
+    )?)
+    .map_err(|e| {
+        familiar_ai_core::FamiliarError::Mcp(format!("invalid control-plane claim: {e}"))
+    })?;
+    let client = LocalClient::connect(
+        std::path::Path::new(&claim.socket_path),
+        ClientHello {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+            request_id: format!("mcp-{}", std::process::id()),
+            session_reference: Some(credential.trim().into()),
+            owner_nonce: Some(claim.owner_nonce),
+        },
+    )
+    .await?;
+    let client = Arc::new(tokio::sync::Mutex::new(client));
 
     // 5. Build status snapshot
     let status = Arc::new(Mutex::new(AppStatus::new()));
@@ -55,21 +81,11 @@ async fn run() -> familiar_ai_core::Result<()> {
         s.mcp_enabled = true;
     }
 
-    // 6. Build inference router if configured
-    // NOTE: Each process owns its own InferenceRouter from on-disk config.
-    // See InferenceRouter docs for rationale.
-    let router = {
-        let r = Arc::new(familiar_ai_llm::InferenceRouter::new(&config.inference));
-        if config.inference.text.mode != familiar_ai_core::config::InferenceMode::Disabled {
-            if let Err(e) = r.enable().await {
-                tracing::warn!(error = %e, "MCP: failed to enable inference router");
-            }
-        }
-        Some(r)
-    };
+    // Agent-facing MCP never receives or initializes provider credentials.
+    let router = None;
 
     // 7. Build storage + context + registry
-    let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new(db));
+    let storage: Arc<dyn Storage> = Arc::new(UnavailableStorage);
     let context = Arc::new(ToolContext {
         storage,
         status,
@@ -78,7 +94,7 @@ async fn run() -> familiar_ai_core::Result<()> {
     });
 
     let mut registry = ToolRegistry::new();
-    register_default_tools(&mut registry);
+    control_plane::register(&mut registry, client);
     let registry = Arc::new(registry);
 
     tracing::info!(tool_count = registry.len(), "MCP server ready");

@@ -209,7 +209,9 @@ impl AppPaths {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
 
         let app_support = home.join("Library/Application Support").join(app_identity);
-        let runtime_dir = PathBuf::from(format!("/tmp/{file_identity}-{uid}"));
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+            .map(|directory| PathBuf::from(directory).join(file_identity))
+            .unwrap_or_else(|_| PathBuf::from(format!("/tmp/{file_identity}-{uid}")));
 
         Self {
             config_dir: app_support.clone(),

@@ -1,6 +1,7 @@
 pub mod backlog;
 pub mod bootstrap;
 pub mod config;
+pub mod control_plane;
 pub mod error;
 pub mod models;
 pub mod onboarding;

@@ -17,6 +17,7 @@ familiar-ai-tokens = { path = "../familiar-ai-tokens" }
 familiar-ai-llm = { path = "../familiar-ai-llm" }
 familiar-ai-logging = { path = "../familiar-ai-logging" }
 familiar-ai-repomap = { path = "../familiar-ai-repomap" }
+familiar-ai-daemon = { path = "../familiar-ai-daemon", default-features = false }
 tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "io-std", "io-util", "macros"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -24,6 +25,7 @@ tracing.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

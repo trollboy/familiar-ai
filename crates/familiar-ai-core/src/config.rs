@@ -2634,10 +2634,23 @@ pub struct DaemonConfig {
     pub socket_path: Option<PathBuf>,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_control_plane_ceiling")]
+    pub global_concurrency_ceiling: usize,
+    #[serde(default = "default_control_plane_ceiling")]
+    pub default_project_concurrency_ceiling: usize,
+    #[serde(default = "default_health_timeout_ms")]
+    pub health_timeout_ms: u64,
 }
 
 fn default_heartbeat_interval() -> u64 {
     60
+}
+
+fn default_control_plane_ceiling() -> usize {
+    1
+}
+fn default_health_timeout_ms() -> u64 {
+    5_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3029,6 +3042,9 @@ impl Default for DaemonConfig {
             pid_file: None,
             socket_path: None,
             heartbeat_interval_secs: default_heartbeat_interval(),
+            global_concurrency_ceiling: default_control_plane_ceiling(),
+            default_project_concurrency_ceiling: default_control_plane_ceiling(),
+            health_timeout_ms: default_health_timeout_ms(),
         }
     }
 }
@@ -3081,6 +3097,15 @@ impl Config {
         self.validate_providers()?;
         self.validate_execution()?;
         self.validate_preflight()?;
+        if self.daemon.global_concurrency_ceiling == 0
+            || self.daemon.default_project_concurrency_ceiling == 0
+            || self.daemon.health_timeout_ms == 0
+        {
+            return Err(FamiliarError::Config(
+                "daemon control-plane ceilings and health_timeout_ms must be greater than zero"
+                    .into(),
+            ));
+        }
         self.delivery.validate().map_err(FamiliarError::Config)?;
         self.worker.validate().map_err(FamiliarError::Config)?;
         self.compression

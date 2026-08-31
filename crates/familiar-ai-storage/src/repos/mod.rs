@@ -3,6 +3,7 @@ pub mod billing;
 pub mod bootstrap;
 pub mod checkpoint;
 pub mod config_decision;
+pub mod control_plane;
 pub mod decision;
 pub mod delivery;
 pub mod driver;

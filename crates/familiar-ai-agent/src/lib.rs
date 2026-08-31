@@ -11,6 +11,7 @@ pub use agent::{
 };
 pub use claude_code::{ClaudeCodeAgent, ClaudeCodeSettings, READ_ONLY_RESTRICTIONS};
 pub use codex::CodexAgent;
+pub use isolation::isolated_command;
 pub use registry::{
     builtin_adapter_factories, AdapterFactories, AdapterFactory, CandidateEvaluation,
     RejectionReason, RouteError, RouteRequest, RouteRule, SelectionRecord, WorkerCapability,
