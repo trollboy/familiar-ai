@@ -1498,11 +1498,15 @@ impl RegistryWorkerConfig {
             Some("ollama") => AgentAdapterKind::Ollama,
             _ => AgentAdapterKind::Codex,
         });
-        let model = match adapter {
-            AgentAdapterKind::Ollama if !self.model.starts_with("ollama/") => {
-                Some(format!("ollama/{}", self.model))
+        let model = if self.model == "__familiar_legacy_default__" {
+            None
+        } else {
+            match adapter {
+                AgentAdapterKind::Ollama if !self.model.starts_with("ollama/") => {
+                    Some(format!("ollama/{}", self.model))
+                }
+                _ => Some(self.model.clone()),
             }
-            _ => Some(self.model.clone()),
         };
         AgentEntryConfig {
             adapter,
@@ -1565,6 +1569,65 @@ pub struct WorkerRegistryConfig {
 }
 
 impl WorkerRegistryConfig {
+    /// Losslessly represent the legacy role configuration in the registry.
+    /// Explicit pins preserve legacy selection semantics for all three stages.
+    pub fn from_legacy_agents(agents: &AgentsConfig) -> Self {
+        let worker = |entry: &AgentEntryConfig, role: &str, capabilities| RegistryWorkerConfig {
+            adapter: Some(entry.adapter),
+            // Keep role identities independent even when both legacy entries
+            // use the same adapter and model.
+            provider: format!("legacy-{}-{role}", entry.adapter.as_str()),
+            model: entry
+                .model
+                .clone()
+                .unwrap_or_else(|| "__familiar_legacy_default__".to_owned()),
+            runtime: Some(entry.adapter.as_str().to_owned()),
+            model_artifact: None,
+            auth_profile: None,
+            capability_profile: None,
+            runtime_config: None,
+            executable: entry.executable.clone(),
+            capabilities,
+            fresh_process_isolation: true,
+            context_tokens: 0,
+            estimated_cost_microusd: 0,
+            available: true,
+            effort: entry.effort,
+            permission_mode: entry.permission_mode,
+            extra_args: entry.extra_args.clone(),
+        };
+        Self {
+            workers: BTreeMap::from([
+                (
+                    "legacy-implementation".to_owned(),
+                    worker(
+                        &agents.implementation,
+                        "implementation",
+                        vec![
+                            WorkerCapabilityConfig::Implementation,
+                            WorkerCapabilityConfig::Remediation,
+                        ],
+                    ),
+                ),
+                (
+                    "legacy-reviewer".to_owned(),
+                    worker(
+                        &agents.reviewer,
+                        "reviewer",
+                        vec![WorkerCapabilityConfig::Review],
+                    ),
+                ),
+            ]),
+            capability_profiles: BTreeMap::new(),
+            routing: WorkerRoutingConfig {
+                implementation_pin: Some("legacy-implementation".to_owned()),
+                review_pin: Some("legacy-reviewer".to_owned()),
+                remediation_pin: Some("legacy-implementation".to_owned()),
+                ..WorkerRoutingConfig::default()
+            },
+        }
+    }
+
     pub fn validate(
         &self,
         risk_vocabulary: &std::collections::BTreeSet<&str>,
@@ -2961,6 +3024,21 @@ fn reject_stale_env() -> crate::Result<()> {
 }
 
 impl Config {
+    /// Validate the complete effective configuration. Mutation callers use
+    /// this same boundary as startup before exposing new bytes.
+    pub fn validate(&self) -> crate::Result<()> {
+        self.validate_repositories()?;
+        self.validate_providers()?;
+        self.validate_execution()?;
+        self.validate_preflight()?;
+        self.delivery.validate().map_err(FamiliarError::Config)?;
+        self.worker.validate().map_err(FamiliarError::Config)?;
+        self.compression
+            .validate(&self.providers)
+            .map_err(FamiliarError::Config)?;
+        Ok(())
+    }
+
     fn validate_preflight(&self) -> crate::Result<()> {
         let mut ids = std::collections::BTreeSet::new();
         for check in &self.preflight.commands {
@@ -3311,16 +3389,7 @@ impl Config {
         let config: Self = figment
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
-        config.validate_repositories()?;
-        config.validate_providers()?;
-        config.validate_execution()?;
-        config.validate_preflight()?;
-        config.delivery.validate().map_err(FamiliarError::Config)?;
-        config.worker.validate().map_err(FamiliarError::Config)?;
-        config
-            .compression
-            .validate(&config.providers)
-            .map_err(FamiliarError::Config)?;
+        config.validate()?;
         Ok(config)
     }
 

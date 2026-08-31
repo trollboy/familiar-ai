@@ -202,6 +202,9 @@ pub enum ConfigAction {
         actor: Option<String>,
     },
     ModelList,
+    MigrateAgents {
+        actor: Option<String>,
+    },
     History {
         limit: usize,
     },
@@ -265,6 +268,7 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
             model_disable(context, &model, actor.as_deref())
         }
         ConfigAction::ModelList => model_list(context),
+        ConfigAction::MigrateAgents { actor } => migrate_agents(context, actor.as_deref()),
         ConfigAction::History { limit } => history(context, limit),
     }
 }
@@ -1289,7 +1293,7 @@ fn model_enable(
     let config = load_config(context)?;
     if config.agents.is_some() {
         return Err(
-            "cannot enable a registry model while legacy [agents] is configured; migrate the legacy agents to worker_registry first"
+            "cannot enable a registry model while legacy [agents] is configured; run `familiar-ai config migrate agents --actor ACTOR`, then retry"
                 .into(),
         );
     }
@@ -1454,6 +1458,54 @@ fn history(context: &ConfigContext, limit: usize) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_agents(context: &ConfigContext, supplied_actor: Option<&str>) -> Result<(), String> {
+    let config = load_config(context)?;
+    if config.worker_registry.is_some() && config.agents.is_none() {
+        println!("Legacy [agents] migration: no-op (configuration is already migrated).");
+        return Ok(());
+    }
+    let Some(agents) = config.agents.as_ref() else {
+        println!("Legacy [agents] migration: no-op (no legacy agents section is configured).");
+        return Ok(());
+    };
+    let actor = actor(supplied_actor)?;
+    let registry = familiar_ai_core::config::WorkerRegistryConfig::from_legacy_agents(agents);
+    let before = fs::read_to_string(&context.config_path).map_err(|error| error.to_string())?;
+    let backup = context.config_path.with_extension("toml.bak");
+    let backup_temporary = context.config_path.with_extension("toml.bak.tmp");
+    fs::write(&backup_temporary, before.as_bytes()).map_err(|error| error.to_string())?;
+    fs::rename(&backup_temporary, &backup).map_err(|error| error.to_string())?;
+    mutate(
+        context,
+        "familiar-ai config migrate agents",
+        &actor,
+        |document| {
+            document.remove("agents");
+            #[derive(serde::Serialize)]
+            struct RegistryDocument<'a> {
+                worker_registry: &'a familiar_ai_core::config::WorkerRegistryConfig,
+            }
+            let encoded = toml::to_string(&RegistryDocument {
+                worker_registry: &registry,
+            })
+            .map_err(|error| format!("cannot encode worker registry: {error}"))?
+            .parse::<Document>()
+            .map_err(|error| format!("cannot edit encoded worker registry: {error}"))?;
+            let item = encoded
+                .get("worker_registry")
+                .cloned()
+                .ok_or("encoded worker registry is missing")?;
+            document.insert("worker_registry", item);
+            Ok(())
+        },
+    )?;
+    println!(
+        "Migrated legacy [agents] to [worker_registry]; backup: {}",
+        backup.display()
+    );
+    Ok(())
+}
+
 fn mutate<F>(context: &ConfigContext, command: &str, actor: &str, edit: F) -> Result<(), String>
 where
     F: FnOnce(&mut Document) -> Result<(), String>,
@@ -1467,9 +1519,9 @@ where
     // Fail closed on typed config validation before writing.
     let candidate: Config =
         toml::from_str(&after).map_err(|error| format!("invalid config after edit: {error}"))?;
-    for (name, provider) in &candidate.providers {
-        provider.validate(name)?;
-    }
+    candidate
+        .validate()
+        .map_err(|error| format!("invalid config after edit: {error}"))?;
     // Establish the audit sink before committing the file mutation.
     let db = open_database(context, &candidate)?;
     if let Some(parent) = context.config_path.parent() {

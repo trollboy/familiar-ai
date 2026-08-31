@@ -201,6 +201,11 @@ enum ConfigCommand {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Migrate legacy configuration sections to supported replacements.
+    Migrate {
+        #[command(subcommand)]
+        command: ConfigMigrateCommand,
+    },
     /// Show durable configuration mutation decisions.
     History {
         #[arg(long, default_value_t = 20)]
@@ -217,6 +222,15 @@ enum ConfigCommand {
         effective: bool,
         #[arg(long, default_value = ".")]
         repository: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigMigrateCommand {
+    /// Losslessly migrate [agents] to the worker registry.
+    Agents {
+        #[arg(long)]
+        actor: Option<String>,
     },
 }
 
@@ -695,6 +709,9 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             },
             ModelCommand::Disable { model, actor } => ConfigAction::ModelDisable { model, actor },
             ModelCommand::List => ConfigAction::ModelList,
+        },
+        ConfigCommand::Migrate { command } => match command {
+            ConfigMigrateCommand::Agents { actor } => ConfigAction::MigrateAgents { actor },
         },
         ConfigCommand::History { limit } => ConfigAction::History { limit },
         ConfigCommand::Project { command } => match command {
