@@ -347,7 +347,14 @@ enum OnboardCommand {
 #[derive(Debug, Subcommand)]
 enum BacklogCommand {
     /// Deterministically check structured PRD metadata migration state. Never writes PRDs.
-    MetadataCheck,
+    MetadataCheck {
+        /// Report legacy migration debt and fail only on structured-v1 diagnostics.
+        #[arg(long, conflicts_with = "strict")]
+        advisory: bool,
+        /// Fail on legacy migration debt as well as structured-v1 diagnostics (default).
+        #[arg(long, conflicts_with = "advisory")]
+        strict: bool,
+    },
     Bootstrap {
         #[command(subcommand)]
         command: BootstrapCommand,
@@ -1717,14 +1724,30 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
     let repository_config = config
         .repository(&repository.worktree)
         .map_err(|e| e.to_string())?;
+    let metadata_mode = match &command {
+        BacklogCommand::MetadataCheck { advisory: true, .. } => {
+            Some(familiar_ai_core::MetadataCheckMode::Advisory)
+        }
+        BacklogCommand::MetadataCheck { .. } => Some(familiar_ai_core::MetadataCheckMode::Strict),
+        _ => None,
+    };
+    if let Some(mode) = metadata_mode {
+        println!("metadata-check mode={}", mode.as_str());
+    }
+    let mut layout = repository_config.layout();
+    if metadata_mode.is_some() {
+        // The checker owns strict/advisory exit semantics. Discovery remains
+        // fail-closed for every malformed structured-v1 document in both modes.
+        layout.metadata_policy = familiar_ai_core::PrdMetadataPolicy::Incremental;
+    }
     let discovered = FilesystemBacklogDiscovery
-        .discover_with_layout(&repository, &repository_config.layout())
+        .discover_with_layout(&repository, &layout)
         .map_err(|e| e.to_string())?;
     if discovered.is_empty() {
         return Err("backlog is empty".into());
     }
     validate_graph(&discovered).map_err(|e| e.to_string())?;
-    if matches!(command, BacklogCommand::MetadataCheck) {
+    if let Some(mode) = metadata_mode {
         let mut legacy = Vec::new();
         for prd in &discovered {
             if prd.metadata.contract_version == Some(1) {
@@ -1734,9 +1757,16 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
                 legacy.push(prd.path.to_string());
             }
         }
-        if !legacy.is_empty() {
+        println!(
+            "metadata-check mode={} structured_v1={} legacy={}",
+            mode.as_str(),
+            discovered.len() - legacy.len(),
+            legacy.len()
+        );
+        if !legacy.is_empty() && mode.legacy_is_failure() {
             return Err(format!(
-                "{} legacy PRD(s) require migration under policy={}: {}",
+                "metadata-check mode={}: {} legacy PRD(s) require migration under policy={}: {}",
+                mode.as_str(),
                 legacy.len(),
                 repository_config.prd_metadata_policy,
                 legacy.join(", ")
@@ -1746,7 +1776,9 @@ fn backlog(command: BacklogCommand) -> Result<(), String> {
     }
     let mut db = database()?;
     match command {
-        BacklogCommand::MetadataCheck => unreachable!("handled before storage is opened"),
+        BacklogCommand::MetadataCheck { .. } => {
+            unreachable!("handled before storage is opened")
+        }
         BacklogCommand::Bootstrap {
             command: BootstrapCommand::Status,
         } => {
@@ -2279,7 +2311,15 @@ mod tests {
                 .unwrap()
                 .command,
             Command::Backlog {
-                command: BacklogCommand::MetadataCheck
+                command: BacklogCommand::MetadataCheck { .. }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "backlog", "metadata-check", "--advisory"])
+                .unwrap()
+                .command,
+            Command::Backlog {
+                command: BacklogCommand::MetadataCheck { advisory: true, .. }
             }
         ));
         assert!(matches!(

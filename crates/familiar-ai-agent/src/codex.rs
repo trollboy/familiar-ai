@@ -1,5 +1,9 @@
+use std::collections::BTreeSet;
+use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
@@ -36,6 +40,72 @@ impl CodexAgent {
             Some(line.to_owned())
         }
     }
+
+    #[cfg(not(test))]
+    fn invalidate_incompatible_model_cache(&self) {
+        let Some(path) = codex_home().map(|home| home.join("models_cache.json")) else {
+            return;
+        };
+        let _ = invalidate_incompatible_model_cache(&path, &mut io::stderr().lock());
+    }
+
+    #[cfg(test)]
+    fn invalidate_incompatible_model_cache(&self) {}
+}
+
+#[cfg(not(test))]
+fn codex_home() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+}
+
+fn invalidate_incompatible_model_cache(
+    path: &Path,
+    diagnostic: &mut dyn Write,
+) -> io::Result<bool> {
+    static INVALIDATED: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let incompatible = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("models").and_then(Value::as_array).cloned())
+        .is_some_and(|models| {
+            !models.is_empty()
+                && models
+                    .iter()
+                    .any(|model| model.get("base_instructions").is_none())
+        });
+    let canonical_key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    if !incompatible {
+        if let Some(invalidated) = INVALIDATED.get() {
+            invalidated
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&canonical_key);
+        }
+        return Ok(false);
+    }
+
+    let mut invalidated = INVALIDATED
+        .get_or_init(|| Mutex::new(BTreeSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if invalidated.contains(&canonical_key) {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    invalidated.insert(canonical_key);
+    writeln!(
+        diagnostic,
+        "codex: invalidated incompatible model-cache schema at {} (missing field base_instructions); refreshing",
+        path.display()
+    )?;
+    Ok(true)
 }
 
 impl CodingAgent for CodexAgent {
@@ -63,6 +133,7 @@ impl CodingAgent for CodexAgent {
                 result: Box::default(),
             });
         }
+        self.invalidate_incompatible_model_cache();
         let mut result = ExecutionResult {
             // Probing executes the adapter binary. Never do that outside the
             // isolated filesystem boundary used for review.
@@ -260,6 +331,38 @@ mod tests {
     fn trait_is_object_safe() {
         fn accepts(_: &dyn CodingAgent) {}
         accepts(&CodexAgent::new("codex"));
+    }
+
+    #[test]
+    fn incompatible_model_cache_is_invalidated_and_diagnosed_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("models_cache.json");
+        fs::write(&cache, r#"{"models":[{"slug":"stale"}]}"#).unwrap();
+        let mut diagnostics = Vec::new();
+        assert!(invalidate_incompatible_model_cache(&cache, &mut diagnostics).unwrap());
+        assert!(!cache.exists());
+        fs::write(&cache, r#"{"models":[{"slug":"stale"}]}"#).unwrap();
+        assert!(!invalidate_incompatible_model_cache(&cache, &mut diagnostics).unwrap());
+        assert_eq!(
+            String::from_utf8(diagnostics)
+                .unwrap()
+                .matches("missing field base_instructions")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn compatible_model_cache_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("models_cache.json");
+        fs::write(
+            &cache,
+            r#"{"models":[{"slug":"current","base_instructions":"help"}]}"#,
+        )
+        .unwrap();
+        assert!(!invalidate_incompatible_model_cache(&cache, &mut Vec::new()).unwrap());
+        assert!(cache.exists());
     }
 
     #[test]

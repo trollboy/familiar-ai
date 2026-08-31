@@ -104,10 +104,10 @@ Secondary chains: 032 → 038 (have-at-it acceptance; 041 completed) and
   explicit `resources`, not whole-crate directories.
 - Heavy items that will pace their waves: 038 (multi-repo acceptance),
   058 (raw runtime), 056 (control-plane migration).
-- `familiar-ai backlog metadata-check` exits nonzero on the 41 legacy PRDs
-  under `policy=incremental` (wave-2 defect 18); treat that specific
-  failure as advisory migration debt, and any structured-v1 diagnostic as
-  blocking.
+- Run `familiar-ai backlog metadata-check --advisory` as the unattended
+  pre-wave gate. It reports the 41 legacy PRDs as migration debt without a
+  failing exit; every structured-v1 diagnostic remains blocking. Use
+  `--strict` when legacy migration debt must also fail the check.
 
 ## Human-approval policy for unattended execution
 

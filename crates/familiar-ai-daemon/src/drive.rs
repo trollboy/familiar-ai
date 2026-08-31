@@ -1315,7 +1315,7 @@ pub fn drive(
                         .as_ref()
                         .is_some_and(crate::worktree::WorktreeHeartbeatGuard::failed);
                     drop(worktree_heartbeat);
-                    let (mut result, trace) = match execution {
+                    let (mut result, mut trace) = match execution {
                         Ok(value) => value,
                         Err(_) => {
                             eprintln!("drive: attempt worker panicked for {}", target.id);
@@ -1357,6 +1357,11 @@ pub fn drive(
                             continue;
                         }
                     };
+                    if trace.retained_reason.is_none() {
+                        if let Err(crate::run::RunError::Context(error)) = &result {
+                            trace.retained_reason = Some(error.retention_class());
+                        }
+                    }
                     if let Err(crate::run::RunError::HumanReviewRequired {
                         result: implementation,
                         cycle,
