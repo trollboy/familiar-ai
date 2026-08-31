@@ -144,6 +144,11 @@ instead of deleting the history.
   honestly or discover a valid selectable identity. Worker preflight must test
   the configured model, and a deterministic configuration rejection must stop
   the session before consuming every PRD attempt.
+- **Disposition (2026-08-31):** identity honesty and configured-model preflight
+  transfer to **PRD-057** (this is FAM-FRICTION-002's predicted blast radius,
+  realized). The stop-the-session circuit breaker for identical deterministic
+  terminal failures is driver work with no owner — flagged for the 066
+  remediation batch below.
 
 ### FAM-BUG-010 — Authored Wave 3 achievable width disagrees with scheduler
 
@@ -157,6 +162,11 @@ instead of deleting the history.
 - **Expected fix:** Validate and persist the exact authored wave through the
   production scheduler before approval, list every conflicting pair, and update
   either scopes/wave composition or the claimed width.
+- **Disposition (2026-08-31): addressed.** The plan row was corrected to the
+  measured width 1 (`ea8af19` lineage) before this entry synced, the owner's
+  wave definition (dependency-ready AND scope-disjoint) is now stated in the
+  plan, and owner-approved **PRD-076** (top gate) narrows scopes and
+  regenerates the rows as scheduler-computed true rounds.
 
 ### FAM-BUG-011 — Preflight is silent, duplicated per stage, and looks hung
 
@@ -171,6 +181,9 @@ instead of deleting the history.
 - **Expected fix:** Stream check start/finish/elapsed heartbeats, deduplicate
   identical executable/auth probes, expose the active check in durable session
   status, and retain bounded captured diagnostics on failure.
+- **Disposition (2026-08-31):** no owning PRD — direct code fix, batched into
+  the 066 remediation below (preflight is the last silent phase; 066 shipped
+  heartbeats for execution only).
 
 ### FAM-BUG-012 — Dependent PRD admitted after its dependency retained without integration
 
@@ -188,6 +201,13 @@ instead of deleting the history.
   its required commit is contained in the current integration revision. A
   retained, review-blocked, or verification-failed predecessor blocks or defers
   every dependent with a durable `dependency_not_integrated` decision.
+- **Disposition (2026-08-31): defect against landed PRD-066** (its contract
+  says dependency satisfaction consumes `integrated`; the implementation
+  checks backlog status). One factual correction: PRD-054's authoritative
+  frontmatter declares dependencies 047 and 051 only — both integrated — so
+  its admission was contract-valid; the forked seam came from prose-level
+  coupling to 052/053, which the integration-containment rule would still
+  have surfaced honestly. Fix in the 066 remediation batch.
 
 ### FAM-BUG-013 — Reviewer preflight admitted an incompatible Ollama runtime
 
@@ -203,6 +223,11 @@ instead of deleting the history.
   tuple and minimum version before claims. Deterministic incompatibility must
   stop once with its real typed reason, not be reclassified as malformed model
   output or retried.
+- **Disposition (2026-08-31):** tuple/version preflight probes transfer to
+  **PRD-057** (capability provenance: probed, not assumed). Deterministic
+  failures being reclassified as malformed output and retried is **PRD-067**'s
+  durable-truth family — its environment/typed-reason machinery should absorb
+  runtime-version incompatibility as a typed preflight class.
 
 ### FAM-BUG-014 — Standing batch approval still stops dependency changes as ambiguous scope
 
@@ -218,6 +243,12 @@ instead of deleting the history.
 - **Expected fix:** PRD-declared manifest/lock scope plus standing approval must
   become a durable, hash-bound policy decision before execution, or admission
   must refuse such PRDs before spending implementation tokens.
+- **Disposition (2026-08-31):** the mechanism exists (066's hash-bound scope
+  decisions); the missing rule is that a manifest path declared in the PRD's
+  authoritative `expected_files` (several pending PRDs declare `Cargo.toml`/
+  `Cargo.lock` for exactly this reason) is already owner-authorized by the
+  plan's batch approval and should mint the hash-bound decision at admission.
+  Fix in the 066 remediation batch.
 
 ### FAM-BUG-015 — Required verification cannot bind loopback in the agent sandbox
 
@@ -232,6 +263,11 @@ instead of deleting the history.
   matching its declared network/socket needs, or the fixture must use a
   deterministic transport abstraction that needs no forbidden socket. The
   durable result must distinguish environment denial from product failure.
+- **Disposition (2026-08-31):** environment-needs declaration extends
+  **PRD-067**'s environment-identity contract (it covers writable paths;
+  sockets are the missing class). The fixture itself should also gain a
+  transport seam so the regression needs no real listener — direct test fix,
+  batched below.
 
 ### FAM-BUG-016 — Recovery blocks current work on stale checkpoints for already-integrated PRDs
 
@@ -251,6 +287,11 @@ instead of deleting the history.
   archive checkpoints for PRDs whose integrated commit is contained in the
   current base, and satisfy dependencies from that integrated state. A stale
   historical candidate must never make a completed predecessor block new work.
+- **Disposition (2026-08-31): defect against landed PRD-066** — its reconciled-
+  recovery acceptance criterion was underimplemented (the integrating merge
+  changed `resume.rs` by four lines; no integrated-checkpoint suppression
+  exists). Highest-priority item in the 066 remediation batch: it blocks the
+  operator's current Wave 3 recovery.
 
 ### FAM-FRICTION-001 — Provider registration does not imply execution readiness
 
@@ -311,3 +352,17 @@ instead of deleting the history.
   provides the canonical kebab-case spelling, `config model list` uses it, and
   a regression pins display output to the serde serialization for every
   variant.
+
+## 2026-08-31 — Disposition summary: the 066 remediation batch
+
+Bugs 011, 012, 014, and 016 (plus 009's session circuit breaker and 015's
+fixture transport seam) are one bounded remediation of landed PRD-066
+behavior: reconciled recovery inventory (016, urgent — blocks current
+recovery), integration-contained dependency admission (012), declared-
+manifest scope decisions minted at admission (014), preflight heartbeats
+with probe deduplication (011), identical-deterministic-failure circuit
+breaker (009), and the loopback-free discovery fixture (015). Bugs 009/013
+identity and probe halves transfer to PRD-057; 013's typed deterministic
+classification and 015's socket-needs declaration extend PRD-067's
+contract; 010 is addressed by the corrected plan and owner-approved
+PRD-076.
