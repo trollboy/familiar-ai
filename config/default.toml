@@ -31,6 +31,7 @@
 # auth = "env: UNSLOTH_API_KEY"
 
 [execution_context]
+# repository_map_enabled = false # Per-repository approved override only.
 # hard_ceiling_tokens = 12000  # Optional; disabled when absent
 # prompt_cache_enabled = true   # Codex receives a stable-prefix cache key;
 #                               # unsupported adapters receive no cache flag

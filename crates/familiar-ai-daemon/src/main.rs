@@ -207,9 +207,19 @@ async fn daemon_run(
         let status_clone = state.status.clone();
         let summary_tx_clone = summary_tx.clone();
         let max_size = state.config.summary.max_file_size_bytes;
+        let context_service = familiar_ai_daemon::context_service::ContextService::with_cache_dir(
+            state.paths.data_dir.join("repomaps"),
+        );
         let handler_task = tokio::spawn(async move {
-            handle_watcher_events(event_rx, db_clone, status_clone, summary_tx_clone, max_size)
-                .await;
+            handle_watcher_events(
+                event_rx,
+                db_clone,
+                status_clone,
+                summary_tx_clone,
+                max_size,
+                context_service,
+            )
+            .await;
         });
 
         Some((watcher_task, handler_task))
@@ -464,8 +474,10 @@ async fn handle_watcher_events(
     status: Arc<Mutex<AppStatus>>,
     summary_tx: Option<mpsc::Sender<SummaryRequest>>,
     max_file_size_bytes: u64,
+    context_service: familiar_ai_daemon::context_service::ContextService,
 ) {
     while let Some(event) = rx.recv().await {
+        context_service.apply(&event);
         match event {
             WatcherEvent::RepoDiscovered { repo_root } => {
                 let repo_str = repo_root.to_string_lossy().to_string();

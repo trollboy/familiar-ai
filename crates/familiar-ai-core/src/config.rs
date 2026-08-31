@@ -2363,6 +2363,8 @@ impl ReviewConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionContextConfig {
     pub hard_ceiling_tokens: Option<u64>,
+    #[serde(default)]
+    pub repository_map_enabled: bool,
     /// Enables adapter-specific prompt cache controls. Unsupported adapters
     /// retain their native behavior and receive no fabricated flags.
     #[serde(default = "default_prompt_cache_enabled")]
@@ -2377,6 +2379,7 @@ impl Default for ExecutionContextConfig {
     fn default() -> Self {
         Self {
             hard_ceiling_tokens: None,
+            repository_map_enabled: false,
             prompt_cache_enabled: true,
         }
     }

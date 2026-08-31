@@ -621,6 +621,7 @@ name = "familiar-ai-context"
 version = "0.1.0"
 dependencies = [
  "familiar-ai-core",
+ "familiar-ai-repomap",
  "familiar-ai-tokens",
  "tempfile",
  "thiserror 2.0.18",
@@ -657,6 +658,7 @@ dependencies = [
  "familiar-ai-core",
  "familiar-ai-llm",
  "familiar-ai-logging",
+ "familiar-ai-repomap",
  "familiar-ai-review",
  "familiar-ai-storage",
  "familiar-ai-summary",
@@ -722,6 +724,7 @@ dependencies = [
  "familiar-ai-core",
  "familiar-ai-llm",
  "familiar-ai-logging",
+ "familiar-ai-repomap",
  "familiar-ai-storage",
  "familiar-ai-summary",
  "familiar-ai-tokens",
@@ -731,6 +734,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "familiar-ai-repomap"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

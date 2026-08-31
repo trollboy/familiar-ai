@@ -87,6 +87,22 @@ pub struct CompressionExperimentSummary {
     pub on: CompressionLaneSummary,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenSink {
+    pub dimension: String,
+    pub value: String,
+    pub category: String,
+    pub tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextEffect {
+    pub category: String,
+    pub injection_on: u64,
+    pub injection_off: u64,
+    pub delta: i64,
+}
+
 impl<'a> AccountingRepository<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self { conn }
@@ -272,6 +288,72 @@ impl<'a> AccountingRepository<'a> {
             params![label, lane],
             |row| Ok(CompressionLaneSummary { observations: row.get(0)?, uncached_input_tokens: row.get(1)?, cache_read_tokens: row.get(2)?, cache_write_tokens: row.get(3)?, output_tokens: row.get(4)?, known_nanousd: row.get(5)? }),
         ).map_err(db)
+    }
+
+    pub fn token_sinks(&self, project_id: &str) -> familiar_ai_core::Result<Vec<TokenSink>> {
+        let dimensions = [("stage", "stage"), ("worker", "worker_identity")];
+        let categories = [
+            ("uncached_input", "uncached_input_tokens"),
+            ("cache_read", "cache_read_tokens"),
+            ("cache_write", "cache_write_tokens"),
+            ("output", "output_tokens"),
+            ("reasoning_output", "reasoning_output_tokens"),
+        ];
+        let mut out = Vec::new();
+        for (dimension, column) in dimensions {
+            for (category, token_column) in categories {
+                let sql=format!("SELECT {column},sum({token_column}) FROM usage_observations WHERE project_id=?1 AND {token_column} IS NOT NULL GROUP BY {column}");
+                let mut statement = self.conn.prepare(&sql).map_err(db)?;
+                let rows = statement
+                    .query_map([project_id], |r| {
+                        Ok(TokenSink {
+                            dimension: dimension.into(),
+                            value: r.get(0)?,
+                            category: category.into(),
+                            tokens: r.get(1)?,
+                        })
+                    })
+                    .map_err(db)?;
+                for row in rows {
+                    out.push(row.map_err(db)?);
+                }
+            }
+        }
+        out.sort_by_key(|v| {
+            (
+                std::cmp::Reverse(v.tokens),
+                v.dimension.clone(),
+                v.value.clone(),
+                v.category.clone(),
+            )
+        });
+        Ok(out)
+    }
+    pub fn context_effect(&self, project_id: &str) -> familiar_ai_core::Result<Vec<ContextEffect>> {
+        let categories = [
+            ("uncached_input", "uncached_input_tokens"),
+            ("cache_read", "cache_read_tokens"),
+            ("cache_write", "cache_write_tokens"),
+            ("output", "output_tokens"),
+            ("reasoning_output", "reasoning_output_tokens"),
+        ];
+        let mut out = Vec::new();
+        for (category, column) in categories {
+            let sql=format!("SELECT coalesce(sum(CASE WHEN c.injection_enabled=1 THEN u.{column} END),0),coalesce(sum(CASE WHEN c.injection_enabled=0 THEN u.{column} END),0) FROM usage_observations u JOIN context_service_executions c ON c.execution_id=u.execution_id WHERE u.project_id=?1 AND u.{column} IS NOT NULL");
+            let (on, off): (u64, u64) = self
+                .conn
+                .query_row(&sql, [project_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(db)?;
+            out.push(ContextEffect {
+                category: category.into(),
+                injection_on: on,
+                injection_off: off,
+                delta: i64::try_from(on)
+                    .unwrap_or(i64::MAX)
+                    .saturating_sub(i64::try_from(off).unwrap_or(i64::MAX)),
+            });
+        }
+        Ok(out)
     }
 }
 

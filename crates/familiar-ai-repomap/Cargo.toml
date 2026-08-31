@@ -1,14 +1,14 @@
 [package]
-name = "familiar-ai-context"
+name = "familiar-ai-repomap"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-familiar-ai-core = { path = "../familiar-ai-core" }
-familiar-ai-tokens = { path = "../familiar-ai-tokens" }
-familiar-ai-repomap = { path = "../familiar-ai-repomap" }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -6,7 +6,7 @@ pub(crate) mod sql;
 pub use db::Database;
 pub use repos::accounting::{
     decimal_nanousd, AccountingRepository, CompressionExperimentSummary, CompressionLaneSummary,
-    LedgerUsageSummary, OpenAiCostFact, UsageObservation,
+    ContextEffect, LedgerUsageSummary, OpenAiCostFact, TokenSink, UsageObservation,
 };
 pub use repos::backlog::{
     list_entries as list_backlog_entries, list_recovery_events, BacklogEntryRow, RecoveryEventRow,

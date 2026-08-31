@@ -15,9 +15,9 @@ use familiar_ai_agent::{
 };
 use familiar_ai_compress::{RegisterId, REGISTER_VERSION};
 use familiar_ai_context::{
-    render_stable_prefix, ContextBudget, ContextBudgetError, ContextBudgeter,
-    ContextCompilationError, ContextCompiler, ContextProfile, ContextReferenceKind,
-    ContextReferenceRoot, ContextRequest, ExecutionContext,
+    render_stable_prefix, render_stable_prefix_with_map, ContextBudget, ContextBudgetError,
+    ContextBudgeter, ContextCompilationError, ContextCompiler, ContextProfile,
+    ContextReferenceKind, ContextReferenceRoot, ContextRequest, ExecutionContext,
 };
 use familiar_ai_core::config::WorkerCapabilityConfig;
 use familiar_ai_core::{
@@ -972,7 +972,17 @@ fn execute_tracked_inner(
         }
         None => context,
     };
-    let stable_prefix = render_stable_prefix(&context, &profile, EXECUTION_CONSTRAINTS);
+    let repository_map = repository_config
+        .execution_context
+        .as_ref()
+        .is_some_and(|value| value.repository_map_enabled)
+        .then(|| build_repository_map(&context.repository.worktree));
+    let stable_prefix = render_stable_prefix_with_map(
+        &context,
+        &profile,
+        EXECUTION_CONSTRAINTS,
+        repository_map.as_deref(),
+    );
     let prompt_cache_key = familiar_ai_review::content_hash(stable_prefix.as_bytes());
     let mut prompt = render_prompt_with_prefix(&context, &stable_prefix);
     if let Some(version) = migration_version {
@@ -1164,6 +1174,10 @@ fn execute_tracked_inner(
                 RunError::Storage(e.to_string()),
             )
         })?;
+    db.conn().execute(
+        "INSERT INTO context_service_executions(execution_id,project_id,injection_enabled,configured_at,audit_reason) VALUES(?1,NULL,?2,?3,?4)",
+        rusqlite::params![id, i64::from(repository_map.is_some()), Utc::now().to_rfc3339(), if repository_map.is_some(){"approved per-repository repository_map_enabled"}else{"repository map injection disabled"}],
+    ).map_err(|e| RunError::Storage(e.to_string()))?;
 
     let execution = agents.implementation.execute(
         ExecutionRequest {
@@ -2561,6 +2575,26 @@ pub fn inject_output_register(prompt: &str, register: Option<RegisterId>) -> Str
         return prompt.to_owned();
     };
     format!("{prompt}\n{}\n", register.contract())
+}
+
+fn build_repository_map(repository: &Path) -> Vec<u8> {
+    let mut map = familiar_ai_repomap::RepositoryMap::new(true);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["ls-files", "-z"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            for item in output.stdout.split(|b| *b == 0).filter(|x| !x.is_empty()) {
+                if let Ok(relative) = std::str::from_utf8(item) {
+                    let _ = map.reindex_file(repository, &repository.join(relative));
+                }
+            }
+        }
+        _ => map.mark_stale("tracked-file inventory unavailable"),
+    }
+    map.serialize(500)
 }
 
 #[cfg(test)]

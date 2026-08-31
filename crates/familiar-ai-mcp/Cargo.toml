@@ -16,6 +16,7 @@ familiar-ai-summary = { path = "../familiar-ai-summary" }
 familiar-ai-tokens = { path = "../familiar-ai-tokens" }
 familiar-ai-llm = { path = "../familiar-ai-llm" }
 familiar-ai-logging = { path = "../familiar-ai-logging" }
+familiar-ai-repomap = { path = "../familiar-ai-repomap" }
 tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "io-std", "io-util", "macros"] }
 serde.workspace = true
 serde_json.workspace = true

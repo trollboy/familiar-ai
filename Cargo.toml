@@ -5,6 +5,7 @@ members = [
     "crates/familiar-ai-review",
     "crates/familiar-ai-context",
     "crates/familiar-ai-compress",
+    "crates/familiar-ai-repomap",
     "crates/familiar-ai-core",
     "crates/familiar-ai-logging",
     "crates/familiar-ai-mcp",

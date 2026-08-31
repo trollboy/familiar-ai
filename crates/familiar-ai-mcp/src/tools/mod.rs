@@ -8,6 +8,7 @@ pub mod get_session_rollups;
 pub mod keywords;
 pub mod pack_for_task;
 pub mod remember_result;
+pub mod repository_map;
 pub mod scoring;
 pub mod search;
 pub mod session_rollup_query;
@@ -30,6 +31,7 @@ pub fn register_default_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(create_decision::CreateDecisionTool));
     registry.register(Arc::new(search::SearchTool));
     registry.register(Arc::new(pack_for_task::PackForTaskTool));
+    registry.register(Arc::new(repository_map::RepositoryMapTool));
     registry.register(Arc::new(get_file_summary::GetFileSummaryTool));
     registry.register(Arc::new(get_module_summary::GetModuleSummaryTool));
     registry.register(Arc::new(get_recent_changes::GetRecentChangesTool));

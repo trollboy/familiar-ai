@@ -1,6 +1,7 @@
 pub mod billing;
 pub mod compress_cli;
 pub mod config_cli;
+pub mod context_service;
 pub mod delivery;
 pub mod drive;
 pub mod launchd;

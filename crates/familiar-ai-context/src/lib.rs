@@ -111,6 +111,21 @@ pub fn render_stable_prefix(
     out
 }
 
+pub fn render_stable_prefix_with_map(
+    context: &ExecutionContext,
+    profile: &ContextProfile,
+    policy: &str,
+    repository_map: Option<&[u8]>,
+) -> String {
+    let mut out = render_stable_prefix(context, profile, policy);
+    if let Some(map) = repository_map {
+        out.push_str("\n## Maintained repository symbol map\n\n");
+        out.push_str(&String::from_utf8_lossy(map));
+        out.push('\n');
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryContext {
     pub repository: PathBuf,
@@ -574,6 +589,11 @@ mod tests {
         };
         let profile = ContextProfile::default();
         let original = render_stable_prefix(&context, &profile, "policy");
+        assert_eq!(
+            render_stable_prefix_with_map(&context, &profile, "policy", None),
+            original,
+            "disabled injection must preserve every pre-PRD prompt byte"
+        );
         context.prd.content = "different volatile body".into();
         assert_eq!(render_stable_prefix(&context, &profile, "policy"), original);
         context.repository.git_commit = Some("def".into());
