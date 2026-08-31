@@ -5,6 +5,21 @@ use rusqlite::{params, Connection, OptionalExtension};
 use familiar_ai_core::FamiliarError;
 
 #[derive(Debug, Clone)]
+pub struct OpenAiCostFact<'a> {
+    pub source_id: &'a str,
+    pub organization_id: &'a str,
+    pub project_id: Option<&'a str>,
+    pub bucket_start: i64,
+    pub bucket_end: i64,
+    pub line_item: &'a str,
+    pub classification: &'a str,
+    pub raw_amount_lexical: &'a str,
+    pub currency: &'a str,
+    pub payload_hash: &'a str,
+    pub collected_at: &'a str,
+}
+
+#[derive(Debug, Clone)]
 pub struct UsageObservation<'a> {
     pub execution_id: &'a str,
     pub attempt_id: &'a str,
@@ -145,6 +160,53 @@ impl<'a> AccountingRepository<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_credit_estimate(
+        &self,
+        observation_id: &str,
+        schedule_id: &str,
+        source_url: &str,
+        effective_at: &str,
+        calculation_version: &str,
+        rates_json: &str,
+        amount_micocredits: u64,
+    ) -> familiar_ai_core::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute("INSERT OR IGNORE INTO credit_schedules(schedule_id,source_url,effective_at,calculation_version,rates_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)", params![schedule_id,source_url,effective_at,calculation_version,rates_json,now]).map_err(db)?;
+        self.conn.execute("INSERT OR IGNORE INTO credit_estimates(estimate_id,observation_id,schedule_id,amount_micocredits,calculation_version,created_at) VALUES(?1,?2,?3,?4,?5,?6)", params![format!("cre_{}",random_hex()?),observation_id,schedule_id,amount_micocredits,calculation_version,now]).map_err(db)?;
+        Ok(())
+    }
+
+    /// Appends a changed provider fact and links it to the prior effective
+    /// revision. An identical payload is an idempotent no-op.
+    pub fn append_openai_cost_revision(
+        &self,
+        fact: &OpenAiCostFact<'_>,
+    ) -> familiar_ai_core::Result<bool> {
+        let duplicate: Option<String> = self.conn.query_row("SELECT revision_id FROM openai_cost_revisions WHERE source_id=?1 AND organization_id=?2 AND project_id IS ?3 AND bucket_start=?4 AND bucket_end=?5 AND line_item=?6 AND payload_hash=?7", params![fact.source_id,fact.organization_id,fact.project_id,fact.bucket_start,fact.bucket_end,fact.line_item,fact.payload_hash], |r| r.get(0)).optional().map_err(db)?;
+        if duplicate.is_some() {
+            return Ok(false);
+        }
+        let prior: Option<String> = self.conn.query_row("SELECT revision_id FROM openai_cost_revisions WHERE source_id=?1 AND organization_id=?2 AND project_id IS ?3 AND bucket_start=?4 AND bucket_end=?5 AND line_item=?6 ORDER BY collected_at DESC, rowid DESC LIMIT 1", params![fact.source_id,fact.organization_id,fact.project_id,fact.bucket_start,fact.bucket_end,fact.line_item], |r| r.get(0)).optional().map_err(db)?;
+        let (amount, normalization_error) = if fact.currency.eq_ignore_ascii_case("usd") {
+            (
+                Some(
+                    signed_decimal_nanousd(fact.raw_amount_lexical).ok_or_else(|| {
+                        FamiliarError::Database("invalid OpenAI USD decimal".into())
+                    })?,
+                ),
+                None,
+            )
+        } else {
+            (
+                None,
+                Some("non-USD provider cost retained without conversion"),
+            )
+        };
+        self.conn.execute("INSERT INTO openai_cost_revisions(revision_id,source_id,organization_id,project_id,bucket_start,bucket_end,line_item,classification,raw_amount_lexical,currency,amount_nanousd,normalization_error,payload_hash,supersedes_revision_id,collected_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,lower(?10),?11,?12,?13,?14,?15)", params![format!("ocr_{}",random_hex()?),fact.source_id,fact.organization_id,fact.project_id,fact.bucket_start,fact.bucket_end,fact.line_item,fact.classification,fact.raw_amount_lexical,fact.currency,amount,normalization_error,fact.payload_hash,prior,fact.collected_at]).map_err(db)?;
+        Ok(true)
+    }
+
     pub fn usage(&self) -> familiar_ai_core::Result<LedgerUsageSummary> {
         let tokens = self.conn.query_row("SELECT count(*),coalesce(sum(CASE WHEN unknown_reason IS NOT NULL THEN 1 ELSE 0 END),0),coalesce(sum(uncached_input_tokens),0),coalesce(sum(cache_read_tokens),0),coalesce(sum(cache_write_tokens),0),coalesce(sum(output_tokens),0),coalesce(sum(reasoning_output_tokens),0) FROM usage_observations", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).map_err(db)?;
         let costs = self.conn.query_row("SELECT coalesce(sum(CASE WHEN unit='nanoUSD' THEN amount ELSE 0 END),0),coalesce(sum(CASE WHEN provenance='vendor-reported' THEN 1 ELSE 0 END),0),coalesce(sum(CASE WHEN provenance='configured-rate' THEN 1 ELSE 0 END),0),coalesce(sum(CASE WHEN provenance='known-zero' THEN 1 ELSE 0 END),0) FROM cost_estimates", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(db)?;
@@ -171,7 +233,7 @@ fn random_hex() -> familiar_ai_core::Result<String> {
         .map_err(|_| FamiliarError::Database("secure project-id generation failed".into()))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
-fn decimal_nanousd(value: &str) -> Option<u64> {
+pub fn decimal_nanousd(value: &str) -> Option<u64> {
     let (whole, frac) = value.split_once('.').unwrap_or((value, ""));
     if whole.is_empty()
         || !whole.bytes().all(|b| b.is_ascii_digit())
@@ -201,6 +263,17 @@ fn decimal_nanousd(value: &str) -> Option<u64> {
     };
     n.checked_add(u64::from(round))
         .filter(|v| *v <= i64::MAX as u64)
+}
+fn signed_decimal_nanousd(value: &str) -> Option<i64> {
+    let (negative, magnitude) = value
+        .strip_prefix('-')
+        .map_or((false, value), |v| (true, v));
+    let magnitude = decimal_nanousd(magnitude)?;
+    if negative {
+        i64::try_from(magnitude).ok()?.checked_neg()
+    } else {
+        i64::try_from(magnitude).ok()
+    }
 }
 fn db(e: rusqlite::Error) -> FamiliarError {
     FamiliarError::Database(e.to_string())
@@ -290,5 +363,34 @@ mod tests {
             repo.project_id("/machine/git/common").unwrap(),
             repo.project_id("/machine/git/common").unwrap()
         );
+    }
+
+    #[test]
+    fn openai_revisions_are_exact_idempotent_and_superseding() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db.conn().execute("INSERT INTO openai_billing_sources(source_id,provider_name,organization_id,project_id,admin_auth_env,created_at) VALUES('src','openai','org_a','proj_1','OPENAI_ADMIN_KEY','now')", []).unwrap();
+        let repo = AccountingRepository::new(db.conn());
+        let mut fact = OpenAiCostFact {
+            source_id: "src",
+            organization_id: "org_a",
+            project_id: Some("proj_1"),
+            bucket_start: 1,
+            bucket_end: 2,
+            line_item: "completions",
+            classification: "usage",
+            raw_amount_lexical: "0.0000000015",
+            currency: "usd",
+            payload_hash: "hash-1",
+            collected_at: "2026-08-30T00:00:00Z",
+        };
+        assert!(repo.append_openai_cost_revision(&fact).unwrap());
+        assert!(!repo.append_openai_cost_revision(&fact).unwrap());
+        fact.raw_amount_lexical = "0.0000000025";
+        fact.payload_hash = "hash-2";
+        fact.collected_at = "2026-08-30T01:00:00Z";
+        assert!(repo.append_openai_cost_revision(&fact).unwrap());
+        let rows: (i64, i64, i64) = db.conn().query_row("SELECT count(*), max(amount_nanousd), sum(supersedes_revision_id IS NOT NULL) FROM openai_cost_revisions", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(rows, (2, 2, 1));
     }
 }

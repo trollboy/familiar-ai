@@ -242,6 +242,9 @@ pub struct ProviderConfig {
     pub organization_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization_name: Option<String>,
+    /// Optional explicit Platform attribution boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<InferenceRuntimeKind>,
     #[serde(default)]
@@ -275,6 +278,7 @@ pub enum EndpointProviderKind {
 #[serde(rename_all = "kebab-case")]
 pub enum BillingMode {
     AnthropicOrganization,
+    OpenAiOrganization,
     Bedrock,
     Vertex,
     Foundry,
@@ -438,6 +442,7 @@ impl ProviderConfig {
                     || self.recipe.is_some()
                     || !self.models.is_empty()
                     || !self.capabilities.is_empty()
+                    || self.via.is_some()
                 {
                     return Err("billing provider has non-billing extension fields".into());
                 }
@@ -461,6 +466,15 @@ impl ProviderConfig {
                     {
                         return Err("billing organization name is missing".into());
                     }
+                }
+                if !matches!(self.auth, AuthDescriptor::Env(_)) {
+                    return Err(
+                        "billing provider auth must be an env: NAME Admin credential reference"
+                            .into(),
+                    );
+                }
+                if let Some(project_id) = self.project_id.as_deref() {
+                    validate_identifier(project_id, "project id")?;
                 }
             }
         }

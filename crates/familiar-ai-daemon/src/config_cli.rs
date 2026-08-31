@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -538,6 +539,9 @@ fn provider_add(
         return deploy_target_add(context, name, host, auth, via, recipe, supplied_actor);
     }
     if kind == "billing" {
+        if matches!(mode, Some("openai-organization" | "openai")) {
+            return billing_provider_add(context, name, host, auth, supplied_actor);
+        }
         return billing_add(
             context,
             name,
@@ -589,6 +593,81 @@ fn provider_add(
         "Added {name} ({kind}) at {host} — {} models discovered.",
         models.len()
     );
+    Ok(())
+}
+
+fn billing_provider_add(
+    context: &ConfigContext,
+    name: &str,
+    host: Option<&str>,
+    auth: Option<&str>,
+    supplied_actor: Option<&str>,
+) -> Result<(), String> {
+    let host = host.unwrap_or("api.openai.com:443");
+    validate_host(host)?;
+    let descriptor =
+        parse_auth(auth.ok_or("billing provider requires --auth env:OPENAI_ADMIN_KEY")?)?;
+    let AuthDescriptor::Env(env_name) = &descriptor else {
+        return Err("billing provider auth must be an env: NAME Admin credential reference".into());
+    };
+    if load_config(context)?.providers.contains_key(name) {
+        return Err(format!("provider '{name}' already exists"));
+    }
+    let secret = std::env::var(env_name).map_err(|_| format!("Admin credential unavailable — export `{env_name}` and retry; a project API key is not sufficient"))?;
+    let now = Utc::now();
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "cannot initialize OpenAI billing probe")?
+        .get(format!("https://{host}/v1/organization/costs"))
+        .query(&[
+            ("start_time", now.timestamp() - 86_400),
+            ("end_time", now.timestamp()),
+        ])
+        .bearer_auth(secret)
+        .send()
+        .map_err(|_| "OpenAI billing probe failed — verify network access and OPENAI_ADMIN_KEY")?;
+    if !response.status().is_success() {
+        return Err("OpenAI Admin authority missing or expired — create/export an organization Admin key and retry; project API keys cannot collect organization costs".into());
+    }
+    let body = response
+        .text()
+        .map_err(|_| "OpenAI billing probe returned an unreadable response")?;
+    let page = crate::openai_billing::parse_cost_page(&body, None)?;
+    let organizations = page
+        .items
+        .iter()
+        .map(|row| row.organization_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if organizations.len() != 1 {
+        return Err("OpenAI billing probe did not establish one unambiguous organization identity; retry a window containing costs or use an organization-scoped Admin key".into());
+    }
+    let organization_id = (*organizations.iter().next().unwrap()).to_owned();
+    if load_config(context)?.providers.values().any(|p| {
+        p.kind == EndpointProviderKind::Billing
+            && p.organization_id.as_deref() == Some(&organization_id)
+            && p.project_id.is_none()
+    }) {
+        return Err(format!("organization '{organization_id}' already has a billing collector; duplicate scope rejected"));
+    }
+    let verified_at = now.to_rfc3339();
+    let actor = actor(supplied_actor)?;
+    mutate(
+        context,
+        "familiar-ai config provider add",
+        &actor,
+        |document| {
+            let table = provider_table(document, name);
+            table["kind"] = value("billing");
+            table["billing_mode"] = value("open-ai-organization");
+            table["host"] = value(host);
+            table["auth"] = value(String::from(descriptor.clone()));
+            table["organization_id"] = value(&organization_id);
+            table["verified_at"] = value(&verified_at);
+            Ok(())
+        },
+    )?;
+    println!("Added {name} (billing) organization={organization_id} authority=organization-costs verified={verified_at}.");
     Ok(())
 }
 
@@ -790,6 +869,7 @@ fn billing_add(
 ) -> Result<(), String> {
     let mode = match mode {
         "anthropic-organization" | "anthropic" => BillingMode::AnthropicOrganization,
+        "openai-organization" | "openai" => BillingMode::OpenAiOrganization,
         "bedrock" | "aws-bedrock" => BillingMode::Bedrock,
         "vertex" | "agent-platform" => BillingMode::Vertex,
         "foundry" | "microsoft-foundry" => BillingMode::Foundry,
@@ -819,6 +899,7 @@ fn billing_add(
         billing_mode: Some(mode),
         organization_id: None,
         organization_name: None,
+        project_id: None,
         runtime: None,
         host: host.into(),
         via: None,

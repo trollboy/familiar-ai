@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use ring::digest::{digest, SHA256};
 use serde_json::Value;
 
 use crate::isolation::{isolated_command, stream_lines, StreamAction};
@@ -142,6 +143,17 @@ impl CodingAgent for CodexAgent {
             ..ExecutionResult::default()
         };
         let mut command = isolated_command(&self.executable, request.denied_read_path)?;
+        // Billing Admin credentials are a separate capability and may never
+        // reach Codex. Inference OPENAI_API_KEY remains operator-managed BYO
+        // auth. Configuration validation restricts Admin references to env
+        // descriptors; remove conventionally named Admin variables here as a
+        // final process-boundary defense.
+        for (name, _) in std::env::vars_os() {
+            let upper = name.to_string_lossy().to_ascii_uppercase();
+            if upper.contains("ADMIN") && (upper.contains("KEY") || upper.contains("TOKEN")) {
+                command.env_remove(name);
+            }
+        }
         command.arg("exec");
         // Review packages intentionally live in fresh, non-repository
         // directories. Their contents are bounded by Familiar and the real
@@ -275,7 +287,12 @@ fn parse_event(
                 result.input_tokens = uint(usage.get("input_tokens"));
                 result.output_tokens = uint(usage.get("output_tokens"));
                 result.cached_tokens = uint(usage.get("cached_input_tokens"));
+                result.reasoning_output_tokens = uint(usage.get("reasoning_output_tokens"));
             }
+            // Hash only the terminal source event. The full JSONL stream may
+            // contain prompts, responses, commands, diffs, and local paths and
+            // must never become accounting evidence.
+            result.accounting_source_hash = Some(hex_digest(line.as_bytes()));
             None
         }
         "item.completed" => {
@@ -293,6 +310,14 @@ fn parse_event(
             .map(|message| format!("error: {message}")),
         _ => None,
     }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn uint(value: Option<&Value>) -> Option<u64> {
@@ -398,13 +423,15 @@ mod tests {
             Some("hello".into())
         );
         parse_event(
-            r#"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":4}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}"#,
             &mut result,
             &mut terminal_seen,
         );
         assert_eq!(result.input_tokens, Some(10));
         assert_eq!(result.cached_tokens, Some(3));
         assert_eq!(result.output_tokens, Some(4));
+        assert_eq!(result.reasoning_output_tokens, Some(2));
+        assert!(result.accounting_source_hash.is_some());
         assert_eq!(result.model, None);
         assert_eq!(
             parse_event(

@@ -3,6 +3,7 @@ pub mod config_cli;
 pub mod delivery;
 pub mod drive;
 pub mod launchd;
+pub mod openai_billing;
 pub mod plan;
 pub mod preflight;
 pub mod report;
