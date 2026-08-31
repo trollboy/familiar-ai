@@ -233,6 +233,15 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub kind: EndpointProviderKind,
+    /// Billing implementation. Only `anthropic-organization` has a collector;
+    /// external modes are typed so they fail closed instead of being mistaken
+    /// for local or authoritative coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_mode: Option<BillingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<InferenceRuntimeKind>,
     #[serde(default)]
@@ -259,6 +268,17 @@ pub struct ProviderConfig {
 pub enum EndpointProviderKind {
     Inference,
     DeployTarget,
+    Billing,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BillingMode {
+    AnthropicOrganization,
+    Bedrock,
+    Vertex,
+    Foundry,
+    ExternalBilling,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -348,19 +368,32 @@ impl ProviderConfig {
                     return Err("CLI deploy-target cannot declare a host".into());
                 }
             }
+            EndpointProviderKind::Billing => validate_host(&self.host)?,
         }
         for model in &self.models {
             validate_model_identifier(model)?;
         }
         match self.kind {
             EndpointProviderKind::Inference => {
-                if self.recipe.is_some() || self.via.is_some() || !self.capabilities.is_empty() {
-                    return Err("inference provider has deploy-target extension fields".into());
+                if self.recipe.is_some()
+                    || self.via.is_some()
+                    || !self.capabilities.is_empty()
+                    || self.billing_mode.is_some()
+                    || self.organization_id.is_some()
+                    || self.organization_name.is_some()
+                {
+                    return Err("inference provider has non-inference extension fields".into());
                 }
             }
             EndpointProviderKind::DeployTarget => {
                 if self.runtime.is_some() {
                     return Err("deploy-target cannot declare an inference runtime".into());
+                }
+                if self.billing_mode.is_some()
+                    || self.organization_id.is_some()
+                    || self.organization_name.is_some()
+                {
+                    return Err("deploy-target has billing extension fields".into());
                 }
                 if self.via.is_none() && self.auth != AuthDescriptor::SshAgent {
                     return Err("SSH deploy-target auth must be ssh-agent".into());
@@ -397,6 +430,36 @@ impl ProviderConfig {
                                 "CLI deploy-target recipe commands must execute through '{via}'"
                             ));
                         }
+                    }
+                }
+            }
+            EndpointProviderKind::Billing => {
+                if self.runtime.is_some()
+                    || self.recipe.is_some()
+                    || !self.models.is_empty()
+                    || !self.capabilities.is_empty()
+                {
+                    return Err("billing provider has non-billing extension fields".into());
+                }
+                let mode = self
+                    .billing_mode
+                    .ok_or("billing provider mode is missing")?;
+                if mode == BillingMode::AnthropicOrganization {
+                    if !matches!(self.auth, AuthDescriptor::Env(_)) {
+                        return Err("anthropic organization billing auth must use an `env: NAME` descriptor".into());
+                    }
+                    validate_identifier(
+                        self.organization_id
+                            .as_deref()
+                            .ok_or("billing organization identity is missing")?,
+                        "organization id",
+                    )?;
+                    if self
+                        .organization_name
+                        .as_deref()
+                        .map_or(true, str::is_empty)
+                    {
+                        return Err("billing organization name is missing".into());
                     }
                 }
             }

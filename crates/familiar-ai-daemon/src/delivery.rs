@@ -994,6 +994,9 @@ mod tests {
             "box".into(),
             ProviderConfig {
                 kind: EndpointProviderKind::DeployTarget,
+                billing_mode: None,
+                organization_id: None,
+                organization_name: None,
                 runtime: None,
                 host: "box.example".into(),
                 via: None,
@@ -1069,6 +1072,9 @@ mod tests {
             "cloud".into(),
             ProviderConfig {
                 kind: EndpointProviderKind::DeployTarget,
+                billing_mode: None,
+                organization_id: None,
+                organization_name: None,
                 runtime: None,
                 host: String::new(),
                 via: Some("az".into()),
@@ -1129,6 +1135,9 @@ mod tests {
             "cloud".into(),
             ProviderConfig {
                 kind: EndpointProviderKind::DeployTarget,
+                billing_mode: None,
+                organization_id: None,
+                organization_name: None,
                 runtime: None,
                 host: String::new(),
                 via: Some("az".into()),

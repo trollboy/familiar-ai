@@ -6,7 +6,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use familiar_ai_core::config::{
     validate_cloud_cli, validate_host, validate_ssh_host, AgentAdapterKind, AuthDescriptor,
-    EndpointProviderKind, InferenceRuntimeKind, RegistryWorkerConfig, WorkerCapabilityConfig,
+    BillingMode, EndpointProviderKind, InferenceRuntimeKind, ProviderConfig, RegistryWorkerConfig,
+    WorkerCapabilityConfig,
 };
 use familiar_ai_core::{
     AppPaths, BacklogDiscovery, Config, FamiliarToml, FilesystemBacklogDiscovery,
@@ -39,6 +40,7 @@ pub enum ConfigAction {
     ProviderAdd {
         name: String,
         kind: String,
+        mode: Option<String>,
         host: Option<String>,
         auth: Option<String>,
         via: Option<String>,
@@ -101,6 +103,7 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
         ConfigAction::ProviderAdd {
             name,
             kind,
+            mode,
             host,
             auth,
             via,
@@ -110,6 +113,7 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
             context,
             &name,
             &kind,
+            mode.as_deref(),
             host.as_deref(),
             auth.as_deref(),
             via.as_deref(),
@@ -332,6 +336,7 @@ fn provider_bind(
     let kind = match target.kind {
         EndpointProviderKind::Inference => "inference",
         EndpointProviderKind::DeployTarget => "deploy-target",
+        EndpointProviderKind::Billing => "billing",
     };
     if kind != required.requires {
         return Err(format!(
@@ -518,6 +523,7 @@ fn provider_add(
     context: &ConfigContext,
     name: &str,
     kind: &str,
+    mode: Option<&str>,
     host: Option<&str>,
     auth: Option<&str>,
     via: Option<&str>,
@@ -525,11 +531,21 @@ fn provider_add(
     supplied_actor: Option<&str>,
 ) -> Result<(), String> {
     validate_name(name, "provider")?;
-    if kind != "inference" && kind != "unsloth" && kind != "deploy-target" {
+    if kind != "inference" && kind != "unsloth" && kind != "deploy-target" && kind != "billing" {
         return Err(format!("unknown provider kind '{kind}'"));
     }
     if kind == "deploy-target" {
         return deploy_target_add(context, name, host, auth, via, recipe, supplied_actor);
+    }
+    if kind == "billing" {
+        return billing_add(
+            context,
+            name,
+            mode.unwrap_or("anthropic-organization"),
+            host,
+            auth,
+            supplied_actor,
+        );
     }
     let host = host.unwrap_or_else(|| {
         if name == "ollama" {
@@ -764,6 +780,104 @@ fn run_cloud_probe(via: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn billing_add(
+    context: &ConfigContext,
+    name: &str,
+    mode: &str,
+    host: Option<&str>,
+    auth: Option<&str>,
+    supplied_actor: Option<&str>,
+) -> Result<(), String> {
+    let mode = match mode {
+        "anthropic-organization" | "anthropic" => BillingMode::AnthropicOrganization,
+        "bedrock" | "aws-bedrock" => BillingMode::Bedrock,
+        "vertex" | "agent-platform" => BillingMode::Vertex,
+        "foundry" | "microsoft-foundry" => BillingMode::Foundry,
+        "external-billing" => BillingMode::ExternalBilling,
+        other => return Err(format!("unknown billing mode '{other}'")),
+    };
+    if mode != BillingMode::AnthropicOrganization {
+        return Err(format!("{mode:?}: {}", crate::billing::EXTERNAL_REMEDY));
+    }
+    let host = host.unwrap_or("api.anthropic.com:443");
+    validate_host(host)?;
+    let descriptor = parse_auth(auth.ok_or(
+        "billing source requires --auth env:NAME — credential values are never accepted",
+    )?)?;
+    if !matches!(descriptor, AuthDescriptor::Env(_)) {
+        return Err(
+            "billing auth must use an `env: NAME` descriptor; credential values are never accepted"
+                .into(),
+        );
+    }
+    let config = load_config(context)?;
+    if config.providers.contains_key(name) {
+        return Err(format!("provider '{name}' already exists"));
+    }
+    let candidate = ProviderConfig {
+        kind: EndpointProviderKind::Billing,
+        billing_mode: Some(mode),
+        organization_id: None,
+        organization_name: None,
+        runtime: None,
+        host: host.into(),
+        via: None,
+        auth: descriptor.clone(),
+        models: Vec::new(),
+        verified_at: None,
+        capabilities: Vec::new(),
+        recipe: None,
+    };
+    let identity = crate::billing::probe_organization(&candidate)
+        .map_err(|e| format!("{name}: {e}. Nothing added."))?;
+    let db = open_database(context, &config)?;
+    let repo = familiar_ai_storage::BillingRepository::new(db.conn());
+    if let Some(bound) = repo
+        .source_for_organization(&identity.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "organization '{}' is already bound to billing source '{bound}'. Nothing added.",
+            identity.id
+        ));
+    }
+    let verified_at = Utc::now().to_rfc3339();
+    let actor = actor(supplied_actor)?;
+    mutate(
+        context,
+        "familiar-ai config provider add",
+        &actor,
+        |document| {
+            let table = provider_table(document, name);
+            table.decor_mut().set_prefix(format!(
+                "# added by familiar-ai config provider add — {actor} {verified_at}\n"
+            ));
+            table["kind"] = value("billing");
+            table["billing_mode"] = value("anthropic-organization");
+            table["host"] = value(host);
+            table["auth"] = value(String::from(descriptor.clone()));
+            table["organization_id"] = value(&identity.id);
+            table["organization_name"] = value(&identity.name);
+            table["verified_at"] = value(&verified_at);
+            Ok(())
+        },
+    )?;
+    let credential_reference = String::from(descriptor);
+    repo.bind_source(&familiar_ai_storage::BillingSource {
+        name,
+        mode: "anthropic-organization",
+        organization_id: &identity.id,
+        organization_name: &identity.name,
+        credential_reference: &credential_reference,
+    })
+    .map_err(|e| e.to_string())?;
+    println!(
+        "Added {name} (billing) — organization \"{}\" ({}) via /v1/organizations/me.",
+        identity.name, identity.id
+    );
+    Ok(())
+}
+
 fn probe_deploy_target(host: &str) -> Result<Vec<String>, String> {
     let output = Command::new("ssh")
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
@@ -829,6 +943,20 @@ fn provider_verify(
         .providers
         .get(name)
         .ok_or_else(|| format!("unknown provider '{name}'"))?;
+    if provider.kind == EndpointProviderKind::Billing {
+        let found = crate::billing::probe_organization(provider)
+            .map_err(|error| format!("{name}: {error}"))?;
+        if provider.organization_id.as_deref() != Some(found.id.as_str()) {
+            return Err(format!(
+                "{name}: credential resolved to a different organization"
+            ));
+        }
+        println!(
+            "{name}: verified — organization \"{}\" ({}).",
+            found.name, found.id
+        );
+        return Ok(());
+    }
     if provider.kind == EndpointProviderKind::DeployTarget {
         let capabilities = if let Some(via) = &provider.via {
             run_cloud_probe(via).map_err(|error| format!("{name}: {error}"))?;
@@ -879,6 +1007,12 @@ fn provider_list(
         let config = load_config(context)?;
         let mut discoveries = Vec::new();
         for (name, provider) in &config.providers {
+            if provider.kind == EndpointProviderKind::Billing {
+                if refresh {
+                    return Err("billing sources are refreshed only by explicit `billing collect`; provider list is cached".into());
+                }
+                continue;
+            }
             if provider.kind == EndpointProviderKind::DeployTarget {
                 let capabilities = if let Some(via) = &provider.via {
                     run_cloud_probe(via).map_err(|error| format!("{name}: {error}"))?;
@@ -925,7 +1059,18 @@ fn provider_list(
         }
     }
     let config = load_config(context)?;
+    let config_for_list = config.clone();
     for (name, provider) in config.providers {
+        if provider.kind == EndpointProviderKind::Billing {
+            let db = open_database(context, &config_for_list)?;
+            let status = familiar_ai_storage::BillingRepository::new(db.conn())
+                .statuses()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|s| s.source_name == name);
+            println!("{name} [ billing mode={:?} organization={} authority=verified last_success={} coverage={}..{} ]",provider.billing_mode,provider.organization_name.as_deref().unwrap_or("unknown"),status.as_ref().and_then(|s|s.last_success.as_deref()).unwrap_or("never"),status.as_ref().and_then(|s|s.window_start.as_deref()).unwrap_or("none"),status.as_ref().and_then(|s|s.window_end.as_deref()).unwrap_or("none"));
+            continue;
+        }
         let models = provider.models.join(", ");
         let age = provider
             .verified_at
@@ -1498,6 +1643,7 @@ mod tests {
             ConfigAction::ProviderAdd {
                 name: "ollama".into(),
                 kind: "inference".into(),
+                mode: None,
                 host: Some("fixture-fail:1".into()),
                 auth: None,
                 via: None,
@@ -1561,6 +1707,7 @@ mod tests {
             ConfigAction::ProviderAdd {
                 name: "ollama".into(),
                 kind: "inference".into(),
+                mode: None,
                 host: Some("fixture-success:1".into()),
                 auth: None,
                 via: None,
@@ -1594,6 +1741,7 @@ mod tests {
             ConfigAction::ProviderAdd {
                 name: "ollama".into(),
                 kind: "inference".into(),
+                mode: None,
                 host: Some("fixture-success:1".into()),
                 auth: None,
                 via: None,
@@ -1666,6 +1814,7 @@ mod tests {
             ConfigAction::ProviderAdd {
                 name: "remote".into(),
                 kind: "inference".into(),
+                mode: None,
                 host: Some("localhost:1".into()),
                 auth: Some("env: ACME_TEST_KEY".into()),
                 via: None,
@@ -1692,6 +1841,7 @@ mod tests {
             ConfigAction::ProviderAdd {
                 name: "ollama".into(),
                 kind: "inference".into(),
+                mode: None,
                 host: Some("fixture-success:1".into()),
                 auth: None,
                 via: None,

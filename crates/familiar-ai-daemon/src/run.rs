@@ -140,6 +140,7 @@ pub fn resolved_remediation_entry(config: &Config) -> Result<AgentEntryConfig, S
 pub fn resolved_agent_entries(
     config: &Config,
 ) -> Result<(AgentEntryConfig, AgentEntryConfig), String> {
+    crate::billing::scrub_credentials_from_process_environment(config);
     if config.worker_registry.is_some() {
         let plan = resolved_worker_plan(config, &RouteContext::default())?;
         return Ok((plan.0, plan.1));

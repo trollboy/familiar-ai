@@ -35,6 +35,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Inspect cached authoritative billing or explicitly collect it.
+    Billing {
+        #[command(subcommand)]
+        command: BillingCommand,
+    },
     /// Show repository project-configuration approval and binding state.
     Status {
         #[arg(long, default_value = ".")]
@@ -142,6 +147,18 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum BillingCommand {
+    /// Cached status only; never contacts a provider.
+    Status,
+    /// Explicitly contact configured organization billing sources.
+    Collect {
+        source: Option<String>,
+        #[arg(long)]
+        month: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ConfigCommand {
     Provider {
         #[command(subcommand)]
@@ -192,6 +209,8 @@ enum ProviderCommand {
         name: String,
         #[arg(long, default_value = "inference")]
         kind: String,
+        #[arg(long)]
+        mode: Option<String>,
         #[arg(long)]
         host: Option<String>,
         #[arg(long)]
@@ -458,6 +477,10 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+        Command::Billing { command } => match billing_command(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Status { repository } => match familiar_ai_daemon::config_cli::execute(
             familiar_ai_daemon::config_cli::ConfigAction::Status { repository },
         ) {
@@ -566,6 +589,7 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             ProviderCommand::Add {
                 name,
                 kind,
+                mode,
                 host,
                 auth,
                 via,
@@ -574,6 +598,7 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             } => ConfigAction::ProviderAdd {
                 name,
                 kind,
+                mode,
                 host,
                 auth,
                 via,
@@ -630,6 +655,86 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
         }
     };
     execute(action)
+}
+
+fn billing_command(command: BillingCommand) -> Result<(), String> {
+    use chrono::{Datelike, NaiveDate, Utc};
+    use familiar_ai_core::config::EndpointProviderKind;
+    let context = familiar_ai_daemon::config_cli::ConfigContext::resolve()?;
+    let config = Config::load(Some(&context.config_path)).map_err(|e| e.to_string())?;
+    let db = Database::open(&config.database.resolve_path(&context.data_dir))
+        .map_err(|e| e.to_string())?;
+    db.run_migrations().map_err(|e| e.to_string())?;
+    let repo = familiar_ai_storage::BillingRepository::new(db.conn());
+    match command {
+        BillingCommand::Status => {
+            let statuses = repo.statuses().map_err(|e| e.to_string())?;
+            if statuses.is_empty() {
+                println!("no operator-bound billing sources; local-estimate-only coverage");
+                return Ok(());
+            }
+            for row in statuses {
+                let stale = row
+                    .last_success
+                    .as_deref()
+                    .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                    .map(|v| {
+                        Utc::now()
+                            .signed_duration_since(v.with_timezone(&Utc))
+                            .num_hours()
+                    })
+                    .map(|h| format!("{h}h"))
+                    .unwrap_or_else(|| "never".into());
+                println!("{} organization=\"{}\" last_success={} staleness={} coverage={}..{} failure={}",row.source_name,row.organization_name,row.last_success.as_deref().unwrap_or("never"),stale,row.window_start.as_deref().unwrap_or("none"),row.window_end.as_deref().unwrap_or("none"),row.last_failure.as_deref().unwrap_or("none"));
+            }
+            Ok(())
+        }
+        BillingCommand::Collect { source, month } => {
+            let today = Utc::now().date_naive();
+            let first = if let Some(month) = month {
+                NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
+                    .map_err(|_| "--month must be YYYY-MM".to_string())?
+            } else {
+                today.with_day(1).unwrap()
+            };
+            if first > today {
+                return Err("cannot collect a future billing month".into());
+            }
+            let next = if first.month() == 12 {
+                NaiveDate::from_ymd_opt(first.year() + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(first.year(), first.month() + 1, 1).unwrap()
+            };
+            let end = next.min(today);
+            if end <= first {
+                return Err("the current daily bucket is not complete; no authoritative window is available yet".into());
+            }
+            let start = format!("{}T00:00:00Z", first.format("%Y-%m-%d"));
+            let end = format!("{}T00:00:00Z", end.format("%Y-%m-%d"));
+            let selected = config
+                .providers
+                .iter()
+                .filter(|(name, p)| {
+                    p.kind == EndpointProviderKind::Billing
+                        && source
+                            .as_deref()
+                            .map_or(true, |wanted| wanted == name.as_str())
+                })
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Err(source.map_or_else(
+                    || "no operator-bound billing sources".into(),
+                    |v| format!("unknown billing source '{v}'"),
+                ));
+            }
+            for (name, provider) in selected {
+                let added =
+                    familiar_ai_daemon::billing::collect(name, provider, &start, &end, &repo)?;
+                println!("{name}: complete {start}..{end}, {added} new revisions");
+            }
+            Ok(())
+        }
+    }
 }
 
 fn onboard(command: OnboardCommand) -> Result<(), String> {

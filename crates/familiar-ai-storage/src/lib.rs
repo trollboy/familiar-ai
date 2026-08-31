@@ -9,6 +9,9 @@ pub use repos::backlog::{
     list_entries as list_backlog_entries, list_recovery_events, BacklogEntryRow, RecoveryEventRow,
     SqliteBacklogRepository,
 };
+pub use repos::billing::{
+    decimal_nanousd, BillingRepository, BillingSource, BillingStatus, ProviderCostRow,
+};
 pub use repos::bootstrap::SqliteBootstrapRepository;
 pub use repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
 pub use repos::config_decision::{ConfigDecision, ConfigDecisionRepository};

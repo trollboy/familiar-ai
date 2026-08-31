@@ -1,4 +1,5 @@
 pub mod backlog;
+pub mod billing;
 pub mod bootstrap;
 pub mod checkpoint;
 pub mod config_decision;
