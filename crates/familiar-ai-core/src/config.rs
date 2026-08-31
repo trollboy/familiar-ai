@@ -1498,7 +1498,7 @@ impl RegistryWorkerConfig {
             Some("ollama") => AgentAdapterKind::Ollama,
             _ => AgentAdapterKind::Codex,
         });
-        let model = if self.model == "__familiar_legacy_default__" {
+        let model = if self.model == "__legacy_cli_default__" {
             None
         } else {
             match adapter {
@@ -1580,7 +1580,7 @@ impl WorkerRegistryConfig {
             model: entry
                 .model
                 .clone()
-                .unwrap_or_else(|| "__familiar_legacy_default__".to_owned()),
+                .unwrap_or_else(|| "__legacy_cli_default__".to_owned()),
             runtime: Some(entry.adapter.as_str().to_owned()),
             model_artifact: None,
             auth_profile: None,

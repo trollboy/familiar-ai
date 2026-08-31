@@ -384,7 +384,9 @@ fn legacy_prd_document_scope_routes_and_persists_the_derived_file_count() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(stored, ("user-pin".into(), "large".into(), 3));
+    assert_eq!(stored.0, "user-pin");
+    assert!(stored.1.starts_with("wspec-sha256:"));
+    assert_eq!(stored.2, 3);
 }
 
 #[test]
