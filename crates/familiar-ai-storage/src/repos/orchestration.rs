@@ -284,6 +284,17 @@ impl<'a> OrchestrationRepository<'a> {
                 .and_then(|v| v.to_str())
             {
                 terminal.insert(id.to_owned());
+                // FAM-BUG-016 root cause: file stems are zero-padded
+                // ("PRD-048") while checkpoint/attempt prd_ids use the
+                // canonical rendering ("PRD-48"). Insert the canonical
+                // spelling too so the filter actually matches.
+                if let Some(rest) = id.strip_prefix("PRD-") {
+                    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    let suffix: String = rest.chars().skip_while(|c| c.is_ascii_digit()).collect();
+                    if let Ok(number) = digits.parse::<u64>() {
+                        terminal.insert(format!("PRD-{number}{suffix}"));
+                    }
+                }
             }
         }
         let mut integrated = self.conn.prepare("SELECT a.prd_id FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.integrated_at IS NOT NULL").map_err(db)?;

@@ -104,11 +104,11 @@ whole-crate declarations forfeit concurrency by design.
 | gate | 066 — integration-aware parallel orchestration | 1 | 1 |
 | gate | 067, 068 — verification truth, driver hygiene | 2 | 2 (disjoint by construction) |
 | gate | 076 — scope modularization (makes the rows below true waves) | 1 | 1 |
-| 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | 9 | **1 as declared (measured)** — 076 regenerates |
+| 3 | **057 first (open-bug carrier)**, 052, 054, 064, 069, 070, 074, 075 | 8 | **1 as declared (measured)** — 076 regenerates |
 | 4 | 032, 055, 056, 062 | 4 | ~2 |
 | 5 | 038, 053, 058 | 3 | ~2 |
 | 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 (per-adapter files disjoint; 072 shares 058's surfaces) |
-| 7 | 071, 073 | 2 | ~2 (batch review vs model residency are disjoint) |
+| 7 | 050, 071, 073 | 3 | ~2–3 (050 deferred here per bug policy 2026-08-31) |
 
 ## Critical path
 
@@ -134,6 +134,25 @@ Secondary chains: 032 → 038 (have-at-it acceptance; 041 completed) and
   pre-wave gate. It reports the 41 legacy PRDs as migration debt without a
   failing exit; every structured-v1 diagnostic remains blocking. Use
   `--strict` when legacy migration debt must also fail the check.
+
+## Bugs preempt the backlog (owner policy, 2026-08-31)
+
+Open entries in `docs/running_bugs.md` outrank all planned work. No bug
+waits for the wave that contains its owning PRD:
+
+1. Bug remediation is the first work of every session. A drive session
+   warranted while bugs are open starts with the bug-fix work, not the
+   next product PRD.
+2. "Transferred to PRD-X" is a valid disposition only when PRD-X is the
+   next thing scheduled to run. Otherwise the bug is fixed narrowly now
+   and the owning PRD generalizes later.
+3. New bugs go to the top of the priority order, never the end. Tech-debt
+   findings follow the same rule.
+4. Consequences applied now: **PRD-057 runs first in Wave 3** (open bugs
+   009 and 013 transfer into it); **PRD-050 is deferred to Wave 7** (least
+   urgent item in the backlog, and a scope hog); the 066 remediation batch
+   (bugs 011, 012, 014, 016, the 009 circuit breaker, the 015 fixture
+   seam) is being fixed directly, not scheduled.
 
 ## Human-approval policy for unattended execution
 

@@ -743,11 +743,19 @@ fn resume_command(prd: &str, dry_run: bool) -> Result<(), String> {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let completed = discovered
+    // FAM-BUG-016: completion authority is the durable backlog status, not
+    // file location — a completed PRD whose document still sits in the active
+    // directory (the wave-2 shape) must satisfy dependencies here.
+    let mut completed = discovered
         .iter()
         .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Archived)
         .map(|entry| entry.id.to_string())
         .collect::<BTreeSet<_>>();
+    completed.extend(
+        familiar_ai_storage::OrchestrationRepository::new(db.conn())
+            .terminal_prds(&repository.key)
+            .map_err(|e| e.to_string())?,
+    );
     let active_prds = discovered
         .iter()
         .filter(|entry| entry.location == familiar_ai_core::PrdLocation::Active)

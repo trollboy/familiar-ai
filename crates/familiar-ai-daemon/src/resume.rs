@@ -95,6 +95,9 @@ pub fn discover_with_legacy(
     active_prds: &BTreeMap<String, String>,
     import: bool,
 ) -> Result<Vec<ResumeCandidate>, String> {
+    let terminal = familiar_ai_storage::OrchestrationRepository::new(db.conn())
+        .terminal_prds(repository_key)
+        .map_err(|e| e.to_string())?;
     let mut candidates = discover(db, repository_key)?
         .into_iter()
         .filter(|candidate| active_prds.contains_key(&candidate.prd_id))
@@ -112,6 +115,11 @@ pub fn discover_with_legacy(
             continue;
         };
         if existing.contains(&ownership.prd_id) {
+            continue;
+        }
+        // FAM-BUG-016: a preserved worktree for a PRD that is already
+        // completed/integrated is historical evidence, never resumable work.
+        if terminal.contains(&ownership.prd_id) {
             continue;
         }
         let attempt = DriverRepository::new(db.conn())
@@ -241,6 +249,14 @@ pub fn one(db: &Database, repository_key: &str, prd_id: &str) -> Result<ResumeCa
     let checkpoints = CheckpointRepository::new(db.conn());
     if !checkpoints.schema_available().map_err(|e| e.to_string())? {
         return Err(format!("no durable checkpoint for {prd_id}"));
+    }
+    let terminal = familiar_ai_storage::OrchestrationRepository::new(db.conn())
+        .terminal_prds(repository_key)
+        .map_err(|e| e.to_string())?;
+    if terminal.contains(prd_id) {
+        return Err(format!(
+            "{prd_id} is already completed and integrated; its preserved worktree is historical evidence, not resumable work"
+        ));
     }
     let checkpoint = checkpoints
         .get(repository_key, prd_id)
@@ -660,6 +676,64 @@ mod tests {
         std::fs::remove_file(root.path().join("doomed")).unwrap();
         let error = verify_commit_contains_candidate(root.path(), &kept, &manifest).unwrap_err();
         assert!(error.contains("doomed"), "{error}");
+    }
+
+    /// FAM-BUG-016 regression: a checkpoint for a PRD whose durable backlog
+    /// status is completed is historical evidence, never resumable work —
+    /// including across the zero-padded-file-stem ("PRD-009") versus
+    /// canonical-id ("PRD-9") spelling gap that let stale wave-2 worktrees
+    /// block wave-3 recovery.
+    #[test]
+    fn completed_prds_are_suppressed_from_recovery_inventory() {
+        use familiar_ai_core::{
+            BacklogStatusStore, DiscoveredPrd, PrdId, PrdLocation, RepositoryIdentity,
+        };
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = RepositoryIdentity {
+            worktree: "/tmp/work".into(),
+            key: "repo".into(),
+        };
+        // Zero-padded document path, archived location => durable completed.
+        let prd = DiscoveredPrd {
+            id: PrdId::new(9),
+            number: 9,
+            path: familiar_ai_core::RepositoryPath::new("docs/prds/done/PRD-009.md").unwrap(),
+            location: PrdLocation::Archived,
+            title: "Nine".into(),
+            dependencies: vec![],
+            metadata: Default::default(),
+            content_hash: "abc".into(),
+        };
+        familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&repository, &[prd])
+            .unwrap();
+        // A stale checkpoint survives under the CANONICAL id spelling.
+        CheckpointRepository::new(db.conn())
+            .put(&ExecutionCheckpoint {
+                checkpoint_id: "checkpoint-old".into(),
+                repository_key: "repo".into(),
+                prd_id: "PRD-9".into(),
+                prd_path: "docs/prds/PRD-009.md".into(),
+                execution_id: Some("exec-old".into()),
+                phase: "implemented_pending_review".into(),
+                base_revision: "stale".into(),
+                worktree_path: "/nonexistent".into(),
+                branch_name: None,
+                diff_hash: "sha256:old".into(),
+                changed_files_json: "[]".into(),
+                agent_identity: "agent".into(),
+                usage_json: "{}".into(),
+                test_evidence_json: "{}".into(),
+                invalid_reason: None,
+            })
+            .unwrap();
+        assert!(
+            discover(&db, "repo").unwrap().is_empty(),
+            "completed PRD's stale checkpoint must be suppressed"
+        );
+        let error = one(&db, "repo", "PRD-9").unwrap_err();
+        assert!(error.contains("already completed"), "{error}");
     }
 
     #[test]

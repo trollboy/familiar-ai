@@ -287,11 +287,14 @@ instead of deleting the history.
   archive checkpoints for PRDs whose integrated commit is contained in the
   current base, and satisfy dependencies from that integrated state. A stale
   historical candidate must never make a completed predecessor block new work.
-- **Disposition (2026-08-31): defect against landed PRD-066** — its reconciled-
-  recovery acceptance criterion was underimplemented (the integrating merge
-  changed `resume.rs` by four lines; no integrated-checkpoint suppression
-  exists). Highest-priority item in the 066 remediation batch: it blocks the
-  operator's current Wave 3 recovery.
+- **Disposition (2026-08-31): defect against landed PRD-066.**
+- **Status update (2026-08-31): Fixed.** Root cause was an identity-spelling
+  mismatch: `terminal_prds` filtered by zero-padded file stems ("PRD-048")
+  while checkpoints store canonical ids ("PRD-48"), so the suppression filter
+  never matched. Fixed: terminal set now carries both spellings; the
+  ownership-file recovery scan and `resume <prd>` also consult it; the
+  recovery planner's completed set unions durable backlog completion with
+  archived location. Regression pins the padded-stem/canonical-id shape.
 
 ### FAM-FRICTION-001 — Provider registration does not imply execution readiness
 
