@@ -30,6 +30,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Configure native compression or report a measured paired experiment.
+    Compress {
+        #[command(subcommand)]
+        command: CompressCommand,
+    },
     /// Manage provider endpoints and enabled models without handling credentials.
     Config {
         #[command(subcommand)]
@@ -155,6 +160,34 @@ enum BillingCommand {
         source: Option<String>,
         #[arg(long)]
         month: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CompressCommand {
+    OutputEnable {
+        stage: String,
+        #[arg(default_value = "compact")]
+        register: String,
+        #[arg(long)]
+        actor: String,
+    },
+    InputEnable {
+        provider: String,
+        #[arg(default_value = "native-rle")]
+        transform: String,
+        #[arg(long)]
+        actor: String,
+    },
+    /// With --lane, auditably label subsequent observations; without it,
+    /// report only measured paired ledger values. Default-on promotion
+    /// requires a recorded experiment result.
+    Experiment {
+        label: String,
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long, requires = "lane")]
+        actor: Option<String>,
     },
 }
 
@@ -473,6 +506,34 @@ enum BootstrapCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Compress { command } => {
+            let result = match command {
+                CompressCommand::OutputEnable {
+                    stage,
+                    register,
+                    actor,
+                } => familiar_ai_daemon::compress_cli::configure_output(&stage, &register, &actor),
+                CompressCommand::InputEnable {
+                    provider,
+                    transform,
+                    actor,
+                } => {
+                    familiar_ai_daemon::compress_cli::configure_input(&provider, &transform, &actor)
+                }
+                CompressCommand::Experiment { label, lane, actor } => match lane {
+                    Some(lane) => familiar_ai_daemon::compress_cli::configure_experiment(
+                        &label,
+                        &lane,
+                        actor.as_deref().expect("clap requires actor with lane"),
+                    ),
+                    None => familiar_ai_daemon::compress_cli::experiment(&label),
+                },
+            };
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
         Command::Config { command } => match config_command(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),

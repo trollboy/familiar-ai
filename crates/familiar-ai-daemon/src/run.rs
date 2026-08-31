@@ -13,6 +13,7 @@ use familiar_ai_agent::{
     ExecutionResult, RouteRequest, RouteRule, SelectionRecord, WorkerCapability, WorkerDescriptor,
     WorkerRegistry, WorkerStage,
 };
+use familiar_ai_compress::{RegisterId, REGISTER_VERSION};
 use familiar_ai_context::{
     render_stable_prefix, ContextBudget, ContextBudgetError, ContextBudgeter,
     ContextCompilationError, ContextCompiler, ContextProfile, ContextReferenceKind,
@@ -120,6 +121,40 @@ pub struct AgentSet<'a> {
     pub implementation: &'a dyn CodingAgent,
     pub reviewer: &'a dyn CodingAgent,
     pub remediation: &'a dyn CodingAgent,
+}
+
+struct RegisterAgent<'a> {
+    inner: &'a dyn CodingAgent,
+    register: Option<RegisterId>,
+}
+
+impl CodingAgent for RegisterAgent<'_> {
+    fn execute(
+        &self,
+        request: ExecutionRequest<'_>,
+        output: &mut dyn io::Write,
+    ) -> Result<ExecutionResult, AgentExecutionError> {
+        let prompt = inject_output_register(request.prompt, self.register);
+        self.inner.execute(
+            ExecutionRequest {
+                prompt: &prompt,
+                ..request
+            },
+            output,
+        )
+    }
+
+    fn isolation_capability(&self) -> familiar_ai_agent::IsolationCapability {
+        self.inner.isolation_capability()
+    }
+
+    fn budget_capability(&self) -> familiar_ai_agent::BudgetCapability {
+        self.inner.budget_capability()
+    }
+
+    fn preflight(&self) -> Result<(), String> {
+        self.inner.preflight()
+    }
 }
 
 pub fn resolved_remediation_entry(config: &Config) -> Result<AgentEntryConfig, String> {
@@ -945,6 +980,8 @@ fn execute_tracked_inner(
             "\n## Reserved migration version\n\nThis attempt exclusively owns migration version {version:03}. Any authored storage migration MUST use that exact numeric filename prefix; do not choose or renumber a migration independently.\n"
         ));
     }
+    let output_register = configured_output_register(config, "implementation")?;
+    prompt = inject_output_register(&prompt, output_register);
     let database_path = config.database.resolve_path(&paths.data_dir);
     let mut db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
     db.run_migrations()
@@ -1149,6 +1186,9 @@ fn execute_tracked_inner(
         },
         &mut io::stdout(),
     );
+    if let Some(register) = output_register {
+        eprintln!("output-register: {}@{}", register.id(), REGISTER_VERSION);
+    }
     let (result, outcome) = match &execution {
         Ok(result) => (result, outcome(result)),
         Err(AgentExecutionError::Launch { result, .. }) => (result.as_ref(), "launch_failed"),
@@ -1182,6 +1222,8 @@ fn execute_tracked_inner(
         implementation_entry.adapter.as_str(),
         &context.repository.worktree,
         &finalization,
+        output_register,
+        config,
     )
     .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
     let result = execution
@@ -1819,15 +1861,23 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         .map(|value| value / u64::from(config.review.max_review_attempts))
         .unwrap_or(300_000)
         .max(1);
+    let reviewer_with_register = RegisterAgent {
+        inner: reviewer_agent,
+        register: configured_output_register(config, "review")?,
+    };
+    let remediation_with_register = RegisterAgent {
+        inner: implementation_agent,
+        register: configured_output_register(config, "remediation")?,
+    };
     let reviewer_adapter = StructuredReviewAdapter::new(
-        reviewer_agent,
+        &reviewer_with_register,
         context.repository.worktree.clone(),
         reviewer.clone(),
         review_timeout,
         codex_session,
     );
     let remediation_adapter = CodingRemediationAdapter::new(
-        implementation_agent,
+        &remediation_with_register,
         context.repository.worktree.clone(),
         implementation.clone(),
         codex_session,
@@ -2194,6 +2244,8 @@ fn persist_accounting_observations(
     adapter: &str,
     worktree: &Path,
     finalization: &ExecutionFinalization,
+    output_register: Option<RegisterId>,
+    config: &Config,
 ) -> Result<(), RunError> {
     let period_end = Utc::now().to_rfc3339();
     let evidence = git_common_directory_evidence(worktree);
@@ -2254,6 +2306,16 @@ fn persist_accounting_observations(
                 source_event_hash: &format!("{base_hash}:model:{index}"),
                 provider_cost_lexical: result.reported_cost_usd_lexical.as_deref(),
                 project_resolution_evidence: evidence.as_deref(),
+                output_register_id: output_register.map(RegisterId::id).unwrap_or("none"),
+                output_register_version: output_register
+                    .map(|_| REGISTER_VERSION)
+                    .unwrap_or("none"),
+                // Raw/adaptor provider integration is out of scope in this PRD,
+                // so current execution observations truthfully record none.
+                input_compression_id: "none",
+                input_compression_version: "none",
+                compression_experiment: config.compression.experiment_label.as_deref(),
+                compression_lane: config.compression.experiment_lane.as_deref(),
             })
             .map_err(|e| RunError::Storage(e.to_string()))?;
         if let Some(observation_id) = observation_id {
@@ -2477,6 +2539,28 @@ fn render_prompt_with_prefix(context: &ExecutionContext, prefix: &str) -> String
     prompt.push_str(&context.prd.content);
     prompt.push('\n');
     prompt
+}
+
+pub fn configured_output_register(
+    config: &Config,
+    stage: &str,
+) -> Result<Option<RegisterId>, RunError> {
+    config
+        .compression
+        .output_registers
+        .get(stage)
+        .map(|identity| identity.parse::<RegisterId>())
+        .transpose()
+        .map_err(|error| RunError::Config(error.to_string()))
+}
+
+/// Appends nothing at all when disabled, preserving the historical prompt
+/// byte-for-byte. Kept public for adapter and regression use.
+pub fn inject_output_register(prompt: &str, register: Option<RegisterId>) -> String {
+    let Some(register) = register else {
+        return prompt.to_owned();
+    };
+    format!("{prompt}\n{}\n", register.contract())
 }
 
 #[cfg(test)]

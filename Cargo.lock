@@ -609,6 +609,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "familiar-ai-compress"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "familiar-ai-context"
 version = "0.1.0"
 dependencies = [
@@ -644,6 +652,7 @@ dependencies = [
  "chrono",
  "clap",
  "familiar-ai-agent",
+ "familiar-ai-compress",
  "familiar-ai-context",
  "familiar-ai-core",
  "familiar-ai-llm",

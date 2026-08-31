@@ -44,6 +44,12 @@ pub struct UsageObservation<'a> {
     pub provider_cost_lexical: Option<&'a str>,
     /// Canonical Git common-directory evidence; absent is explicitly degraded.
     pub project_resolution_evidence: Option<&'a str>,
+    pub output_register_id: &'a str,
+    pub output_register_version: &'a str,
+    pub input_compression_id: &'a str,
+    pub input_compression_version: &'a str,
+    pub compression_experiment: Option<&'a str>,
+    pub compression_lane: Option<&'a str>,
 }
 
 pub struct AccountingRepository<'a> {
@@ -63,6 +69,22 @@ pub struct LedgerUsageSummary {
     pub vendor_reported_estimates: u64,
     pub configured_rate_estimates: u64,
     pub known_zero_estimates: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompressionLaneSummary {
+    pub observations: u64,
+    pub uncached_input_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub known_nanousd: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompressionExperimentSummary {
+    pub off: CompressionLaneSummary,
+    pub on: CompressionLaneSummary,
 }
 
 impl<'a> AccountingRepository<'a> {
@@ -131,7 +153,7 @@ impl<'a> AccountingRepository<'a> {
         let (spec_identity, empirical_version) = selected_spec.unwrap_or((None, None));
         let tx = self.conn.unchecked_transaction().map_err(db)?;
         tx.execute("INSERT INTO accounting_evidence(evidence_id,execution_id,adapter,cli_version,model_identity,provider_session_id,provider_request_id,usage_json,provider_cost_lexical,observed_at,terminal_status,source_event_hash) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![evidence_id,value.execution_id,value.adapter,value.cli_version,value.model_identity,value.session_id,value.provider_request_id,usage_json,value.provider_cost_lexical,value.period_end,value.terminal_status,value.source_event_hash]).map_err(db)?;
-        tx.execute("INSERT INTO usage_observations(observation_id,evidence_id,project_id,degraded_identity,execution_id,attempt_id,stage,session_id,worker_identity,adapter,model_identity,service_tier,provider_request_id,uncached_input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,reasoning_output_tokens,unknown_reason,period_start,period_end,observed_at,ingested_at,spec_identity,empirical_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?21,?22,?23,?24)", params![observation_id,evidence_id,project_id,degraded,value.execution_id,value.attempt_id,value.stage,value.session_id,value.worker_identity,value.adapter,value.model_identity,value.service_tier,value.provider_request_id,value.uncached_input_tokens,value.cache_read_tokens,value.cache_write_tokens,value.output_tokens,value.reasoning_output_tokens,value.unknown_reason,value.period_start,value.period_end,now,spec_identity,empirical_version]).map_err(db)?;
+        tx.execute("INSERT INTO usage_observations(observation_id,evidence_id,project_id,degraded_identity,execution_id,attempt_id,stage,session_id,worker_identity,adapter,model_identity,service_tier,provider_request_id,uncached_input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,reasoning_output_tokens,unknown_reason,period_start,period_end,observed_at,ingested_at,spec_identity,empirical_version,output_register_id,output_register_version,input_compression_id,input_compression_version,compression_experiment,compression_lane) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)", params![observation_id,evidence_id,project_id,degraded,value.execution_id,value.attempt_id,value.stage,value.session_id,value.worker_identity,value.adapter,value.model_identity,value.service_tier,value.provider_request_id,value.uncached_input_tokens,value.cache_read_tokens,value.cache_write_tokens,value.output_tokens,value.reasoning_output_tokens,value.unknown_reason,value.period_start,value.period_end,now,spec_identity,empirical_version,value.output_register_id,value.output_register_version,value.input_compression_id,value.input_compression_version,value.compression_experiment,value.compression_lane]).map_err(db)?;
         tx.commit().map_err(db)?;
         Ok(Some(observation_id))
     }
@@ -228,6 +250,28 @@ impl<'a> AccountingRepository<'a> {
             configured_rate_estimates: costs.2,
             known_zero_estimates: costs.3,
         })
+    }
+
+    pub fn compression_experiment(
+        &self,
+        label: &str,
+    ) -> familiar_ai_core::Result<CompressionExperimentSummary> {
+        Ok(CompressionExperimentSummary {
+            off: self.compression_lane(label, "off")?,
+            on: self.compression_lane(label, "on")?,
+        })
+    }
+
+    fn compression_lane(
+        &self,
+        label: &str,
+        lane: &str,
+    ) -> familiar_ai_core::Result<CompressionLaneSummary> {
+        self.conn.query_row(
+            "SELECT count(*),sum(uncached_input_tokens),sum(cache_read_tokens),sum(cache_write_tokens),sum(output_tokens),sum((SELECT amount FROM cost_estimates c WHERE c.observation_id=o.observation_id AND c.unit='nanoUSD' LIMIT 1)) FROM usage_observations o WHERE compression_experiment=?1 AND compression_lane=?2",
+            params![label, lane],
+            |row| Ok(CompressionLaneSummary { observations: row.get(0)?, uncached_input_tokens: row.get(1)?, cache_read_tokens: row.get(2)?, cache_write_tokens: row.get(3)?, output_tokens: row.get(4)?, known_nanousd: row.get(5)? }),
+        ).map_err(db)
     }
 }
 
@@ -341,6 +385,12 @@ mod tests {
             source_event_hash: "sha256:fixture",
             provider_cost_lexical: Some("0.0000000015"),
             project_resolution_evidence: Some("/machine/git/common"),
+            output_register_id: "none",
+            output_register_version: "none",
+            input_compression_id: "none",
+            input_compression_version: "none",
+            compression_experiment: None,
+            compression_lane: None,
         };
         let observation = repo.append_observation(&value).unwrap().unwrap();
         assert_eq!(
