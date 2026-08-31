@@ -501,6 +501,17 @@ PRD-076.
   and full capability sessions were not implemented. Verification retained the
   knowingly incomplete candidate, and the driver immediately admitted PRD-062
   anyway. The operator again supplied the missing circuit breaker.
+- **PRD-056 recovery cost (2026-08-31):** The preserved candidate passed some
+  focused checks but was missing acceptance-critical daemon transport, detached
+  CLI lifecycle, MCP isolation, worker adoption, ownership races, atomic
+  PRD-064 reservations, accounting, and shared-service boundaries. External
+  recovery required two explicit acceptance audits and ultimately landed a
+  4,551-line change across 32 files. The first recovery pass even reported a
+  green workspace while correctly admitting that MCP still opened SQLite and
+  legacy CLI orchestration remained duplicated; only a second audit closed
+  those gaps. This is the exact failed workflow: `familiar-ai drive` produced
+  a retained partial, the session cascaded into PRD-062, and the operator then
+  finished PRD-056 individually outside Familiar.
 
 ### FAM-BUG-023 — Valid config cannot be edited because disabled delivery defaults active
 
