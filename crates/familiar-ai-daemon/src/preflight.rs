@@ -1,5 +1,6 @@
 //! Deterministic, side-effect-free prerequisite checks for unattended work.
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -104,8 +105,21 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
     // Provider authentication is resolved in the daemon itself. In
     // particular, credential-store references do not depend on a login shell
     // or an environment-variable bridge inherited by the supervisor.
+    let routed_providers = config.worker_registry.as_ref().map(|registry| {
+        registry
+            .workers
+            .values()
+            .map(|worker| worker.provider.as_str())
+            .collect::<BTreeSet<_>>()
+    });
     for (name, provider) in &config.providers {
         if provider.kind == familiar_ai_core::EndpointProviderKind::Inference {
+            if routed_providers
+                .as_ref()
+                .is_some_and(|providers| !providers.contains(name.as_str()))
+            {
+                continue;
+            }
             checks.push(provider_auth_check_with_store(
                 name,
                 &provider.auth,
@@ -306,5 +320,47 @@ mod tests {
         assert!(report.failure_summary().contains("failed"));
         assert!(report.failure_summary().contains("missing or empty"));
         assert!(!report.failure_summary().contains("credential="));
+    }
+
+    #[test]
+    fn unused_inventory_provider_does_not_block_worker_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.providers.insert(
+            "unused".into(),
+            familiar_ai_core::config::ProviderConfig {
+                kind: familiar_ai_core::EndpointProviderKind::Inference,
+                billing_mode: None,
+                organization_id: None,
+                organization_name: None,
+                project_id: None,
+                runtime: None,
+                host: "127.0.0.1:1".into(),
+                via: None,
+                auth: familiar_ai_core::config::AuthDescriptor::Env(
+                    "FAMILIAR_AI_TEST_DEFINITELY_MISSING_UNUSED_KEY".into(),
+                ),
+                models: vec!["unused-model".into()],
+                verified_at: None,
+                capabilities: Vec::new(),
+                recipe: None,
+            },
+        );
+        config.worker_registry = Some(familiar_ai_core::config::WorkerRegistryConfig::default());
+        let agent = AvailableAgent;
+        let report = run(
+            &AgentSet {
+                implementation: &agent,
+                reviewer: &agent,
+                remediation: &agent,
+            },
+            &config,
+            temp.path(),
+        );
+
+        assert!(report
+            .checks
+            .iter()
+            .all(|check| check.check_id != "provider_auth.unused"));
     }
 }

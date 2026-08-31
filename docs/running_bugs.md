@@ -429,3 +429,22 @@ PRD-076.
   with no manual worktree edits, cherry-picks, backlog overrides, or per-PRD
   completion commands. Until then, this bug remains open regardless of whether
   the individual underlying defects are dispositioned elsewhere.
+
+### FAM-BUG-020 — Unused provider credential blocks every drive session
+
+- **Status:** Fixed 2026-08-31; exposed at Wave 4 admission
+- **Observed:** Wave 4 spent roughly eleven silent minutes in shared preflight,
+  then terminated before its first attempt because the registered but unrouted
+  `unsloth-local` inventory provider referenced an absent `UNSLOTH_API_KEY`.
+  No enabled worker used that provider, and the local endpoint was offline.
+- **Impact:** Merely registering an optional provider turns its credential into
+  a global availability dependency. One offline experimental endpoint can
+  prevent healthy Codex and Ollama workers from executing any PRD.
+- **Fix:** When a worker registry is present, provider-auth preflight now checks
+  only providers referenced by enabled registry workers. Inventory-only
+  providers remain registered without gating unrelated work. A regression pins
+  an unused provider with a missing credential as absent from the preflight
+  report.
+- **Remaining friction:** The failure was silent for roughly eleven minutes,
+  reaffirming FAM-BUG-011. The execution plan also directs operators to
+  `make wave-plan-check`, but the repository currently defines no such target.
