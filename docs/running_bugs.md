@@ -126,6 +126,113 @@ instead of deleting the history.
   `claude-code`, with a configuration round-trip regression test. The unsafe
   worker entry was removed before any execution.
 
+### FAM-BUG-009 — Synthetic Claude discovery identity passed admission and failed every Wave 3 attempt
+
+- **Status:** Open; unsafe worker disabled and claims recovered
+- **Observed:** The CLI-login probe recorded the command label `claude` as a
+  discovered model. The registry admitted `claude/claude`, routing selected it
+  for every stage, and Claude Code rejected `--model claude` as
+  `unrecognized_model`. The allowlisted Wave 3 session consumed all nine PRD
+  attempts without launching implementation.
+- **Impact:** Synthetic discovery metadata can pass provider verification,
+  worker enablement, routing, and preflight, then fan one configuration error
+  across an entire wave. The resulting token-usage-unknown classification hides
+  the actual configuration failure.
+- **Recovery:** Disabled `claude/claude` before retry and released all nine
+  claims with attributed recovery events; no implementation changes occurred.
+- **Expected fix:** CLI-backed providers must represent an omitted/default model
+  honestly or discover a valid selectable identity. Worker preflight must test
+  the configured model, and a deterministic configuration rejection must stop
+  the session before consuming every PRD attempt.
+
+### FAM-BUG-010 — Authored Wave 3 achievable width disagrees with scheduler
+
+- **Status:** Open
+- **Observed:** The execution plan claims Wave 3 achievable width `~3–4`, but
+  the real scheduler computed width 1. PRD-050's declared
+  `docs/contracts/providers.md` and configuration scope overlaps every other
+  Wave 3 candidate directly or through coarse core scope.
+- **Impact:** The approved wave promises concurrency that the actual declarations
+  cannot achieve; dogfooding serializes all nine items.
+- **Expected fix:** Validate and persist the exact authored wave through the
+  production scheduler before approval, list every conflicting pair, and update
+  either scopes/wave composition or the claimed width.
+
+### FAM-BUG-011 — Preflight is silent, duplicated per stage, and looks hung
+
+- **Status:** Open
+- **Observed:** Drive emitted only `session started` for several minutes while
+  preflight repeatedly probed the same routed Claude executable across stages
+  and ran required `cargo test --workspace` with output suppressed. An operator
+  reasonably interpreted the first healthy session as orphaned and interrupted
+  it; recovery later marked it correctly.
+- **Impact:** Long healthy preflight is operationally indistinguishable from a
+  deadlock, and duplicate expensive probes inflate every drive startup.
+- **Expected fix:** Stream check start/finish/elapsed heartbeats, deduplicate
+  identical executable/auth probes, expose the active check in durable session
+  status, and retain bounded captured diagnostics on failure.
+
+### FAM-BUG-012 — Dependent PRD admitted after its dependency retained without integration
+
+- **Status:** Open; observed during Wave 3
+- **Observed:** PRD-052 retained with `human_review_required` and never landed,
+  but the same session immediately admitted PRD-054, which declares PRD-052 as
+  a dependency. PRD-054's worker correctly observed that the collector and
+  reconciliation implementation did not exist in its base revision and created
+  a minimal compatibility seam instead.
+- **Impact:** Dependency admission is checking historical/backlog state rather
+  than successful integration into the session revision. Dependents can fork
+  incompatible duplicate foundations, guarantee merge conflicts, and falsely
+  narrate acceptance against code they never inherited.
+- **Expected fix:** A dependency is satisfied for session admission only when
+  its required commit is contained in the current integration revision. A
+  retained, review-blocked, or verification-failed predecessor blocks or defers
+  every dependent with a durable `dependency_not_integrated` decision.
+
+### FAM-BUG-013 — Reviewer preflight admitted an incompatible Ollama runtime
+
+- **Status:** Open; review blocked for PRD-052 and PRD-054
+- **Observed:** Independent review routed to Ollama. Each of three review
+  attempts then failed identically because installed Ollama 0.12.3 is below
+  Codex's required 0.13.4. The failure was reported as malformed structured
+  review/EOF and retried three times.
+- **Impact:** Preflight does not establish runtime compatibility, deterministic
+  configuration failures consume the full retry budget, and completed
+  implementations retain behind `human_review_required` without review.
+- **Expected fix:** Worker preflight must probe the complete adapter/runtime/model
+  tuple and minimum version before claims. Deterministic incompatibility must
+  stop once with its real typed reason, not be reclassified as malformed model
+  output or retried.
+
+### FAM-BUG-014 — Standing batch approval still stops dependency changes as ambiguous scope
+
+- **Status:** Open; PRD-050 retained
+- **Observed:** PRD-050 legitimately added one dependency and changed
+  `Cargo.toml`/`Cargo.lock` within the approved implementation, but global scope
+  policy classified both files as `human_review`. The execution plan's standing
+  batch approval did not produce a usable waiver or review decision, so the
+  attempt retained as `scope_ambiguous`.
+- **Impact:** Approved unattended work that necessarily changes dependencies
+  cannot land, recreating the human-review wall the execution plan intended to
+  remove.
+- **Expected fix:** PRD-declared manifest/lock scope plus standing approval must
+  become a durable, hash-bound policy decision before execution, or admission
+  must refuse such PRDs before spending implementation tokens.
+
+### FAM-BUG-015 — Required verification cannot bind loopback in the agent sandbox
+
+- **Status:** Open; PRD-050/057 verification affected
+- **Observed:** The existing Unsloth authenticated-discovery regression binds a
+  loopback listener. Focused and workspace verification inside the coding-agent
+  sandbox intermittently fails with `Operation not permitted`, although the same
+  test passes in the operator environment.
+- **Impact:** Unrelated PRDs retain as verification failures and workers learn to
+  dismiss a required workspace failure as environmental narration.
+- **Expected fix:** Required verification must run in a preflighted environment
+  matching its declared network/socket needs, or the fixture must use a
+  deterministic transport abstraction that needs no forbidden socket. The
+  durable result must distinguish environment denial from product failure.
+
 ### FAM-FRICTION-001 — Provider registration does not imply execution readiness
 
 - **Status:** Open design/UX gap
@@ -148,6 +255,8 @@ instead of deleting the history.
   selected or available model.
 - **Impact:** Routing provenance cannot honestly answer which hosted model will
   execute work.
+- **Confirmed failure (2026-08-31):** `claude` was used as a literal model and
+  rejected by Claude Code across all nine Wave 3 attempts; see FAM-BUG-009.
 - **Expected fix:** Represent CLI-default/unknown model identity explicitly and
   capture the provider-reported model from execution; never present a command
   name as a discovered model.
