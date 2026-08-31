@@ -367,7 +367,29 @@ pub enum AuthDescriptor {
     None,
     CliLogin(String),
     Env(String),
+    CredentialStore(CredentialStoreDescriptor),
     SshAgent,
+}
+
+/// A durable reference to a credential managed outside Familiar. The fields
+/// are deliberately restricted to stable identifiers so the descriptor has
+/// one unambiguous, diagnostic-safe representation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialStoreDescriptor {
+    pub store: String,
+    pub service: String,
+    pub account: String,
+}
+
+impl std::fmt::Display for CredentialStoreDescriptor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "credential-store: {}/{}/{}",
+            self.store, self.service, self.account
+        )
+    }
 }
 
 impl TryFrom<String> for AuthDescriptor {
@@ -392,6 +414,19 @@ impl TryFrom<String> for AuthDescriptor {
             } else {
                 Ok(Self::Env(name.to_owned()))
             }
+        } else if let Some(reference) = value.strip_prefix("credential-store: ") {
+            let fields = reference.split('/').collect::<Vec<_>>();
+            if fields.len() != 3 {
+                return Err(format!("invalid auth descriptor '{value}'"));
+            }
+            validate_identifier(fields[0], "credential store")?;
+            validate_identifier(fields[1], "credential store service")?;
+            validate_identifier(fields[2], "credential store account")?;
+            Ok(Self::CredentialStore(CredentialStoreDescriptor {
+                store: fields[0].to_owned(),
+                service: fields[1].to_owned(),
+                account: fields[2].to_owned(),
+            }))
         } else {
             Err(format!("invalid auth descriptor '{value}'"))
         }
@@ -404,6 +439,7 @@ impl From<AuthDescriptor> for String {
             AuthDescriptor::None => "none".into(),
             AuthDescriptor::CliLogin(command) => format!("cli-login: {command}"),
             AuthDescriptor::Env(name) => format!("env: {name}"),
+            AuthDescriptor::CredentialStore(reference) => reference.to_string(),
             AuthDescriptor::SshAgent => "ssh-agent".into(),
         }
     }

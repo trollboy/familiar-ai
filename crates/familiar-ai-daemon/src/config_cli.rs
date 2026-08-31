@@ -18,7 +18,119 @@ use ring::digest::{digest, SHA256};
 use toml_edit::{value, Array, Document, Item, Table};
 
 const BYO_AUTH_REMEDY: &str =
-    "configure BYO-auth with a descriptor (`cli-login: NAME`, `env: NAME`, `ssh-agent`, or `none`); never pass a credential";
+    "configure BYO-auth with a descriptor (`cli-login: NAME`, `env: NAME`, `credential-store: STORE/SERVICE/ACCOUNT`, `ssh-agent`, or `none`); never pass a credential";
+
+/// Read-only boundary for platform credential stores. Implementations must
+/// return credential bytes in memory and must never export them to an
+/// environment variable or durable record.
+pub trait CredentialStore {
+    fn resolve(
+        &self,
+        descriptor: &familiar_ai_core::config::CredentialStoreDescriptor,
+    ) -> Result<String, CredentialStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialStoreError {
+    UnsupportedPlatform,
+    Missing,
+    AccessDenied,
+    Unavailable,
+}
+
+pub struct SystemCredentialStore;
+
+impl CredentialStore for SystemCredentialStore {
+    fn resolve(
+        &self,
+        descriptor: &familiar_ai_core::config::CredentialStoreDescriptor,
+    ) -> Result<String, CredentialStoreError> {
+        if descriptor.store != "macos-keychain" || !cfg!(target_os = "macos") {
+            return Err(CredentialStoreError::UnsupportedPlatform);
+        }
+        let output = Command::new("/usr/bin/security")
+            .args([
+                "find-generic-password",
+                "-s",
+                &descriptor.service,
+                "-a",
+                &descriptor.account,
+                "-w",
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|_| CredentialStoreError::Unavailable)?;
+        if !output.status.success() {
+            return Err(match output.status.code() {
+                Some(44) => CredentialStoreError::Missing,
+                Some(36) | Some(51) | Some(128) => CredentialStoreError::AccessDenied,
+                _ => CredentialStoreError::Unavailable,
+            });
+        }
+        let credential =
+            String::from_utf8(output.stdout).map_err(|_| CredentialStoreError::Unavailable)?;
+        let credential = credential.trim_end_matches(['\r', '\n']).to_owned();
+        if credential.is_empty() {
+            return Err(CredentialStoreError::Missing);
+        }
+        Ok(credential)
+    }
+}
+
+/// An intentionally non-printable in-memory credential. Debug output is
+/// always redacted; callers can only borrow it while constructing a request.
+pub struct ResolvedCredential(String);
+
+impl std::fmt::Debug for ResolvedCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ResolvedCredential([REDACTED])")
+    }
+}
+
+impl ResolvedCredential {
+    pub fn expose_for_request(&self) -> &str {
+        &self.0
+    }
+}
+
+pub fn resolve_auth_with_store(
+    auth: &AuthDescriptor,
+    store: &dyn CredentialStore,
+) -> Result<Option<ResolvedCredential>, String> {
+    match auth {
+        AuthDescriptor::Env(name) => std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(ResolvedCredential)
+            .map(Some)
+            .ok_or_else(|| {
+                format!("required environment variable {name} is missing — export `{name}`.")
+            }),
+        AuthDescriptor::CredentialStore(descriptor) => store
+            .resolve(descriptor)
+            .and_then(|value| {
+                if value.is_empty() {
+                    Err(CredentialStoreError::Missing)
+                } else {
+                    Ok(value)
+                }
+            })
+            .map(|value| Some(ResolvedCredential(value)))
+            .map_err(|condition| {
+                let condition = match condition {
+                    CredentialStoreError::UnsupportedPlatform => {
+                        "credential store is unsupported on this platform"
+                    }
+                    CredentialStoreError::Missing => "entry is missing or empty",
+                    CredentialStoreError::AccessDenied => "access was denied",
+                    CredentialStoreError::Unavailable => "credential store is unavailable",
+                };
+                format!("{descriptor}: {condition}")
+            }),
+        _ => Ok(None),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigContext {
@@ -569,26 +681,25 @@ fn provider_add(
         .map_err(|error| format!("{name}: {error} — nothing added."))?;
     let verified_at = Utc::now().to_rfc3339();
     let actor = actor(supplied_actor)?;
-    mutate(
-        context,
-        "familiar-ai config provider add",
-        &actor,
-        |document| {
-            let table = provider_table(document, name);
-            table.decor_mut().set_prefix(format!(
-                "# added by familiar-ai config provider add — {actor} {verified_at}\n"
-            ));
-            table["kind"] = value("inference");
-            if runtime == Some(InferenceRuntimeKind::Unsloth) {
-                table["runtime"] = value("unsloth");
-            }
-            table["host"] = value(host);
-            table["auth"] = value(String::from(descriptor.clone()));
-            table["models"] = array_value(&models);
-            table["verified_at"] = value(&verified_at);
-            Ok(())
-        },
-    )?;
+    let audit_command = format!(
+        "familiar-ai config provider add --auth {}",
+        String::from(descriptor.clone())
+    );
+    mutate(context, &audit_command, &actor, |document| {
+        let table = provider_table(document, name);
+        table.decor_mut().set_prefix(format!(
+            "# added by familiar-ai config provider add — {actor} {verified_at}\n"
+        ));
+        table["kind"] = value("inference");
+        if runtime == Some(InferenceRuntimeKind::Unsloth) {
+            table["runtime"] = value("unsloth");
+        }
+        table["host"] = value(host);
+        table["auth"] = value(String::from(descriptor.clone()));
+        table["models"] = array_value(&models);
+        table["verified_at"] = value(&verified_at);
+        Ok(())
+    })?;
     println!(
         "Added {name} ({kind}) at {host} — {} models discovered.",
         models.len()
@@ -1504,7 +1615,17 @@ fn probe(
     host: &str,
     auth: &AuthDescriptor,
 ) -> Result<Vec<String>, String> {
-    check_auth(auth)?;
+    probe_with_store(runtime, name, host, auth, &SystemCredentialStore)
+}
+
+pub fn probe_with_store(
+    runtime: Option<InferenceRuntimeKind>,
+    name: &str,
+    host: &str,
+    auth: &AuthDescriptor,
+    store: &dyn CredentialStore,
+) -> Result<Vec<String>, String> {
+    let credential = check_auth_with_store(auth, store)?;
     #[cfg(test)]
     match host {
         "fixture-success:1" => return Ok(vec!["llama2".into(), "qwen3".into()]),
@@ -1512,7 +1633,7 @@ fn probe(
         _ => {}
     }
     if runtime == Some(InferenceRuntimeKind::Unsloth) {
-        probe_unsloth(host, auth)
+        probe_unsloth(host, auth, credential.as_ref())
     } else if name == "ollama" {
         probe_ollama(host)
     } else if let AuthDescriptor::CliLogin(command) = auth {
@@ -1522,13 +1643,21 @@ fn probe(
     }
 }
 
-fn probe_unsloth(host: &str, auth: &AuthDescriptor) -> Result<Vec<String>, String> {
+fn probe_unsloth(
+    host: &str,
+    auth: &AuthDescriptor,
+    credential: Option<&ResolvedCredential>,
+) -> Result<Vec<String>, String> {
     validate_host(host)?;
-    let token = match auth {
-        AuthDescriptor::Env(name) => std::env::var(name).map_err(|_| {
-            format!("required environment variable {name} is missing — export `{name}`.")
-        })?,
-        _ => return Err("unsloth auth must use an `env: NAME` descriptor".into()),
+    let token = match (auth, credential) {
+        (AuthDescriptor::Env(_) | AuthDescriptor::CredentialStore(_), Some(value)) => {
+            value.expose_for_request()
+        }
+        _ => {
+            return Err(
+                "unsloth auth must use an `env: NAME` or credential-store descriptor".into(),
+            )
+        }
     };
     let response = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -1566,19 +1695,22 @@ fn probe_unsloth(host: &str, auth: &AuthDescriptor) -> Result<Vec<String>, Strin
     Ok(models)
 }
 
-fn check_auth(auth: &AuthDescriptor) -> Result<(), String> {
+pub fn check_auth(auth: &AuthDescriptor) -> Result<Option<ResolvedCredential>, String> {
+    check_auth_with_store(auth, &SystemCredentialStore)
+}
+
+pub fn check_auth_with_store(
+    auth: &AuthDescriptor,
+    store: &dyn CredentialStore,
+) -> Result<Option<ResolvedCredential>, String> {
     match auth {
-        AuthDescriptor::None => Ok(()),
-        AuthDescriptor::Env(name) => match std::env::var_os(name).filter(|value| !value.is_empty())
-        {
-            Some(_) => Ok(()),
-            None => Err(format!(
-                "required environment variable {name} is missing — export `{name}`."
-            )),
-        },
+        AuthDescriptor::None => Ok(None),
+        AuthDescriptor::Env(_) | AuthDescriptor::CredentialStore(_) => {
+            resolve_auth_with_store(auth, store)
+        }
         AuthDescriptor::SshAgent => {
             match std::env::var_os("SSH_AUTH_SOCK").filter(|value| !value.is_empty()) {
-                Some(_) => Ok(()),
+                Some(_) => Ok(None),
                 None => Err(
                     "SSH agent unavailable — start an SSH agent and load the required key.".into(),
                 ),
@@ -1601,7 +1733,7 @@ fn check_auth(auth: &AuthDescriptor) -> Result<(), String> {
                     if output.status.success()
                         && (executable != "claude" || claude_status_logged_in(&output.stdout)) =>
                 {
-                    Ok(())
+                    Ok(None)
                 }
                 _ if executable == "az" => Err("az CLI not authenticated — run `az login`.".into()),
                 _ => Err(format!(
@@ -1767,8 +1899,12 @@ mod tests {
             )
             .unwrap();
         });
-        let models =
-            probe_unsloth(&address.to_string(), &AuthDescriptor::Env(ENV_NAME.into())).unwrap();
+        let models = probe_unsloth(
+            &address.to_string(),
+            &AuthDescriptor::Env(ENV_NAME.into()),
+            Some(&ResolvedCredential("test-only-secret".into())),
+        )
+        .unwrap();
         server.join().unwrap();
         std::env::remove_var(ENV_NAME);
         assert_eq!(models, ["unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"]);

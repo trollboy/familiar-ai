@@ -101,6 +101,18 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
             },
         });
     }
+    // Provider authentication is resolved in the daemon itself. In
+    // particular, credential-store references do not depend on a login shell
+    // or an environment-variable bridge inherited by the supervisor.
+    for (name, provider) in &config.providers {
+        if provider.kind == familiar_ai_core::EndpointProviderKind::Inference {
+            checks.push(provider_auth_check_with_store(
+                name,
+                &provider.auth,
+                &crate::config_cli::SystemCredentialStore,
+            ));
+        }
+    }
     // Expire deploy-target authentication before an unattended claim. Only
     // targets reachable through this repository's role bindings are probed.
     match config.repository(repository) {
@@ -146,6 +158,26 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
         }),
     }
     PreflightReport { checks }
+}
+
+pub fn provider_auth_check_with_store(
+    name: &str,
+    auth: &familiar_ai_core::config::AuthDescriptor,
+    store: &dyn crate::config_cli::CredentialStore,
+) -> PreflightCheck {
+    let descriptor = String::from(auth.clone());
+    match crate::config_cli::check_auth_with_store(auth, store) {
+        Ok(_) => PreflightCheck {
+            check_id: format!("provider_auth.{name}"),
+            status: PreflightStatus::Passed,
+            detail: format!("available via {descriptor}"),
+        },
+        Err(condition) => PreflightCheck {
+            check_id: format!("provider_auth.{name}"),
+            status: PreflightStatus::Failed,
+            detail: condition,
+        },
+    }
 }
 
 fn writable_path_check(check_id: &str, path: &Path) -> PreflightCheck {
