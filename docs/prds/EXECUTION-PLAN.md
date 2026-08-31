@@ -1,7 +1,7 @@
 # Backlog Execution Plan — 2026-08-30
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
-**Approval:** All 34 pending PRDs (032, 036–038, 041, 044–064, 066–073) are
+**Approval:** All 36 pending PRDs (032, 036–038, 041, 044–064, 066–075) are
 approved for implementation. The owner-directed economy family
 (2026-08-30): PRD-069 native token compression (caveman functionality
 replicated first-party, no external dependency), PRD-070 daemon context
@@ -87,7 +87,7 @@ whole-crate declarations forfeit concurrency by design.
 | 2 | 041, 048, 049, 051 — **completed 2026-08-30** | 4 | 1 (measured) |
 | gate | 066 — integration-aware parallel orchestration | 1 | 1 |
 | gate | 067, 068 — verification truth, driver hygiene | 2 | 2 (disjoint by construction) |
-| 3 | 050, 052, 054, 057, 064, 069, 070 | 7 | ~3–4 (069/070's new crates are disjoint) |
+| 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | 9 | ~3–4 (069/070's new crates are disjoint; 074/075 share config surfaces and pipeline) |
 | 4 | 032, 055, 056, 062 | 4 | ~2 |
 | 5 | 038, 053, 058 | 3 | ~2 |
 | 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 (per-adapter files disjoint; 072 shares 058's surfaces) |

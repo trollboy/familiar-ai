@@ -45,9 +45,9 @@ instead of deleting the history.
   securely in Keychain.
 - **Expected fix:** Add a non-exporting Keychain auth descriptor/resolver with
   redaction, probe, daemon, and supervisor coverage.
-- **Disposition (2026-08-31):** no owning PRD — needs a small new PRD
-  extending PRD-047 BYO-auth with a platform credential-store descriptor.
-  Owner decision on priority.
+- **Disposition (2026-08-31):** transferred to **PRD-074** (platform
+  credential-store authentication: use-time Keychain resolution, never
+  exported or persisted, supervisor-context coverage, fail-closed).
 
 ### FAM-BUG-004 — Claude CLI false-positive authentication
 
@@ -77,9 +77,10 @@ instead of deleting the history.
 ### FAM-BUG-006 — First model enable can create an invalid mixed configuration
 
 - **Status:** Corruption guard fixed (committed in `4f0305e`); migration UX remains open
-- **Disposition (2026-08-31):** migration UX has no owning PRD — needs a small
-  new PRD (explicit audited lossless `[agents]` → `[worker_registry]`
-  migration command) or a PRD-047-family follow-up. Owner decision.
+- **Disposition (2026-08-31):** transferred to **PRD-075** (audited lossless
+  `[agents]` → `[worker_registry]` migration command, plus the generalized
+  invariant: every configuration mutation validates the complete proposed
+  configuration before atomic persistence).
 - **Observed:** `config model enable codex/codex` added `[worker_registry]` to a
   configuration already containing `[agents]`. The mutation path validated the
   registry in isolation, then every subsequent load failed because the two
