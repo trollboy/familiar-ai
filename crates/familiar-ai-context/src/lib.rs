@@ -157,12 +157,26 @@ pub enum ContextCompilationError {
     ReadPrd { path: PathBuf, source: io::Error },
     #[error("invalid directly referenced document {path}: {detail}")]
     InvalidReference { path: String, detail: String },
+    #[error("authoritative input reference is missing: {path}")]
+    MissingReference { path: String },
     #[error("cannot read directly referenced document {path}: {source}")]
     ReadReference { path: PathBuf, source: io::Error },
     #[error("token estimate overflow for {path}")]
     TokenEstimateOverflow { path: String },
     #[error("aggregate token estimate overflow")]
     AggregateTokenOverflow,
+}
+
+impl ContextCompilationError {
+    /// Stable driver retention class. Context failures are attempt-local and
+    /// must never fall through to the driver's unclassified terminal path.
+    pub fn retention_class(&self) -> &'static str {
+        match self {
+            Self::MissingReference { .. } => "missing_authoritative_input_reference",
+            Self::ReadReference { .. } => "unreadable_reference",
+            _ => "context_compilation_failed",
+        }
+    }
 }
 
 impl ContextCompiler {
@@ -482,13 +496,18 @@ fn validate_reference(
     root: &str,
 ) -> Result<PathBuf, ContextCompilationError> {
     let candidate = worktree.join(relative);
-    let path =
-        candidate
-            .canonicalize()
-            .map_err(|error| ContextCompilationError::InvalidReference {
+    let path = candidate.canonicalize().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ContextCompilationError::MissingReference {
+                path: relative.into(),
+            }
+        } else {
+            ContextCompilationError::InvalidReference {
                 path: relative.into(),
                 detail: format!("cannot be resolved: {error}"),
-            })?;
+            }
+        }
+    })?;
     let allowed = worktree.join(root).canonicalize().map_err(|error| {
         ContextCompilationError::InvalidReference {
             path: relative.into(),
@@ -712,8 +731,21 @@ mod tests {
             })
             .unwrap_err();
         assert!(
-            matches!(error, ContextCompilationError::InvalidReference { path, .. } if path == "docs/adr/missing.md")
+            matches!(error, ContextCompilationError::MissingReference { ref path } if path == "docs/adr/missing.md")
         );
+        assert_eq!(
+            error.retention_class(),
+            "missing_authoritative_input_reference"
+        );
+    }
+
+    #[test]
+    fn unreadable_reference_has_a_precise_retention_class() {
+        let error = ContextCompilationError::ReadReference {
+            path: PathBuf::from("docs/contracts/unreadable.md"),
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "fixture"),
+        };
+        assert_eq!(error.retention_class(), "unreadable_reference");
     }
 
     #[test]

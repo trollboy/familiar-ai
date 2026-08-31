@@ -13,9 +13,9 @@ pub use backlog::{
     admit_run_prd, resolve_run_prd, structured_prd_metadata, validate_graph,
     validate_recovery_attribution, BacklogDiscovery, BacklogEntry, BacklogError, BacklogLayout,
     BacklogManager, BacklogProfile, BacklogRecoveryAction, BacklogStatus, BacklogStatusStore,
-    BacklogStoreError, DiscoveredPrd, FilesystemBacklogDiscovery, IneligibilityReason, NextPrd,
-    PrdId, PrdLocation, PrdMetadata, PrdMetadataPolicy, ProfiledFilesystemBacklogDiscovery,
-    RepositoryIdentity, RepositoryPath,
+    BacklogStoreError, DiscoveredPrd, FilesystemBacklogDiscovery, IneligibilityReason,
+    MetadataCheckMode, NextPrd, PrdId, PrdLocation, PrdMetadata, PrdMetadataPolicy,
+    ProfiledFilesystemBacklogDiscovery, RepositoryIdentity, RepositoryPath,
 };
 pub use bootstrap::*;
 pub use config::{

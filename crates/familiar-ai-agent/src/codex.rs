@@ -1,10 +1,14 @@
+use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
 use crate::isolation::{isolated_command, stream_lines, StreamAction};
-use crate::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
+use crate::{
+    AgentExecutionError, CodexExecutionSession, CodingAgent, ExecutionRequest, ExecutionResult,
+};
 
 #[derive(Debug, Clone)]
 pub struct CodexAgent {
@@ -36,6 +40,69 @@ impl CodexAgent {
             Some(line.to_owned())
         }
     }
+
+    #[cfg(not(test))]
+    fn invalidate_incompatible_model_cache(&self, session: Option<&CodexExecutionSession>) {
+        let Some(session) = session else {
+            return;
+        };
+        let Some(path) = codex_home().map(|home| home.join("models_cache.json")) else {
+            return;
+        };
+        let _ = invalidate_incompatible_model_cache(session, &path, &mut io::stderr().lock());
+    }
+
+    #[cfg(test)]
+    fn invalidate_incompatible_model_cache(&self, _session: Option<&CodexExecutionSession>) {}
+}
+
+#[cfg(not(test))]
+fn codex_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
+        })
+}
+
+fn invalidate_incompatible_model_cache(
+    session: &CodexExecutionSession,
+    path: &Path,
+    diagnostic: &mut dyn Write,
+) -> io::Result<bool> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let incompatible = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("models").and_then(Value::as_array).cloned())
+        .is_some_and(|models| {
+            !models.is_empty()
+                && models
+                    .iter()
+                    .any(|model| model.get("base_instructions").is_none())
+        });
+    let canonical_key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    if !incompatible {
+        return Ok(false);
+    }
+
+    fs::remove_file(path)?;
+    let first_diagnostic = session
+        .diagnosed_model_caches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(canonical_key);
+    if first_diagnostic {
+        writeln!(
+            diagnostic,
+            "codex: invalidated incompatible model-cache schema at {} (missing field base_instructions); refreshing",
+            path.display()
+        )?;
+    }
+    Ok(true)
 }
 
 impl CodingAgent for CodexAgent {
@@ -63,6 +130,7 @@ impl CodingAgent for CodexAgent {
                 result: Box::default(),
             });
         }
+        self.invalidate_incompatible_model_cache(request.codex_session);
         let mut result = ExecutionResult {
             // Probing executes the adapter binary. Never do that outside the
             // isolated filesystem boundary used for review.
@@ -263,6 +331,61 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_model_cache_is_removed_each_execution_and_diagnosed_once_per_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("models_cache.json");
+        let first_session = CodexExecutionSession::default();
+        fs::write(&cache, r#"{"models":[{"slug":"stale"}]}"#).unwrap();
+        let mut diagnostics = Vec::new();
+        assert!(
+            invalidate_incompatible_model_cache(&first_session, &cache, &mut diagnostics).unwrap()
+        );
+        assert!(!cache.exists());
+        fs::write(&cache, r#"{"models":[{"slug":"stale"}]}"#).unwrap();
+        assert!(
+            invalidate_incompatible_model_cache(&first_session, &cache, &mut diagnostics).unwrap()
+        );
+        assert!(!cache.exists());
+        assert_eq!(
+            String::from_utf8_lossy(&diagnostics)
+                .matches("missing field base_instructions")
+                .count(),
+            1
+        );
+
+        let later_session = CodexExecutionSession::default();
+        fs::write(&cache, r#"{"models":[{"slug":"stale"}]}"#).unwrap();
+        assert!(
+            invalidate_incompatible_model_cache(&later_session, &cache, &mut diagnostics).unwrap()
+        );
+        assert!(!cache.exists());
+        assert_eq!(
+            String::from_utf8_lossy(&diagnostics)
+                .matches("missing field base_instructions")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn compatible_model_cache_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("models_cache.json");
+        fs::write(
+            &cache,
+            r#"{"models":[{"slug":"current","base_instructions":"help"}]}"#,
+        )
+        .unwrap();
+        assert!(!invalidate_incompatible_model_cache(
+            &CodexExecutionSession::default(),
+            &cache,
+            &mut Vec::new()
+        )
+        .unwrap());
+        assert!(cache.exists());
+    }
+
+    #[test]
     fn parses_only_supported_typed_events() {
         let mut result = ExecutionResult::default();
         let mut terminal_seen = false;
@@ -331,6 +454,7 @@ mod tests {
                 denied_read_path: None,
                 prompt: "review",
                 prompt_cache_key: None,
+                codex_session: None,
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(50),
@@ -364,6 +488,7 @@ mod tests {
                     denied_read_path: None,
                     prompt: "work",
                     prompt_cache_key: None,
+                    codex_session: None,
                     filesystem: crate::FilesystemPolicy::Normal,
                     model: None,
                     timeout_ms: Some(5_000),
@@ -394,6 +519,7 @@ mod tests {
             denied_read_path: None,
             prompt: "work",
             prompt_cache_key: None,
+            codex_session: None,
             filesystem: crate::FilesystemPolicy::Normal,
             model: None,
             timeout_ms: Some(5_000),
@@ -460,6 +586,7 @@ mod tests {
                 denied_read_path: Some(&repository),
                 prompt: "review",
                 prompt_cache_key: None,
+                codex_session: None,
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(5_000),
@@ -514,6 +641,7 @@ mod tests {
                     denied_read_path: Some(&repository),
                     prompt: "review",
                     prompt_cache_key: None,
+                    codex_session: None,
                     filesystem: crate::FilesystemPolicy::ReadOnly,
                     model: None,
                     timeout_ms: Some(5_000),

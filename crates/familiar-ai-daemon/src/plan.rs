@@ -506,6 +506,7 @@ pub fn generate(
             denied_read_path: None,
             prompt: &prompt,
             prompt_cache_key: None,
+            codex_session: None,
             filesystem: FilesystemPolicy::ReadOnly,
             model: limits.agent.model.as_deref(),
             timeout_ms: (limits.agent.max_execution_duration_ms > 0)

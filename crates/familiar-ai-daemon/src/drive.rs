@@ -881,6 +881,7 @@ pub fn drive(
         DriveError::Storage(format!("cannot recover worktree evidence: {error}"))
     })?;
     let session_id = format!("drive-{}", crate::run::new_id());
+    let codex_session = familiar_ai_agent::CodexExecutionSession::default();
     DriverRepository::new(db.conn())
         .open_session(&session_id, &repository.key, &warrant.as_json())
         .map_err(|error| DriveError::Storage(error.to_string()))?;
@@ -1241,6 +1242,7 @@ pub fn drive(
                     let sender = result_sender.clone();
                     let progress_database_path = database_path.clone();
                     let progress_session_id = session_id.clone();
+                    let codex_session = &codex_session;
                     active_workers = active_workers.saturating_add(1);
                     scope.spawn(move || {
                         let attempt_timer = Instant::now();
@@ -1266,6 +1268,7 @@ pub fn drive(
                                     Some(route_context.clone()),
                                     None,
                                     migration_version,
+                                    codex_session,
                                 )
                             }));
                         let duration_ms =
@@ -1315,7 +1318,7 @@ pub fn drive(
                         .as_ref()
                         .is_some_and(crate::worktree::WorktreeHeartbeatGuard::failed);
                     drop(worktree_heartbeat);
-                    let (mut result, trace) = match execution {
+                    let (mut result, mut trace) = match execution {
                         Ok(value) => value,
                         Err(_) => {
                             eprintln!("drive: attempt worker panicked for {}", target.id);
@@ -1357,6 +1360,11 @@ pub fn drive(
                             continue;
                         }
                     };
+                    if trace.retained_reason.is_none() {
+                        if let Err(crate::run::RunError::Context(error)) = &result {
+                            trace.retained_reason = Some(error.retention_class());
+                        }
+                    }
                     if let Err(crate::run::RunError::HumanReviewRequired {
                         result: implementation,
                         cycle,

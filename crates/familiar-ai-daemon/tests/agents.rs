@@ -307,6 +307,7 @@ fn build_agent_maps_each_adapter_to_its_invocation_shape() {
             denied_read_path: None,
             prompt: "prompt",
             prompt_cache_key: None,
+            codex_session: None,
             filesystem: FilesystemPolicy::Normal,
             model: None,
             timeout_ms: None,

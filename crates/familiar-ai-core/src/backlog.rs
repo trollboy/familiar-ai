@@ -149,6 +149,28 @@ pub enum PrdMetadataPolicy {
     Strict,
 }
 
+/// Exit semantics for the read-only metadata migration check. This is
+/// intentionally independent of admission policy: advisory mode reports
+/// legacy debt without making otherwise valid legacy PRDs inadmissible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataCheckMode {
+    Strict,
+    Advisory,
+}
+
+impl MetadataCheckMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Advisory => "advisory",
+        }
+    }
+
+    pub fn legacy_is_failure(self) -> bool {
+        matches!(self, Self::Strict)
+    }
+}
+
 impl PrdMetadataPolicy {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {

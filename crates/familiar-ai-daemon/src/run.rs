@@ -522,6 +522,7 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context_and_timeo
         implementation_timeout_ms,
         false,
         None,
+        None,
         &mut trace,
     );
     (result, trace)
@@ -538,6 +539,7 @@ pub fn execute_reviewed_candidate(
     route_context: Option<RouteContext>,
     implementation_timeout_ms: Option<u64>,
     migration_version: Option<u64>,
+    codex_session: &familiar_ai_agent::CodexExecutionSession,
 ) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
     let mut trace = AttemptTrace::default();
     let result = execute_tracked_inner(
@@ -551,6 +553,7 @@ pub fn execute_reviewed_candidate(
         implementation_timeout_ms,
         true,
         migration_version,
+        Some(codex_session),
         &mut trace,
     );
     (result, trace)
@@ -701,6 +704,7 @@ pub fn resume_implemented_checkpoint(
         config,
         paths,
         false,
+        None,
         &mut trace,
     )?;
     let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
@@ -830,6 +834,7 @@ fn execute_tracked_inner(
     implementation_timeout_ms: Option<u64>,
     defer_completion: bool,
     migration_version: Option<u64>,
+    codex_session: Option<&familiar_ai_agent::CodexExecutionSession>,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     let discovery = FilesystemBacklogDiscovery;
@@ -1097,6 +1102,7 @@ fn execute_tracked_inner(
                 .execution_context
                 .prompt_cache_enabled
                 .then_some(prompt_cache_key.as_str()),
+            codex_session,
             filesystem: familiar_ai_agent::FilesystemPolicy::Normal,
             model: if config.worker_registry.is_some() || config.review.enabled {
                 config.review.implementation_agent.model.as_deref()
@@ -1240,6 +1246,7 @@ fn execute_tracked_inner(
         config,
         paths,
         defer_completion,
+        codex_session,
         trace,
     )
 }
@@ -1259,6 +1266,7 @@ fn finish_implementation(
     config: &Config,
     paths: &AppPaths,
     defer_completion: bool,
+    codex_session: Option<&familiar_ai_agent::CodexExecutionSession>,
     trace: &mut AttemptTrace,
 ) -> Result<RunWorkflowResult, RunError> {
     if !config.review.enabled {
@@ -1285,6 +1293,7 @@ fn finish_implementation(
         paths,
         base_revision: &preflight.baseline,
         scope_policy: &preflight.snapshot,
+        codex_session,
     })
     .map_err(|e| retained_traced(trace, target, "review_failed", e))?;
     if cycle.state != ReviewCycleState::Completed
@@ -1681,6 +1690,7 @@ struct ReviewRunInput<'a> {
     paths: &'a AppPaths,
     base_revision: &'a str,
     scope_policy: &'a ScopePolicySnapshot,
+    codex_session: Option<&'a familiar_ai_agent::CodexExecutionSession>,
 }
 
 fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
@@ -1696,6 +1706,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         paths,
         base_revision,
         scope_policy,
+        codex_session,
     } = input;
     let implementation = AgentAssignment {
         adapter_id: config.review.implementation_agent.adapter_id.clone(),
@@ -1778,11 +1789,13 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         context.repository.worktree.clone(),
         reviewer.clone(),
         review_timeout,
+        codex_session,
     );
     let remediation_adapter = CodingRemediationAdapter::new(
         implementation_agent,
         context.repository.worktree.clone(),
         implementation.clone(),
+        codex_session,
     );
     let checks = config
         .review
@@ -3037,6 +3050,7 @@ mod tests {
                 paths: &paths,
                 base_revision: &baseline,
                 scope_policy: &snapshot,
+                codex_session: None,
             })
             .unwrap();
             let cycle = ReviewRepository::new(db.conn())
@@ -3126,6 +3140,7 @@ mod tests {
             paths: &paths,
             base_revision: &baseline,
             scope_policy: &snapshot,
+            codex_session: None,
         })
         .unwrap();
         assert_eq!(cycle.disposition, ReviewDisposition::ReadyForHumanApproval);
@@ -3185,6 +3200,7 @@ mod tests {
             paths: &paths,
             base_revision: &baseline,
             scope_policy: &snapshot,
+            codex_session: None,
         })
         .unwrap();
         assert_eq!(cycle.state, ReviewCycleState::Completed);
@@ -3230,6 +3246,7 @@ mod tests {
             paths: &paths,
             base_revision: &baseline,
             scope_policy: &snapshot,
+            codex_session: None,
         });
         let cycle = error.unwrap();
         assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::ScopeBroadened]);
