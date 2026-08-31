@@ -11,6 +11,7 @@ pub mod file_summary;
 pub mod lifecycle;
 pub mod orchestration;
 pub mod planner;
+pub mod probation;
 pub mod project;
 pub mod project_config;
 pub mod reservation;

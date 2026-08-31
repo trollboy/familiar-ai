@@ -36,6 +36,7 @@ pub use repos::lifecycle::{
 };
 pub use repos::orchestration::{MigrationReservation, OrchestrationRepository, ScopeDecision};
 pub use repos::planner::{PlannerBatchRecord, PlannerBatchRepository};
+pub use repos::probation::{ProbationObservation, ProbationRepository};
 pub use repos::project::ProjectRepository;
 pub use repos::project_config::{FamiliarTomlDecision, FamiliarTomlRepository};
 pub use repos::reservation::{

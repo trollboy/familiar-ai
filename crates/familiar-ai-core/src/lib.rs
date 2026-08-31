@@ -5,6 +5,7 @@ pub mod error;
 pub mod models;
 pub mod onboarding;
 pub mod paths;
+pub mod probation;
 pub mod repository_path;
 pub mod reservation;
 pub mod status;

@@ -35,7 +35,8 @@ use familiar_ai_review::{
     ReviewTask, ReviewTier, ReviewTierPolicy, ReviewTierRule, ScopeClassPolicy,
     ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass, ScopeFileClassPolicies,
     ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
-    StructuredReviewAdapter, VerificationCheck, VerificationPlan, WorkflowLimits,
+    StructuredReviewAdapter, VerificationCheck, VerificationPlan, VerificationStatus,
+    WorkflowLimits,
 };
 use familiar_ai_storage::{
     AccountingRepository, Database, ExecutionFinalization, ExecutionHistoryRepository,
@@ -755,6 +756,8 @@ pub fn resume_implemented_checkpoint(
         false,
         None,
         &mut trace,
+        None,
+        None,
     )?;
     let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
     for (phase, detail) in [
@@ -1004,13 +1007,14 @@ fn execute_tracked_inner(
     // Contradictory agent configuration must fail closed before any claim,
     // regardless of which caller constructed the agents.
     let implementation_entry = resolved_agent_entries(config).map_err(RunError::Config)?.0;
-    if config.worker_registry.is_some() {
+    let mut implementation_probation_worker: Option<(String, String)> = None;
+    let mut remediation_probation_worker: Option<(String, String)> = None;
+    if let Some(worker_registry) = &config.worker_registry {
         let (_, _, records) =
             resolved_worker_plan(config, &route_context).map_err(RunError::Config)?;
         let selections = familiar_ai_storage::WorkerSelectionRepository::new(db.conn());
         for (index, record) in records.iter().enumerate() {
-            let configured_worker =
-                &config.worker_registry.as_ref().unwrap().workers[&record.selected_worker];
+            let configured_worker = &worker_registry.workers[&record.selected_worker];
             let material = serde_json::json!({"effort": configured_worker.effort.map(|value| value.as_str()), "permission_mode": configured_worker.permission_mode.map(|value| value.as_str()), "context_tokens": configured_worker.context_tokens, "extra_args": configured_worker.extra_args});
             familiar_ai_storage::WorkerSpecRepository::new(db.conn())
                 .record_spec(
@@ -1054,6 +1058,56 @@ fn execute_tracked_inner(
                     },
                 )
                 .map_err(|e| RunError::Storage(e.to_string()))?;
+
+            // PRD-032 authority is checked after the immutable selection and
+            // identity evidence exists, but before any selected worker runs.
+            if matches!(
+                record.stage,
+                WorkerStage::Implementation | WorkerStage::Remediation
+            ) {
+                let policy = worker_probation_policy();
+                let probation = familiar_ai_storage::ProbationRepository::new(db.conn());
+                probation
+                    .record_policy(&policy)
+                    .map_err(|e| RunError::Storage(e.to_string()))?;
+                let pin = match record.stage {
+                    WorkerStage::Implementation => {
+                        worker_registry.routing.implementation_pin.as_deref()
+                    }
+                    WorkerStage::Remediation => worker_registry.routing.remediation_pin.as_deref(),
+                    _ => None,
+                };
+                if pin == Some(record.selected_worker.as_str()) {
+                    probation
+                        .set_routing_pin(
+                            &format!("{selection_id}:operator-pin"),
+                            &record.selected_spec_identity,
+                            &record.selected_empirical_version,
+                            "repository-config",
+                            "explicit worker routing pin",
+                        )
+                        .map_err(|e| RunError::Storage(e.to_string()))?;
+                }
+                probation
+                    .authorize(
+                        &record.selected_spec_identity,
+                        &record.selected_empirical_version,
+                        &policy,
+                        route_context.expected_file_count,
+                        !route_context.risk_classes.is_empty(),
+                        config.review.enabled,
+                    )
+                    .map_err(|e| RunError::Config(e.to_string()))?;
+                let selected = Some((
+                    record.selected_spec_identity.clone(),
+                    record.selected_empirical_version.clone(),
+                ));
+                match record.stage {
+                    WorkerStage::Implementation => implementation_probation_worker = selected,
+                    WorkerStage::Remediation => remediation_probation_worker = selected,
+                    _ => {}
+                }
+            }
         }
     }
     let execution_budget = ExecutionBudget {
@@ -1240,6 +1294,21 @@ fn execute_tracked_inner(
         config,
     )
     .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
+    if execution.is_err() {
+        persist_probation_outcome(
+            &db,
+            implementation_probation_worker.as_ref(),
+            "implementation",
+            &id,
+            finalization.duration_ms,
+            false,
+            false,
+            None,
+            false,
+            true,
+            &serde_json::json!({"execution_outcome": outcome}),
+        )?;
+    }
     let result = execution
         .map_err(|e| retained_traced(trace, &target, agent_reason(&e), RunError::Agent(e)))?;
     if result.exit_code == Some(0) && result.signal.is_none() {
@@ -1313,6 +1382,23 @@ fn execute_tracked_inner(
         }
     }
     if result.exit_code != Some(0) || result.signal.is_some() {
+        persist_probation_outcome(
+            &db,
+            implementation_probation_worker.as_ref(),
+            "implementation",
+            &id,
+            finalization.duration_ms,
+            false,
+            false,
+            None,
+            false,
+            true,
+            &serde_json::json!({
+                "execution_outcome": outcome,
+                "exit_code": result.exit_code,
+                "signal": result.signal,
+            }),
+        )?;
         return Err(retained_traced(
             trace,
             &target,
@@ -1339,6 +1425,8 @@ fn execute_tracked_inner(
         defer_completion,
         codex_session,
         trace,
+        implementation_probation_worker.as_ref(),
+        remediation_probation_worker.as_ref(),
     )
 }
 
@@ -1359,8 +1447,23 @@ fn finish_implementation(
     defer_completion: bool,
     codex_session: Option<&familiar_ai_agent::CodexExecutionSession>,
     trace: &mut AttemptTrace,
+    implementation_probation_worker: Option<&(String, String)>,
+    remediation_probation_worker: Option<&(String, String)>,
 ) -> Result<RunWorkflowResult, RunError> {
     if !config.review.enabled {
+        persist_probation_outcome(
+            db,
+            implementation_probation_worker,
+            "implementation",
+            id,
+            finalization.duration_ms,
+            false,
+            false,
+            None,
+            false,
+            true,
+            &serde_json::json!({"review": "disabled"}),
+        )?;
         return Err(retained_traced(
             trace,
             target,
@@ -1387,10 +1490,68 @@ fn finish_implementation(
         codex_session,
     })
     .map_err(|e| retained_traced(trace, target, "review_failed", e))?;
-    if cycle.state != ReviewCycleState::Completed
-        || cycle.disposition != ReviewDisposition::ReadyForHumanApproval
-        || cycle.stop_reasons != [ReviewStopReason::CleanReview]
-    {
+    let clean = cycle.state == ReviewCycleState::Completed
+        && cycle.disposition == ReviewDisposition::ReadyForHumanApproval
+        && cycle.stop_reasons == [ReviewStopReason::CleanReview];
+    let verification_passed = cycle
+        .verification_history
+        .iter()
+        .filter(|evidence| evidence.required)
+        .all(|evidence| evidence.status == VerificationStatus::Passed);
+    let independent_review_passed = cycle
+        .review_result
+        .as_ref()
+        .map(|_| clean && cycle.independence.is_some());
+    let remediation_required = !cycle.remediation_attempts.is_empty();
+    persist_probation_outcome(
+        db,
+        implementation_probation_worker,
+        "implementation",
+        id,
+        finalization.duration_ms,
+        clean,
+        verification_passed,
+        independent_review_passed,
+        remediation_required,
+        !clean,
+        &cycle,
+    )?;
+    if remediation_required {
+        let remediation_latency_ms = cycle
+            .remediation_attempts
+            .iter()
+            .map(|attempt| attempt.duration_ms)
+            .sum();
+        let remediation_failed = !clean
+            || cycle
+                .remediation_attempts
+                .iter()
+                .any(|attempt| attempt.outcome != "completed");
+        let remediation_verification_passed = cycle
+            .verification_after_remediation
+            .iter()
+            .filter(|evidence| evidence.required)
+            .all(|evidence| evidence.status == VerificationStatus::Passed);
+        persist_probation_outcome(
+            db,
+            remediation_probation_worker,
+            "remediation",
+            id,
+            remediation_latency_ms,
+            clean,
+            remediation_verification_passed,
+            independent_review_passed,
+            false,
+            remediation_failed,
+            &serde_json::json!({
+                "remediation_attempts": cycle.remediation_attempts,
+                "verification_after_remediation": cycle.verification_after_remediation,
+                "disposition": cycle.disposition,
+                "stop_reasons": cycle.stop_reasons,
+            }),
+        )?;
+    }
+    if !clean {
         let reason = review_retained_reason(&cycle);
         trace.retained_reason = Some(reason);
         if let Some(checkpoint) = familiar_ai_storage::CheckpointRepository::new(db.conn())
@@ -1471,6 +1632,68 @@ fn finish_implementation(
     Ok(RunWorkflowResult {
         implementation: result,
     })
+}
+
+fn worker_probation_policy() -> familiar_ai_core::probation::ProbationPolicy {
+    familiar_ai_core::probation::ProbationPolicy {
+        policy_id: "default-worker-probation".into(),
+        version: "prd-032-v1".into(),
+        minimum_accepted_prds: 3,
+        minimum_review_pass_basis_points: 9_000,
+        maximum_remediation_basis_points: 3_334,
+        maximum_failure_basis_points: 1_000,
+        probation_max_expected_files: 2,
+        require_independent_review: true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_probation_outcome<T: serde::Serialize>(
+    db: &Database,
+    worker: Option<&(String, String)>,
+    stage: &str,
+    execution_id: &str,
+    latency_ms: u64,
+    accepted: bool,
+    verification_passed: bool,
+    independent_review_passed: Option<bool>,
+    remediation_required: bool,
+    failed: bool,
+    evidence: &T,
+) -> Result<(), RunError> {
+    let Some((spec, version)) = worker else {
+        return Ok(());
+    };
+    let repository = familiar_ai_storage::ProbationRepository::new(db.conn());
+    let evidence_json =
+        serde_json::to_string(evidence).map_err(|error| RunError::Storage(error.to_string()))?;
+    repository
+        .append_observation(
+            &familiar_ai_storage::repos::probation::ProbationObservation {
+                observation_id: &format!("{execution_id}:{stage}:probation-observation"),
+                spec_identity: spec,
+                empirical_version: version,
+                execution_id: Some(execution_id),
+                accepted,
+                verification_passed,
+                independent_review_passed,
+                remediation_required,
+                failed,
+                latency_ms,
+                evidence_json: &evidence_json,
+            },
+        )
+        .map_err(|error| RunError::Storage(error.to_string()))?;
+    repository
+        .apply_policy(
+            &format!("{execution_id}:{stage}:probation-policy"),
+            &format!("{execution_id}:{stage}:probation-score"),
+            spec,
+            version,
+            &worker_probation_policy(),
+        )
+        .map_err(|error| RunError::Storage(error.to_string()))?;
+    Ok(())
 }
 
 /// Probe every executable that this run is configured to invoke. This is
@@ -3638,6 +3861,186 @@ mod tests {
         assert_eq!(
             acceptance_criteria("## Acceptance criteria\n1. Numbered criterion\n"),
             vec!["Numbered criterion".to_owned()]
+        );
+    }
+
+    #[test]
+    fn persisted_terminal_outcomes_promote_then_failure_changes_authorization() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        familiar_ai_storage::WorkerSpecRepository::new(db.conn())
+            .record_spec(
+                "spec", "version", "worker", "provider", "runtime", "model", None, None, "profile",
+                "{}",
+            )
+            .unwrap();
+        let worker = ("spec".to_owned(), "version".to_owned());
+        for execution in ["success-1", "success-2", "success-3"] {
+            ExecutionHistoryRepository::new(db.conn())
+                .insert_running(&ExecutionStart {
+                    execution_id: execution.into(),
+                    started_at: "2026-01-01T00:00:00Z".into(),
+                    repository: "repository".into(),
+                    worktree: "worktree".into(),
+                    git_commit: None,
+                    prd_path: "PRD.md".into(),
+                    unavailable_fields: BTreeMap::new(),
+                })
+                .unwrap();
+            persist_probation_outcome(
+                &db,
+                Some(&worker),
+                "implementation",
+                execution,
+                10,
+                true,
+                true,
+                Some(true),
+                false,
+                false,
+                &serde_json::json!({"disposition": "clean_review"}),
+            )
+            .unwrap();
+        }
+        let repository = familiar_ai_storage::ProbationRepository::new(db.conn());
+        assert!(repository
+            .authorize(
+                "spec",
+                "version",
+                &worker_probation_policy(),
+                99,
+                true,
+                false,
+            )
+            .is_ok());
+
+        ExecutionHistoryRepository::new(db.conn())
+            .insert_running(&ExecutionStart {
+                execution_id: "failed-4".into(),
+                started_at: "2026-01-01T00:00:00Z".into(),
+                repository: "repository".into(),
+                worktree: "worktree".into(),
+                git_commit: None,
+                prd_path: "PRD.md".into(),
+                unavailable_fields: BTreeMap::new(),
+            })
+            .unwrap();
+        persist_probation_outcome(
+            &db,
+            Some(&worker),
+            "implementation",
+            "failed-4",
+            20,
+            false,
+            false,
+            Some(false),
+            true,
+            true,
+            &serde_json::json!({"verification": "failed"}),
+        )
+        .unwrap();
+        assert!(repository
+            .authorize(
+                "spec",
+                "version",
+                &worker_probation_policy(),
+                99,
+                true,
+                false,
+            )
+            .is_err());
+        let observations: u64 = db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM worker_probation_observations WHERE spec_identity='spec'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(observations, 4);
+    }
+
+    #[test]
+    fn probation_outcomes_for_distinct_stages_are_attributed_separately() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        for (spec, worker) in [
+            ("implementation-spec", "implementation"),
+            ("remediation-spec", "remediation"),
+        ] {
+            familiar_ai_storage::WorkerSpecRepository::new(db.conn())
+                .record_spec(
+                    spec, "version", worker, "provider", "runtime", "model", None, None, "profile",
+                    "{}",
+                )
+                .unwrap();
+        }
+        ExecutionHistoryRepository::new(db.conn())
+            .insert_running(&ExecutionStart {
+                execution_id: "shared-execution".into(),
+                started_at: "2026-01-01T00:00:00Z".into(),
+                repository: "repository".into(),
+                worktree: "worktree".into(),
+                git_commit: None,
+                prd_path: "PRD.md".into(),
+                unavailable_fields: BTreeMap::new(),
+            })
+            .unwrap();
+        let implementation = ("implementation-spec".to_owned(), "version".to_owned());
+        let remediation = ("remediation-spec".to_owned(), "version".to_owned());
+        persist_probation_outcome(
+            &db,
+            Some(&implementation),
+            "implementation",
+            "shared-execution",
+            11,
+            false,
+            false,
+            Some(false),
+            true,
+            true,
+            &serde_json::json!({"stage": "implementation"}),
+        )
+        .unwrap();
+        persist_probation_outcome(
+            &db,
+            Some(&remediation),
+            "remediation",
+            "shared-execution",
+            7,
+            true,
+            true,
+            Some(true),
+            false,
+            false,
+            &serde_json::json!({"stage": "remediation"}),
+        )
+        .unwrap();
+
+        let rows = db
+            .conn()
+            .prepare("SELECT observation_id,spec_identity,latency_ms FROM worker_probation_observations ORDER BY observation_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "shared-execution:implementation:probation-observation".into(),
+                    "implementation-spec".into(),
+                    11
+                ),
+                (
+                    "shared-execution:remediation:probation-observation".into(),
+                    "remediation-spec".into(),
+                    7
+                ),
+            ]
         );
     }
 }
