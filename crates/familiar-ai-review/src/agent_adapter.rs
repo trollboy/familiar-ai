@@ -13,6 +13,7 @@ pub struct StructuredReviewAdapter<'a> {
     repository: PathBuf,
     assignment: AgentAssignment,
     timeout_ms: u64,
+    codex_session: Option<&'a familiar_ai_agent::CodexExecutionSession>,
 }
 impl<'a> StructuredReviewAdapter<'a> {
     pub fn new(
@@ -20,12 +21,14 @@ impl<'a> StructuredReviewAdapter<'a> {
         repository: PathBuf,
         assignment: AgentAssignment,
         timeout_ms: u64,
+        codex_session: Option<&'a familiar_ai_agent::CodexExecutionSession>,
     ) -> Self {
         Self {
             agent,
             repository,
             assignment,
             timeout_ms,
+            codex_session,
         }
     }
 }
@@ -86,6 +89,7 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
                     denied_read_path: Some(&self.repository),
                     prompt: &prompt,
                     prompt_cache_key: None,
+                    codex_session: self.codex_session,
                     filesystem: familiar_ai_agent::FilesystemPolicy::ReadOnly,
                     model: request.reviewer.requested_model.as_deref(),
                     timeout_ms: Some(self.timeout_ms),
@@ -143,13 +147,20 @@ pub struct CodingRemediationAdapter<'a> {
     agent: &'a dyn CodingAgent,
     worktree: PathBuf,
     assignment: AgentAssignment,
+    codex_session: Option<&'a familiar_ai_agent::CodexExecutionSession>,
 }
 impl<'a> CodingRemediationAdapter<'a> {
-    pub fn new(agent: &'a dyn CodingAgent, worktree: PathBuf, assignment: AgentAssignment) -> Self {
+    pub fn new(
+        agent: &'a dyn CodingAgent,
+        worktree: PathBuf,
+        assignment: AgentAssignment,
+        codex_session: Option<&'a familiar_ai_agent::CodexExecutionSession>,
+    ) -> Self {
         Self {
             agent,
             worktree,
             assignment,
+            codex_session,
         }
     }
 }
@@ -172,6 +183,7 @@ impl RemediationAgent for CodingRemediationAdapter<'_> {
                     denied_read_path: None,
                     prompt: &prompt,
                     prompt_cache_key: None,
+                    codex_session: self.codex_session,
                     filesystem: familiar_ai_agent::FilesystemPolicy::WorkspaceWrite,
                     model: self.assignment.requested_model.as_deref(),
                     timeout_ms: Some(request.budget.max_duration_ms),
@@ -421,8 +433,13 @@ mod tests {
             workspaces: Mutex::new(vec![]),
             fail: false,
         };
-        let adapter =
-            StructuredReviewAdapter::new(&agent, repository.path().to_owned(), assignment(), 1_000);
+        let adapter = StructuredReviewAdapter::new(
+            &agent,
+            repository.path().to_owned(),
+            assignment(),
+            1_000,
+            None,
+        );
         adapter
             .review(&request(repository.path()), &mut Vec::new())
             .unwrap();
@@ -438,8 +455,13 @@ mod tests {
             workspaces: Mutex::new(vec![]),
             fail: true,
         };
-        let adapter =
-            StructuredReviewAdapter::new(&agent, repository.path().to_owned(), assignment(), 1_000);
+        let adapter = StructuredReviewAdapter::new(
+            &agent,
+            repository.path().to_owned(),
+            assignment(),
+            1_000,
+            None,
+        );
         assert!(adapter
             .review(&request(repository.path()), &mut Vec::new())
             .is_err());

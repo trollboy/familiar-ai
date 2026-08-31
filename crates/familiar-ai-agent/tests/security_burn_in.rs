@@ -22,6 +22,7 @@ fn request<'a>(directory: &'a std::path::Path, prompt: &'a str) -> ExecutionRequ
         denied_read_path: None,
         prompt,
         prompt_cache_key: None,
+        codex_session: None,
         filesystem: FilesystemPolicy::Normal,
         model: None,
         timeout_ms: Some(2_000),

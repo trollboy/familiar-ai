@@ -1,6 +1,15 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Cache-diagnostic state shared only by executions in one drive session.
+#[derive(Debug, Default)]
+pub struct CodexExecutionSession {
+    pub(crate) diagnosed_model_caches: Mutex<BTreeSet<PathBuf>>,
+}
 
 /// Remove values supplied through secret-bearing environment variables before
 /// untrusted provider text crosses a logging or persistence boundary.
@@ -123,6 +132,9 @@ pub struct ExecutionRequest<'a> {
     /// Stable, non-secret provider cache identity. Adapters that do not
     /// support an explicit cache key must ignore it.
     pub prompt_cache_key: Option<&'a str>,
+    /// Drive-session-scoped Codex cache diagnostic state. A new drive must
+    /// create a new value; executions outside a drive leave this unset.
+    pub codex_session: Option<&'a CodexExecutionSession>,
     pub filesystem: FilesystemPolicy,
     pub model: Option<&'a str>,
     pub timeout_ms: Option<u64>,

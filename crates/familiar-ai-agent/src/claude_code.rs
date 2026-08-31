@@ -596,6 +596,7 @@ mod tests {
             denied_read_path: None,
             prompt: "prompt bytes",
             prompt_cache_key: None,
+            codex_session: None,
             filesystem,
             model,
             timeout_ms: None,

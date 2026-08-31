@@ -366,6 +366,7 @@ mod tests {
                 denied_read_path: Some(&denied),
                 prompt: "review",
                 prompt_cache_key: None,
+                codex_session: None,
                 filesystem: crate::FilesystemPolicy::ReadOnly,
                 model: None,
                 timeout_ms: Some(1_000),
