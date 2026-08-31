@@ -1,7 +1,7 @@
 # Backlog Execution Plan — 2026-08-30
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
-**Approval:** All 36 pending PRDs (032, 036–038, 041, 044–064, 066–075) are
+**Approval:** All 37 pending PRDs (032, 036–038, 041, 044–064, 066–076) are
 approved for implementation. The owner-directed economy family
 (2026-08-30): PRD-069 native token compression (caveman functionality
 replicated first-party, no external dependency), PRD-070 daemon context
@@ -66,6 +66,22 @@ dedicated test file, versus context/agent/drive/bin + dedicated test
 file), making them the first honest width-2 test of the new machinery:
 `familiar-ai drive --max-prds 2 --prd PRD-067 --prd PRD-068`.
 
+**Definition (2026-08-31, owner's): a wave is a batch of PRDs runnable
+simultaneously — dependency-ready AND mutually scope-disjoint.** The rows
+below the next gate do not yet satisfy that definition: they are
+dependency layers only, and computed against the scheduler's conflict
+rules the backlog they hold is currently a width-one chain, because four
+shared surfaces (`config.rs`, `providers.md`, the CLI binary, shared test
+directories) sit in nearly every declared scope.
+
+**GATE (2026-08-31): PRD-076 blocks everything below it.** Scope
+modularization for parallel authoring: split the four hot surfaces into
+per-feature files (behavior-preserving, proven by fixture equivalence),
+amend every pending PRD's expected_files to the narrowed forms under this
+PRD's recorded authorization, and regenerate the rows below as computed
+true rounds (expected shape: ~9 rounds at widths 2–5 instead of ~23 at
+width 1). Runs alone: `familiar-ai drive --max-prds 1 --prd PRD-076`.
+
 A PRD may start only when its dependencies are complete AND it is inside
 the session's approved allowlist — the earlier "wave boundaries are
 guidance, not barriers" language is retracted; it authorized the Wave 1
@@ -87,7 +103,8 @@ whole-crate declarations forfeit concurrency by design.
 | 2 | 041, 048, 049, 051 — **completed 2026-08-30** | 4 | 1 (measured) |
 | gate | 066 — integration-aware parallel orchestration | 1 | 1 |
 | gate | 067, 068 — verification truth, driver hygiene | 2 | 2 (disjoint by construction) |
-| 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | 9 | ~3–4 (069/070's new crates are disjoint; 074/075 share config surfaces and pipeline) |
+| gate | 076 — scope modularization (makes the rows below true waves) | 1 | 1 |
+| 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | 9 | **1 as declared (measured)** — 076 regenerates |
 | 4 | 032, 055, 056, 062 | 4 | ~2 |
 | 5 | 038, 053, 058 | 3 | ~2 |
 | 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 (per-adapter files disjoint; 072 shares 058's surfaces) |
