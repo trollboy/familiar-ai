@@ -197,6 +197,10 @@ enum ProviderCommand {
         #[arg(long)]
         auth: Option<String>,
         #[arg(long)]
+        via: Option<String>,
+        #[arg(long)]
+        recipe: Option<String>,
+        #[arg(long)]
         actor: Option<String>,
     },
     Remove {
@@ -564,12 +568,16 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
                 kind,
                 host,
                 auth,
+                via,
+                recipe,
                 actor,
             } => ConfigAction::ProviderAdd {
                 name,
                 kind,
                 host,
                 auth,
+                via,
+                recipe,
                 actor,
             },
             ProviderCommand::Remove { name, actor } => ConfigAction::ProviderRemove { name, actor },

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use familiar_ai_core::config::{
-    validate_host, validate_ssh_host, AgentAdapterKind, AuthDescriptor, EndpointProviderKind,
-    InferenceRuntimeKind, RegistryWorkerConfig, WorkerCapabilityConfig,
+    validate_cloud_cli, validate_host, validate_ssh_host, AgentAdapterKind, AuthDescriptor,
+    EndpointProviderKind, InferenceRuntimeKind, RegistryWorkerConfig, WorkerCapabilityConfig,
 };
 use familiar_ai_core::{
     AppPaths, BacklogDiscovery, Config, FamiliarToml, FilesystemBacklogDiscovery,
@@ -41,6 +41,8 @@ pub enum ConfigAction {
         kind: String,
         host: Option<String>,
         auth: Option<String>,
+        via: Option<String>,
+        recipe: Option<String>,
         actor: Option<String>,
     },
     ProviderRemove {
@@ -101,6 +103,8 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
             kind,
             host,
             auth,
+            via,
+            recipe,
             actor,
         } => provider_add(
             context,
@@ -108,6 +112,8 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
             &kind,
             host.as_deref(),
             auth.as_deref(),
+            via.as_deref(),
+            recipe.as_deref(),
             actor.as_deref(),
         ),
         ConfigAction::ProviderRemove { name, actor } => {
@@ -514,6 +520,8 @@ fn provider_add(
     kind: &str,
     host: Option<&str>,
     auth: Option<&str>,
+    via: Option<&str>,
+    recipe: Option<&str>,
     supplied_actor: Option<&str>,
 ) -> Result<(), String> {
     validate_name(name, "provider")?;
@@ -521,7 +529,7 @@ fn provider_add(
         return Err(format!("unknown provider kind '{kind}'"));
     }
     if kind == "deploy-target" {
-        return deploy_target_add(context, name, host, auth, supplied_actor);
+        return deploy_target_add(context, name, host, auth, via, recipe, supplied_actor);
     }
     let host = host.unwrap_or_else(|| {
         if name == "ollama" {
@@ -573,8 +581,58 @@ fn deploy_target_add(
     name: &str,
     host: Option<&str>,
     auth: Option<&str>,
+    via: Option<&str>,
+    recipe: Option<&str>,
     supplied_actor: Option<&str>,
 ) -> Result<(), String> {
+    if let Some(via) = via {
+        if host.is_some() || auth.is_some() {
+            return Err("CLI deploy-target uses --via and --recipe, not --host or --auth".into());
+        }
+        validate_cloud_cli(via)?;
+        let recipe = recipe.ok_or("CLI deploy-target requires --recipe")?;
+        let deploy_argv = shlex::split(recipe).ok_or("--recipe contains invalid shell quoting")?;
+        if deploy_argv.first().map(String::as_str) != Some(via) {
+            return Err(format!("--recipe must execute through '{via}'"));
+        }
+        if load_config(context)?.providers.contains_key(name) {
+            return Err(format!("provider '{name}' already exists"));
+        }
+        let auth_probe = cloud_auth_probe(via);
+        let identity_probe = cloud_identity_probe(via);
+        let identity =
+            run_cloud_probe(via).map_err(|error| format!("{name}: {error} — nothing added."))?;
+        let verified_at = Utc::now().to_rfc3339();
+        let actor = actor(supplied_actor)?;
+        mutate(
+            context,
+            "familiar-ai config provider add",
+            &actor,
+            |document| {
+                let table = provider_table(document, name);
+                table.decor_mut().set_prefix(format!(
+                    "# added by familiar-ai config provider add — {actor} {verified_at}\n"
+                ));
+                table["kind"] = value("deploy-target");
+                table["host"] = value("");
+                table["via"] = value(via);
+                table["auth"] = value(format!("cli-login: {via}"));
+                table["capabilities"] = array_value(&["authenticated".into()]);
+                table["verified_at"] = value(&verified_at);
+                let mut configured = Table::new();
+                configured["sync_argv"] = array_value(&deploy_argv);
+                configured["restart_argv"] = array_value(&auth_probe);
+                configured["smoke_argv"] = array_value(&identity_probe);
+                table.insert("recipe", Item::Table(configured));
+                Ok(())
+            },
+        )?;
+        println!("Added {name} (deploy-target via {via}) — authenticated as {identity}.");
+        return Ok(());
+    }
+    if recipe.is_some() {
+        return Err("--recipe requires --via".into());
+    }
     let host = host.ok_or("deploy-target requires --host")?;
     validate_ssh_host(host)?;
     let descriptor = parse_auth(auth.unwrap_or("ssh-agent"))?;
@@ -615,6 +673,95 @@ fn deploy_target_add(
         capabilities.join(", ")
     );
     Ok(())
+}
+
+fn cloud_auth_probe(via: &str) -> Vec<String> {
+    match via {
+        "az" => vec!["az", "account", "show", "--query", "user.name", "-o", "tsv"],
+        "aws" => vec![
+            "aws",
+            "sts",
+            "get-caller-identity",
+            "--query",
+            "Arn",
+            "--output",
+            "text",
+        ],
+        "gcloud" => vec![
+            "gcloud",
+            "auth",
+            "application-default",
+            "print-access-token",
+        ],
+        "doctl" => vec![
+            "doctl",
+            "account",
+            "get",
+            "--format",
+            "Email",
+            "--no-header",
+        ],
+        _ => unreachable!("validated cloud CLI"),
+    }
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn cloud_identity_probe(via: &str) -> Vec<String> {
+    if via == "gcloud" {
+        ["gcloud", "config", "get-value", "account"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        cloud_auth_probe(via)
+    }
+}
+
+fn cloud_remedy(via: &str) -> &'static str {
+    match via {
+        "az" => "run `az login`",
+        "aws" => "configure an AWS profile or run `aws sso login`",
+        "gcloud" => "run `gcloud auth application-default login`",
+        "doctl" => "run `doctl auth init`",
+        _ => "authenticate the configured cloud CLI",
+    }
+}
+
+fn run_cloud_probe(via: &str) -> Result<String, String> {
+    let argv = cloud_auth_probe(via);
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            format!(
+                "{via} CLI is not installed ({error}); install `{via}` and then {}",
+                cloud_remedy(via)
+            )
+        })?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err(format!(
+            "{via} CLI not authenticated — {}",
+            cloud_remedy(via)
+        ));
+    }
+    if via == "gcloud" {
+        let identity = cloud_identity_probe(via);
+        let output = Command::new(&identity[0])
+            .args(&identity[1..])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("cannot inspect gcloud account ({error})"))?;
+        let account = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        return Ok(if account.is_empty() {
+            "configured account".into()
+        } else {
+            account
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn probe_deploy_target(host: &str) -> Result<Vec<String>, String> {
@@ -683,8 +830,12 @@ fn provider_verify(
         .get(name)
         .ok_or_else(|| format!("unknown provider '{name}'"))?;
     if provider.kind == EndpointProviderKind::DeployTarget {
-        let capabilities =
-            probe_deploy_target(&provider.host).map_err(|error| format!("{name}: {error}"))?;
+        let capabilities = if let Some(via) = &provider.via {
+            run_cloud_probe(via).map_err(|error| format!("{name}: {error}"))?;
+            vec!["authenticated".into()]
+        } else {
+            probe_deploy_target(&provider.host).map_err(|error| format!("{name}: {error}"))?
+        };
         let verified_at = Utc::now().to_rfc3339();
         let actor = actor(supplied_actor)?;
         return mutate(
@@ -729,8 +880,13 @@ fn provider_list(
         let mut discoveries = Vec::new();
         for (name, provider) in &config.providers {
             if provider.kind == EndpointProviderKind::DeployTarget {
-                let capabilities = probe_deploy_target(&provider.host)
-                    .map_err(|error| format!("{name}: {error}"))?;
+                let capabilities = if let Some(via) = &provider.via {
+                    run_cloud_probe(via).map_err(|error| format!("{name}: {error}"))?;
+                    vec!["authenticated".into()]
+                } else {
+                    probe_deploy_target(&provider.host)
+                        .map_err(|error| format!("{name}: {error}"))?
+                };
                 discoveries.push((name.clone(), capabilities, Utc::now().to_rfc3339()));
                 continue;
             }
@@ -1344,6 +1500,8 @@ mod tests {
                 kind: "inference".into(),
                 host: Some("fixture-fail:1".into()),
                 auth: None,
+                via: None,
+                recipe: None,
                 actor: Some("human:test".into()),
             },
             &context,
@@ -1405,6 +1563,8 @@ mod tests {
                 kind: "inference".into(),
                 host: Some("fixture-success:1".into()),
                 auth: None,
+                via: None,
+                recipe: None,
                 actor: Some("human:test".into()),
             },
             &context,
@@ -1436,6 +1596,8 @@ mod tests {
                 kind: "inference".into(),
                 host: Some("fixture-success:1".into()),
                 auth: None,
+                via: None,
+                recipe: None,
                 actor: Some("human:test".into()),
             },
             &context,
@@ -1506,6 +1668,8 @@ mod tests {
                 kind: "inference".into(),
                 host: Some("localhost:1".into()),
                 auth: Some("env: ACME_TEST_KEY".into()),
+                via: None,
+                recipe: None,
                 actor: Some("human:test".into()),
             },
             &context,
@@ -1530,6 +1694,8 @@ mod tests {
                 kind: "inference".into(),
                 host: Some("fixture-success:1".into()),
                 auth: None,
+                via: None,
+                recipe: None,
                 actor: Some("human:test".into()),
             },
             &context,

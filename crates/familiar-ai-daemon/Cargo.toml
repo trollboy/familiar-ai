@@ -45,6 +45,7 @@ ring.workspace = true
 axum.workspace = true
 wait-timeout.workspace = true
 rusqlite.workspace = true
+shlex = "1.3"
 
 [dev-dependencies]
 familiar-ai-testutil = { path = "../familiar-ai-testutil" }

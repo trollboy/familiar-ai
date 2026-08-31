@@ -395,6 +395,36 @@ pub fn deliver_to_with(
         .recipe
         .as_ref()
         .ok_or("deploy-target recipe is missing")?;
+    if let Some(via) = &target.via {
+        let remedy = cloud_auth_remedy(via);
+        for (kind, argv, evidence) in [
+            ("cloud_preflight", &recipe.restart_argv, false),
+            ("deploy", &recipe.sync_argv, false),
+            ("smoke", &recipe.smoke_argv, true),
+        ] {
+            run_effect(
+                &repo,
+                runner,
+                directory,
+                repository_key,
+                session_id,
+                prd_id,
+                role,
+                target_name,
+                revision,
+                kind,
+                argv,
+                evidence,
+                remedy,
+            )?;
+        }
+        return Ok(TargetDeliveryResult {
+            role: role.into(),
+            target: target_name.clone(),
+            revision: revision.into(),
+            smoke_passed: true,
+        });
+    }
     let preflight = vec![
         "ssh".into(),
         "-o".into(),
@@ -417,6 +447,7 @@ pub fn deliver_to_with(
         "ssh_preflight",
         &preflight,
         false,
+        "restore SSH agent authentication/reachability, verify ~/.ssh/config, then start a new delivery session",
     )?;
     for (kind, remote) in [
         ("sync", &recipe.sync_argv),
@@ -436,6 +467,7 @@ pub fn deliver_to_with(
             kind,
             &argv,
             false,
+            "restore SSH agent authentication/reachability, verify ~/.ssh/config, then start a new delivery session",
         )?;
     }
     let smoke = ssh_argv(&target.host, &recipe.smoke_argv);
@@ -452,6 +484,7 @@ pub fn deliver_to_with(
         "smoke",
         &smoke,
         true,
+        "restore SSH agent authentication/reachability, verify ~/.ssh/config, then start a new delivery session",
     )?;
     Ok(TargetDeliveryResult {
         role: role.into(),
@@ -496,6 +529,7 @@ fn run_effect(
     kind: &str,
     argv: &[String],
     retain_output: bool,
+    remedy: &str,
 ) -> Result<(), String> {
     let key = format!("{session_id}:{prd_id}:{role}:{target}:{revision}:{kind}");
     let effect_id = format!("effect-{}", hex_digest(key.as_bytes()));
@@ -518,7 +552,10 @@ fn run_effect(
             let detail = if output.status.success() {
                 None
             } else {
-                Some(familiar_ai_agent::redact_sensitive(format!("{kind} failed; restore SSH agent authentication/reachability, correct the target, then start a new delivery session: {}", String::from_utf8_lossy(&output.stderr).trim())))
+                Some(familiar_ai_agent::redact_sensitive(format!(
+                    "{kind} failed; {remedy}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )))
             };
             if retain_output {
                 repo.finish_evidence(
@@ -544,11 +581,27 @@ fn run_effect(
             }
         }
         Err(error) => {
-            let detail = familiar_ai_agent::redact_sensitive(format!("{kind} could not run; restore SSH agent authentication/reachability, verify ~/.ssh/config, then start a new delivery session: {error}"));
+            let detail = familiar_ai_agent::redact_sensitive(format!(
+                "{kind} could not run; {remedy}: {error}"
+            ));
             repo.finish_effect(&key, false, Some(role), Some(&detail))
                 .map_err(|e| e.to_string())?;
             Err(detail)
         }
+    }
+}
+
+fn cloud_auth_remedy(via: &str) -> &'static str {
+    match via {
+        "az" => "run `az login`, then start a new delivery session",
+        "aws" => {
+            "configure an AWS profile or run `aws sso login`, then start a new delivery session"
+        }
+        "gcloud" => {
+            "run `gcloud auth application-default login`, then start a new delivery session"
+        }
+        "doctl" => "run `doctl auth init`, then start a new delivery session",
+        _ => "authenticate the cloud CLI, then start a new delivery session",
     }
 }
 
@@ -718,6 +771,18 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+            })
+        }
+    }
+
+    struct ExpiredCloudRunner;
+
+    impl CommandRunner for ExpiredCloudRunner {
+        fn run(&self, _directory: &Path, _argv: &[String]) -> Result<Output, String> {
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: b"session expired".to_vec(),
             })
         }
     }
@@ -931,6 +996,7 @@ mod tests {
                 kind: EndpointProviderKind::DeployTarget,
                 runtime: None,
                 host: "box.example".into(),
+                via: None,
                 auth: AuthDescriptor::SshAgent,
                 models: vec![],
                 verified_at: Some("2026-01-01T00:00:00Z".into()),
@@ -994,6 +1060,118 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(evidence.passed);
+    }
+
+    #[test]
+    fn cloud_target_uses_only_its_cli_and_records_parity_evidence() {
+        let (mut config, policy, db) = target_fixture(DeliveryMode::ReviewGatedAutomatic);
+        config.providers.insert(
+            "cloud".into(),
+            ProviderConfig {
+                kind: EndpointProviderKind::DeployTarget,
+                runtime: None,
+                host: String::new(),
+                via: Some("az".into()),
+                auth: AuthDescriptor::CliLogin("az".into()),
+                models: vec![],
+                verified_at: Some("2026-01-01T00:00:00Z".into()),
+                capabilities: vec!["authenticated".into()],
+                recipe: Some(DeployRecipeConfig {
+                    sync_argv: vec!["az".into(), "webapp".into(), "deploy".into()],
+                    restart_argv: vec!["az".into(), "account".into(), "show".into()],
+                    smoke_argv: vec!["az".into(), "account".into(), "show".into()],
+                }),
+            },
+        );
+        let mut policy = policy;
+        policy.targets.insert("staging".into(), "cloud".into());
+        let runner = FakeRunner {
+            calls: Mutex::new(vec![]),
+            fail_deploy: false,
+            fail_smoke: false,
+            staged: "",
+        };
+        let result = deliver_to_with(
+            &config,
+            &policy,
+            "staging",
+            "repo",
+            "session",
+            "PRD-50",
+            "rev50",
+            &[],
+            db.conn(),
+            Path::new("."),
+            &runner,
+        )
+        .unwrap();
+        assert!(result.smoke_passed);
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls
+            .iter()
+            .all(|argv| argv.first().is_some_and(|v| v == "az")));
+        let (target, revision): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT target,revision FROM delivery_external_effects WHERE effect_kind='smoke'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((target.as_str(), revision.as_str()), ("cloud", "rev50"));
+    }
+
+    #[test]
+    fn expired_cloud_preflight_is_a_retained_stop_with_vendor_remedy() {
+        let (mut config, mut policy, db) = target_fixture(DeliveryMode::ReviewGatedAutomatic);
+        config.providers.insert(
+            "cloud".into(),
+            ProviderConfig {
+                kind: EndpointProviderKind::DeployTarget,
+                runtime: None,
+                host: String::new(),
+                via: Some("az".into()),
+                auth: AuthDescriptor::CliLogin("az".into()),
+                models: vec![],
+                verified_at: Some("2026-01-01T00:00:00Z".into()),
+                capabilities: vec!["authenticated".into()],
+                recipe: Some(DeployRecipeConfig {
+                    sync_argv: vec!["az".into(), "webapp".into(), "deploy".into()],
+                    restart_argv: vec!["az".into(), "account".into(), "show".into()],
+                    smoke_argv: vec!["az".into(), "account".into(), "show".into()],
+                }),
+            },
+        );
+        policy.targets.insert("staging".into(), "cloud".into());
+        let deliver = || {
+            deliver_to_with(
+                &config,
+                &policy,
+                "staging",
+                "repo",
+                "session",
+                "PRD-50",
+                "rev50",
+                &[],
+                db.conn(),
+                Path::new("."),
+                &ExpiredCloudRunner,
+            )
+        };
+        let first = deliver().unwrap_err();
+        assert!(first.contains("run `az login`"), "{first}");
+        let second = deliver().unwrap_err();
+        assert_eq!(second, first);
+        let rows: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM delivery_external_effects",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "a retained stop must not become a retry loop");
     }
 
     #[test]

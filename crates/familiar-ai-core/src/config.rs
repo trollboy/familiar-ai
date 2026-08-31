@@ -235,7 +235,11 @@ pub struct ProviderConfig {
     pub kind: EndpointProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<InferenceRuntimeKind>,
+    #[serde(default)]
     pub host: String,
+    /// Deploy-target executable. Absent selects the legacy SSH transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
     pub auth: AuthDescriptor,
     #[serde(default)]
     pub models: Vec<String>,
@@ -336,14 +340,21 @@ impl ProviderConfig {
         validate_identifier(name, "provider name")?;
         match self.kind {
             EndpointProviderKind::Inference => validate_host(&self.host)?,
-            EndpointProviderKind::DeployTarget => validate_ssh_host(&self.host)?,
+            EndpointProviderKind::DeployTarget if self.via.is_none() => {
+                validate_ssh_host(&self.host)?
+            }
+            EndpointProviderKind::DeployTarget => {
+                if !self.host.is_empty() {
+                    return Err("CLI deploy-target cannot declare a host".into());
+                }
+            }
         }
         for model in &self.models {
             validate_model_identifier(model)?;
         }
         match self.kind {
             EndpointProviderKind::Inference => {
-                if self.recipe.is_some() || !self.capabilities.is_empty() {
+                if self.recipe.is_some() || self.via.is_some() || !self.capabilities.is_empty() {
                     return Err("inference provider has deploy-target extension fields".into());
                 }
             }
@@ -351,8 +362,14 @@ impl ProviderConfig {
                 if self.runtime.is_some() {
                     return Err("deploy-target cannot declare an inference runtime".into());
                 }
-                if self.auth != AuthDescriptor::SshAgent {
-                    return Err("deploy-target auth must be ssh-agent".into());
+                if self.via.is_none() && self.auth != AuthDescriptor::SshAgent {
+                    return Err("SSH deploy-target auth must be ssh-agent".into());
+                }
+                if let Some(via) = &self.via {
+                    validate_cloud_cli(via)?;
+                    if self.auth != AuthDescriptor::CliLogin(via.clone()) {
+                        return Err(format!("CLI deploy-target auth must be 'cli-login: {via}'"));
+                    }
                 }
                 if !self.models.is_empty() {
                     return Err("deploy-target provider cannot declare models".into());
@@ -373,6 +390,15 @@ impl ProviderConfig {
                 {
                     return Err("deploy-target recipe commands must be non-empty".into());
                 }
+                if let Some(via) = &self.via {
+                    for argv in [&recipe.sync_argv, &recipe.restart_argv, &recipe.smoke_argv] {
+                        if argv.first() != Some(via) {
+                            return Err(format!(
+                                "CLI deploy-target recipe commands must execute through '{via}'"
+                            ));
+                        }
+                    }
+                }
             }
         }
         if let Some(value) = &self.verified_at {
@@ -380,6 +406,13 @@ impl ProviderConfig {
                 .map_err(|_| format!("invalid verified_at '{value}'"))?;
         }
         Ok(())
+    }
+}
+
+pub fn validate_cloud_cli(value: &str) -> Result<(), String> {
+    match value {
+        "az" | "aws" | "gcloud" | "doctl" => Ok(()),
+        _ => Err(format!("unsupported cloud CLI '{value}'")),
     }
 }
 
