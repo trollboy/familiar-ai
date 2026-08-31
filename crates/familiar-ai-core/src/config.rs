@@ -1117,6 +1117,22 @@ pub enum WorkerCapabilityConfig {
     NarrowTask,
 }
 
+impl WorkerCapabilityConfig {
+    /// The canonical serialized spelling — identical to the serde kebab-case
+    /// form and to what the CLI accepts, so display output always round-trips
+    /// (FAM-FRICTION-004: `NarrowTask` must render as `narrow-task`, never
+    /// `narrowtask`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Implementation => "implementation",
+            Self::Review => "review",
+            Self::Remediation => "remediation",
+            Self::NarrowTask => "narrow-task",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryWorkerConfig {
@@ -3039,6 +3055,24 @@ model = "legacy"
         worker.max_prds_per_run = 1;
         worker.restart_throttle_secs = 0;
         assert!(worker.validate().unwrap_err().contains("throttle"));
+    }
+
+    #[test]
+    fn capability_display_spelling_round_trips_with_serde() {
+        for capability in [
+            WorkerCapabilityConfig::Planning,
+            WorkerCapabilityConfig::Implementation,
+            WorkerCapabilityConfig::Review,
+            WorkerCapabilityConfig::Remediation,
+            WorkerCapabilityConfig::NarrowTask,
+        ] {
+            let serialized = serde_json::to_value(capability).unwrap();
+            assert_eq!(
+                serialized.as_str().unwrap(),
+                capability.as_str(),
+                "display spelling must match the canonical serialized form"
+            );
+        }
     }
 
     #[test]

@@ -17,10 +17,14 @@ instead of deleting the history.
   readiness are separate states but are not presented together.
 - **Expected fix:** One diagnostic command reports every candidate with typed
   states and an exact remediation command for each unavailable transition.
+- **Disposition (2026-08-31):** transferred to **PRD-057** — its
+  WorkerSpec/capability-provenance surface (declared, probed, observed,
+  unknown) is exactly the typed-state vocabulary this inventory needs; the
+  diagnostic command should land as part of 057's acceptance surface.
 
 ### FAM-BUG-002 — OpenAI-compatible endpoints were treated as Ollama
 
-- **Status:** Fixed locally; uncommitted
+- **Status:** Fixed — committed in `4f0305e`
 - **Observed:** Every non-CLI inference provider was probed through
   `/api/tags`, so authenticated Unsloth `/v1/models` endpoints could not be
   registered.
@@ -41,10 +45,13 @@ instead of deleting the history.
   securely in Keychain.
 - **Expected fix:** Add a non-exporting Keychain auth descriptor/resolver with
   redaction, probe, daemon, and supervisor coverage.
+- **Disposition (2026-08-31):** no owning PRD — needs a small new PRD
+  extending PRD-047 BYO-auth with a platform credential-store descriptor.
+  Owner decision on priority.
 
 ### FAM-BUG-004 — Claude CLI false-positive authentication
 
-- **Status:** Fixed locally; uncommitted
+- **Status:** Fixed — committed in `4f0305e`
 - **Observed:** `claude auth status` exited zero while returning
   `{"loggedIn":false}`. Familiar checked only the exit status and incorrectly
   persisted Claude as verified.
@@ -57,7 +64,7 @@ instead of deleting the history.
 
 ### FAM-BUG-005 — Ollama discovery rejected valid chunked HTTP
 
-- **Status:** Fixed locally; uncommitted
+- **Status:** Fixed — committed in `4f0305e`
 - **Observed:** Familiar's hand-written TCP/HTTP parser attempted to parse a
   valid chunked `/api/tags` body as plain JSON and reported `provider returned
   malformed discovery`.
@@ -69,7 +76,10 @@ instead of deleting the history.
 
 ### FAM-BUG-006 — First model enable can create an invalid mixed configuration
 
-- **Status:** Corruption guard fixed locally; migration UX remains open
+- **Status:** Corruption guard fixed (committed in `4f0305e`); migration UX remains open
+- **Disposition (2026-08-31):** migration UX has no owning PRD — needs a small
+  new PRD (explicit audited lossless `[agents]` → `[worker_registry]`
+  migration command) or a PRD-047-family follow-up. Owner decision.
 - **Observed:** `config model enable codex/codex` added `[worker_registry]` to a
   configuration already containing `[agents]`. The mutation path validated the
   registry in isolation, then every subsequent load failed because the two
@@ -95,10 +105,17 @@ instead of deleting the history.
 - **Expected fix:** Represent unknown cost as unknown, never zero. Use explicit
   local-resource cost semantics, qualification evidence, and empirical routing
   history before optimizing across workers.
+- **Disposition (2026-08-31):** transferred to **PRD-032**, which already
+  carries the never-zero-dollar-cheap subscription rule, with PRD-051's
+  unknown-stays-unknown semantics as the substrate. **Operational note until
+  032 lands: the multi-model registry routes essentially lexicographically —
+  do not read model diversity into routing records.** This is the same defect
+  class PRD-024 found in budgets (zero sails past every ceiling); 032 should
+  cite it as motivating evidence.
 
 ### FAM-BUG-008 — Claude model enable selected the Codex adapter
 
-- **Status:** Fixed locally; uncommitted
+- **Status:** Fixed — committed in `4f0305e`
 - **Observed:** Provider registration correctly admitted authenticated Claude,
   but `config model enable claude/claude` mapped every provider other than the
   literal name `ollama` to `adapter = "codex"`.
@@ -118,6 +135,9 @@ instead of deleting the history.
 - **Expected fix:** Surface the blocked transition and dependency in inventory
   output, and finish the neutral local runtime rather than routing Unsloth
   through Codex.
+- **Disposition (2026-08-31):** the runtime is **PRD-058/PRD-063** (specced,
+  waves 5–6); the blocked-transition display joins FAM-BUG-001's inventory
+  work in **PRD-057**.
 
 ### FAM-FRICTION-002 — Provider CLI discovery for subscription CLIs is not real model discovery
 
@@ -130,6 +150,10 @@ instead of deleting the history.
 - **Expected fix:** Represent CLI-default/unknown model identity explicitly and
   capture the provider-reported model from execution; never present a command
   name as a discovered model.
+- **Disposition (2026-08-31):** transferred to **PRD-057** (worker identity:
+  provider/model addresses become aliases; CLI-default identity is exactly its
+  material-parameter problem). PRD-051 already records the provider-reported
+  model per observation — 057 joins the two.
 
 ### FAM-FRICTION-003 — Capability declarations are manual and unverified
 
@@ -141,6 +165,10 @@ instead of deleting the history.
 - **Expected fix:** Start conservatively, distinguish declared from verified
   capabilities, and promote models through deterministic qualification and
   empirical history.
+- **Disposition (2026-08-31):** already specced — **PRD-057** (capability
+  provenance: declared / probed / observed / unknown) plus **PRD-032**
+  (probation and promotion on empirical history). No new work needed beyond
+  executing them.
 
 ### FAM-FRICTION-004 — Capability display is not canonical
 
@@ -150,3 +178,7 @@ instead of deleting the history.
   invites invalid copy/paste commands.
 - **Expected fix:** Use the canonical serialized capability spelling on every
   CLI and dashboard surface.
+- **Status update (2026-08-31): Fixed.** `WorkerCapabilityConfig::as_str`
+  provides the canonical kebab-case spelling, `config model list` uses it, and
+  a regression pins display output to the serde serialization for every
+  variant.

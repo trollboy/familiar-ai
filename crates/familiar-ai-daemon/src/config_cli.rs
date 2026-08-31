@@ -932,7 +932,7 @@ fn model_list(context: &ConfigContext) -> Result<(), String> {
             let capabilities = worker
                 .capabilities
                 .iter()
-                .map(|value| format!("{value:?}").to_lowercase())
+                .map(|value| value.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("{address} [ {capabilities} ]");
