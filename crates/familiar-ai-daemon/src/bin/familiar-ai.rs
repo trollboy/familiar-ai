@@ -105,8 +105,21 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
-    /// Summarize known standalone execution usage and cost.
-    Usage,
+    /// Query cached local accounting. With no range, preserves the legacy summary.
+    Usage {
+        #[arg(long, requires = "end")]
+        start: Option<String>,
+        #[arg(long, requires = "start")]
+        end: Option<String>,
+        #[arg(long, default_value = "day")]
+        bucket: String,
+        #[arg(long, value_delimiter = ',')]
+        group_by: Vec<String>,
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+        #[arg(long)]
+        dense: bool,
+    },
     /// Render one unattended driver session: what got built, what stopped and
     /// why, what it cost, and what needs human judgment. Defaults to the most
     /// recent session.
@@ -627,7 +640,21 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
-        Command::Usage => match usage() {
+        Command::Usage {
+            start,
+            end,
+            bucket,
+            group_by,
+            filters,
+            dense,
+        } => match usage(
+            start.as_deref(),
+            end.as_deref(),
+            &bucket,
+            group_by,
+            filters,
+            dense,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -2337,8 +2364,52 @@ fn history(limit: u8, verbose: bool) -> Result<(), String> {
     }
     Ok(())
 }
-fn usage() -> Result<(), String> {
+fn usage(
+    start: Option<&str>,
+    end: Option<&str>,
+    bucket: &str,
+    group_by: Vec<String>,
+    filters: Vec<String>,
+    dense: bool,
+) -> Result<(), String> {
     let db = database()?;
+    if let (Some(start), Some(end)) = (start, end) {
+        use familiar_ai_storage::{UsageBucket, UsageSeriesRequest};
+        let parse = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map(|v| v.with_timezone(&chrono::Utc))
+                .map_err(|e| format!("invalid UTC timestamp '{value}': {e}"))
+        };
+        let bucket = match bucket {
+            "hour" => UsageBucket::Hour,
+            "day" => UsageBucket::Day,
+            "week" => UsageBucket::Week,
+            "month" => UsageBucket::Month,
+            _ => return Err("bucket must be hour, day, week, or month".into()),
+        };
+        let mut parsed_filters = std::collections::BTreeMap::new();
+        for filter in filters {
+            let (key, value) = filter
+                .split_once('=')
+                .ok_or_else(|| format!("filter must be dimension=value: {filter}"))?;
+            parsed_filters.insert(key.into(), value.into());
+        }
+        let points = familiar_ai_storage::AccountingRepository::new(db.conn())
+            .usage_series(&UsageSeriesRequest {
+                start: parse(start)?,
+                end: parse(end)?,
+                bucket,
+                group_by,
+                filters: parsed_filters,
+                dense,
+            })
+            .map_err(|e| e.to_string())?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&points).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
     let ledger = familiar_ai_storage::AccountingRepository::new(db.conn())
         .usage()
         .map_err(|e| e.to_string())?;
@@ -2465,7 +2536,7 @@ mod tests {
             Cli::try_parse_from(["familiar-ai", "usage"])
                 .unwrap()
                 .command,
-            Command::Usage
+            Command::Usage { .. }
         ));
         assert!(matches!(
             Cli::try_parse_from(["familiar-ai", "next"])

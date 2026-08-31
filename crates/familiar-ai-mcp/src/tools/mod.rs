@@ -15,6 +15,7 @@ pub mod session_rollup_query;
 pub mod stewardship_mutations;
 pub mod stewardship_reads;
 pub mod stewardship_support;
+pub mod usage_series;
 
 #[cfg(test)]
 pub mod test_helpers;
@@ -45,6 +46,7 @@ pub fn register_default_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(stewardship_reads::GetBudgetTool));
     registry.register(Arc::new(stewardship_reads::ListReviewFindingsTool));
     registry.register(Arc::new(stewardship_reads::ListPendingHumanGatesTool));
+    registry.register(Arc::new(usage_series::UsageSeriesTool));
     registry.register(Arc::new(stewardship_mutations::BacklogReleaseTool));
     registry.register(Arc::new(stewardship_mutations::BacklogCompleteTool));
     registry.register(Arc::new(stewardship_mutations::BacklogRecordCompleteTool));

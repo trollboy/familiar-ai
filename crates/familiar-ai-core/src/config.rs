@@ -12,6 +12,10 @@ use crate::FamiliarError;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FamiliarToml {
+    /// Shareable reporting identity. It becomes effective only when the exact
+    /// familiar.toml snapshot has passed the existing local approval gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectDeclaration>,
     #[serde(default)]
     pub environments: BTreeMap<String, EnvironmentDeclaration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +36,17 @@ pub struct FamiliarToml {
     pub execution_context: Option<ExecutionContextConfig>,
     #[serde(default)]
     pub verification: Vec<SharedVerification>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectDeclaration {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_boundary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +79,32 @@ impl FamiliarToml {
         let encoded = toml::Value::try_from(self)
             .map_err(|error| FamiliarError::Config(error.to_string()))?;
         validate_shareable_value(&encoded, "familiar.toml")?;
+        if let Some(project) = &self.project {
+            if !valid_project_id(&project.id) || project.name.trim().is_empty() {
+                return Err(FamiliarError::Config(
+                    "project declaration requires a prj_ id and non-empty name".into(),
+                ));
+            }
+            if project
+                .forked_from
+                .as_deref()
+                .is_some_and(|id| !valid_project_id(id))
+                || (project.forked_from.is_some() != project.fork_boundary.is_some())
+            {
+                return Err(FamiliarError::Config(
+                    "project fork requires both a valid parent id and UTC boundary".into(),
+                ));
+            }
+            if project
+                .fork_boundary
+                .as_deref()
+                .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_err())
+            {
+                return Err(FamiliarError::Config(
+                    "invalid project fork boundary".into(),
+                ));
+            }
+        }
         let mut candidate = Config::default();
         candidate.repositories.insert(
             "/".into(),
@@ -130,6 +171,15 @@ impl FamiliarToml {
         }
         value
     }
+}
+
+fn valid_project_id(value: &str) -> bool {
+    value.strip_prefix("prj_").is_some_and(|suffix| {
+        suffix.len() >= 16
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
 }
 
 fn validate_shareable_value(value: &toml::Value, path: &str) -> crate::Result<()> {

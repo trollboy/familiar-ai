@@ -1,8 +1,58 @@
-use chrono::Utc;
+use std::collections::{BTreeMap, BTreeSet};
+
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use familiar_ai_core::FamiliarError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageBucket {
+    Hour,
+    Day,
+    Week,
+    Month,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSeriesRequest {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub bucket: UsageBucket,
+    pub group_by: Vec<String>,
+    pub filters: BTreeMap<String, String>,
+    pub dense: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UsageSeriesPoint {
+    pub bucket_start: String,
+    pub bucket_end: String,
+    pub dimensions: BTreeMap<String, String>,
+    pub estimated_cost_nanousd: Option<i64>,
+    pub authoritative_cost_nanousd: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub cached_input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub request_count: Option<i64>,
+    pub credit_estimate_microcredits: Option<i64>,
+    pub observation_ids: Vec<String>,
+}
+
+type SeriesGroup = Vec<(String, String)>;
+type SeriesKey = (DateTime<Utc>, SeriesGroup);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectIdentityResolution {
+    Resolved {
+        project_id: String,
+    },
+    Degraded {
+        evidence: Option<String>,
+        reason: String,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCostFact<'a> {
@@ -109,27 +159,332 @@ impl<'a> AccountingRepository<'a> {
     }
 
     pub fn project_id(&self, evidence: &str) -> familiar_ai_core::Result<String> {
-        if let Some(id) = self
-            .conn
+        self.conn
             .query_row(
-                "SELECT project_id FROM project_identities WHERE resolution_evidence=?1",
+                "SELECT project_id FROM project_registry_bindings WHERE evidence_value=?1 ORDER BY bound_at DESC, binding_id DESC LIMIT 1",
                 [evidence],
                 |r| r.get(0),
             )
             .optional()
             .map_err(db)?
-        {
-            return Ok(id);
+            .ok_or_else(|| FamiliarError::Database("repository identity is not bound to a durable project".into()))
+    }
+
+    pub fn resolve_project(
+        &self,
+        evidence: Option<&str>,
+    ) -> familiar_ai_core::Result<ProjectIdentityResolution> {
+        let Some(evidence) = evidence else {
+            return Ok(ProjectIdentityResolution::Degraded {
+                evidence: None,
+                reason: "git-metadata-unavailable".into(),
+            });
+        };
+        Ok(match self.project_id(evidence) {
+            Ok(project_id) => ProjectIdentityResolution::Resolved { project_id },
+            Err(_) => ProjectIdentityResolution::Degraded {
+                evidence: Some(evidence.into()),
+                reason: "durable-project-unbound".into(),
+            },
+        })
+    }
+
+    pub fn register_project(
+        &self,
+        project_id: &str,
+        name: &str,
+        evidence_kind: &str,
+        evidence: &str,
+        actor: &str,
+    ) -> familiar_ai_core::Result<()> {
+        if !project_id.starts_with("prj_") || name.trim().is_empty() || actor.trim().is_empty() {
+            return Err(FamiliarError::Database(
+                "invalid durable project registration".into(),
+            ));
         }
-        let id = format!("prj_{}", random_hex()?);
-        self.conn.execute("INSERT OR IGNORE INTO project_identities(resolution_evidence,project_id,issued_at) VALUES(?1,?2,?3)", params![evidence,id,Utc::now().to_rfc3339()]).map_err(db)?;
-        self.conn
-            .query_row(
-                "SELECT project_id FROM project_identities WHERE resolution_evidence=?1",
-                [evidence],
-                |r| r.get(0),
+        let now = Utc::now().to_rfc3339();
+        let tx = self.conn.unchecked_transaction().map_err(db)?;
+        tx.execute("INSERT OR IGNORE INTO durable_projects(project_id,display_name,created_at) VALUES(?1,?2,?3)", params![project_id,name,now]).map_err(db)?;
+        tx.execute("INSERT OR IGNORE INTO project_registry_bindings(binding_id,project_id,evidence_kind,evidence_value,actor,bound_at) VALUES(?1,?2,?3,?4,?5,?6)", params![format!("pbd_{}",random_hex()?),project_id,evidence_kind,evidence,actor,now]).map_err(db)?;
+        tx.commit().map_err(db)
+    }
+
+    pub fn bind_provider(
+        &self,
+        project_id: &str,
+        provider: &str,
+        scope_kind: &str,
+        scope_value: &str,
+        confidence: &str,
+        actor: &str,
+    ) -> familiar_ai_core::Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO provider_attribution_bindings(binding_id,project_id,provider,scope_kind,scope_value,confidence,actor,bound_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![format!("pab_{}",random_hex()?),project_id,provider,scope_kind,scope_value,confidence,actor,Utc::now().to_rfc3339()]).map_err(db)?;
+        Ok(())
+    }
+
+    /// Provider-neutral historical accounting query. Facts are assigned by
+    /// period_start and are never prorated, even when their native interval
+    /// crosses a requested bucket boundary.
+    pub fn usage_series(
+        &self,
+        request: &UsageSeriesRequest,
+    ) -> familiar_ai_core::Result<Vec<UsageSeriesPoint>> {
+        if request.start >= request.end {
+            return Err(FamiliarError::Database(
+                "usage series range must be non-empty".into(),
+            ));
+        }
+        const DIMENSIONS: &[&str] = &[
+            "project",
+            "provider",
+            "model",
+            "prd",
+            "execution",
+            "attempt",
+            "stage",
+            "billing_source",
+            "attribution_status",
+        ];
+        if request
+            .group_by
+            .iter()
+            .chain(request.filters.keys())
+            .any(|v| !DIMENSIONS.contains(&v.as_str()))
+        {
+            return Err(FamiliarError::Database(
+                "unsupported usage-series dimension".into(),
+            ));
+        }
+        let mut facts = self.local_series_facts(request)?;
+        facts.extend(self.openai_series_facts(request)?);
+        facts.extend(self.anthropic_series_facts(request)?);
+        facts.retain(|fact| {
+            request
+                .filters
+                .iter()
+                .all(|(key, value)| fact.dimensions.get(key) == Some(value))
+        });
+
+        let mut points: BTreeMap<SeriesKey, UsageSeriesPoint> = BTreeMap::new();
+        for fact in facts {
+            let start = bucket_start(fact.assignment, request.bucket);
+            let grouped: Vec<_> = request
+                .group_by
+                .iter()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        fact.dimensions
+                            .get(key)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".into()),
+                    )
+                })
+                .collect();
+            let point =
+                points
+                    .entry((start, grouped.clone()))
+                    .or_insert_with(|| UsageSeriesPoint {
+                        bucket_start: start.to_rfc3339(),
+                        bucket_end: next_bucket(start, request.bucket).to_rfc3339(),
+                        dimensions: grouped.into_iter().collect(),
+                        estimated_cost_nanousd: None,
+                        authoritative_cost_nanousd: None,
+                        input_tokens: None,
+                        cached_input_tokens: None,
+                        output_tokens: None,
+                        reasoning_tokens: None,
+                        request_count: None,
+                        credit_estimate_microcredits: None,
+                        observation_ids: Vec::new(),
+                    });
+            add_optional(&mut point.estimated_cost_nanousd, fact.estimated_cost);
+            add_optional(
+                &mut point.authoritative_cost_nanousd,
+                fact.authoritative_cost,
+            );
+            add_optional(&mut point.input_tokens, fact.input_tokens);
+            add_optional(&mut point.cached_input_tokens, fact.cached_input_tokens);
+            add_optional(&mut point.output_tokens, fact.output_tokens);
+            add_optional(&mut point.reasoning_tokens, fact.reasoning_tokens);
+            add_optional(&mut point.request_count, fact.request_count);
+            add_optional(
+                &mut point.credit_estimate_microcredits,
+                fact.credit_estimate,
+            );
+            point.observation_ids.push(fact.id);
+        }
+        if request.dense {
+            let groups: BTreeSet<SeriesGroup> =
+                points.keys().map(|(_, group)| group.clone()).collect();
+            let mut cursor = bucket_start(request.start, request.bucket);
+            while cursor < request.end {
+                for group in &groups {
+                    points
+                        .entry((cursor, group.clone()))
+                        .or_insert_with(|| UsageSeriesPoint {
+                            bucket_start: cursor.to_rfc3339(),
+                            bucket_end: next_bucket(cursor, request.bucket).to_rfc3339(),
+                            dimensions: group.clone().into_iter().collect(),
+                            estimated_cost_nanousd: Some(0),
+                            authoritative_cost_nanousd: Some(0),
+                            input_tokens: Some(0),
+                            cached_input_tokens: Some(0),
+                            output_tokens: Some(0),
+                            reasoning_tokens: Some(0),
+                            request_count: Some(0),
+                            credit_estimate_microcredits: Some(0),
+                            observation_ids: Vec::new(),
+                        });
+                }
+                cursor = next_bucket(cursor, request.bucket);
+            }
+        }
+        let mut result: Vec<_> = points.into_values().collect();
+        for point in &mut result {
+            point.observation_ids.sort();
+            point.observation_ids.dedup();
+        }
+        Ok(result)
+    }
+
+    fn local_series_facts(
+        &self,
+        request: &UsageSeriesRequest,
+    ) -> familiar_ai_core::Result<Vec<SeriesFact>> {
+        let mut statement = self.conn.prepare("SELECT u.observation_id,u.period_start,coalesce((SELECT c.project_id FROM accounting_corrections c WHERE c.observation_id=u.observation_id AND c.correction_kind='reattribution' ORDER BY c.effective_at DESC,c.correction_id DESC LIMIT 1),u.project_id),u.degraded_identity,u.adapter,u.model_identity,e.prd_path,u.execution_id,u.attempt_id,u.stage,coalesce((SELECT sum(amount) FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD'),NULL),u.uncached_input_tokens,u.cache_read_tokens,u.output_tokens,u.reasoning_output_tokens,(SELECT sum(amount_micocredits) FROM credit_estimates c WHERE c.observation_id=u.observation_id) FROM usage_observations u JOIN execution_history e ON e.execution_id=u.execution_id WHERE u.period_start>=?1 AND u.period_start<?2 ORDER BY u.period_start,u.observation_id").map_err(db)?;
+        let rows = statement
+            .query_map(
+                params![request.start.to_rfc3339(), request.end.to_rfc3339()],
+                |row| {
+                    let project: Option<String> = row.get(2)?;
+                    let degraded: Option<String> = row.get(3)?;
+                    let mut dimensions = BTreeMap::new();
+                    dimensions.insert(
+                        "project".into(),
+                        project.clone().unwrap_or_else(|| {
+                            format!(
+                                "degraded:{}",
+                                degraded.unwrap_or_else(|| "unresolved".into())
+                            )
+                        }),
+                    );
+                    dimensions.insert("provider".into(), row.get::<_, String>(4)?);
+                    dimensions.insert(
+                        "model".into(),
+                        row.get::<_, Option<String>>(5)?
+                            .unwrap_or_else(|| "unknown".into()),
+                    );
+                    dimensions.insert("prd".into(), row.get(6)?);
+                    dimensions.insert("execution".into(), row.get(7)?);
+                    dimensions.insert("attempt".into(), row.get(8)?);
+                    dimensions.insert("stage".into(), row.get(9)?);
+                    dimensions.insert("billing_source".into(), "local".into());
+                    dimensions.insert(
+                        "attribution_status".into(),
+                        if project.is_some() {
+                            "attributed"
+                        } else {
+                            "degraded-identity"
+                        }
+                        .into(),
+                    );
+                    Ok(SeriesFact {
+                        id: row.get(0)?,
+                        assignment: parse_utc(row.get::<_, String>(1)?).map_err(sql_conversion)?,
+                        dimensions,
+                        estimated_cost: row.get(10)?,
+                        authoritative_cost: None,
+                        input_tokens: row.get(11)?,
+                        cached_input_tokens: row.get(12)?,
+                        output_tokens: row.get(13)?,
+                        reasoning_tokens: row.get(14)?,
+                        request_count: Some(1),
+                        credit_estimate: row.get(15)?,
+                    })
+                },
             )
-            .map_err(db)
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
+    fn openai_series_facts(
+        &self,
+        request: &UsageSeriesRequest,
+    ) -> familiar_ai_core::Result<Vec<SeriesFact>> {
+        let mut statement=self.conn.prepare("SELECT r.revision_id,r.bucket_start,r.source_id,r.organization_id,r.project_id,r.amount_nanousd,(SELECT b.project_id FROM provider_attribution_bindings b WHERE b.provider='openai' AND ((b.scope_kind='project' AND b.scope_value=r.project_id) OR (b.scope_kind='organization' AND b.scope_value=r.organization_id)) ORDER BY CASE b.scope_kind WHEN 'project' THEN 0 ELSE 1 END,b.bound_at DESC LIMIT 1) FROM openai_cost_revisions r LEFT JOIN openai_cost_revisions newer ON newer.supersedes_revision_id=r.revision_id WHERE newer.revision_id IS NULL AND r.bucket_start>=?1 AND r.bucket_start<?2 AND r.amount_nanousd IS NOT NULL ORDER BY r.bucket_start,r.revision_id").map_err(db)?;
+        let rows = statement
+            .query_map(
+                params![request.start.timestamp(), request.end.timestamp()],
+                |row| {
+                    provider_fact(
+                        row,
+                        "openai",
+                        DateTime::from_timestamp(row.get(1)?, 0)
+                            .ok_or(rusqlite::Error::InvalidQuery)?,
+                    )
+                },
+            )
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
+    fn anthropic_series_facts(
+        &self,
+        request: &UsageSeriesRequest,
+    ) -> familiar_ai_core::Result<Vec<SeriesFact>> {
+        let mut statement=self.conn.prepare("SELECT r.revision_id,r.bucket_start,r.source_name,'',r.workspace_id,r.amount_nanousd,b.project_id FROM current_provider_costs r LEFT JOIN provider_attribution_bindings b ON b.provider='anthropic' AND b.scope_kind='workspace' AND b.scope_value=r.workspace_id WHERE r.bucket_start>=?1 AND r.bucket_start<?2 ORDER BY r.bucket_start,r.revision_id").map_err(db)?;
+        let rows = statement
+            .query_map(
+                params![request.start.to_rfc3339(), request.end.to_rfc3339()],
+                |row| {
+                    let time = parse_utc(row.get::<_, String>(1)?).map_err(sql_conversion)?;
+                    provider_fact(row, "anthropic", time)
+                },
+            )
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
+    pub fn append_reattribution(
+        &self,
+        observation_id: &str,
+        project_id: &str,
+        actor: &str,
+        reason: &str,
+        effective_at: &str,
+    ) -> familiar_ai_core::Result<String> {
+        let prior: Option<String>=self.conn.query_row("SELECT coalesce((SELECT project_id FROM accounting_corrections WHERE observation_id=?1 AND correction_kind='reattribution' ORDER BY effective_at DESC,correction_id DESC LIMIT 1),(SELECT project_id FROM usage_observations WHERE observation_id=?1))",[observation_id],|r|r.get(0)).optional().map_err(db)?.flatten();
+        let id = format!("cor_{}", random_hex()?);
+        self.conn.execute("INSERT INTO accounting_corrections(correction_id,observation_id,correction_kind,prior_project_id,project_id,reason,actor,effective_at) VALUES(?1,?2,'reattribution',?3,?4,?5,?6,?7)",params![id,observation_id,prior,project_id,reason,actor,effective_at]).map_err(db)?;
+        Ok(id)
+    }
+
+    /// Atomically replaces disposable rollups; raw observations are untouched.
+    pub fn rebuild_rollups(
+        &self,
+        request: &UsageSeriesRequest,
+        definition_version: i64,
+    ) -> familiar_ai_core::Result<usize> {
+        let points = self.usage_series(request)?;
+        let now = Utc::now().to_rfc3339();
+        let tx = self.conn.unchecked_transaction().map_err(db)?;
+        tx.execute(
+            "DELETE FROM usage_rollups WHERE definition_version=?1 AND bucket_kind=?2",
+            params![definition_version, bucket_name(request.bucket)],
+        )
+        .map_err(db)?;
+        for point in &points {
+            let dimensions = serde_json::to_string(&point.dimensions)
+                .map_err(|e| FamiliarError::Database(e.to_string()))?;
+            let metrics =
+                serde_json::to_string(point).map_err(|e| FamiliarError::Database(e.to_string()))?;
+            let ids = serde_json::to_string(&point.observation_ids)
+                .map_err(|e| FamiliarError::Database(e.to_string()))?;
+            tx.execute("INSERT INTO usage_rollups(definition_version,bucket_kind,bucket_start,dimensions_json,metrics_json,observation_ids_json,rebuilt_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![definition_version,bucket_name(request.bucket),point.bucket_start,dimensions,metrics,ids,now]).map_err(db)?;
+        }
+        tx.commit().map_err(db)?;
+        Ok(points.len())
     }
 
     /// Idempotency is keyed by the sanitized source-event hash. Evidence and
@@ -154,13 +509,11 @@ impl<'a> AccountingRepository<'a> {
         let evidence_id = format!("evi_{}", random_hex()?);
         let observation_id = format!("obs_{}", random_hex()?);
         let now = Utc::now().to_rfc3339();
-        let project_id = value
-            .project_resolution_evidence
-            .map(|e| self.project_id(e))
-            .transpose()?;
-        let degraded = project_id
-            .is_none()
-            .then_some("git-common-directory-unavailable");
+        let (project_id, degraded) =
+            match self.resolve_project(value.project_resolution_evidence)? {
+                ProjectIdentityResolution::Resolved { project_id } => (Some(project_id), None),
+                ProjectIdentityResolution::Degraded { reason, .. } => (None, Some(reason)),
+            };
         let usage_json = serde_json::json!({"uncached_input_tokens":value.uncached_input_tokens,"cache_read_tokens":value.cache_read_tokens,"cache_write_tokens":value.cache_write_tokens,"output_tokens":value.output_tokens,"reasoning_output_tokens":value.reasoning_output_tokens}).to_string();
         let selected_spec: Option<(Option<String>, Option<String>)> = self.conn.query_row(
             "SELECT selected_spec_identity,selected_empirical_version FROM worker_selections WHERE execution_id=?1 AND stage=?2 ORDER BY recorded_at DESC LIMIT 1",
@@ -364,6 +717,125 @@ fn random_hex() -> familiar_ai_core::Result<String> {
         .map_err(|_| FamiliarError::Database("secure project-id generation failed".into()))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
+
+struct SeriesFact {
+    id: String,
+    assignment: DateTime<Utc>,
+    dimensions: BTreeMap<String, String>,
+    estimated_cost: Option<i64>,
+    authoritative_cost: Option<i64>,
+    input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    reasoning_tokens: Option<i64>,
+    request_count: Option<i64>,
+    credit_estimate: Option<i64>,
+}
+
+fn provider_fact(
+    row: &rusqlite::Row<'_>,
+    provider: &str,
+    assignment: DateTime<Utc>,
+) -> rusqlite::Result<SeriesFact> {
+    let project: Option<String> = row.get(6)?;
+    let mut dimensions = BTreeMap::new();
+    dimensions.insert(
+        "project".into(),
+        project.clone().unwrap_or_else(|| "unattributed".into()),
+    );
+    dimensions.insert("provider".into(), provider.into());
+    dimensions.insert("model".into(), "unknown".into());
+    dimensions.insert("prd".into(), "unknown".into());
+    dimensions.insert("execution".into(), "unknown".into());
+    dimensions.insert("attempt".into(), "unknown".into());
+    dimensions.insert("stage".into(), "unknown".into());
+    dimensions.insert("billing_source".into(), row.get(2)?);
+    dimensions.insert(
+        "attribution_status".into(),
+        if project.is_some() {
+            "attributed"
+        } else {
+            "unattributed"
+        }
+        .into(),
+    );
+    Ok(SeriesFact {
+        id: row.get(0)?,
+        assignment,
+        dimensions,
+        estimated_cost: None,
+        authoritative_cost: row.get(5)?,
+        input_tokens: None,
+        cached_input_tokens: None,
+        output_tokens: None,
+        reasoning_tokens: None,
+        request_count: None,
+        credit_estimate: None,
+    })
+}
+
+fn parse_utc(value: String) -> Result<DateTime<Utc>, chrono::ParseError> {
+    DateTime::parse_from_rfc3339(&value).map(|value| value.with_timezone(&Utc))
+}
+
+fn sql_conversion(error: chrono::ParseError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+}
+
+fn add_optional(target: &mut Option<i64>, value: Option<i64>) {
+    if let Some(value) = value {
+        *target = Some(target.unwrap_or(0).saturating_add(value));
+    }
+}
+
+fn bucket_start(value: DateTime<Utc>, bucket: UsageBucket) -> DateTime<Utc> {
+    match bucket {
+        UsageBucket::Hour => value
+            .with_minute(0)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap(),
+        UsageBucket::Day => Utc
+            .with_ymd_and_hms(value.year(), value.month(), value.day(), 0, 0, 0)
+            .unwrap(),
+        UsageBucket::Week => {
+            let day = Utc
+                .with_ymd_and_hms(value.year(), value.month(), value.day(), 0, 0, 0)
+                .unwrap();
+            day - Duration::days(value.weekday().num_days_from_monday().into())
+        }
+        UsageBucket::Month => Utc
+            .with_ymd_and_hms(value.year(), value.month(), 1, 0, 0, 0)
+            .unwrap(),
+    }
+}
+
+fn next_bucket(value: DateTime<Utc>, bucket: UsageBucket) -> DateTime<Utc> {
+    match bucket {
+        UsageBucket::Hour => value + Duration::hours(1),
+        UsageBucket::Day => value + Duration::days(1),
+        UsageBucket::Week => value + Duration::weeks(1),
+        UsageBucket::Month => {
+            if value.month() == 12 {
+                Utc.with_ymd_and_hms(value.year() + 1, 1, 1, 0, 0, 0)
+                    .unwrap()
+            } else {
+                Utc.with_ymd_and_hms(value.year(), value.month() + 1, 1, 0, 0, 0)
+                    .unwrap()
+            }
+        }
+    }
+}
+fn bucket_name(bucket: UsageBucket) -> &'static str {
+    match bucket {
+        UsageBucket::Hour => "hour",
+        UsageBucket::Day => "day",
+        UsageBucket::Week => "week",
+        UsageBucket::Month => "month",
+    }
+}
 pub fn decimal_nanousd(value: &str) -> Option<u64> {
     let (whole, frac) = value.split_once('.').unwrap_or((value, ""));
     if whole.is_empty()
@@ -444,6 +916,14 @@ mod tests {
             })
             .unwrap();
         let repo = AccountingRepository::new(db.conn());
+        repo.register_project(
+            "prj_fixture00000001",
+            "fixture",
+            "repository",
+            "/machine/git/common",
+            "test",
+        )
+        .unwrap();
         let value = UsageObservation {
             execution_id: "execution",
             attempt_id: "attempt-1",
@@ -500,6 +980,118 @@ mod tests {
             repo.project_id("/machine/git/common").unwrap(),
             repo.project_id("/machine/git/common").unwrap()
         );
+    }
+
+    #[test]
+    fn unresolved_identity_is_explicit_and_series_is_dense_and_bucketed_by_covered_time() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        for (id, prd) in [("exec-a", "PRD-A"), ("exec-b", "PRD-B")] {
+            ExecutionHistoryRepository::new(db.conn())
+                .insert_running(&ExecutionStart {
+                    execution_id: id.into(),
+                    started_at: "2026-08-01T00:00:00Z".into(),
+                    repository: "/moved".into(),
+                    worktree: "/alternate".into(),
+                    git_commit: None,
+                    prd_path: prd.into(),
+                    unavailable_fields: BTreeMap::new(),
+                })
+                .unwrap();
+        }
+        let repo = AccountingRepository::new(db.conn());
+        assert!(
+            matches!(repo.resolve_project(Some("unbound")).unwrap(),ProjectIdentityResolution::Degraded{reason,..} if reason=="durable-project-unbound")
+        );
+        repo.register_project("prj_project0000001", "A", "repository", "repo-a", "test")
+            .unwrap();
+        repo.register_project("prj_project0000002", "B", "repository", "repo-b", "test")
+            .unwrap();
+        for (n, (execution, evidence, provider, time, tokens, cost)) in [
+            (
+                "1",
+                (
+                    "exec-a",
+                    "repo-a",
+                    "claude-code",
+                    "2026-08-01T23:00:00Z",
+                    10,
+                    "1.0",
+                ),
+            ),
+            (
+                "2",
+                (
+                    "exec-b",
+                    "repo-b",
+                    "codex",
+                    "2026-08-02T12:00:00Z",
+                    20,
+                    "2.0",
+                ),
+            ),
+        ] {
+            let value = UsageObservation {
+                execution_id: execution,
+                attempt_id: n,
+                stage: "implementation",
+                session_id: None,
+                worker_identity: provider,
+                adapter: provider,
+                cli_version: None,
+                model_identity: Some("model"),
+                service_tier: None,
+                provider_request_id: None,
+                uncached_input_tokens: Some(tokens),
+                cache_read_tokens: Some(0),
+                cache_write_tokens: None,
+                output_tokens: Some(1),
+                reasoning_output_tokens: Some(0),
+                unknown_reason: None,
+                period_start: time,
+                period_end: "2026-08-03T00:00:00Z",
+                terminal_status: "succeeded",
+                source_event_hash: n,
+                provider_cost_lexical: Some(cost),
+                project_resolution_evidence: Some(evidence),
+                output_register_id: "none",
+                output_register_version: "none",
+                input_compression_id: "none",
+                input_compression_version: "none",
+                compression_experiment: None,
+                compression_lane: None,
+            };
+            let id = repo.append_observation(&value).unwrap().unwrap();
+            repo.append_vendor_estimate(&id, cost).unwrap();
+        }
+        let points = repo
+            .usage_series(&UsageSeriesRequest {
+                start: parse_utc("2026-08-01T00:00:00Z".into()).unwrap(),
+                end: parse_utc("2026-08-04T00:00:00Z".into()).unwrap(),
+                bucket: UsageBucket::Day,
+                group_by: vec!["project".into(), "provider".into()],
+                filters: BTreeMap::new(),
+                dense: true,
+            })
+            .unwrap();
+        assert_eq!(points.len(), 6); // two stable groups across three chart buckets
+        assert_eq!(
+            points
+                .iter()
+                .filter(|p| !p.observation_ids.is_empty())
+                .count(),
+            2
+        );
+        assert_eq!(
+            points
+                .iter()
+                .filter_map(|p| p.estimated_cost_nanousd)
+                .sum::<i64>(),
+            3_000_000_000
+        );
+        assert!(points.iter().any(
+            |p| p.bucket_start == "2026-08-01T00:00:00+00:00" && !p.observation_ids.is_empty()
+        ));
     }
 
     #[test]

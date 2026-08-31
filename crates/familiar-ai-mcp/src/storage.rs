@@ -17,7 +17,7 @@ use familiar_ai_storage::repos::file_summary::{
 use familiar_ai_storage::{
     BacklogEntryRow, BudgetSummary, DeliveryDecisionRow, DeliveryRepository, DriverAttempt,
     DriverRepository, DriverSession, ExecutionCheckpoint, PendingGate, RecoveryEventRow,
-    ReviewFindingsRow,
+    ReviewFindingsRow, UsageSeriesPoint, UsageSeriesRequest,
 };
 use familiar_ai_storage::{
     CheckpointRepository, Database, DecisionRepository, FileSummaryRepository, ProjectRepository,
@@ -40,6 +40,12 @@ pub enum StorageError {
 /// For now the SqliteStorage impl just wraps sync rusqlite calls.
 #[async_trait]
 pub trait Storage: Send + Sync {
+    async fn usage_series(
+        &self,
+        _request: &UsageSeriesRequest,
+    ) -> Result<Vec<UsageSeriesPoint>, StorageError> {
+        Ok(Vec::new())
+    }
     async fn list_decisions_by_project(
         &self,
         project_id: i64,
@@ -261,6 +267,15 @@ fn map_err<E: std::fmt::Display>(e: E) -> StorageError {
 
 #[async_trait]
 impl Storage for SqliteStorage {
+    async fn usage_series(
+        &self,
+        request: &UsageSeriesRequest,
+    ) -> Result<Vec<UsageSeriesPoint>, StorageError> {
+        let db = self.db.lock().unwrap();
+        familiar_ai_storage::AccountingRepository::new(db.conn())
+            .usage_series(request)
+            .map_err(map_err)
+    }
     async fn list_decisions_by_project(
         &self,
         project_id: i64,

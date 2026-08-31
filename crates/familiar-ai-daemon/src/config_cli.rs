@@ -13,7 +13,9 @@ use familiar_ai_core::config::{
 use familiar_ai_core::{
     AppPaths, BacklogDiscovery, Config, FamiliarToml, FilesystemBacklogDiscovery,
 };
-use familiar_ai_storage::{ConfigDecisionRepository, Database, FamiliarTomlRepository};
+use familiar_ai_storage::{
+    AccountingRepository, ConfigDecisionRepository, Database, FamiliarTomlRepository,
+};
 use ring::digest::{digest, SHA256};
 use toml_edit::{value, Array, Document, Item, Table};
 
@@ -277,14 +279,13 @@ fn repository_identity(repository: &std::path::Path) -> Result<(PathBuf, String)
     let canonical = repository
         .canonicalize()
         .map_err(|e| format!("cannot resolve repository {}: {e}", repository.display()))?;
-    let canonical = FilesystemBacklogDiscovery
-        .resolve(&canonical)
-        .map(|identity| identity.worktree)
-        .unwrap_or(canonical);
-    Ok((
-        canonical.clone(),
-        canonical.to_string_lossy().replace('\\', "/"),
-    ))
+    match FilesystemBacklogDiscovery.resolve(&canonical) {
+        Ok(identity) => Ok((identity.worktree, identity.key)),
+        Err(_) => Ok((
+            canonical.clone(),
+            canonical.to_string_lossy().replace('\\', "/"),
+        )),
+    }
 }
 
 fn project_snapshot(
@@ -308,13 +309,18 @@ fn project_approve(
 ) -> Result<(), String> {
     let actor = actor(Some(supplied_actor))?;
     let (repository, key) = repository_identity(repository)?;
-    let (content, _) = project_snapshot(&repository)?.ok_or("familiar.toml not found")?;
+    let (content, declaration) = project_snapshot(&repository)?.ok_or("familiar.toml not found")?;
     let hash = sha256(content.as_bytes());
     let config = load_config(context)?;
     let db = open_database(context, &config)?;
     FamiliarTomlRepository::new(&db)
         .record(&key, "approve", &actor, &hash, &content)
         .map_err(|e| e.to_string())?;
+    if let Some(project) = declaration.project {
+        AccountingRepository::new(db.conn())
+            .register_project(&project.id, &project.name, "declaration", &key, &actor)
+            .map_err(|e| e.to_string())?;
+    }
     println!("familiar.toml: approved (snapshot {hash}, {actor})");
     Ok(())
 }
