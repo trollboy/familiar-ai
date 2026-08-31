@@ -448,3 +448,57 @@ PRD-076.
 - **Remaining friction:** The failure was silent for roughly eleven minutes,
   reaffirming FAM-BUG-011. The execution plan also directs operators to
   `make wave-plan-check`, but the repository currently defines no such target.
+
+### FAM-BUG-021 — Familiar invalidates its own checkpoint after remediation
+
+- **Status:** Open; blocks autonomous Wave 4 recovery
+- **Observed:** PRD-032 completed implementation, verification, two independent
+  review/remediation cycles, and a third review that found one new actionable
+  defect. After increasing the bounded remediation allowance and invoking
+  `resume PRD-32`, recovery rejected the preserved candidate with
+  `hash_mismatch`: expected
+  `sha256:e7b6dfbafc1ff9e345667c891c082ea13010c16e5c6583e88ba9838cd378b116`,
+  actual
+  `sha256:5a15121af0d18148b42de212a2b8de4b6c263acb1f3ff70e37deb262a6443263`.
+  The changed bytes were produced by Familiar's own remediation workers.
+- **Impact:** A valid reviewer finding cannot be remediated through Familiar
+  after the configured retry ceiling changes. Familiar turns its own durable
+  candidate into an invalid checkpoint and forces manual worktree recovery.
+- **Expected fix:** Every successful remediation must atomically advance the
+  checkpoint manifest/hash and preserve the review lineage it supersedes.
+  Resume must accept the exact candidate last produced and verified by
+  Familiar, while still rejecting external mutation.
+
+### FAM-BUG-022 — Wave 4 reproduces cascade-then-manual delivery
+
+- **Status:** Open; concrete second reproduction of FAM-BUG-019
+- **Observed:** Wave 4 first spent roughly eleven silent minutes before an
+  unused Unsloth credential aborted the whole session. After that was fixed,
+  PRD-032 implemented successfully but the routed Qwen reviewer emitted prose
+  before JSON three times; Familiar retained it and immediately admitted
+  PRD-055 against the same broken review fleet. The operator interrupted the
+  cascade. A restricted llama3 reviewer then completed two useful remediation
+  cycles, but FAM-BUG-021 made the candidate unresumable.
+- **Impact:** The live workflow is again `drive` → shared-stage cascade →
+  manual per-PRD landing outside Familiar. The operator had to supply the
+  circuit breaker, repair provider routing, alter retry policy, and now recover
+  the checkpoint manually.
+- **Expected fix:** FAM-BUG-019's end-to-end exit criterion remains mandatory.
+  Additionally, identical structured-output failures must quarantine the
+  worker for the session and fall through to another eligible reviewer before
+  retaining the PRD or admitting another candidate.
+
+### FAM-BUG-023 — Valid config cannot be edited because disabled delivery defaults active
+
+- **Status:** Open; machine config repaired manually
+- **Observed:** Every `config model disable` command failed atomic validation,
+  first demanding `max_deliveries_per_session`, then a remote/base, because the
+  existing `[delivery] enabled = false` table defaulted `mode` to
+  `reviewed_pr_manual`. Adding `mode = "disabled"` made the supported commands
+  work.
+- **Impact:** An older valid configuration can run drives but cannot be changed
+  through Familiar's own atomic configuration commands, blocking emergency
+  worker quarantine.
+- **Expected fix:** Legacy `enabled = false` must migrate or deserialize to
+  disabled mode before validation. Add an edit regression starting from that
+  exact historical table.
