@@ -108,6 +108,27 @@ impl<'a> CheckpointRepository<'a> {
         self.transition(checkpoint_id, phase, "phase_completed")
     }
 
+    /// Rebind approval evidence after integration rematerializes a candidate.
+    /// The old hash must match, preventing an unrelated candidate takeover.
+    pub fn rebind_candidate(
+        &self,
+        checkpoint_id: &str,
+        old_hash: &str,
+        new_hash: &str,
+        commit: &str,
+    ) -> familiar_ai_core::Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE execution_checkpoints SET diff_hash=?1,approved_diff_hash=CASE WHEN approved_diff_hash=?2 THEN ?1 ELSE approved_diff_hash END,approved_commit=?3,base_revision=?3,updated_at=?4 WHERE checkpoint_id=?5 AND diff_hash=?2",
+            params![new_hash,old_hash,commit,Utc::now().to_rfc3339(),checkpoint_id],
+        ).map_err(db)?;
+        if changed != 1 {
+            return Err(FamiliarError::Database(format!(
+                "candidate binding for {checkpoint_id} changed"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn transition(
         &self,
         checkpoint_id: &str,

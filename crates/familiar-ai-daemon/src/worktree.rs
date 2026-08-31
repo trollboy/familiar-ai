@@ -111,6 +111,26 @@ impl WorktreeLease {
         component_id: &str,
         configured_root: Option<&Path>,
     ) -> io::Result<Self> {
+        Self::create_component_at(
+            repository,
+            state_dir,
+            session_id,
+            component_id,
+            configured_root,
+            "HEAD",
+        )
+    }
+
+    /// Create a worker from the session's persisted integration revision.
+    /// Callers pass an immutable object id, never a moving branch name.
+    pub fn create_component_at(
+        repository: &Path,
+        state_dir: &Path,
+        session_id: &str,
+        component_id: &str,
+        configured_root: Option<&Path>,
+        revision: &str,
+    ) -> io::Result<Self> {
         let safe_id: String = component_id
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -130,7 +150,7 @@ impl WorktreeLease {
         let output = Command::new("git")
             .args(["worktree", "add", "-b", &branch])
             .arg(&worktree)
-            .arg("HEAD")
+            .arg(revision)
             .current_dir(repository)
             .stdin(Stdio::null())
             .output()?;

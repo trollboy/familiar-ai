@@ -398,6 +398,31 @@ impl<'a> SqliteBacklogRepository<'a> {
         actor: &str,
         required_checks: &[String],
     ) -> Result<BacklogEntry, BacklogStoreError> {
+        self.complete_run_with(
+            repository,
+            target,
+            execution_id,
+            actor,
+            required_checks,
+            |_| Ok(()),
+        )
+    }
+
+    /// Complete a reviewed run and additional orchestration transitions in
+    /// the same immediate transaction. The callback must contain only durable
+    /// exposure of the already-materialized candidate.
+    pub fn complete_run_with<F>(
+        &mut self,
+        repository: &RepositoryIdentity,
+        target: &DiscoveredPrd,
+        execution_id: &str,
+        actor: &str,
+        required_checks: &[String],
+        finalize: F,
+    ) -> Result<BacklogEntry, BacklogStoreError>
+    where
+        F: FnOnce(&Transaction<'_>) -> Result<(), BacklogStoreError>,
+    {
         validate_run_actor(actor)?;
         let tx = self
             .connection
@@ -461,6 +486,7 @@ impl<'a> SqliteBacklogRepository<'a> {
             });
         }
         tx.execute("INSERT INTO backlog_status_events(repository_key,prd_path,old_status,new_status,actor,changed_at)VALUES(?1,?2,'in_progress','completed',?3,?4)",params![repository.key,target.path.as_str(),actor,now]).map_err(storage)?;
+        finalize(&tx)?;
         tx.commit().map_err(storage)?;
         Ok(BacklogEntry {
             prd: target.clone(),
