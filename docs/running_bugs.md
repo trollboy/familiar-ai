@@ -487,6 +487,14 @@ PRD-076.
   Additionally, identical structured-output failures must quarantine the
   worker for the session and fall through to another eligible reviewer before
   retaining the PRD or admitting another candidate.
+- **Second cascade (2026-08-31):** After PRD-032 was landed manually, a new
+  three-PRD drive implemented and fully tested PRD-055, then retained it as
+  `scope_broadened` solely because
+  `crates/familiar-ai-mcp/tests/integration.rs` was not in the PRD's expected
+  files even though the PRD declares the entire MCP source surface and requires
+  deterministic offline query coverage. Familiar immediately admitted
+  PRD-056 on the unintegrated base. The operator again had to interrupt the
+  session to prevent a second incompatible-candidate pile.
 
 ### FAM-BUG-023 — Valid config cannot be edited because disabled delivery defaults active
 
