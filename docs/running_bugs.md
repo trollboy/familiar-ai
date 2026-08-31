@@ -233,6 +233,25 @@ instead of deleting the history.
   deterministic transport abstraction that needs no forbidden socket. The
   durable result must distinguish environment denial from product failure.
 
+### FAM-BUG-016 — Recovery blocks current work on stale checkpoints for already-integrated PRDs
+
+- **Status:** Open; Wave 3 recovery requires manual integration
+- **Observed:** After the Wave 3 drive retained all nine candidates,
+  `familiar-ai resume all --dry-run` classified old Wave 2 PRD-048 and PRD-051
+  worktrees as `stale_base`, then reported PRD-050 blocked on PRD-048 and
+  PRD-052/054/057/064/069/070 blocked on PRD-051. Both predecessor PRDs are
+  already integrated and durably complete on `main`; only their obsolete
+  preserved worktrees are stale.
+- **Impact:** The recovery planner gives obsolete checkpoint state precedence
+  over current backlog and Git integration evidence. Valid, resumable Wave 3
+  candidates cannot be recovered through Familiar and require manual worktree
+  review, rebase, testing, and integration.
+- **Expected fix:** Reconcile recovery inventory against the current backlog
+  and integration revision before constructing dependency waves. Suppress or
+  archive checkpoints for PRDs whose integrated commit is contained in the
+  current base, and satisfy dependencies from that integrated state. A stale
+  historical candidate must never make a completed predecessor block new work.
+
 ### FAM-FRICTION-001 — Provider registration does not imply execution readiness
 
 - **Status:** Open design/UX gap
