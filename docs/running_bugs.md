@@ -495,6 +495,12 @@ PRD-076.
   deterministic offline query coverage. Familiar immediately admitted
   PRD-056 on the unintegrated base. The operator again had to interrupt the
   session to prevent a second incompatible-candidate pile.
+- **Third cascade (2026-08-31):** After PRD-055 was landed manually, Familiar's
+  PRD-056 worker explicitly reported that detached CLI execution, the live
+  socket host/client, MCP migration away from direct SQLite, worker adoption,
+  and full capability sessions were not implemented. Verification retained the
+  knowingly incomplete candidate, and the driver immediately admitted PRD-062
+  anyway. The operator again supplied the missing circuit breaker.
 
 ### FAM-BUG-023 — Valid config cannot be edited because disabled delivery defaults active
 
