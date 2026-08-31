@@ -296,6 +296,23 @@ instead of deleting the history.
   recovery planner's completed set unions durable backlog completion with
   archived location. Regression pins the padded-stem/canonical-id shape.
 
+### FAM-BUG-017 — Provider verification constructs invalid TOML before atomic validation
+
+- **Status:** Open; live configuration was protected by validation
+- **Observed:** After upgrading Ollama, `familiar-ai config provider verify
+  ollama --actor human:trollboy` attempted to construct
+  `models =# added by ...`, then failed full-configuration parsing with
+  `invalid config after edit`. The original machine configuration remained
+  intact.
+- **Impact:** An operator cannot refresh provider verification through the
+  supported command. Atomic validation prevents corruption, but the mutation
+  renderer cannot safely update a provider table adjacent to provenance
+  comments.
+- **Expected fix:** Make provider verification update the existing TOML item
+  without attaching a provenance comment inside the `models` assignment.
+  Add a byte-exact regression using a provider followed immediately by another
+  provider comment/table, and prove failed rendering never reaches persistence.
+
 ### FAM-FRICTION-001 — Provider registration does not imply execution readiness
 
 - **Status:** Open design/UX gap
