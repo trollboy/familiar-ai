@@ -233,6 +233,8 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     pub kind: EndpointProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<InferenceRuntimeKind>,
     pub host: String,
     pub auth: AuthDescriptor,
     #[serde(default)]
@@ -253,6 +255,12 @@ pub struct ProviderConfig {
 pub enum EndpointProviderKind {
     Inference,
     DeployTarget,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InferenceRuntimeKind {
+    Unsloth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,6 +348,9 @@ impl ProviderConfig {
                 }
             }
             EndpointProviderKind::DeployTarget => {
+                if self.runtime.is_some() {
+                    return Err("deploy-target cannot declare an inference runtime".into());
+                }
                 if self.auth != AuthDescriptor::SshAgent {
                     return Err("deploy-target auth must be ssh-agent".into());
                 }
@@ -376,7 +387,7 @@ fn validate_model_identifier(value: &str) -> Result<(), String> {
     if value.is_empty()
         || !value
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
     {
         Err(format!("invalid model '{value}'"))
     } else {
@@ -3968,5 +3979,21 @@ output_microusd_per_million = 300
         .unwrap();
         let error = Config::load(Some(&path)).unwrap_err().to_string();
         assert!(error.contains("https://bad/path"), "{error}");
+    }
+
+    #[test]
+    fn unsloth_is_a_typed_inference_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.local]\nkind = \"inference\"\nruntime = \"unsloth\"\nhost = \"127.0.0.1:8888\"\nauth = \"env: UNSLOTH_API_KEY\"\nmodels = [\"unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(
+            config.providers["local"].runtime,
+            Some(InferenceRuntimeKind::Unsloth)
+        );
     }
 }

@@ -929,6 +929,7 @@ mod tests {
             "box".into(),
             ProviderConfig {
                 kind: EndpointProviderKind::DeployTarget,
+                runtime: None,
                 host: "box.example".into(),
                 auth: AuthDescriptor::SshAgent,
                 models: vec![],

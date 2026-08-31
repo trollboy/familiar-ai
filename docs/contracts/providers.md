@@ -14,6 +14,11 @@ authentication; they never contain credential values.
   endpoint or required authentication is unavailable.
 - Discovery results are cached with their verification time; refreshing them
   is explicit.
+- `kind = "inference"` with `runtime = "unsloth"` identifies an externally
+  managed Unsloth Studio endpoint. The CLI accepts `--kind unsloth` as shorthand.
+  Familiar discovers it through authenticated OpenAI-compatible `/v1/models`;
+  authentication must be an `env: NAME` reference and credential bytes are
+  never persisted. This runtime identity does not imply OpenAI behavior.
 - Configuration mutations preserve existing comments and record actor, time,
   command, and before/after content hashes.
 - Provider output is untrusted and credentials must not appear in

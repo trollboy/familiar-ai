@@ -1,6 +1,4 @@
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -8,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use familiar_ai_core::config::{
     validate_host, validate_ssh_host, AgentAdapterKind, AuthDescriptor, EndpointProviderKind,
-    RegistryWorkerConfig, WorkerCapabilityConfig,
+    InferenceRuntimeKind, RegistryWorkerConfig, WorkerCapabilityConfig,
 };
 use familiar_ai_core::{
     AppPaths, BacklogDiscovery, Config, FamiliarToml, FilesystemBacklogDiscovery,
@@ -519,7 +517,7 @@ fn provider_add(
     supplied_actor: Option<&str>,
 ) -> Result<(), String> {
     validate_name(name, "provider")?;
-    if kind != "inference" && kind != "deploy-target" {
+    if kind != "inference" && kind != "unsloth" && kind != "deploy-target" {
         return Err(format!("unknown provider kind '{kind}'"));
     }
     if kind == "deploy-target" {
@@ -538,7 +536,8 @@ fn provider_add(
     if config.providers.contains_key(name) {
         return Err(format!("provider '{name}' already exists"));
     }
-    let models = probe(name, host, &descriptor)
+    let runtime = (kind == "unsloth").then_some(InferenceRuntimeKind::Unsloth);
+    let models = probe(runtime, name, host, &descriptor)
         .map_err(|error| format!("{name}: {error} — nothing added."))?;
     let verified_at = Utc::now().to_rfc3339();
     let actor = actor(supplied_actor)?;
@@ -552,6 +551,9 @@ fn provider_add(
                 "# added by familiar-ai config provider add — {actor} {verified_at}\n"
             ));
             table["kind"] = value("inference");
+            if runtime == Some(InferenceRuntimeKind::Unsloth) {
+                table["runtime"] = value("unsloth");
+            }
             table["host"] = value(host);
             table["auth"] = value(String::from(descriptor.clone()));
             table["models"] = array_value(&models);
@@ -560,7 +562,7 @@ fn provider_add(
         },
     )?;
     println!(
-        "Added {name} (inference) at {host} — {} models discovered.",
+        "Added {name} ({kind}) at {host} — {} models discovered.",
         models.len()
     );
     Ok(())
@@ -697,8 +699,8 @@ fn provider_verify(
             },
         );
     }
-    let models =
-        probe(name, &provider.host, &provider.auth).map_err(|error| format!("{name}: {error}"))?;
+    let models = probe(provider.runtime, name, &provider.host, &provider.auth)
+        .map_err(|error| format!("{name}: {error}"))?;
     let verified_at = Utc::now().to_rfc3339();
     let actor = actor(supplied_actor)?;
     mutate(
@@ -732,7 +734,7 @@ fn provider_list(
                 discoveries.push((name.clone(), capabilities, Utc::now().to_rfc3339()));
                 continue;
             }
-            let models = probe(name, &provider.host, &provider.auth)
+            let models = probe(provider.runtime, name, &provider.host, &provider.auth)
                 .map_err(|error| format!("{name}: {error}"))?;
             discoveries.push((name.clone(), models, Utc::now().to_rfc3339()));
         }
@@ -792,10 +794,22 @@ fn model_enable(
 ) -> Result<(), String> {
     let (provider_name, model) = split_address(address)?;
     let config = load_config(context)?;
+    if config.agents.is_some() {
+        return Err(
+            "cannot enable a registry model while legacy [agents] is configured; migrate the legacy agents to worker_registry first"
+                .into(),
+        );
+    }
     let provider = config
         .providers
         .get(provider_name)
         .ok_or_else(|| format!("unknown provider '{provider_name}'"))?;
+    if provider.runtime == Some(InferenceRuntimeKind::Unsloth) {
+        return Err(
+            "Unsloth endpoint is registered, but its local execution runtime is not available yet"
+                .into(),
+        );
+    }
     if !provider.models.iter().any(|candidate| candidate == model) {
         return Err(format!(
             "provider '{provider_name}' has no discovered model '{model}'"
@@ -808,10 +822,10 @@ fn model_enable(
         .iter()
         .map(|value| parse_capability(value))
         .collect::<Result<Vec<_>, _>>()?;
-    let adapter = if provider_name == "ollama" {
-        AgentAdapterKind::Ollama
-    } else {
-        AgentAdapterKind::Codex
+    let adapter = match provider_name {
+        "ollama" => AgentAdapterKind::Ollama,
+        "claude" => AgentAdapterKind::ClaudeCode,
+        _ => AgentAdapterKind::Codex,
     };
     let worker = RegistryWorkerConfig {
         adapter,
@@ -856,10 +870,10 @@ fn model_enable(
             table.decor_mut().set_prefix(format!(
                 "# added by familiar-ai config model enable — {actor} {now}\n"
             ));
-            table["adapter"] = value(if adapter == AgentAdapterKind::Ollama {
-                "ollama"
-            } else {
-                "codex"
+            table["adapter"] = value(match adapter {
+                AgentAdapterKind::Ollama => "ollama",
+                AgentAdapterKind::ClaudeCode => "claude-code",
+                AgentAdapterKind::Codex => "codex",
             });
             table["provider"] = value(provider_name);
             table["model"] = value(model);
@@ -1097,7 +1111,12 @@ fn default_auth(name: &str) -> &'static str {
     }
 }
 
-fn probe(name: &str, host: &str, auth: &AuthDescriptor) -> Result<Vec<String>, String> {
+fn probe(
+    runtime: Option<InferenceRuntimeKind>,
+    name: &str,
+    host: &str,
+    auth: &AuthDescriptor,
+) -> Result<Vec<String>, String> {
     check_auth(auth)?;
     #[cfg(test)]
     match host {
@@ -1105,13 +1124,59 @@ fn probe(name: &str, host: &str, auth: &AuthDescriptor) -> Result<Vec<String>, S
         "fixture-fail:1" => return Err("host unreachable".into()),
         _ => {}
     }
-    if name == "ollama" {
+    if runtime == Some(InferenceRuntimeKind::Unsloth) {
+        probe_unsloth(host, auth)
+    } else if name == "ollama" {
         probe_ollama(host)
     } else if let AuthDescriptor::CliLogin(command) = auth {
         Ok(vec![command.clone()])
     } else {
         probe_ollama(host)
     }
+}
+
+fn probe_unsloth(host: &str, auth: &AuthDescriptor) -> Result<Vec<String>, String> {
+    validate_host(host)?;
+    let token = match auth {
+        AuthDescriptor::Env(name) => std::env::var(name).map_err(|_| {
+            format!("required environment variable {name} is missing — export `{name}`.")
+        })?,
+        _ => return Err("unsloth auth must use an `env: NAME` descriptor".into()),
+    };
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("could not build Unsloth probe client ({error})"))?
+        .get(format!("http://{host}/v1/models"))
+        .bearer_auth(token)
+        .send()
+        .map_err(|error| format!("Unsloth endpoint unreachable ({error})"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Unsloth model discovery returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|error| format!("invalid Unsloth /v1/models response ({error})"))?;
+    let mut models = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("invalid Unsloth /v1/models response: missing data array")?
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err("Unsloth /v1/models returned no model identifiers".into());
+    }
+    for model in &models {
+        validate_model_name(model)?;
+    }
+    Ok(models)
 }
 
 fn check_auth(auth: &AuthDescriptor) -> Result<(), String> {
@@ -1139,14 +1204,18 @@ fn check_auth(auth: &AuthDescriptor) -> Result<(), String> {
                 "codex" => &["login", "status"],
                 _ => &["--version"],
             };
-            let status = Command::new(executable)
+            let output = Command::new(executable)
                 .args(args)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status();
-            match status {
-                Ok(status) if status.success() => Ok(()),
+                .output();
+            match output {
+                Ok(output)
+                    if output.status.success()
+                        && (executable != "claude" || claude_status_logged_in(&output.stdout)) =>
+                {
+                    Ok(())
+                }
                 _ if executable == "az" => Err("az CLI not authenticated — run `az login`.".into()),
                 _ => Err(format!(
                     "{executable} CLI not authenticated — authenticate with `{executable}`."
@@ -1156,40 +1225,27 @@ fn check_auth(auth: &AuthDescriptor) -> Result<(), String> {
     }
 }
 
+fn claude_status_logged_in(output: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(output)
+        .ok()
+        .and_then(|value| value.get("loggedIn").and_then(|v| v.as_bool()))
+        == Some(true)
+}
+
 fn probe_ollama(host: &str) -> Result<Vec<String>, String> {
     validate_host(host)?;
-    let address = host
-        .to_socket_addrs()
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
         .map_err(|_| "host unreachable".to_owned())?
-        .next()
-        .ok_or("host unreachable")?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .get(format!("http://{host}/api/tags"))
+        .send()
         .map_err(|_| "host unreachable".to_owned())?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(|_| "host unreachable".to_owned())?;
-    write!(
-        stream,
-        "GET /api/tags HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    )
-    .map_err(|_| "host unreachable".to_owned())?;
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|_| "host unreachable".to_owned())?;
-    let text =
-        String::from_utf8(response).map_err(|_| "provider returned invalid UTF-8".to_owned())?;
-    let (headers, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or("provider returned malformed HTTP")?;
-    if !headers
-        .lines()
-        .next()
-        .is_some_and(|line| line.contains(" 200 "))
-    {
+    if !response.status().is_success() {
         return Err("host unreachable".into());
     }
-    let value: serde_json::Value = serde_json::from_str(body)
+    let value: serde_json::Value = response
+        .json()
         .map_err(|_| "provider returned malformed discovery".to_owned())?;
     let mut models = value
         .get("models")
@@ -1220,7 +1276,7 @@ fn validate_model_name(value: &str) -> Result<(), String> {
     if value.is_empty()
         || !value
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
     {
         Err(format!("invalid model '{value}'"))
     } else {
@@ -1266,6 +1322,9 @@ fn sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     fn context() -> (tempfile::TempDir, ConfigContext) {
         let directory = tempfile::tempdir().unwrap();
@@ -1292,6 +1351,44 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("nothing added"));
         assert!(!context.config_path.exists());
+    }
+
+    #[test]
+    fn unsloth_probe_uses_bearer_auth_and_discovers_openai_models() {
+        const ENV_NAME: &str = "FAMILIAR_AI_TEST_UNSLOTH_KEY";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::env::set_var(ENV_NAME, "test-only-secret");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /v1/models "));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-only-secret"));
+            let body = r#"{"data":[{"id":"unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let models =
+            probe_unsloth(&address.to_string(), &AuthDescriptor::Env(ENV_NAME.into())).unwrap();
+        server.join().unwrap();
+        std::env::remove_var(ENV_NAME);
+        assert_eq!(models, ["unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"]);
+    }
+
+    #[test]
+    fn claude_login_requires_explicit_true_json_status() {
+        assert!(claude_status_logged_in(br#"{"loggedIn":true}"#));
+        assert!(!claude_status_logged_in(br#"{"loggedIn":false}"#));
+        assert!(!claude_status_logged_in(b"not json"));
     }
 
     #[test]
@@ -1372,6 +1469,31 @@ mod tests {
             .worker_registry
             .as_ref()
             .is_some_and(|registry| registry.workers.contains_key("ollama/qwen3")));
+    }
+
+    #[test]
+    fn claude_provider_enables_the_claude_code_adapter() {
+        let (_directory, context) = context();
+        fs::write(
+            &context.config_path,
+            "[providers.claude]\nkind = \"inference\"\nhost = \"localhost:443\"\nauth = \"cli-login: claude\"\nmodels = [\"claude\"]\n",
+        )
+        .unwrap();
+        execute_with_context(
+            ConfigAction::ModelEnable {
+                model: "claude/claude".into(),
+                capabilities: vec!["review".into()],
+                actor: Some("human:test".into()),
+            },
+            &context,
+        )
+        .unwrap();
+        let worker = &load_config(&context)
+            .unwrap()
+            .worker_registry
+            .unwrap()
+            .workers["claude/claude"];
+        assert_eq!(worker.adapter, AgentAdapterKind::ClaudeCode);
     }
 
     #[test]

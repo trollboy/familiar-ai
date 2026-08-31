@@ -21,6 +21,15 @@
 [database]
 # path = ""             # Default: <data_dir>/familiar.db
 
+# Externally managed Unsloth Studio endpoint. The credential value remains in
+# the environment; Familiar persists only this descriptor and probes
+# authenticated OpenAI-compatible /v1/models before accepting the provider.
+# [providers.unsloth-local]
+# kind = "inference"
+# runtime = "unsloth"
+# host = "127.0.0.1:8888"
+# auth = "env: UNSLOTH_API_KEY"
+
 [execution_context]
 # hard_ceiling_tokens = 12000  # Optional; disabled when absent
 # prompt_cache_enabled = true   # Codex receives a stable-prefix cache key;
