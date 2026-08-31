@@ -312,7 +312,13 @@ pub fn next_implementation_worker(
 pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
     let descriptor = WorkerDescriptor {
         id: "legacy".into(),
-        adapter_id: entry.adapter.as_str().into(),
+        spec_identity: format!(
+            "legacy/{}/{}",
+            entry.adapter.as_str(),
+            entry.model.as_deref().unwrap_or("runtime-selected")
+        ),
+        empirical_version: "legacy-fixed-v1".into(),
+        runtime_id: entry.adapter.as_str().into(),
         provider: entry.adapter.as_str().into(),
         model: entry.model.clone().unwrap_or_default(),
         executable: entry.resolved_executable(),
@@ -335,15 +341,22 @@ fn worker_descriptor(
     worker: &familiar_ai_core::config::RegistryWorkerConfig,
     capabilities: std::collections::BTreeSet<WorkerCapability>,
 ) -> WorkerDescriptor {
+    let entry = worker.as_agent_entry();
     WorkerDescriptor {
         id: id.into(),
-        adapter_id: worker.adapter.as_str().into(),
+        spec_identity: worker
+            .canonical_spec_identity()
+            .unwrap_or_else(|_| format!("invalid/{id}")),
+        empirical_version: worker
+            .empirical_version()
+            .unwrap_or_else(|_| format!("invalid/{id}")),
+        runtime_id: worker.runtime_id().unwrap_or(entry.adapter.as_str()).into(),
         provider: worker.provider.clone(),
-        model: worker.as_agent_entry().model.unwrap_or_default(),
+        model: entry.model.unwrap_or_default(),
         executable: worker
             .executable
             .clone()
-            .unwrap_or_else(|| worker.adapter.default_executable().into()),
+            .unwrap_or_else(|| entry.adapter.default_executable().into()),
         capabilities,
         fresh_process_isolation: worker.fresh_process_isolation,
         context_tokens: worker.context_tokens,
@@ -870,7 +883,7 @@ fn execute_tracked_inner(
         ] {
             if let Some(record) = records.iter().find(|record| record.stage == stage) {
                 let worker = &registry.workers[&record.selected_worker];
-                identity.adapter_id = worker.adapter.as_str().into();
+                identity.adapter_id = worker.runtime_id().unwrap_or("invalid").into();
                 identity.agent_id = record.selected_worker.clone();
                 identity.provider = Some(worker.provider.clone());
                 identity.model = Some(worker.as_agent_entry().model.unwrap_or_default());
@@ -949,6 +962,26 @@ fn execute_tracked_inner(
             resolved_worker_plan(config, &route_context).map_err(RunError::Config)?;
         let selections = familiar_ai_storage::WorkerSelectionRepository::new(db.conn());
         for (index, record) in records.iter().enumerate() {
+            let configured_worker =
+                &config.worker_registry.as_ref().unwrap().workers[&record.selected_worker];
+            let material = serde_json::json!({"effort": configured_worker.effort.map(|value| value.as_str()), "permission_mode": configured_worker.permission_mode.map(|value| value.as_str()), "context_tokens": configured_worker.context_tokens, "extra_args": configured_worker.extra_args});
+            familiar_ai_storage::WorkerSpecRepository::new(db.conn())
+                .record_spec(
+                    &record.selected_spec_identity,
+                    &record.selected_empirical_version,
+                    &record.selected_worker,
+                    &configured_worker.provider,
+                    configured_worker.runtime_id().map_err(RunError::Config)?,
+                    &configured_worker.model,
+                    configured_worker.model_artifact.as_deref(),
+                    configured_worker.auth_profile.as_deref(),
+                    configured_worker
+                        .capability_profile
+                        .as_deref()
+                        .unwrap_or("legacy-migrated"),
+                    &material.to_string(),
+                )
+                .map_err(|error| RunError::Storage(error.to_string()))?;
             let candidates = record.candidates.iter().map(|candidate| serde_json::json!({
                 "worker_id": candidate.worker_id,
                 "rejected_reasons": candidate.rejected.iter().map(|reason| format!("{reason:?}")).collect::<Vec<_>>()
@@ -966,7 +999,8 @@ fn execute_tracked_inner(
                         execution_id: Some(&id),
                         stage: &stage,
                         rule: &record.rule,
-                        selected_identity: &record.selected_worker,
+                        selected_identity: &record.selected_spec_identity,
+                        selected_empirical_version: &record.selected_empirical_version,
                         candidates_json: &candidates_json,
                         risk_classes_json: &risk_classes_json,
                         expected_file_count: route_context.expected_file_count,

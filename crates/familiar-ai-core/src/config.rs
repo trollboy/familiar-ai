@@ -182,6 +182,10 @@ pub struct Config {
     /// this boundary; `auth` only describes an operator-managed prerequisite.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// Operator-managed authentication/entitlement references. Values are
+    /// diagnostic descriptors only; credential bytes never enter config.
+    #[serde(default)]
+    pub auth_profiles: BTreeMap<String, AuthDescriptor>,
     #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
@@ -1227,6 +1231,55 @@ pub enum WorkerCapabilityConfig {
     NarrowTask,
 }
 
+/// Closed routing/runtime capability vocabulary. Stage eligibility remains a
+/// separate concern and is migrated from the historical `capabilities` list.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeCapabilityConfig {
+    EditsFiles,
+    ExecutesCommands,
+    ReadsRepository,
+    NativeToolCalling,
+    McpClient,
+    StructuredOutput,
+    Streaming,
+    ResumableSessions,
+    ContextCompaction,
+    PromptCaching,
+    ImageInput,
+    MaxContext,
+    ReasoningControls,
+    SandboxBehavior,
+    RemoteOrLocal,
+    UsageReportingCategories,
+    CostReportingMode,
+    ParallelToolCalls,
+    DeterministicSeed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityProvenanceConfig {
+    Declared,
+    Probed,
+    Observed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityProfileConfig {
+    #[serde(default)]
+    pub capabilities: BTreeMap<RuntimeCapabilityConfig, CapabilityProvenanceConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OllamaRuntimeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
 impl WorkerCapabilityConfig {
     /// The canonical serialized spelling — identical to the serde kebab-case
     /// form and to what the CLI accepts, so display output always round-trips
@@ -1246,11 +1299,25 @@ impl WorkerCapabilityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryWorkerConfig {
-    pub adapter: AgentAdapterKind,
+    /// Compatibility input for PRD-031 registries. New entries use `runtime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AgentAdapterKind>,
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_profile: Option<String>,
+    /// The only runtime extension introduced in this PRD. Other runtimes must
+    /// add their own closed adapter-owned type when their adapter is added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<OllamaRuntimeConfig>,
     #[serde(default)]
     pub executable: Option<String>,
     #[serde(default)]
@@ -1276,15 +1343,75 @@ fn default_worker_available() -> bool {
 }
 
 impl RegistryWorkerConfig {
+    pub fn runtime_id(&self) -> Result<&str, String> {
+        match (&self.runtime, self.adapter) {
+            (Some(runtime), Some(adapter)) if runtime != adapter.as_str() => Err(format!(
+                "runtime '{runtime}' contradicts legacy adapter '{}'",
+                adapter.as_str()
+            )),
+            (Some(runtime), _) => Ok(runtime),
+            (None, Some(adapter)) => Ok(adapter.as_str()),
+            (None, None) => Err("requires runtime (or legacy adapter)".into()),
+        }
+    }
+
+    pub fn canonical_spec_identity(&self) -> Result<String, String> {
+        let runtime = self.runtime_id()?;
+        let model = if self.model.is_empty() {
+            "unknown"
+        } else {
+            &self.model
+        };
+        let artifact = self.model_artifact.as_deref().unwrap_or("-");
+        let profile = self.capability_profile.as_deref().unwrap_or("legacy");
+        let material = format!(
+            "provider={}\nruntime={}\nmodel={}\nartifact={}\ncapability-profile={}",
+            self.provider, runtime, model, artifact, profile
+        );
+        let hash = ring::digest::digest(&ring::digest::SHA256, material.as_bytes());
+        Ok(format!(
+            "wspec-sha256:{}",
+            hash.as_ref()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ))
+    }
+
+    pub fn empirical_version(&self) -> Result<String, String> {
+        let material = serde_json::to_vec(&(
+            self.canonical_spec_identity()?,
+            self.model_artifact.as_deref(),
+            self.effort,
+            self.permission_mode,
+            self.context_tokens,
+            &self.extra_args,
+        ))
+        .map_err(|error| error.to_string())?;
+        let hash = ring::digest::digest(&ring::digest::SHA256, &material);
+        Ok(format!(
+            "wver-sha256:{}",
+            hash.as_ref()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ))
+    }
+
     pub fn as_agent_entry(&self) -> AgentEntryConfig {
-        let model = match self.adapter {
+        let adapter = self.adapter.unwrap_or(match self.runtime.as_deref() {
+            Some("claude-code") => AgentAdapterKind::ClaudeCode,
+            Some("ollama") => AgentAdapterKind::Ollama,
+            _ => AgentAdapterKind::Codex,
+        });
+        let model = match adapter {
             AgentAdapterKind::Ollama if !self.model.starts_with("ollama/") => {
                 Some(format!("ollama/{}", self.model))
             }
             _ => Some(self.model.clone()),
         };
         AgentEntryConfig {
-            adapter: self.adapter,
+            adapter,
             executable: self.executable.clone(),
             model,
             effort: self.effort,
@@ -1338,6 +1465,8 @@ pub struct WorkerRegistryConfig {
     #[serde(default)]
     pub workers: BTreeMap<String, RegistryWorkerConfig>,
     #[serde(default)]
+    pub capability_profiles: BTreeMap<String, CapabilityProfileConfig>,
+    #[serde(default)]
     pub routing: WorkerRoutingConfig,
 }
 
@@ -1358,6 +1487,34 @@ impl WorkerRegistryConfig {
                 return Err(format!(
                     "worker_registry.workers.{id} requires provider, model, and capabilities"
                 ));
+            }
+            validate_identifier(&worker.provider, "provider id")?;
+            validate_identifier(
+                worker
+                    .runtime_id()
+                    .map_err(|error| format!("worker_registry.workers.{id} {error}"))?,
+                "runtime id",
+            )?;
+            if !matches!(worker.model.as_str(), "unknown" | "runtime-selected") {
+                validate_model_identifier(&worker.model)?;
+            }
+            if let Some(artifact) = &worker.model_artifact {
+                let valid = artifact.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+                });
+                if !valid {
+                    return Err(format!("worker_registry.workers.{id} model_artifact must be an immutable sha256 content identity"));
+                }
+            }
+            if worker.runtime_config.is_some() && worker.runtime_id()? != "ollama" {
+                return Err(format!("worker_registry.workers.{id}.runtime_config is owned only by the ollama adapter"));
+            }
+            if let Some(profile) = &worker.capability_profile {
+                if !self.capability_profiles.contains_key(profile) {
+                    return Err(format!(
+                        "worker_registry.workers.{id} names missing capability profile '{profile}'"
+                    ));
+                }
             }
             worker.as_agent_entry().validate(
                 &format!("worker_registry.workers.{id}"),
@@ -1418,6 +1575,37 @@ impl WorkerRegistryConfig {
             }
         }
         Ok(())
+    }
+
+    /// Resolve the historical provider/model address only when it has one
+    /// possible runtime. Operator ids and canonical identities are exact.
+    pub fn resolve_worker(&self, address: &str) -> Result<&RegistryWorkerConfig, String> {
+        if let Some(worker) = self.workers.get(address) {
+            return Ok(worker);
+        }
+        let candidates: Vec<_> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| format!("{}/{}", w.provider, w.model) == address)
+            .collect();
+        match candidates.as_slice() {
+            [(_, worker)] => Ok(worker),
+            [] => Err(format!("unknown worker '{address}'")),
+            _ => Err(format!(
+                "legacy worker alias '{address}' is ambiguous; use one of: {}",
+                candidates
+                    .iter()
+                    .map(|(id, w)| format!(
+                        "{} ({}/{}/{})",
+                        id,
+                        w.provider,
+                        w.runtime_id().unwrap_or("invalid"),
+                        w.model
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
     }
 }
 
@@ -2939,6 +3127,15 @@ impl Config {
             registry
                 .validate(&risk_vocabulary)
                 .map_err(FamiliarError::Config)?;
+            for (id, worker) in &registry.workers {
+                if let Some(profile) = &worker.auth_profile {
+                    if !self.auth_profiles.contains_key(profile) {
+                        return Err(FamiliarError::Config(format!(
+                            "worker_registry.workers.{id} auth profile '{profile}' is missing; configure [auth_profiles.{profile}] with a BYO-Auth descriptor"
+                        )));
+                    }
+                }
+            }
         }
         if let Some(planner) = &self.planner {
             planner.validate().map_err(FamiliarError::Config)?;
@@ -3662,9 +3859,14 @@ output_microusd_per_million = 300
 
     fn registry_worker(id: &str) -> RegistryWorkerConfig {
         RegistryWorkerConfig {
-            adapter: AgentAdapterKind::Codex,
+            adapter: Some(AgentAdapterKind::Codex),
             provider: "openai".into(),
             model: id.into(),
+            runtime: None,
+            model_artifact: None,
+            auth_profile: None,
+            capability_profile: None,
+            runtime_config: None,
             executable: None,
             capabilities: vec![WorkerCapabilityConfig::Implementation],
             fresh_process_isolation: true,
@@ -3682,6 +3884,7 @@ output_microusd_per_million = 300
         let mut registry = WorkerRegistryConfig {
             workers: BTreeMap::from([("codex".to_string(), registry_worker("codex"))]),
             routing: WorkerRoutingConfig::default(),
+            ..Default::default()
         };
         registry.routing.rules.push(WorkerRouteRuleConfig {
             id: "risky".into(),
@@ -3701,6 +3904,7 @@ output_microusd_per_million = 300
         let mut registry = WorkerRegistryConfig {
             workers: BTreeMap::from([("codex".to_string(), registry_worker("codex"))]),
             routing: WorkerRoutingConfig::default(),
+            ..Default::default()
         };
         registry.routing.rules.push(WorkerRouteRuleConfig {
             id: "risky".into(),
@@ -3726,6 +3930,7 @@ output_microusd_per_million = 300
                 ("claude".to_string(), registry_worker("claude")),
             ]),
             routing: WorkerRoutingConfig::default(),
+            ..Default::default()
         };
         registry.routing.rules.push(WorkerRouteRuleConfig {
             id: "first".into(),
@@ -4139,5 +4344,77 @@ output_microusd_per_million = 300
             config.providers["local"].runtime,
             Some(InferenceRuntimeKind::Unsloth)
         );
+    }
+
+    #[test]
+    fn legacy_registry_migration_and_aliases_are_deterministic() {
+        let mut first = registry_worker("same-model");
+        first.provider = "openai".into();
+        assert_eq!(first.runtime_id().unwrap(), "codex");
+        assert_eq!(
+            first.canonical_spec_identity().unwrap(),
+            first.canonical_spec_identity().unwrap()
+        );
+        let mut registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([("harness".into(), first.clone())]),
+            ..Default::default()
+        };
+        assert_eq!(
+            registry
+                .resolve_worker("openai/same-model")
+                .unwrap()
+                .runtime_id()
+                .unwrap(),
+            "codex"
+        );
+        let mut raw = first;
+        raw.adapter = None;
+        raw.runtime = Some("openai-api".into());
+        registry.workers.insert("raw-api".into(), raw);
+        let error = registry.resolve_worker("openai/same-model").unwrap_err();
+        assert!(
+            error.contains("ambiguous") && error.contains("harness") && error.contains("raw-api"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn runtime_artifact_and_capability_profile_partition_identity() {
+        let base = registry_worker("qwen");
+        let mut runtime = base.clone();
+        runtime.adapter = None;
+        runtime.runtime = Some("ollama".into());
+        assert_ne!(
+            base.canonical_spec_identity().unwrap(),
+            runtime.canonical_spec_identity().unwrap()
+        );
+        let mut artifact = runtime.clone();
+        artifact.model_artifact = Some(format!("sha256:{}", "a".repeat(64)));
+        assert_ne!(
+            runtime.canonical_spec_identity().unwrap(),
+            artifact.canonical_spec_identity().unwrap()
+        );
+        artifact.capability_profile = Some("different".into());
+        assert_ne!(
+            runtime.canonical_spec_identity().unwrap(),
+            artifact.canonical_spec_identity().unwrap()
+        );
+    }
+
+    #[test]
+    fn worker_extensions_and_missing_auth_fail_closed_with_remedies() {
+        let mut worker = registry_worker("model");
+        worker.auth_profile = Some("missing-login".into());
+        worker.runtime_config = Some(OllamaRuntimeConfig::default());
+        let registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([("entry".into(), worker)]),
+            ..Default::default()
+        };
+        let error = registry.validate(&BTreeSet::new()).unwrap_err();
+        assert!(
+            error.contains("entry") && error.contains("ollama"),
+            "{error}"
+        );
+        assert!(toml::from_str::<RegistryWorkerConfig>("runtime='codex'\nprovider='openai'\nmodel='runtime-selected'\ncapabilities=['implementation']\n[runtime_config]\nunknown=true").is_err());
     }
 }

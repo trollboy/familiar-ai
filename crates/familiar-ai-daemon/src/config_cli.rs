@@ -1210,9 +1210,14 @@ fn model_enable(
         _ => AgentAdapterKind::Codex,
     };
     let worker = RegistryWorkerConfig {
-        adapter,
+        adapter: Some(adapter),
         provider: provider_name.into(),
         model: model.into(),
+        runtime: Some(adapter.as_str().into()),
+        model_artifact: None,
+        auth_profile: None,
+        capability_profile: None,
+        runtime_config: None,
         executable: None,
         capabilities: parsed,
         fresh_process_isolation: true,
@@ -1884,7 +1889,7 @@ mod tests {
             .worker_registry
             .unwrap()
             .workers["claude/claude"];
-        assert_eq!(worker.adapter, AgentAdapterKind::ClaudeCode);
+        assert_eq!(worker.adapter, Some(AgentAdapterKind::ClaudeCode));
     }
 
     #[test]

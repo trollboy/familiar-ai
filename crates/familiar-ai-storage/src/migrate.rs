@@ -144,6 +144,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 40,
         sql: include_str!("../migrations/040_openai_accounting.sql"),
     },
+    Migration {
+        version: 41,
+        sql: include_str!("../migrations/041_worker_spec_identity.sql"),
+    },
 ];
 
 pub fn run_migrations(conn: &Connection) -> familiar_ai_core::Result<usize> {
@@ -279,7 +283,7 @@ mod tests {
             versions,
             vec![
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
-                24, 25, 26, 27, 28, 29, 30, 31, 32, 39, 40
+                24, 25, 26, 27, 28, 29, 30, 31, 32, 39, 40, 41
             ]
         );
     }

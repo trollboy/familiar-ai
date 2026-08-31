@@ -314,9 +314,14 @@ fn legacy_prd_document_scope_routes_and_persists_the_derived_file_count() {
         "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"turn.completed\"}'\n",
     );
     let registry_worker = |model: &str| RegistryWorkerConfig {
-        adapter: AgentAdapterKind::Codex,
+        adapter: Some(AgentAdapterKind::Codex),
         provider: "test".into(),
         model: model.into(),
+        runtime: None,
+        model_artifact: None,
+        auth_profile: None,
+        capability_profile: None,
+        runtime_config: None,
         executable: Some(worker.to_string_lossy().into_owned()),
         capabilities: vec![
             WorkerCapabilityConfig::Implementation,

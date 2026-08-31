@@ -44,3 +44,4 @@ pub use repos::stewardship::{
     ReviewFindingsRow,
 };
 pub use repos::worker_selection::WorkerSelectionRepository;
+pub use repos::worker_spec::WorkerSpecRepository;

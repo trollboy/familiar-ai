@@ -38,7 +38,9 @@ impl From<WorkerStage> for WorkerCapability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerDescriptor {
     pub id: String,
-    pub adapter_id: String,
+    pub spec_identity: String,
+    pub empirical_version: String,
+    pub runtime_id: String,
     pub provider: String,
     pub model: String,
     pub executable: String,
@@ -80,8 +82,8 @@ impl AdapterFactories {
 
     pub fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String> {
         self.factories
-            .get(&worker.adapter_id)
-            .ok_or_else(|| format!("no adapter factory registered for {:?}", worker.adapter_id))?
+            .get(&worker.runtime_id)
+            .ok_or_else(|| format!("no adapter factory registered for {:?}", worker.runtime_id))?
             .build(worker)
     }
 }
@@ -193,12 +195,15 @@ pub struct SelectionRecord {
     pub stage: WorkerStage,
     pub rule: String,
     pub selected_worker: String,
+    pub selected_spec_identity: String,
+    pub selected_empirical_version: String,
     pub candidates: Vec<CandidateEvaluation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteError {
     UnknownPinnedWorker(String),
+    InvalidPinnedWorker(String),
     PinnedWorkerRefused {
         worker: String,
         reasons: Vec<RejectionReason>,
@@ -211,6 +216,7 @@ impl fmt::Display for RouteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownPinnedWorker(id) => write!(f, "pinned worker {id:?} is not registered"),
+            Self::InvalidPinnedWorker(remedy) => f.write_str(remedy),
             Self::PinnedWorkerRefused { worker, reasons } => {
                 write!(f, "pinned worker {worker:?} was refused: {reasons:?}")
             }
@@ -230,7 +236,9 @@ pub struct WorkerRegistry {
 impl WorkerRegistry {
     pub fn register(&mut self, worker: WorkerDescriptor) -> Result<(), String> {
         if worker.id.trim().is_empty()
-            || worker.adapter_id.trim().is_empty()
+            || worker.runtime_id.trim().is_empty()
+            || worker.spec_identity.trim().is_empty()
+            || worker.empirical_version.trim().is_empty()
             || worker.provider.trim().is_empty()
             || worker.model.trim().is_empty()
             || worker.executable.trim().is_empty()
@@ -272,20 +280,40 @@ impl WorkerRegistry {
         self.workers.get(id)
     }
 
-    pub fn select(&self, request: &RouteRequest) -> Result<SelectionRecord, RouteError> {
-        if let Some(pin) = &request.pinned_worker {
-            if !self.workers.contains_key(pin) {
-                return Err(RouteError::UnknownPinnedWorker(pin.clone()));
-            }
+    pub fn resolve(&self, address: &str) -> Result<&WorkerDescriptor, String> {
+        if let Some(worker) = self.workers.get(address) {
+            return Ok(worker);
         }
+        let candidates: Vec<_> = self
+            .workers
+            .values()
+            .filter(|worker| format!("{}/{}", worker.provider, worker.model) == address)
+            .collect();
+        match candidates.as_slice() {
+            [worker] => Ok(worker),
+            [] => Err(format!("worker {address:?} is not registered")),
+            _ => Err(format!(
+                "legacy worker alias {address:?} is ambiguous; pin a complete worker spec: {}",
+                candidates
+                    .iter()
+                    .map(|w| format!("{} ({}/{}/{})", w.id, w.provider, w.runtime_id, w.model))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
+    pub fn select(&self, request: &RouteRequest) -> Result<SelectionRecord, RouteError> {
+        let resolved_pin = request
+            .pinned_worker
+            .as_ref()
+            .map(|pin| self.resolve(pin).map(|worker| worker.id.clone()))
+            .transpose()
+            .map_err(RouteError::InvalidPinnedWorker)?;
         let mut candidates = Vec::new();
         for worker in self.workers.values() {
             let mut rejected = Vec::new();
-            if request
-                .pinned_worker
-                .as_ref()
-                .is_some_and(|pin| pin != &worker.id)
-            {
+            if resolved_pin.as_ref().is_some_and(|pin| pin != &worker.id) {
                 rejected.push(RejectionReason::NotPinned);
             }
             if !worker.available {
@@ -376,6 +404,8 @@ impl WorkerRegistry {
                 "lowest-cost-then-id".into()
             },
             selected_worker: selected.id.clone(),
+            selected_spec_identity: selected.spec_identity.clone(),
+            selected_empirical_version: selected.empirical_version.clone(),
             candidates,
         })
     }
@@ -397,7 +427,9 @@ mod tests {
     fn worker(id: &str, cost: u64) -> WorkerDescriptor {
         WorkerDescriptor {
             id: id.into(),
-            adapter_id: "test".into(),
+            spec_identity: format!("spec-{id}"),
+            empirical_version: format!("spec-{id}-v1"),
+            runtime_id: "test".into(),
             provider: "p".into(),
             model: id.into(),
             executable: "test".into(),
@@ -464,7 +496,7 @@ mod tests {
         let mut factories = AdapterFactories::default();
         factories.register(Box::new(CustomFactory)).unwrap();
         let mut descriptor = worker("custom-worker", 1);
-        descriptor.adapter_id = "custom".into();
+        descriptor.runtime_id = "custom".into();
         assert!(factories.build(&descriptor).is_ok());
     }
 
@@ -606,5 +638,25 @@ mod tests {
                 max_expected_files: None,
             })
             .is_err());
+    }
+
+    #[test]
+    fn legacy_provider_model_pin_never_chooses_between_runtimes() {
+        let mut registry = WorkerRegistry::default();
+        let mut harness = worker("harness", 1);
+        harness.provider = "openai".into();
+        harness.model = "same".into();
+        harness.runtime_id = "codex".into();
+        let mut api = harness.clone();
+        api.id = "api".into();
+        api.runtime_id = "openai-api".into();
+        api.spec_identity = "api-spec".into();
+        registry.register(harness).unwrap();
+        registry.register(api).unwrap();
+        let error = registry.resolve("openai/same").unwrap_err();
+        assert!(
+            error.contains("ambiguous") && error.contains("harness") && error.contains("api"),
+            "{error}"
+        );
     }
 }

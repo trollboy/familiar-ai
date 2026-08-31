@@ -198,9 +198,14 @@ estimated_cost_microusd = 2
 #[test]
 fn ollama_registry_entry_uses_existing_codex_oss_adapter() {
     let entry = familiar_ai_core::config::RegistryWorkerConfig {
-        adapter: AgentAdapterKind::Ollama,
+        adapter: Some(AgentAdapterKind::Ollama),
         provider: "ollama".into(),
         model: "qwen3:8b".into(),
+        runtime: None,
+        model_artifact: None,
+        auth_profile: None,
+        capability_profile: None,
+        runtime_config: None,
         executable: None,
         capabilities: vec![familiar_ai_core::config::WorkerCapabilityConfig::Implementation],
         fresh_process_isolation: true,

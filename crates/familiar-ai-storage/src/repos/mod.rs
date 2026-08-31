@@ -18,6 +18,7 @@ pub mod session_rollup;
 pub mod stats;
 pub mod stewardship;
 pub mod worker_selection;
+pub mod worker_spec;
 
 use chrono::{DateTime, Utc};
 use familiar_ai_core::FamiliarError;

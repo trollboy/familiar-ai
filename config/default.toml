@@ -214,9 +214,11 @@ max_verification_log_bytes = 256000
 # max_stage_cost_microusd = 0
 # required_context_tokens = 0
 # [worker_registry.workers.codex-primary]
-# adapter = "codex" # "codex" | "claude-code" | "ollama"
+# runtime = "codex" # execution mechanism; legacy `adapter` migrates deterministically
 # provider = "openai"
-# model = "gpt-5"
+# model = "runtime-selected" # known id, "unknown", or "runtime-selected"
+# auth_profile = "codex-chatgpt" # external descriptor key; never a credential
+# capability_profile = "agentic-implementer"
 # capabilities = ["planning", "implementation", "remediation", "narrow-task"]
 # fresh_process_isolation = true
 # context_tokens = 200000
