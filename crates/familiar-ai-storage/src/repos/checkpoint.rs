@@ -189,9 +189,20 @@ impl<'a> CheckpointRepository<'a> {
                 "checkpoint {checkpoint_id} changed during transition"
             )));
         }
+        // Checkpoint identity is durable across attempts (FAM-BUG-037), so a
+        // later attempt legitimately revisits a phase; the event id carries a
+        // per-checkpoint sequence to stay unique per occurrence, not per
+        // lifetime (FAM-BUG-039).
+        let sequence: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM execution_checkpoint_events WHERE checkpoint_id=?1",
+                params![checkpoint_id],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
         transaction.execute(
             "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,?4,?5,?6)",
-            params![format!("{checkpoint_id}:{phase}"), checkpoint_id, prior, phase, detail, now],
+            params![format!("{checkpoint_id}:{phase}:{sequence}"), checkpoint_id, prior, phase, detail, now],
         ).map_err(db)?;
         transaction.commit().map_err(db)?;
         Ok(())

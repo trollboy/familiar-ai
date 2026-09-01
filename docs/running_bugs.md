@@ -983,3 +983,18 @@ reinstall the binary, then rerun the 076 drive.
   results supersede earlier captures (unconditional overwrite),
   interim count is surfaced as a warning line, never fatal. EOF
   without any result stays fatal.
+
+### FAM-BUG-039 — Durable checkpoint identity replays event ids
+
+- **Status:** Fixed (this commit); collateral of the FAM-BUG-037 fix
+- **Observed:** Session 9 passed freeze (037 validated live), passed
+  format/lint/tests-green-crates verification against the candidate,
+  then died advancing the checkpoint: `UNIQUE constraint failed:
+  execution_checkpoint_events.event_id`. Transition event ids were
+  `{checkpoint_id}:{phase}` — unique per checkpoint lifetime, and 037
+  made checkpoint identity span attempts, so a later attempt revisiting
+  a phase replays the id (session 6's lifecycle already wrote it).
+- **Fix:** transition and approval event ids carry a per-checkpoint
+  sequence (`{checkpoint_id}:{phase}:{n}`) — unique per occurrence.
+  The two drive-side completion writers already used INSERT OR IGNORE
+  and stay as-is.

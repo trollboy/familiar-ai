@@ -321,10 +321,17 @@ impl<'a> SqliteBacklogRepository<'a> {
                 "checkpoint {checkpoint_id} changed during approve-and-complete"
             )));
         }
+        let event_sequence: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM execution_checkpoint_events WHERE checkpoint_id=?1",
+                [&checkpoint_id],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
         tx.execute(
             "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
             params![
-                format!("{checkpoint_id}:approved"),
+                format!("{checkpoint_id}:approved:{event_sequence}"),
                 checkpoint_id,
                 phase,
                 format!("approve_and_complete actor={actor} approved_hash={approved_diff_hash} commit={commit}"),
