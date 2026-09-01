@@ -1,0 +1,35 @@
+command: familiar-ai drive --max-prds 1 --prd PRD-076
+date: Tue Sep  1 11:23:51 AM UTC 2026
+host: trollboy (Linux)
+head: 144a470445ccd73d05e1a41e58b6e55b99e229a3 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788261831375835-0000862973-000000 started warrant={"max_prds":1,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-76"]}
+drive: checkout HEAD=144a470 dirty_files=0 in sync with origin/main (as of last fetch)
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:863046
+preflight: heartbeat check=verification.format elapsed_ms=3895 child=pid:863046
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:863592
+preflight: heartbeat check=verification.lint elapsed_ms=24932 child=pid:863592
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:867675
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30000 child=pid:867675 last="running 107 tests"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=52471 child=pid:867675
+drive: excluded_allowlist PRD-38 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-53 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-58 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-80 ready but outside the session's approved PRD set
+drive: attempt 1 PRD-76 docs/prds/PRD-076.md
+drive: attempt 1 PRD-76 failed: execution history failed: database error: verification evidence requires repository identity
+drive: attempt 1 PRD-76 outcome=retained reason=unclassified_result
+drive: session drive-00001788261831375835-0000862973-000000 terminated reason=unclassified_result attempted=1 completed=0
+session=drive-00001788261831375835-0000862973-000000 termination=unclassified_result attempted=1 completed=0 known_cost_microusd=0
+error: session drive-00001788261831375835-0000862973-000000 terminated abnormally: unclassified_result
+---
+exit: 1
