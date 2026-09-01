@@ -43,9 +43,14 @@ exists to end that.
   review, merge-queue integration in order, the second PRD provably built
   on the first's integrated base. Live confirmation lands with the M1's
   next real wave.
-- **PRD-078 — preflight/verification contract** (bugs 011, 015, 020, 024)
-  and **PRD-079 — capability-probed review routing** (bugs 013, 025) run
-  as a pair after 077 — their declared files are disjoint.
+- **PRD-078 — preflight/verification contract: COMPLETE 2026-08-31** and
+  **PRD-079 — capability-probed review routing: COMPLETE 2026-08-31** —
+  implemented in parallel by Codex on the M1 while Claude implemented 077
+  (the bug wave genuinely ran at width 3 across two machines, human-
+  orchestrated). Bugs 011/015/020/024 and 013/025 fixed; 024/025
+  live-verified 2026-09-01. The predicted migration-052 collision happened
+  and was repaired (079 → migration 053, collision ledger in
+  running_bugs).
 - **PRD-080 — scope authority refinement** (bug 014; the wave-3 PRD-050
   and wave-4 PRD-055 scope walls) follows.
 - Direct fixes **done 2026-08-31**: bug 017 (provider-verify TOML) and
@@ -63,7 +68,7 @@ PRDs' declarations.
 
 | Wave | PRDs | Graph width | Achievable width |
 |------|------|-------------|------------------|
-| bug gate | 077 **done** → 078 ∥ 079 (Codex), then 080 | 4 | 2 → 1 |
+| bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
 | gate | 076 | 1 | 1 |
 | 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
 | 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
