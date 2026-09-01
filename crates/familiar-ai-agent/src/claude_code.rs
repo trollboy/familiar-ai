@@ -241,13 +241,11 @@ impl CodingAgent for ClaudeCodeAgent {
             });
         }
         if stream.duplicate_terminals > 0 {
-            return Err(AgentExecutionError::MalformedOutput {
-                detail: format!(
-                    "stream contained {} duplicate terminal event(s); first result kept, authority ambiguous",
-                    stream.duplicate_terminals
-                ),
-                result: Box::new(result),
-            });
+            let _ = writeln!(
+                output,
+                "stream: {} interim terminal event(s) superseded by the final result",
+                stream.duplicate_terminals
+            );
         }
         // Stray non-JSON stdout lines (CLI warnings, tool noise) do not
         // contaminate the single parsed terminal that carries every durable
@@ -429,11 +427,13 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
         "user" => StreamAction::Silent,
         "result" => {
             if stream.terminal_seen {
-                // Keep the first terminal capture and forward subsequent
-                // terminals as anomalies; which result is authoritative is
-                // now ambiguous, so this stays a hard rejection.
+                // Observed live (session 8): sub-agent sessions emit interim
+                // result events sharing the main session_id — a degenerate
+                // 18-output-token result preceded the real $29 final. The
+                // stream's LAST result is the CLI's terminal contract, so
+                // capture falls through and overwrites: last wins, counted
+                // and surfaced, never fatal (FAM-BUG-038).
                 stream.duplicate_terminals += 1;
-                return StreamAction::Forward;
             }
             stream.terminal_seen = true;
             stream.source_hash = Some(hash_accounting_event(&value));
@@ -725,23 +725,21 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_results_keep_first_capture_and_forward_later_ones() {
+    fn later_results_supersede_earlier_captures_and_are_counted() {
         let mut stream = ClaudeStream::default();
         parse_event(
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"total_cost_usd":0.1}"#,
             &mut stream,
         );
-        assert!(matches!(
-            parse_event(
-                r#"{"type":"result","subtype":"success","usage":{"input_tokens":99,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":99}}"#,
-                &mut stream
-            ),
-            StreamAction::Forward
-        ));
+        parse_event(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":99,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":99},"total_cost_usd":0.9}"#,
+            &mut stream,
+        );
+        assert_eq!(stream.duplicate_terminals, 1);
         let mut result = ExecutionResult::default();
         stream.apply(&mut result);
-        assert_eq!(result.input_tokens, Some(1));
-        assert_eq!(result.reported_cost_microusd, Some(100_000));
+        assert_eq!(result.input_tokens, Some(99));
+        assert_eq!(result.reported_cost_microusd, Some(900_000));
     }
 
     #[test]
@@ -966,28 +964,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn duplicate_terminal_events_stay_a_hard_rejection() {
+    fn interim_terminal_events_are_superseded_by_the_final_result() {
+        // FAM-BUG-038: session 8's stream carried a degenerate interim
+        // result (18 output tokens) before the real final; first-kept
+        // discarded a completed $29 run. The last result is the terminal.
         let temp = tempfile::tempdir().unwrap();
         let executable = temp.path().join("claude");
         write_executable(
             &executable,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Claude Code 2.1'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1}}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"input_tokens\":9,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":9}}'\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Claude Code 2.1'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"sess-1\",\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1}}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"sess-1\",\"total_cost_usd\":0.5,\"usage\":{\"input_tokens\":9,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":9}}'\nexit 0\n",
         );
         let mut output = Vec::new();
-        let error = agent(settings(&executable))
+        let result = agent(settings(&executable))
             .execute(
                 request(temp.path(), None, crate::FilesystemPolicy::WorkspaceWrite),
                 &mut output,
             )
-            .unwrap_err();
-        match error {
-            AgentExecutionError::MalformedOutput { detail, result } => {
-                assert!(detail.contains("1 duplicate terminal event"), "{detail}");
-                // The first terminal's facts are the ones kept.
-                assert_eq!(result.input_tokens, Some(1));
-            }
-            other => panic!("expected MalformedOutput, got {other:?}"),
-        }
+            .unwrap();
+        assert_eq!(result.input_tokens, Some(9));
+        assert_eq!(result.output_tokens, Some(9));
+        assert_eq!(result.reported_cost_microusd, Some(500_000));
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.contains("1 interim terminal event(s) superseded"),
+            "superseding surfaced: {text}"
+        );
     }
 
     #[cfg(unix)]

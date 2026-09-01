@@ -964,3 +964,22 @@ reinstall the binary, then rerun the 076 drive.
 - **Regression:** refreeze over a checkpoint with pending + decided
   scope rows succeeds, keeps the durable id, updates the candidate,
   retires the stale pending row, preserves the human decision.
+
+### FAM-BUG-038 — Interim terminal events voided a fourth completed run
+
+- **Status:** Fixed (this commit); supersedes FAM-BUG-034's
+  duplicate-terminal hard rejection
+- **Observed:** Session 8's worker completed PRD-076 (fourth green
+  implementation, 12.7 min) and the adapter rejected the stream:
+  "1 duplicate terminal event(s)". Live evidence overturned 034's
+  assumption that duplicates are ambiguous: both results shared the
+  main session_id; the FIRST was a degenerate interim (2,578 in /
+  18 out tokens — sub-agent session artifact), the LAST was the real
+  final ($28.70, 66 turns). First-kept chose the wrong authority AND
+  rejected; the forensics were also inverted (the kept result was
+  silent, the discarded final was logged as the anomaly).
+- **Fix:** the stream's last result event is the terminal, per the
+  CLI's own contract that the stream ends with its result. Later
+  results supersede earlier captures (unconditional overwrite),
+  interim count is surfaced as a warning line, never fatal. EOF
+  without any result stays fatal.
