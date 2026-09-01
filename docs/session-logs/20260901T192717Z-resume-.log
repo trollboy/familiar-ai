@@ -1,0 +1,79 @@
+command: familiar-ai resume all
+date: Tue Sep  1 07:27:17 PM UTC 2026
+host: trollboy (Linux)
+head: 4af2458bda8e92c6d02687212e3f0247170afb45 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeAmbiguous]
+Scope evaluation 'initial' under policy sha256:eafda43c6331d654e3b6af761dacc5f7e2ec925e9a3ad233fa787d892f9997e5:
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+scope: JustifiedExpectedFileChange Added docs/acceptance/PRD-038-multi-repo-have-at-it.md rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added tests/fixtures/repo-node-service/README.md rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added tests/fixtures/repo-node-service/design/feature-request.md rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added tests/fixtures/repo-node-service/index.js rule=prd_expected_file_expansion
+scope: AmbiguousHumanReview Added tests/fixtures/repo-node-service/package.json rule=classification:conflict
+scope: AmbiguousHumanReview Added tests/fixtures/repo-rust-cli/Cargo.toml rule=classification:conflict
+scope: JustifiedExpectedFileChange Added tests/fixtures/repo-rust-cli/README.md rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added tests/fixtures/repo-rust-cli/design/feature-request.md rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added tests/fixtures/repo-rust-cli/src/main.rs rule=prd_expected_file_expansion
+HumanReviewRequired prd=PRD-38
+stop_reasons=["scope_ambiguous"]
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 6
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+non-interactive input: preserving checkpoint
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeAmbiguous]
+Scope evaluation 'initial' under policy sha256:ad12a66c655ef0d61415a372cae17380b663f85f8108e7d6d3113dbc7bf6a97c:
+scope: AmbiguousHumanReview Modified Cargo.lock rule=file_class:dependency_lockfile:human_review
+scope: JustifiedExpectedFileChange Modified config/default.toml rule=prd_expected_file_expansion
+scope: AmbiguousHumanReview Modified crates/familiar-ai-agent/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Modified crates/familiar-ai-agent/src/isolation.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-agent/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-agent/src/raw_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-agent/tests/raw_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-core/src/config/agent_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-core/src/config/mod.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-daemon/src/agent_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/raw_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-llm/src/attempt.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-llm/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-storage/migrations/055_agent_runtime.sql rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-storage/src/migrate.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-storage/src/repos/agent_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-storage/src/repos/mod.rs rule=configured_allowed_path
+scope: JustifiedExpectedFileChange Added docs/contracts/agent-loop.md rule=prd_expected_file_expansion
+HumanReviewRequired prd=PRD-58
+stop_reasons=["scope_ambiguous"]
+scope_finding file_class:dependency_lockfile:human_review: class policy requires human review for dependency_lockfile files
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 12
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+non-interactive input: preserving checkpoint
+error: PRD-38: human review required; PRD-58: human review required
+---
+exit: 1
