@@ -347,6 +347,9 @@ pub enum DriveTermination {
     PreflightFailed,
     DeliveryBlocked,
     BudgetDeliveriesExhausted,
+    /// PRD-077: three identical deterministic terminal failures tripped the
+    /// session circuit breaker; the session detail carries the recovery plan.
+    DeterministicFailureCascade,
 }
 
 impl DriveTermination {
@@ -366,6 +369,7 @@ impl DriveTermination {
             Self::PreflightFailed => "preflight_failed",
             Self::DeliveryBlocked => "delivery_blocked",
             Self::BudgetDeliveriesExhausted => "budget_deliveries_exhausted",
+            Self::DeterministicFailureCascade => "deterministic_failure_cascade",
         }
     }
 
@@ -689,6 +693,16 @@ fn scope_overlap(
 /// overlapping mutable expected-file scope. Completed dependencies are safe
 /// immediately after integration because subsequently admitted workers branch
 /// from the persisted integration revision; delivery is independent.
+/// Scopes and resources held by workers still in flight. PRD-077
+/// (FAM-BUG-012 family): these holds persist across scheduling passes until
+/// the holder's result is drained — without them a later pass could admit a
+/// PRD overlapping an active worker's files.
+pub type ActiveHold = (
+    PrdId,
+    Vec<(String, familiar_ai_review::ExpectedMatchKind)>,
+    Vec<String>,
+);
+
 #[allow(clippy::too_many_arguments)]
 fn select_batch(
     repository: &RepositoryIdentity,
@@ -696,6 +710,7 @@ fn select_batch(
     db: &mut Database,
     attempted: &BTreeSet<PrdId>,
     allowlist: Option<&BTreeSet<PrdId>>,
+    active_holds: &[ActiveHold],
     limit: usize,
     decisions: &mut Vec<SelectionDecision>,
 ) -> Result<Selection, DriveError> {
@@ -716,21 +731,50 @@ fn select_batch(
         .map(|entry| (entry.prd.id.clone(), entry.status))
         .collect();
     let mut selected: Vec<DiscoveredPrd> = Vec::new();
+    // Seed the conflict sets with in-flight holders so admission never
+    // overlaps an active worker; in-flight ids label their deferrals
+    // distinctly from same-batch conflicts.
+    let in_flight: BTreeSet<PrdId> = active_holds.iter().map(|(id, _, _)| id.clone()).collect();
     let mut selected_scopes: Vec<(PrdId, Vec<(String, familiar_ai_review::ExpectedMatchKind)>)> =
-        Vec::new();
-    let mut selected_resources: Vec<(PrdId, Vec<String>)> = Vec::new();
+        active_holds
+            .iter()
+            .map(|(id, scope, _)| (id.clone(), scope.clone()))
+            .collect();
+    let mut selected_resources: Vec<(PrdId, Vec<String>)> = active_holds
+        .iter()
+        .map(|(id, _, resources)| (id.clone(), resources.clone()))
+        .collect();
     for entry in entries {
         // An attempt that failed before claim leaves the PRD pending; without
         // this exclusion the session would select it forever.
         if attempted.contains(&entry.prd.id) {
             continue;
         }
-        let dependencies_met = entry
+        let unmet: Vec<&PrdId> = entry
             .prd
             .dependencies
             .iter()
-            .all(|id| statuses.get(id) == Some(&BacklogStatus::Completed));
-        if entry.status != BacklogStatus::Pending || !dependencies_met {
+            .filter(|id| statuses.get(*id) != Some(&BacklogStatus::Completed))
+            .collect();
+        if entry.status != BacklogStatus::Pending || !unmet.is_empty() {
+            // PRD-077 (FAM-BUG-012): a predecessor that was attempted this
+            // session and did not integrate defers its dependents with a
+            // durable named decision instead of silence.
+            let blocked_by: Vec<String> = unmet
+                .iter()
+                .filter(|id| attempted.contains(**id) || in_flight.contains(**id))
+                .map(ToString::to_string)
+                .collect();
+            if entry.status == BacklogStatus::Pending && !blocked_by.is_empty() {
+                decisions.push(SelectionDecision {
+                    prd_id: entry.prd.id.clone(),
+                    decision: "dependency_not_integrated",
+                    detail: format!(
+                        "dependency {} was attempted this session and is not integrated into the session revision",
+                        blocked_by.join(", ")
+                    ),
+                });
+            }
             continue;
         }
         if let Some(allowlist) = allowlist {
@@ -785,9 +829,14 @@ fn select_batch(
             .iter()
             .find_map(|(id, held)| scope_overlap(&scope, held).map(|pair| (id.clone(), pair)))
         {
+            let decision = if in_flight.contains(&holder) {
+                "deferred_scope_held"
+            } else {
+                "deferred_scope_overlap"
+            };
             decisions.push(SelectionDecision {
                 prd_id: entry.prd.id.clone(),
-                decision: "deferred_scope_overlap",
+                decision,
                 detail: format!("scope '{left}' overlaps '{right}' held by {holder}"),
             });
             continue;
@@ -1038,6 +1087,11 @@ pub fn drive(
             let (result_sender, result_receiver) = std::sync::mpsc::channel();
             let mut active_workers = 0_usize;
             let mut stop_after_drain = None;
+            // PRD-077: scopes/resources of in-flight workers, held until their
+            // results drain, and per-reason deterministic-failure streaks for
+            // the session circuit breaker.
+            let mut active_holds: Vec<ActiveHold> = Vec::new();
+            let mut failure_streaks: BTreeMap<String, Vec<String>> = BTreeMap::new();
             let termination = loop {
                 if active_workers == 0 {
                     if let Some(reason) = stop_after_drain {
@@ -1087,6 +1141,7 @@ pub fn drive(
                     &mut db,
                     &attempted_ids,
                     warrant.prd_allowlist.as_ref(),
+                    &active_holds,
                     remaining,
                     &mut decisions,
                 )?;
@@ -1402,6 +1457,14 @@ pub fn drive(
                     let progress_session_id = session_id.clone();
                     let codex_session = &codex_session;
                     active_workers = active_workers.saturating_add(1);
+                    // PRD-077: hold this worker's scope and resources until its
+                    // result drains, so no later scheduling pass admits
+                    // overlapping work while it runs.
+                    active_holds.push((
+                        target.id.clone(),
+                        prd_scope(&repository.worktree, &target).unwrap_or_default(),
+                        target.metadata.resources.clone(),
+                    ));
                     scope.spawn(move || {
                         let attempt_timer = Instant::now();
                         let _progress = ProgressGuard::start(
@@ -1460,6 +1523,7 @@ pub fn drive(
                 };
                 active_workers = active_workers.saturating_sub(1);
                 for joined in std::iter::once(joined) {
+                    active_holds.retain(|(id, _, _)| *id != joined.0.id);
                     let (
                         target,
                         sequence,
@@ -1823,6 +1887,22 @@ pub fn drive(
                             integration_ok = false;
                         }
                     }
+                    // PRD-077 circuit breaker: identical deterministic
+                    // retained reasons indicate a shared configuration cause;
+                    // the third occurrence stops the session with one
+                    // executable recovery plan instead of burning the warrant.
+                    const DETERMINISTIC_REASONS: &[&str] = &[
+                        "preflight_failed",
+                        "malformed_output",
+                        "review_disabled",
+                        "worktree_failed",
+                        "warrant_reservation_refused",
+                        "implementation_token_usage_unknown",
+                        "missing_authoritative_input_reference",
+                        "unreadable_reference",
+                        "context_compilation_failed",
+                        "implementation_incomplete",
+                    ];
                     let (outcome, retained_reason) = match (&result, integration_ok) {
                         (Ok(_), true) => {
                             completed += 1;
@@ -1837,6 +1917,36 @@ pub fn drive(
                             })),
                         ),
                     };
+                    if let Some(reason) = retained_reason {
+                        if DETERMINISTIC_REASONS.contains(&reason) {
+                            let victims = failure_streaks.entry(reason.to_string()).or_default();
+                            victims.push(target.id.to_string());
+                            if victims.len() >= 3 && batch_stop.is_none() {
+                                let plan = format!(
+                                    "deterministic_failure_cascade reason={reason} prds={} — fix the shared cause once, then rerun the remaining allowlist: familiar-ai drive --max-prds {} {}",
+                                    victims.join(","),
+                                    warrant.max_prds.max(1),
+                                    warrant
+                                        .prd_allowlist
+                                        .as_ref()
+                                        .map(|ids| ids
+                                            .iter()
+                                            .filter(|id| !attempted_ids.contains(id))
+                                            .map(|id| format!("--prd {id}"))
+                                            .collect::<Vec<_>>()
+                                            .join(" "))
+                                        .unwrap_or_default()
+                                );
+                                eprintln!("drive: {plan}");
+                                if let Err(error) = DriverRepository::new(db.conn())
+                                    .record_session_detail(&session_id, &plan)
+                                {
+                                    eprintln!("drive: cannot persist recovery plan: {error}");
+                                }
+                                batch_stop = Some(DriveTermination::DeterministicFailureCascade);
+                            }
+                        }
+                    }
                     if let Some(lease) = &mut worktree {
                         let state = if integration_ok {
                             "ready_for_delivery"
@@ -2759,6 +2869,10 @@ mod tests {
                 DriveTermination::BudgetDeliveriesExhausted,
                 "budget_deliveries_exhausted",
             ),
+            (
+                DriveTermination::DeterministicFailureCascade,
+                "deterministic_failure_cascade",
+            ),
         ] {
             assert_eq!(termination.as_str(), text);
         }
@@ -2784,6 +2898,7 @@ mod tests {
             DriveTermination::CostUnknown,
             DriveTermination::DeliveryBlocked,
             DriveTermination::BudgetDeliveriesExhausted,
+            DriveTermination::DeterministicFailureCascade,
         ] {
             assert!(!termination.worker_should_restart(), "{termination:?}");
         }
@@ -2916,6 +3031,7 @@ mod tests {
             db,
             &BTreeSet::new(),
             allowlist,
+            &[],
             limit,
             &mut decisions,
         )
@@ -3193,6 +3309,79 @@ mod tests {
             .find(|decision| decision.prd_id == PrdId::new(1))
             .unwrap();
         assert_eq!(excluded.decision, "excluded_allowlist");
+    }
+
+    /// PRD-077 (FAM-BUG-012): a predecessor attempted this session without
+    /// integrating defers its dependents with a durable named decision.
+    #[test]
+    fn attempted_unintegrated_dependency_defers_dependent_with_named_decision() {
+        use familiar_ai_core::PrdLocation::Active;
+        let (_temp, repository) = test_repository();
+        let discovered = vec![
+            contract_prd(1, &[], Active, &["a.rs"]),
+            contract_prd(2, &[1], Active, &["b.rs"]),
+        ];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        // PRD-1 was attempted (retained) this session; backlog stays pending.
+        let attempted: BTreeSet<PrdId> = [PrdId::new(1)].into_iter().collect();
+        let mut decisions = Vec::new();
+        let selection = select_batch(
+            &repository,
+            &discovered,
+            &mut db,
+            &attempted,
+            None,
+            &[],
+            6,
+            &mut decisions,
+        )
+        .unwrap();
+        assert!(matches!(selection, Selection::NothingEligible));
+        let deferred = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(2))
+            .expect("dependent must receive a decision");
+        assert_eq!(deferred.decision, "dependency_not_integrated");
+        assert!(deferred.detail.contains("PRD-1"), "{}", deferred.detail);
+    }
+
+    /// PRD-077: an in-flight worker's scope is held across scheduling passes —
+    /// a later pass must not admit overlapping work while it runs.
+    #[test]
+    fn in_flight_scope_hold_defers_overlapping_admission() {
+        use familiar_ai_core::PrdLocation::Active;
+        let (_temp, repository) = test_repository();
+        let discovered = vec![contract_prd(2, &[], Active, &["src/lib.rs"])];
+        let mut db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let holds: Vec<ActiveHold> = vec![(
+            PrdId::new(1),
+            vec![(
+                "src/".into(),
+                familiar_ai_review::ExpectedMatchKind::Directory,
+            )],
+            Vec::new(),
+        )];
+        let mut decisions = Vec::new();
+        let selection = select_batch(
+            &repository,
+            &discovered,
+            &mut db,
+            &BTreeSet::new(),
+            None,
+            &holds,
+            6,
+            &mut decisions,
+        )
+        .unwrap();
+        assert!(matches!(selection, Selection::NothingEligible));
+        let deferred = decisions
+            .iter()
+            .find(|decision| decision.prd_id == PrdId::new(2))
+            .unwrap();
+        assert_eq!(deferred.decision, "deferred_scope_held");
+        assert!(deferred.detail.contains("PRD-1"), "{}", deferred.detail);
     }
 
     #[test]
