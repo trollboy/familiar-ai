@@ -732,10 +732,15 @@ fn validate_completion_cycle(
     for finding in result.findings.iter().filter(|f| {
         f.status == FindingStatus::Open && (f.blocking || f.acceptance_criterion_id.is_some())
     }) {
+        // Match by exact id or by claim substance — reviewer ids rotate
+        // between attempts while the waived claim stays the same
+        // (FAM-BUG-044). Legacy rows carry the empty substance and match
+        // by id only.
+        let substance = familiar_ai_review::review_finding_substance_hash(finding);
         let durable: Option<(String, String, String, String, String, String)> = tx
             .query_row(
-                "SELECT waiver_id,cycle_id,finding_id,actor,reason,created_at FROM review_finding_waivers WHERE cycle_id=?1 AND finding_id=?2",
-                params![cycle.cycle_id, finding.finding_id],
+                "SELECT waiver_id,cycle_id,finding_id,actor,reason,created_at FROM review_finding_waivers WHERE cycle_id=?1 AND (finding_id=?2 OR (finding_substance<>'' AND finding_substance=?3)) LIMIT 1",
+                params![cycle.cycle_id, finding.finding_id, substance],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .optional()

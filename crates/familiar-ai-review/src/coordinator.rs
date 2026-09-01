@@ -27,6 +27,12 @@ pub trait RemediationAgent {
 pub trait ReviewStore {
     fn save_cycle(&self, cycle: &ReviewCycle) -> Result<(), String>;
     fn save_artifact(&self, kind: &str, value: &[u8]) -> Result<ArtifactRef, String>;
+    /// Prior persisted state of this cycle, if any. Used to carry durable
+    /// human waivers forward into a fresh attempt's cycle snapshot
+    /// (FAM-BUG-044); the default suits stores without persistence.
+    fn load_cycle(&self, _cycle_id: &str) -> Result<Option<ReviewCycle>, String> {
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,7 +151,13 @@ impl ReviewCoordinator<'_> {
             verification_before_review: vec![],
             verification_after_remediation: vec![],
             verification_history: vec![],
-            waivers: vec![],
+            waivers: self
+                .store
+                .load_cycle(&request.cycle_id)
+                .ok()
+                .flatten()
+                .map(|prior| prior.waivers)
+                .unwrap_or_default(),
             scope_policy_snapshot: None,
             scope_evaluations: vec![],
             tier_selection: None,

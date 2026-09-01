@@ -227,6 +227,38 @@ pub fn scope_finding_substance_hash(finding: &crate::ScopeFinding) -> String {
     )
 }
 
+/// Identity of a review finding's claim substance: its category plus the
+/// sorted set of evidenced paths and verification check ids. Reviewer-chosen
+/// finding ids and prose rotate between attempts (FAM-BUG-044); the claim a
+/// human waives is "this category of finding about these files/checks".
+pub fn review_finding_substance_hash(finding: &crate::ReviewFinding) -> String {
+    let mut parts: Vec<String> = vec![serde_json::to_string(&finding.category)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_owned()];
+    let mut cited: Vec<String> = finding
+        .evidence
+        .iter()
+        .filter_map(|evidence| match evidence {
+            crate::FindingEvidence::FileRange { path, .. }
+            | crate::FindingEvidence::DiffHunk { path, .. } => Some(format!("path:{path}")),
+            crate::FindingEvidence::Verification { check_id, .. } => {
+                Some(format!("check:{check_id}"))
+            }
+            crate::FindingEvidence::Invariant {
+                source, section, ..
+            } => Some(format!("invariant:{source}#{section}")),
+            crate::FindingEvidence::Contract { .. } | crate::FindingEvidence::Artifact { .. } => {
+                None
+            }
+        })
+        .collect();
+    cited.sort();
+    cited.dedup();
+    parts.extend(cited);
+    content_hash(parts.join("\n").as_bytes())
+}
+
 pub fn content_hash(bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
     let hex = digest
@@ -366,6 +398,47 @@ pub fn collect_scope_evidence(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn finding_substance_survives_id_and_prose_rotation() {
+        // FAM-BUG-044: reviewers re-issue the same claim under fresh ids and
+        // re-worded prose every attempt; the substance (category + evidenced
+        // paths/checks) is what a human actually waives.
+        let make = |id: &str, title: &str| crate::ReviewFinding {
+            finding_id: id.into(),
+            category: crate::FindingCategory::ScopeViolation,
+            severity: crate::FindingSeverity::Medium,
+            blocking: true,
+            title: title.into(),
+            claim: title.into(),
+            evidence: vec![
+                crate::FindingEvidence::FileRange {
+                    path: "tests/fixtures/repo-rust-cli/Cargo.toml".into(),
+                    range: crate::LineRange { start: 1, end: 7 },
+                },
+                crate::FindingEvidence::DiffHunk {
+                    path: "docs/acceptance/PRD-038.md".into(),
+                    hunk: "@@ -0,0 +1 @@".into(),
+                },
+            ],
+            remediation: "relocate".into(),
+            status: crate::FindingStatus::Open,
+            supersedes: None,
+            acceptance_criterion_id: None,
+        };
+        let first = make("scope-out-of-allowed-paths", "Nine of eleven files...");
+        let second = make("scope-outside-crates", "Change adds files outside...");
+        assert_eq!(
+            super::review_finding_substance_hash(&first),
+            super::review_finding_substance_hash(&second)
+        );
+        let mut different = make("x", "y");
+        different.category = crate::FindingCategory::TestGap;
+        assert_ne!(
+            super::review_finding_substance_hash(&first),
+            super::review_finding_substance_hash(&different)
+        );
+    }
+
     use super::*;
     use tempfile::tempdir;
 

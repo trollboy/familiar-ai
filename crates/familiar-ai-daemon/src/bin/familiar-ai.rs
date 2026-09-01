@@ -64,6 +64,21 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Attach a durable human waiver to one open blocking review finding
+    /// (required by completion-evidence for terminal reviews). Waivers are
+    /// substance-keyed and survive reviewer finding-id rotation.
+    Waive {
+        #[arg(long)]
+        cycle_id: String,
+        #[arg(long)]
+        finding_id: String,
+        /// Mandatory explicit human authority, e.g. human:trollboy.
+        #[arg(long)]
+        actor: String,
+        /// Mandatory non-empty audit reason.
+        #[arg(long)]
+        reason: String,
+    },
     /// List or decide one hash-bound pending scope finding.
     ScopeDecisions {
         #[arg(long)]
@@ -448,6 +463,15 @@ fn main() -> ExitCode {
                 Err(error) => fail(error),
             }
         }
+        Command::Waive {
+            cycle_id,
+            finding_id,
+            actor,
+            reason,
+        } => match familiar_ai_daemon::cli::waive::waive(cycle_id, finding_id, actor, reason) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::ScopeDecisions {
             finding_hash,
             candidate_hash,

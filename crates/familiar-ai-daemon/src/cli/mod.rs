@@ -26,4 +26,5 @@ pub mod scope_decisions;
 pub mod shared;
 pub mod stewardship;
 pub mod usage;
+pub mod waive;
 pub mod worker;

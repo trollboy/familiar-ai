@@ -59,6 +59,20 @@ impl<'a> ReviewRepository<'a> {
                 "finding {finding_id} is not an open blocking or acceptance-criterion finding"
             )));
         }
+        // Substance identity survives reviewer id/prose rotation between
+        // attempts (FAM-BUG-044); completion matches by id OR substance.
+        let substance: String = self
+            .conn
+            .query_row(
+                "SELECT finding_json FROM review_findings WHERE cycle_id=?1 AND finding_id=?2",
+                params![cycle_id, finding_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db)?
+            .and_then(|json| serde_json::from_str::<familiar_ai_review::ReviewFinding>(&json).ok())
+            .map(|finding| familiar_ai_review::review_finding_substance_hash(&finding))
+            .unwrap_or_default();
         let waiver = ReviewWaiver {
             waiver_id: format!("{cycle_id}:{finding_id}"),
             cycle_id: cycle_id.into(),
@@ -70,7 +84,7 @@ impl<'a> ReviewRepository<'a> {
         cycle.waivers.retain(|value| value.finding_id != finding_id);
         cycle.waivers.push(waiver.clone());
         let tx = self.conn.unchecked_transaction().map_err(db)?;
-        tx.execute("INSERT INTO review_finding_waivers(waiver_id,cycle_id,finding_id,actor,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(cycle_id,finding_id) DO UPDATE SET waiver_id=excluded.waiver_id,actor=excluded.actor,reason=excluded.reason,created_at=excluded.created_at", params![waiver.waiver_id, cycle_id, finding_id, actor, reason, waiver.created_at]).map_err(db)?;
+        tx.execute("INSERT INTO review_finding_waivers(waiver_id,cycle_id,finding_id,finding_substance,actor,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(cycle_id,finding_id) DO UPDATE SET waiver_id=excluded.waiver_id,finding_substance=excluded.finding_substance,actor=excluded.actor,reason=excluded.reason,created_at=excluded.created_at", params![waiver.waiver_id, cycle_id, finding_id, substance, actor, reason, waiver.created_at]).map_err(db)?;
         tx.execute(
             "UPDATE review_cycles SET cycle_json=?2 WHERE cycle_id=?1",
             params![cycle_id, json(&cycle)?],
@@ -231,6 +245,9 @@ impl<'a> ReviewRepository<'a> {
     }
 }
 impl ReviewStore for ReviewRepository<'_> {
+    fn load_cycle(&self, cycle_id: &str) -> Result<Option<ReviewCycle>, String> {
+        self.get_cycle(cycle_id).map_err(|error| error.to_string())
+    }
     fn save_cycle(&self, cycle: &ReviewCycle) -> Result<(), String> {
         let raw = serde_json::to_string(cycle).map_err(|e| e.to_string())?;
         let tx = self

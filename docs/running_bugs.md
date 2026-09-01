@@ -1096,8 +1096,14 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-044 — Waivers key on reviewer-chosen finding ids, which rotate
 
-- **Status:** Open (workaround: manual completion override, used for
-  PRD-38); fix direction: substance-keyed waivers, like approvals
+- **Status:** FIXED 2026-09-01 evening — waivers store the finding's claim
+  substance (category + evidenced paths/checks, hash-stable across id and
+  prose rotation; migration 056 also drops the FK that blocked
+  save_cycle's findings rewrite), completion matches by id OR substance,
+  and the coordinator carries durable waivers forward into each fresh
+  attempt's cycle snapshot. Regression pins substance stability.
+- **Original status:** Open (workaround: manual completion override, used
+  for PRD-38)
 - **Observed:** opus issued the same misinformed scope claim under a
   different finding_id on every attempt (`scope-out-of-allowed-paths`,
   then `scope-outside-crates`), so the durable human waiver never
@@ -1113,13 +1119,17 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-FRICTION-007 — Scope-decisions pause template is not paste-runnable
 
-- **Status:** Open
+- **Status:** Fixed 2026-09-01 evening — template prints `--finding-hash`
+  and `--approve`.
+- **Original status:** Open
 - The drive prints `familiar-ai scope-decisions sha256:… --candidate-hash …`
   but the CLI requires `--finding-hash`; the printed command fails with
   an argument error.
 
 ### FAM-FRICTION-008 — waive_finding has no CLI surface
 
-- **Status:** Open (interim: `operator_waive` example)
+- **Status:** Fixed 2026-09-01 evening — `familiar-ai waive --cycle-id …
+  --finding-id … --actor human:… --reason …`.
+- **Original status:** Open (interim: `operator_waive` example)
 - Completion-evidence demands durable human waivers, but no CLI can
   create one; the examples/operator_waive tool is the stopgap.

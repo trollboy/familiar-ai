@@ -1642,7 +1642,7 @@ pub fn drive(
                             // end — surface the exact command per finding.
                             for hash in &pending_hashes {
                                 eprintln!(
-                                    "drive: scope decision pending for {prd_id}: familiar-ai scope-decisions {hash} --candidate-hash {} --approve|--reject --actor human:<identity> --reason \"...\"",
+                                    "drive: scope decision pending for {prd_id}: familiar-ai scope-decisions --finding-hash {hash} --candidate-hash {} --approve --actor human:<identity> --reason \"...\"",
                                     checkpoint.diff_hash
                                 );
                             }
