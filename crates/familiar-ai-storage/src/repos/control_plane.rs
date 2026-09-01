@@ -374,7 +374,7 @@ impl<'a> ControlPlaneRepository<'a> {
                 &project_pool,
             )?;
             tx.execute("UPDATE control_plane_executions SET state='running',attempt=attempt+1,claim_generation=?2,updated_at=datetime('now') WHERE execution_id=?1 AND state='queued'", params![execution_id, owner_generation as i64]).map_err(db)?;
-            let event_id = format!("{}:claimed:{}:{}", execution_id, owner_generation, attempt);
+            let event_id = format!("{execution_id}:claimed:{owner_generation}:{attempt}");
             tx.execute("INSERT INTO control_plane_events(event_id,execution_id,kind,payload_json,created_at) VALUES(?1,?2,'claimed','{}',datetime('now'))", params![event_id,execution_id]).map_err(db)?;
             tx.execute("UPDATE control_plane_projects SET last_claim_sequence=(SELECT COALESCE(MAX(last_claim_sequence),0)+1 FROM control_plane_projects) WHERE project_id=(SELECT project_id FROM control_plane_executions WHERE execution_id=?1)",[execution_id]).map_err(db)?;
         }

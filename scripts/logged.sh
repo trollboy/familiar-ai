@@ -34,7 +34,9 @@ finalize() {
     -e 's/.*github_pat_[A-Za-z0-9_]{8,}.*/[MASKED LINE]/' \
     -e 's/.*AWS_SECRET_ACCESS_KEY.*/[MASKED LINE]/' \
     "$LOG" > "$TMP" 2>/dev/null && mv "$TMP" "$LOG"
-  git add "$LOG" 2>/dev/null
+  # -f: .gitignore's blanket *.log would silently drop the session log,
+  # leaving finalize to report PUSH FAILED with nothing staged (FRICTION-005).
+  git add -f "$LOG" 2>/dev/null
   if git commit -q -m "session log: familiar-ai ${SLUG%-} ($STAMP, exit $CODE)" 2>/dev/null \
      && git push -q origin main 2>/dev/null; then
     echo "session log pushed: $LOG"

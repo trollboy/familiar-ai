@@ -728,6 +728,14 @@ fn main() -> ExitCode {
             worktree_root,
             prd,
         ) {
+            // A crash-like zero-work stop (preflight failure, lost worker,
+            // storage failure) must be visible to wrapping scripts; only
+            // deliberate policy/budget stops exit 0.
+            Ok(summary) if summary.termination.worker_should_restart() => fail(format!(
+                "session {} terminated abnormally: {}",
+                summary.session_id,
+                summary.termination.as_str()
+            )),
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },

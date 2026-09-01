@@ -134,3 +134,6 @@ test-results//target
 *.swp
 .env
 *.log
+
+# Claude Code harness worktrees (subagent isolation)
+.claude/

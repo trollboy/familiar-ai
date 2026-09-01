@@ -757,3 +757,36 @@ reinstall the binary, then rerun the 076 drive.
   asserted a sub-2s kill; under 20-thread suite load the margin slipped;
   the bound is now 8s — well under the fake's 10s sleep ceiling, still
   proving enforcement).
+
+### FAM-BUG-031 — `drive` exits 0 after a zero-work abnormal termination
+
+- **Status:** Fixed (this commit)
+- **Observed:** The first Linux-hosted PRD-076 session terminated
+  `preflight_failed attempted=0 completed=0` — and exited 0. `logged.sh`
+  recorded "exit 0" in the pushed log's commit message; any wrapper,
+  cron, or CI gating on the exit code would have read the session as
+  healthy. The daemon-supervised path already classified this correctly
+  (`DriveTermination::worker_should_restart` names preflight failure
+  crash-like so launchd retries), but the interactive `drive` subcommand
+  discarded the summary: `Ok(_) => ExitCode::SUCCESS`.
+- **Fix:** the `drive` CLI arm now consults the same predicate the
+  supervisor uses: crash-like terminations (preflight failure, lost
+  worker heartbeat, storage failure, interrupt, unclassified result)
+  exit nonzero with the session id and reason on stderr; deliberate
+  policy/budget stops still exit 0. One classification, both surfaces.
+- **Deliberately unchanged:** `deterministic_failure_cascade` still
+  exits 0 — the breaker is a designed stop that delivers a recovery
+  plan, not a crash. Revisit if an operator script ever needs to
+  distinguish it.
+
+### FAM-FRICTION-005 — Session logs silently swallowed by `.gitignore`
+
+- **Status:** Fixed (this commit)
+- **Observed:** `logged.sh` finalize reported `PUSH FAILED - log saved
+  locally` for the first Linux drive session. Nothing was wrong with the
+  push: `.gitignore`'s blanket `*.log` (line 136) made the quiet
+  `git add "$LOG"` a no-op, so the commit had nothing staged and failed.
+  The whole point of the wrapper — logs that reach origin unattended —
+  was defeated by a rule from before session logs existed.
+- **Fix:** `git add -f "$LOG"` with a comment naming this entry. The
+  stranded log from the failed session is committed alongside.

@@ -457,7 +457,7 @@ mod artifact_tests {
         let second = tempfile::tempdir().unwrap();
         fixture(first.path());
         fixture(second.path());
-        let files = vec!["weights.gguf", "tokenizer/tokenizer.json", "chat.jinja"];
+        let files = ["weights.gguf", "tokenizer/tokenizer.json", "chat.jinja"];
         let a = derive(first.path(), files.iter().map(PathBuf::from).collect());
         let b = derive(
             second.path(),

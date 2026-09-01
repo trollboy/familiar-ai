@@ -726,12 +726,13 @@ fn validate_completion_cycle(
             reason: row.4,
             created_at: row.5,
         });
-        if waiver.as_ref().is_none_or(|waiver| {
-            !waiver.actor.starts_with("human:")
-                || waiver.actor.trim() == "human:"
-                || waiver.reason.trim().is_empty()
-                || !cycle.waivers.contains(waiver)
-        }) {
+        let has_durable_human_waiver = waiver.as_ref().is_some_and(|waiver| {
+            waiver.actor.starts_with("human:")
+                && waiver.actor.trim() != "human:"
+                && !waiver.reason.trim().is_empty()
+                && cycle.waivers.contains(waiver)
+        });
+        if !has_durable_human_waiver {
             return Err(BacklogStoreError::Storage(format!(
                 "terminal review retains open finding {} without a durable human waiver",
                 finding.finding_id
