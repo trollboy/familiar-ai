@@ -1,0 +1,88 @@
+command: familiar-ai resume PRD-38
+date: Tue Sep  1 08:37:01 PM UTC 2026
+host: trollboy (Linux)
+head: 777ab0e487e35318e021e2b0d8eea9b97169c540 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3736775
+verification: heartbeat check=format elapsed_ms=4054 child=pid:3736775
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3737342
+verification: heartbeat check=lint elapsed_ms=29830 child=pid:3737342
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3741532
+verification: heartbeat check=tests-green-crates elapsed_ms=30005 child=pid:3741532
+verification: heartbeat check=tests-green-crates elapsed_ms=58312 child=pid:3741532
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3748567
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30004 child=pid:3748567
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60001 child=pid:3748567
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:3748567
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:3748567
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150000 child=pid:3748567
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=159035 child=pid:3748567
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788282460380264-0002412995-000002-cycle-review-1","reviewed_manifest_hash":"sha256:9c0c36d4190995eb6edeb0431d3421ddb61fcb1a1a15c14770a930a69e85d18d","findings":[{"finding_id":"scope-out-of-crates","category":"scope_violation","severity":"medium","blocking":false,"title":"Change adds files outside the allowed_paths (crates/) under docs/ and tests/","claim":"The task restricts changes to allowed_paths [\"crates/\"], but this change adds nine files outside that root: the acceptance write-up under docs/acceptance/ and the two fixture repositories under tests/fixtures/. Only the two Rust test files under crates/ fall within the declared scope; the remainder (docs/acceptance/PRD-038-multi-repo-have-at-it.md, tests/fixtures/repo-node-service/*, tests/fixtures/repo-rust-cli/*) are outside it. The crates/ test files even depend on these out-of-scope fixture trees at runtime (loaded via CARGO_MANIFEST_DIR/../../tests/fixtures), so the scope escape is load-bearing, not incidental.","evidence":[{"kind":"file_range","path":"docs/acceptance/PRD-038-multi-repo-have-at-it.md","range":{"start":1,"end":49}},{"kind":"file_range","path":"tests/fixtures/repo-rust-cli/Cargo.toml","range":{"start":1,"end":7}},{"kind":"file_range","path":"tests/fixtures/repo-node-service/package.json","range":{"start":1,"end":12}},{"kind":"file_range","path":"tests/fixtures/repo-rust-cli/src/main.rs","range":{"start":1,"end":3}}],"remediation":"Either relocate the fixture repositories and acceptance document under crates/ (e.g. a crate-local tests/fixtures directory referenced by the test) so all changed paths fall within allowed_paths [\"crates/\"], or obtain an explicit expansion of allowed_paths to cover docs/acceptance/ and tests/fixtures/ before merging.","status":"open","supersedes":null}]}
+Good, explicit members list — the fixture `Cargo.toml` won't be picked up. Now update the two test files' path references.
+Those are pre-existing files untouched by this change — leaving them alone, in scope. Now let's verify the workspace builds and the two acceptance tests still compile with the corrected paths.
+Compiles cleanly (that dead-code warning is pre-existing, unrelated to this change). Now run the two acceptance test suites to confirm the fixture path relocation actually works at runtime.
+All 17 tests pass. Now confirm the full diff is entirely within `crates/`.
+Every changed path now lives under `crates/`, matching `allowed_paths`. Let's also run fmt and clippy on the touched crates to make sure the relocation didn't break the configured checks.
+Clean. Fmt and clippy pass, and both acceptance test suites (17 tests total) pass with the relocated fixtures.
+
+**Remediation applied** for `scope-out-of-crates`:
+- Moved `tests/fixtures/` → `crates/familiar-ai-daemon/tests/fixtures/`
+- Moved `docs/acceptance/PRD-038-multi-repo-have-at-it.md` → `crates/familiar-ai-daemon/docs/acceptance/PRD-038-multi-repo-have-at-it.md`
+- Updated `copy_fixture_repository` in both `crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs` and `crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs` to resolve fixtures from the new location (mcp crate references the daemon crate's fixtures via a relative path — no new crate dependency needed)
+- Updated the acceptance doc's fixture-path reference to match
+
+Every changed path is now under `crates/`, matching `allowed_paths`. No Cargo.toml/workspace changes were needed since fixture `Cargo.toml` files aren't picked up (workspace `members` is an explicit list, not a glob). Nothing was committed — working tree changes are staged only (from `git mv`).
+Review disposition: HumanReviewRequired; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [ScopeAmbiguous]
+Scope evaluation 'remediation-1' under policy sha256:74d11d0ed8478a94733d4cee184bd323fb4b1507c7d9f26e230e264a77c1e509:
+scope: AllowedChange Added crates/familiar-ai-daemon/docs/acceptance/PRD-038-multi-repo-have-at-it.md rule=configured_allowed_path
+scope: JustifiedExpectedFileChange Added crates/familiar-ai-daemon/tests/fixtures/repo-node-service/README.md rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Added crates/familiar-ai-daemon/tests/fixtures/repo-node-service/design/feature-request.md rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Added crates/familiar-ai-daemon/tests/fixtures/repo-node-service/index.js rule=file_class:test:declared_surface_coverage
+scope: AmbiguousHumanReview Added crates/familiar-ai-daemon/tests/fixtures/repo-node-service/package.json rule=classification:conflict
+scope: AmbiguousHumanReview Added crates/familiar-ai-daemon/tests/fixtures/repo-rust-cli/Cargo.toml rule=classification:conflict
+scope: JustifiedExpectedFileChange Added crates/familiar-ai-daemon/tests/fixtures/repo-rust-cli/README.md rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Added crates/familiar-ai-daemon/tests/fixtures/repo-rust-cli/design/feature-request.md rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Added crates/familiar-ai-daemon/tests/fixtures/repo-rust-cli/src/main.rs rule=file_class:test:declared_surface_coverage
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+HumanReviewRequired prd=PRD-38
+stop_reasons=["scope_ambiguous"]
+finding scope-out-of-crates Medium: Change adds files outside the allowed_paths (crates/) under docs/ and tests/
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 6
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs'; required coverage is within scope authority
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs'; required coverage is within scope authority
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs'; required coverage is within scope authority
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs'; required coverage is within scope authority
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs'; required coverage is within scope authority
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs'; required coverage is within scope authority
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+non-interactive input: preserving checkpoint
+error: PRD-38: human review required
+---
+exit: 1
