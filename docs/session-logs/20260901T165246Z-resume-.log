@@ -1,0 +1,36 @@
+command: familiar-ai resume PRD-76
+date: Tue Sep  1 04:52:46 PM UTC 2026
+host: trollboy (Linux)
+head: f4ade5994aadebd61eb7bd7ca57c7f078fe4cefd (3 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2328925
+verification: heartbeat check=format elapsed_ms=3876 child=pid:2328925
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2329465
+verification: heartbeat check=lint elapsed_ms=26268 child=pid:2329465
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2333478
+verification: heartbeat check=tests-green-crates elapsed_ms=30000 child=pid:2333478
+verification: heartbeat check=tests-green-crates elapsed_ms=52124 child=pid:2333478
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2339171
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30001 child=pid:2339171
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60001 child=pid:2339171
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:2339171
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120003 child=pid:2339171
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=141550 child=pid:2339171
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788278098454300-0002093630-000001-cycle-review-1","reviewed_manifest_hash":"sha256:8efc15a1b554c52325c9b86f1c9c52955b72e6fc0c0aa3b2725c321de61249cb","findings":[{"finding_id":"daemon-behavior-unverified","category":"unverifiable_claim","severity":"medium","blocking":false,"title":"Behavior-preservation of the daemon CLI refactor is not evidenced by a passing check","claim":"Acceptance criterion 1 requires this refactor to be behavior-preserving — the full workspace test suite passes and no CLI command changes its interface or output. The bulk of the change (splitting the CLI binary body into `crates/familiar-ai-daemon/src/cli/*` modules and adding `pub mod cli;`) lands in the `familiar-ai-daemon` crate, but the required green-tests check `tests-green-crates` runs only `-p familiar-ai-core -p familiar-ai-review -p familiar-ai-agent -p familiar-ai-storage`, which excludes `familiar-ai-daemon`. The only check that exercises the daemon, `tests-workspace-advisory` (`cargo test --workspace`), failed with exit code 101. Since `lint` (`cargo clippy --workspace --all-targets`) passed, the workspace compiles, so the workspace-test failures are runtime assertion failures, not build errors. Consequently the provided verification does not confirm that the daemon CLI dispatch refactor preserves behavior/output as the acceptance criterion requires.","evidence":[{"kind":"diff_hunk","path":"crates/familiar-ai-daemon/src/lib.rs","hunk":"@@ -1,4 +1,5 @@\n pub mod billing;\n+pub mod cli;\n pub mod compress_cli;\n pub mod config_cli;\n pub mod context_service;"},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:eaaaf78f8351b992c543d2a23416af254e7009772658dab3b25556255eaabad4","media_type":"text/plain","byte_size":84334,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788278018377552-0002093630-000000/PRD-76","revision":"sha256:bb0cff9c2e9e76f6f7597b9df9b7971c15b04582463da0d93a117d1455fc8c60","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-eaaaf78f8351b992c543d2a23416af254e7009772658dab3b25556255eaabad4-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Establish that the `tests-workspace-advisory` failures are pre-existing and unrelated to this refactor (e.g., by comparing the same `cargo test --workspace` run against base revision fc6a5950), or fix the daemon behavior the refactor altered, and supply a passing daemon test run so acceptance criterion 1's 'full workspace test suite passes / no CLI command changes its output' is actually evidenced rather than resting on a required check that skips the refactored crate.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+backlog: PRD-76 docs/prds/PRD-076.md in_progress -> completed actor=system:familiar-ai-run:00001788278098454300-0002093630-000001
+PRD-76	phase=blocked	status=resumable	worktree=/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788278018377552-0002093630-000000/PRD-76
+wave=1	PRD-76
+landed	PRD-76	9ca865a2f890f40c0462c39439d84928bd9a8516
+---
+exit: 0
