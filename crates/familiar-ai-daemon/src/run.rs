@@ -2454,6 +2454,9 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             estimated_tokens: document.estimated_tokens,
         })
         .collect();
+    let approved_scope_findings = familiar_ai_storage::OrchestrationRepository::new(db.conn())
+        .approved_scope_findings(&slash(&context.repository.repository))
+        .map_err(|e| RunError::Storage(e.to_string()))?;
     let request = CoordinationRequest {
         cycle_id: format!("{execution_id}-cycle"),
         repository_key: slash(&context.repository.repository),
@@ -2527,6 +2530,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             unavailable_fields: implementation_finalization.unavailable_fields.clone(),
         },
         implementation_duration_ms: implementation_finalization.duration_ms,
+        approved_scope_findings,
     };
     let cycle = coordinator
         .run(&context.repository.worktree, request, &mut io::stdout())

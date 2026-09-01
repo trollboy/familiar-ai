@@ -74,6 +74,32 @@ pub struct CoordinationRequest {
     pub implementation_usage: ExecutionUsage,
     pub implementation_duration_ms: u64,
     pub scope_policy: ScopePolicySnapshot,
+    /// Content hashes of scope findings a human has durably approved
+    /// (PRD-080). An evaluation that requires human review proceeds as
+    /// contained when every human-requiring finding is covered here;
+    /// prohibited changes are never absorbed.
+    pub approved_scope_findings: std::collections::BTreeSet<String>,
+}
+
+fn human_review_absorbed(
+    evaluation: &ScopeEvaluation,
+    approved: &std::collections::BTreeSet<String>,
+) -> bool {
+    !approved.is_empty()
+        && evaluation
+            .findings
+            .iter()
+            .all(|finding| match finding.decision {
+                ScopeDecision::ProhibitedChange => false,
+                ScopeDecision::AmbiguousHumanReview | ScopeDecision::UndeclaredScopeExpansion => {
+                    serde_json::to_string(finding)
+                        .map(|json| {
+                            approved.contains(&crate::evidence::content_hash(json.as_bytes()))
+                        })
+                        .unwrap_or(false)
+                }
+                ScopeDecision::AllowedChange | ScopeDecision::JustifiedExpectedFileChange => true,
+            })
 }
 
 pub struct ReviewCoordinator<'a> {
@@ -190,6 +216,14 @@ impl ReviewCoordinator<'_> {
         match evaluation.disposition {
             ScopeDisposition::Broadened => {
                 return self.stop(cycle, ReviewStopReason::ScopeBroadened)
+            }
+            ScopeDisposition::HumanReviewRequired
+                if human_review_absorbed(&evaluation, &request.approved_scope_findings) =>
+            {
+                let _ = writeln!(
+                    output,
+                    "scope: human-review findings covered by durable approvals; proceeding"
+                );
             }
             ScopeDisposition::HumanReviewRequired => {
                 return self.stop(cycle, ReviewStopReason::ScopeAmbiguous)
@@ -652,6 +686,14 @@ impl ReviewCoordinator<'_> {
             match evaluation.disposition {
                 ScopeDisposition::Broadened => {
                     return self.stop(cycle, ReviewStopReason::ScopeBroadened)
+                }
+                ScopeDisposition::HumanReviewRequired
+                    if human_review_absorbed(&evaluation, &request.approved_scope_findings) =>
+                {
+                    let _ = writeln!(
+                        output,
+                        "scope: human-review findings covered by durable approvals; proceeding"
+                    );
                 }
                 ScopeDisposition::HumanReviewRequired => {
                     return self.stop(cycle, ReviewStopReason::ScopeAmbiguous)
@@ -1255,6 +1297,48 @@ mod tests {
         })
         .expect("test scope policy compiles")
     }
+    #[test]
+    fn durable_approvals_absorb_human_review_but_never_prohibited() {
+        let finding = ScopeFinding {
+            finding_id: "modified:-:Cargo.lock#new".into(),
+            change_id: "modified:-:Cargo.lock".into(),
+            path: "Cargo.lock".into(),
+            old_path: None,
+            change_kind: GitChangeKind::Modified,
+            file_class: ScopeFileClass::DependencyLockfile,
+            decision: ScopeDecision::AmbiguousHumanReview,
+            rule_id: "file_class:dependency_lockfile:human_review".into(),
+            rule_source: ScopeRuleSource::Configuration,
+            rule_detail: "class policy requires human review".into(),
+            expected_file_match: None,
+            allowed_path_match: None,
+            prohibited_rule_match: None,
+            policy_snapshot_hash: "sha256:policy".into(),
+        };
+        let hash =
+            crate::evidence::content_hash(serde_json::to_string(&finding).unwrap().as_bytes());
+        let evaluation = ScopeEvaluation {
+            findings: vec![finding.clone()],
+            disposition: ScopeDisposition::HumanReviewRequired,
+        };
+        let approved: std::collections::BTreeSet<String> = [hash].into_iter().collect();
+        assert!(human_review_absorbed(&evaluation, &approved));
+        assert!(!human_review_absorbed(&evaluation, &Default::default()));
+        let mut prohibited = finding;
+        prohibited.decision = ScopeDecision::ProhibitedChange;
+        let prohibited_hash =
+            crate::evidence::content_hash(serde_json::to_string(&prohibited).unwrap().as_bytes());
+        let evaluation = ScopeEvaluation {
+            findings: vec![prohibited],
+            disposition: ScopeDisposition::HumanReviewRequired,
+        };
+        let approved: std::collections::BTreeSet<String> = [prohibited_hash].into_iter().collect();
+        assert!(
+            !human_review_absorbed(&evaluation, &approved),
+            "prohibited changes are never absorbed"
+        );
+    }
+
     fn base_request() -> CoordinationRequest {
         CoordinationRequest {
             cycle_id: "scenario".into(),
@@ -1312,6 +1396,7 @@ mod tests {
             implementation_usage: known_usage(),
             implementation_duration_ms: 1,
             scope_policy: test_scope_policy(&["src/"]),
+            approved_scope_findings: Default::default(),
         }
     }
     #[test]
@@ -1608,6 +1693,7 @@ mod tests {
             implementation_usage: known_usage(),
             implementation_duration_ms: 1,
             scope_policy: test_scope_policy(&["src/"]),
+            approved_scope_findings: Default::default(),
         };
         let result = coordinator
             .run(Path::new("."), req, &mut Vec::new())
@@ -1690,6 +1776,7 @@ mod tests {
             implementation_usage: known_usage(),
             implementation_duration_ms: 1,
             scope_policy: test_scope_policy(&["src/"]),
+            approved_scope_findings: Default::default(),
         };
         let cycle = coordinator
             .run(Path::new("."), request, &mut Vec::new())

@@ -267,6 +267,27 @@ impl<'a> OrchestrationRepository<'a> {
         Ok(checkpoint)
     }
 
+    /// Content hashes of scope findings a human has durably approved for
+    /// this repository (PRD-080). The review coordinator absorbs matching
+    /// human-review findings instead of pausing again (FAM-BUG-041 flow).
+    pub fn approved_scope_findings(
+        &self,
+        repository: &str,
+    ) -> familiar_ai_core::Result<std::collections::BTreeSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT finding_hash FROM scope_decisions WHERE repository_key=?1 AND decision='approved'",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map([repository], |row| row.get::<_, String>(0))
+            .map_err(db)?
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .map_err(db)?;
+        Ok(rows)
+    }
+
     /// One snapshot of terminal PRDs from both authorities. Recovery callers
     /// use this set for the entire inventory they print.
     pub fn terminal_prds(
