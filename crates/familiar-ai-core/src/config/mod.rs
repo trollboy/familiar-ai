@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::FamiliarError;
 
 mod accounting;
+mod agent_runtime;
 mod artifacts;
 mod compression;
 mod context_service;
@@ -30,6 +31,7 @@ mod tray;
 mod watcher;
 
 pub use accounting::*;
+pub use agent_runtime::*;
 pub use artifacts::*;
 pub use compression::*;
 pub use context_service::*;
@@ -122,6 +124,10 @@ pub struct Config {
     /// Native compression is inert unless an identity is explicitly selected.
     #[serde(default)]
     pub compression: CompressionConfig,
+    /// PRD-058 Familiar-owned raw-model agent loop. Absent/disabled changes
+    /// no existing harness-driven execution behavior.
+    #[serde(default)]
+    pub agent_runtime: AgentRuntimeConfig,
 }
 
 /// The configuration environment prefix.
@@ -177,6 +183,9 @@ impl Config {
         self.worker.validate().map_err(FamiliarError::Config)?;
         self.compression
             .validate(&self.providers)
+            .map_err(FamiliarError::Config)?;
+        self.agent_runtime
+            .validate()
             .map_err(FamiliarError::Config)?;
         Ok(())
     }

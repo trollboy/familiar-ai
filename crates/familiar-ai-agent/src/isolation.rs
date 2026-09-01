@@ -263,16 +263,19 @@ pub(crate) fn stream_lines(
 }
 
 #[cfg(unix)]
-pub(crate) type Watchdog = (
+pub type Watchdog = (
     std::sync::mpsc::Sender<()>,
     std::thread::JoinHandle<()>,
     Arc<AtomicBool>,
 );
 
 /// Kill the child's whole process group at the deadline. The child must have
-/// been spawned with `process_group(0)`.
+/// been spawned with `process_group(0)`. Exported (beyond this crate's own
+/// harness adapters) so a PRD-058 raw-runtime tool executor can enforce the
+/// same cancellation/timeout-kills-the-process-group guarantee for
+/// `run-command` tool calls.
 #[cfg(unix)]
-pub(crate) fn spawn_watchdog(child_id: u32, timeout_ms: Option<u64>) -> Option<Watchdog> {
+pub fn spawn_watchdog(child_id: u32, timeout_ms: Option<u64>) -> Option<Watchdog> {
     timeout_ms.map(|timeout| {
         let timed_out = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&timed_out);
@@ -293,7 +296,7 @@ pub(crate) fn spawn_watchdog(child_id: u32, timeout_ms: Option<u64>) -> Option<W
 }
 
 #[cfg(unix)]
-pub(crate) fn finish_watchdog(watchdog: Option<Watchdog>) -> bool {
+pub fn finish_watchdog(watchdog: Option<Watchdog>) -> bool {
     if let Some((done, handle, flag)) = watchdog {
         let _ = done.send(());
         let _ = handle.join();
