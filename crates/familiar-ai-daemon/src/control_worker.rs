@@ -245,11 +245,11 @@ async fn execute(
 pub fn process_start_identity(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        return std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
             .ok()?
             .split_whitespace()
             .nth(21)
-            .map(str::to_owned);
+            .map(str::to_owned)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -257,11 +257,10 @@ pub fn process_start_identity(pid: u32) -> Option<String> {
             .args(["-o", "lstart=", "-p", &pid.to_string()])
             .output()
             .ok()?;
-        return o
-            .status
+        o.status
             .success()
             .then(|| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
     }
 }
 

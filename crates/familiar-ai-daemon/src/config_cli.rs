@@ -693,6 +693,7 @@ fn show_effective(context: &ConfigContext, repository: &std::path::Path) -> Resu
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provider_add(
     context: &ConfigContext,
     name: &str,

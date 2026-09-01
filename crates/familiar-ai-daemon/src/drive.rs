@@ -32,6 +32,7 @@ use familiar_ai_storage::{
 /// Shared application-service entry point used by CLI fallback and daemon
 /// hosting. Argument parsing and rendering stay in adapters; routing and
 /// warrant construction do not.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_configured(
     paths: &AppPaths,
     repository: &Path,

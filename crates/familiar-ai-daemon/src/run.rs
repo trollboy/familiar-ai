@@ -774,6 +774,7 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context_and_timeo
 
 /// Merge-queue worker entry point. A clean review stops at `reviewed`; the
 /// driver alone may integrate and then commit backlog completion.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_reviewed_candidate(
     current: &Path,
     prd_path: &Path,
