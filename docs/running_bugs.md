@@ -545,7 +545,7 @@ PRD-076.
 
 ### FAM-BUG-024 — Drive preflight drops verification configuration and hides failures
 
-- **Status:** Fixed 2026-08-31 by PRD-078; installed verification pending
+- **Status:** Fixed 2026-08-31 by PRD-078; installed and live-verified 2026-09-01
 - **Observed:** Five PRD-062 drive sessions spent roughly five to ten silent
   minutes apiece running `verification.workspace-tests`, then reported only
   `command exited with code Some(101)`. `preflight::run` reconstructs each
@@ -573,7 +573,7 @@ PRD-076.
 
 ### FAM-BUG-025 — Reviewer capability mismatch retries and forces manual recovery
 
-- **Status:** Fixed 2026-08-31 by PRD-079; installed verification pending
+- **Status:** Fixed 2026-08-31 by PRD-079; installed and live-verified 2026-09-01
 - **Observed:** PRD-062 implementation and focused verification completed, but
   review routed to Ollama `llama3:latest`. The runtime reported that the model
   does not support tools. Familiar retried the same incompatible reviewer three
@@ -613,6 +613,14 @@ PRD-076.
   their aliases to explicit degraded, unverified artifact records. A regression
   upgrades a pre-051 database containing an Ollama worker, verifies the degraded
   alias, and proves the historical worker row still rejects mutation.
+- **Migration-number collision (2026-09-01):** PRD-079 initially used migration
+  052 while remote PRD-077 independently landed a different migration 052. The
+  pre-rebase binary had already recorded the probe-table bytes as version 52 in
+  the live database. After rebase, migration 053 failed because that table
+  existed and PRD-077's selection-decision widening had never run. Migration
+  053 now idempotently repairs both histories, and a regression constructs the
+  exact collision ledger and verifies both schemas. The repaired release then
+  migrated the live database successfully.
 - **Required systemic follow-up:** Every data-migrating PRD needs at least one
   populated prior-version fixture that exercises production constraints and
   triggers; empty fresh-database migration tests are insufficient release
