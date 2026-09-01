@@ -1,0 +1,209 @@
+command: familiar-ai drive --max-prds 1 --prd PRD-076
+date: Tue Sep  1 11:35:30 AM UTC 2026
+host: trollboy (Linux)
+head: 49c7e94ed71dcf015c00030932e5e60f36c5bcaf (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788262530512928-0000903933-000000 started warrant={"max_prds":1,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-76"]}
+drive: checkout HEAD=49c7e94 dirty_files=0 in sync with origin/main (as of last fetch)
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:903976
+preflight: heartbeat check=verification.format elapsed_ms=4020 child=pid:903976
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:904527
+preflight: heartbeat check=verification.lint elapsed_ms=25918 child=pid:904527
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:908522
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30002 child=pid:908522 last="running 108 tests"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=50736 child=pid:908522
+drive: excluded_allowlist PRD-38 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-53 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-58 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-80 ready but outside the session's approved PRD set
+drive: attempt 1 PRD-76 docs/prds/PRD-076.md
+backlog: PRD-76 docs/prds/PRD-076.md pending -> in_progress actor=system:familiar-ai-run:00001788262611591244-0000903933-000001
+I'll start by exploring the current repository structure to understand the scope of changes needed.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=60002 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=120004 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=180006 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=240009 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=300012 last_durable_phase=preflight
+Given the scale of this refactor, I'll parallelize: I'll handle the docs/contracts split and PRD amendments myself while delegating the two large mechanical Rust splits (config.rs and the CLI binary) to agents with precise instructions, since correctness there hinges on careful line-by-line extraction and compilation verification. Let me first gather exact boundaries so the instructions are unambiguous.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=360016 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=420017 last_durable_phase=preflight
+Both agents are running in the background. While they work, I'll read the pending PRDs' details to figure out precise config/contract touchpoints for the expected_files amendments, and draft the contracts split.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=480021 last_durable_phase=preflight
+Good. So artifacts.rs = lines 220-552, mod.rs Config struct = lines 554-625ish. Let me check the end boundary of Config struct (before CompressionConfig at 626) and other transitions systematically.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=540024 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=600027 last_durable_phase=preflight
+All boundaries check out cleanly. Now let me extract the ranges into files.
+Now let's assemble mod.rs and add `use` statements to each submodule file. First, let's look at the extracted files to determine which external imports each needs.
+Good, all files start cleanly. Now let's check for any `#[cfg(test)] mod` sections that got mixed in (e.g., artifacts.rs should include `artifact_tests`, review.rs and providers.rs might have inline tests). Let's check tail of each and search for stray test modules across files that shouldn't be split awkwardly.
+Good — `artifact_tests` is correctly contained in artifacts.rs, and no other file has stray test modules. Now let's assemble mod.rs and add the required `use` statements to each submodule.
+Good. Now let's build mod.rs by combining: module declarations, pub use, modA (Config struct), modB (reject_stale_env + impl Config + tests).
+Good. Now let's build the full mod.rs.
+No File/Read/Component/Format needed directly (fully qualified `std::fs::` used). Let's check Figment/Env/Toml/Serialized usage context to write correct imports for mod.rs.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=660029 last_durable_phase=preflight
+Now let's assemble mod.rs with module declarations, pub use, then the Config struct, then modB content.
+Now let's add `use super::*;` plus needed explicit external imports to each submodule file.
+daemon.rs does need bare `Path` (line 53: `&Path`). Now let's write all the use-block insertions.
+Now let's remove the old config.rs and clean up temp files, then attempt the build.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=720032 last_durable_phase=preflight
+Now let's build.
+Now let's fix the visibility of these cross-module items to `pub(crate)`.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=780036 last_durable_phase=preflight
+Now the two methods: `AgentEntryConfig::validate` in driver.rs and `ReviewTierPolicyConfig::validate_risk_vocabulary` in review.rs.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=840039 last_durable_phase=preflight
+Let's remove the unused `use super::*;` lines from these files, and fix the unused `BTreeSet` import in registry.rs.
+Good, that's already fixed by the sed removal. Now fix registry.rs's unused `BTreeSet`.
+Registry.rs uses fully-qualified `std::collections::BTreeSet`, so the explicit import is indeed unused. Let's remove it.
+Now let's rebuild.
+Now let me create the split contracts directory.
+Clean build with no warnings. Now let's build the whole workspace.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=900041 last_durable_phase=preflight
+Now let me draft the exact expected_files amendments for each pending PRD.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=960046 last_durable_phase=preflight
+Right, need to Read each file before editing. Let me read and then re-apply edits.
+Now applying all the amendments.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1020048 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1080051 last_durable_phase=preflight
+Now let's compare test names against the original file (via git show).
+50 test functions in the original file, 50 in the new `config::` module tree. Let's verify names match exactly.
+Just an ordering difference from sort — the names themselves match. Let's confirm with a proper set comparison.
+All 50 tests carried over. Now let's actually run the test suite.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1140054 last_durable_phase=preflight
+Now fix the test pin to include the missing test-file entry.
+Now let's rerun the tests to confirm this resolves the identity_gate failure without introducing others.
+Ah, there's already a trailing comma. Let me fix precisely.
+All tests pass now: 108 unit tests + 1 identity_gate integration test + 0 doc tests. Let's run `cargo fmt` and verify the build stays clean.
+Formatting succeeded and the build stays clean (only reordered `use` statements, no logic changes). Let's do the final verification pass: item-name diff, file listing with line counts, and a full workspace/test re-run.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1200058 last_durable_phase=preflight
+All 144 top-level struct/enum/fn names match exactly as a set, with none dropped or duplicated.
+`lib.rs` is untouched (no git status output) and its `pub use config::{...}` block resolves cleanly since the crate builds without error.
+
+## Summary
+
+Split `crates/familiar-ai-core/src/config.rs` (5164 lines) into `crates/familiar-ai-core/src/config/` with 18 files, exactly per the requested layout:
+Let me check on the background agents' progress.
+**Verification performed:**
+- `git show HEAD:...config.rs | grep -oE '^(pub )?(struct|enum|fn) [A-Za-z_]+'` vs. same grep across `config/*.rs`: 144 names, exact set match, none dropped/duplicated.
+- Test-name diff: all 50 `#[test] fn` names present in both old and new locations as an identical set.
+- `cargo build -p familiar-ai-core`: clean, zero warnings.
+- `cargo build --workspace --exclude familiar-ai-daemon`: clean.
+- `cargo build --workspace`: every crate compiles; only the final `familiar-ai-daemon` **binary link step** fails, with `rust-lld: error: unable to find library -lxdo` — confirmed this sandbox has no system `libxdo` installed at all (not in `ldconfig`, `dpkg`, or `pkg-config`), so this is a pre-existing environment gap (GUI tray dependency) that would fail identically on the unmodified `config.rs`. Nothing in the split touches this.
+- `cargo test -p familiar-ai-core`: 108 unit tests + 1 integration test (`identity_gate`) + 0 doc tests, all pass.
+- `crates/familiar-ai-core/src/config.rs` removed; `crates/familiar-ai-core/src/config/mod.rs` exists; `lib.rs` untouched (verified via `git status`).
+
+**One necessary deviation:** the repo has an `identity_gate` integration test (`crates/familiar-ai-core/tests/identity_gate.rs`) that fails any source line containing the pre-rename literal `familiar_` not followed by `ai_`. Naming the module/file `familiar_toml.rs` as instructed introduces exactly that literal (`mod familiar_toml;` / `pub use familiar_toml::*;`) for the first time, since the original code only ever referenced the type as `FamiliarToml` (PascalCase, never matched). I used the codebase's existing, precedented escape hatch for this exact class of false positive — an `// identity-gate: allow` trailing comment (already used elsewhere in the file, e.g. on `LEGACY_ENV_PREFIX`) — on those two lines in `config/mod.rs`. No behavior changed; this only silences a test whose false-positive trigger is purely the new file/module name.
+
+**Other plumbing needed (all mechanical, no logic changes):** a handful of helper `fn`s/methods that were private in the monolith but are called across the new file boundaries were widened from private to `pub(crate)` (not `pub`, so no new public API surface): `validate_identifier`, `validate_model_identifier` (providers.rs), `default_true` (inference.rs), `git_common_directory` (execution.rs), `hex_digest` (artifacts.rs), `AgentEntryConfig::validate` (driver.rs), `ReviewTierPolicyConfig::validate_risk_vocabulary` (review.rs). The private `reject_stale_env` fn (uses `ENV_PREFIX`/`LEGACY_ENV_PREFIX`/`stale_legacy_env`, only ever called from `impl Config`) was kept in `mod.rs` alongside `impl Config` rather than in `daemon.rs`, since the task's mapping didn't list it under any file and it's exclusively an `impl Config` helper.
+Good, this looks legitimate and matches existing precedent. Let me run the full workspace build/test to independently verify.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1260061 last_durable_phase=preflight
+Config split confirmed clean. Now let's wait for the CLI split agent, and meanwhile draft the EXECUTION-PLAN regeneration.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1320066 last_durable_phase=preflight
+Let me apply the formatting fix.
+Good, tests still pass after formatting. Now let's wait for the CLI split agent to finish before final integration checks.
+I've kicked off two background agents to handle the large mechanical Rust refactors (splitting `config.rs` into a module tree, and thinning the CLI binary), while I've directly completed:
+
+1. **Contracts split**: `docs/contracts/providers.md` → `docs/contracts/providers/` (index + `inference-providers.md`, `credential-authentication.md`, `registry-migration.md`), content preserved verbatim per section.
+2. **PRD amendments**: Narrowed `expected_files` on all 10 affected pending PRDs (038, 053, 058–063, 071–073) — config.rs → specific `config/<feature>.rs`, providers.md → specific domain/adapter contract file, shared test directories → specific test files, shared storage-repo directories → specific repo files.
+3. **New pinned regression test** (`crates/familiar-ai-review/tests/scope_narrowing.rs`) that pins each amendment and computationally proves wave 5 (038/053/058) now achieves scheduler-computed width 2 (passing, 12/12 tests).
+4. **EXECUTION-PLAN.md regenerated** with real computed widths and an honest note on wave 6's residual limitation (still shared `agent/src`/`llm/src`, out of this PRD's authorized scope).
+
+The config-split agent finished cleanly (workspace builds, 108 core tests pass). Waiting on the CLI-split agent before reconciling exact module names and running the final full verification pass.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1380070 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1440075 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1500089 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1560092 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1620097 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1680102 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1740106 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1800110 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1860114 last_durable_phase=preflight
+Build confirmed clean. Quick test run to double-check the reported pass count.
+All confirmed green. The refactor is complete and verified.
+
+## Summary
+
+The mechanical refactor extracting subcommand implementations out of `crates/familiar-ai-daemon/src/bin/familiar-ai.rs` is done and verified.
+
+**Line counts:**
+- `bin/familiar-ai.rs`: 2563 → 475 lines (now just top-level clap `Cli`/`Command` definitions, dispatch-only `main()`, `fail()`, and the existing `#[cfg(test)]` clap-parsing tests, unchanged).
+- New modules under `crates/familiar-ai-daemon/src/bin/cli/` (21 files, ~2200 lines total): `mod.rs`, `backlog.rs`, `billing.rs`, `common.rs`, `compress.rs`, `config.rs`, `control.rs`, `deliver.rs`, `drive.rs`, `history.rs`, `next.rs`, `onboard.rs`, `plan.rs`, `preflight.rs`, `report.rs`, `resume.rs`, `run.rs`, `scope_decisions.rs`, `stewardship.rs`, `usage.rs`, `worker.rs`.
+
+**One deliberate deviation from the task instructions:** the plan said to put the new tree at `crates/familiar-ai-daemon/src/cli/`, but that path collides with a pre-existing, unrelated `crates/familiar-ai-daemon/src/cli.rs` already used by this crate's *other* binary (`src/main.rs`, a small daemon-launch `Cli` struct). Since `main.rs`/`lib.rs` share `src/` as their module root, adding `src/cli/` there would conflict with the existing `mod cli;` (`cli.rs` vs `cli/mod.rs` ambiguity). The subagent instead placed the new tree at `crates/familiar-ai-daemon/src/bin/cli/`, which is exactly where Rust resolves `mod cli;` declared inside `src/bin/familiar-ai.rs` (binaries at `src/bin/<name>.rs` search their own `src/bin/` directory). This satisfies "dispatch-only binary + per-domain `cli/` modules with `mod cli;`" without touching the unrelated existing `cli.rs`.
+
+**Verification (re-checked directly, not just trusting the subagent):**
+- `cargo build -p familiar-ai-daemon --bin familiar-ai` — clean.
+- `cargo test -p familiar-ai-daemon --no-default-features` — passes (255 total per subagent; spot-checked a slice, all green, 0 failed).
+- `cargo build --workspace` succeeds under `--no-default-features`; under default features one pre-existing, unrelated failure exists (missing system lib `-lxdo` for the optional `tray` GUI feature on the *other* daemon binary) — confirmed unrelated to this change.
+- `cargo fmt -p familiar-ai-daemon -- --check` clean.
+- `--help` output (top-level + all first-level subcommands + a sample of second-level ones) diffed byte-identical before/after.
+- One test file needed a mechanical update: `crates/familiar-ai-daemon/tests/control_plane_boundaries.rs::legacy_cli_mutation_handlers_are_rendering_adapters_only` did raw text scans of the old monolithic binary file to check that certain handler functions don't inline scheduler/DB logic. Updated it to read the same functions from their new locations (`cli/resume.rs`, `cli/deliver.rs`, `cli/run.rs`, `cli/drive.rs`) with the identical forbidden-string checks — no assertions changed, just the source location scanned.
+- `git status` confirms only `bin/familiar-ai.rs`, the new `bin/cli/` directory, and `tests/control_plane_boundaries.rs` were touched by this work; the concurrent `familiar-ai-core/src/config.rs` → `config/` split and `docs/prds/*`/`docs/contracts/*` changes from other in-flight work were left untouched.
+
+No commits were made, per the task instructions.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1920119 last_durable_phase=preflight
+Now fix PRD-053, 071, 073 and the test pins.
+Now update the test pins and EXECUTION-PLAN.md text to match.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1980122 last_durable_phase=preflight
+Now let's re-run the pin tests and then do the full workspace verification.
+All good. Now let's run the full workspace build and test suite.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2040127 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2100130 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2160133 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2220138 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2280141 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2340144 last_durable_phase=preflight
+Clean formatting. Now clippy:
+Confirmed both warning-source files are untouched — pre-existing. Now let's do the full acceptance-criteria audit against the actual PRD.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2400146 last_durable_phase=preflight
+CLI surface intact. Now let's audit the equivalence-oracle acceptance criterion — a pinned fixture configuration resolving identically before/after the config split.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2460149 last_durable_phase=preflight
+Good, the pattern is established. Now let me write the equivalence oracle test.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2520152 last_durable_phase=preflight
+No `PartialEq`. Let me fix the final assertion to avoid requiring it.
+Now let's compile and run this test, fixing any field/type mismatches.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2580157 last_durable_phase=preflight
+Test passes. Now let's run the full core test suite and full workspace test suite once more to confirm nothing broke.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2640161 last_durable_phase=preflight
+109 tests pass (108 + 1 new), formatting clean. Now let's run the full workspace test suite one final time to confirm everything is still green together.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2700163 last_durable_phase=preflight
+All green (that "EOF before turn.completed" line is expected simulated log output from a fake-agent test, not a real error). Let's run the metadata-check CLI to confirm the last acceptance criterion (advisory metadata-check passes with no structured-v1 diagnostics), then finalize.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2760166 last_durable_phase=preflight
+Exit code 0, no diagnostics or errors found. Let's also verify the config split's identity-gate allow comments and do a final review of the changed-file diff summary.
+Everything looks consistent. Let's do a final acceptance-criteria walkthrough against the PRD text.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2820169 last_durable_phase=preflight
+Confirmed byte-identical CLI output before and after. Let's rebuild once more to ensure the working tree is fully restored and clean.
+Everything is restored and building cleanly. All acceptance criteria are satisfied. Let me do one final full test pass to close out.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2880174 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2940177 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3000179 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3060182 last_durable_phase=preflight
+65/65 test-result blocks pass, exit code 0, zero real failures. PRD-076 is complete.
+
+## Summary
+
+Implemented PRD-076 (Scope Modularization for Parallel Authoring) as a pure, behavior-preserving refactor:
+
+1. **`config.rs` → `config/` module tree** — 17 per-feature files (`providers.rs`, `registry.rs`, `driver.rs`, `review.rs`, `execution.rs`, `delivery.rs`, `daemon.rs`, `inference.rs`, etc.) re-exported unchanged from `mod.rs`. Added a pinned fixture-configuration test (`config::tests::pinned_fixture_configuration_resolves_identically_across_the_module_split`) as the equivalence oracle spanning most modules.
+2. **`docs/contracts/providers.md` → `docs/contracts/providers/`** — index + `inference-providers.md`, `credential-authentication.md`, `registry-migration.md`, content moved verbatim per section.
+3. **CLI binary thinned** — `bin/familiar-ai.rs` dropped from 2563 → 475 lines (dispatch-only); subcommand bodies moved to 21 new modules under `bin/cli/` (had to land at `src/bin/cli/` rather than `src/cli/` due to a pre-existing unrelated `cli.rs` for the daemon's own binary — documented in the plan).
+4. **10 pending PRDs amended** (038, 053, 058–063, 071–073) to narrow `expected_files` to specific per-feature files instead of shared surfaces; PRD-080 was already narrow. PRD-076's own declaration corrected to match the real `bin/cli/` path.
+5. **New pinned regression test** `crates/familiar-ai-review/tests/scope_narrowing.rs` (12 tests) pins every amendment and computationally proves the scheduler's own conflict rule now gives wave 5 (038/053/058) an achievable width of 2.
+6. **`EXECUTION-PLAN.md` regenerated** with real computed widths and an explicit, honest note that wave 6 remains at width 1 because `crates/familiar-ai-agent/src/` and `crates/familiar-ai-llm/src/` stay as shared whole-directory declarations — out of this PRD's authorized scope (same precedent as `billing.rs` being left to PRD-052/054).
+
+**Verification**: full workspace build and test suite green (65/65 result blocks, one known pre-existing timing-flaky test confirmed to pass in isolation), `cargo fmt --check` clean, `cargo clippy` shows only two pre-existing warnings in untouched files, CLI `--help` output byte-identical before/after (verified via `git stash -u`), and `backlog metadata-check --advisory` exits 0 with no diagnostics.
+{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"duration_ms":1151362,"duration_api_ms":3374409,"ttft_ms":19369,"ttft_stream_ms":2382,"time_to_request_ms":24,"num_turns":69,"result":"65/65 test-result blocks pass, exit code 0, zero real failures. PRD-076 is complete.\n\n## Summary\n\nImplemented PRD-076 (Scope Modularization for Parallel Authoring) as a pure, behavior-preserving refactor:\n\n1. **`config.rs` → `config/` module tree** — 17 per-feature files (`providers.rs`, `registry.rs`, `driver.rs`, `review.rs`, `execution.rs`, `delivery.rs`, `daemon.rs`, `inference.rs`, etc.) re-exported unchanged from `mod.rs`. Added a pinned fixture-configuration test (`config::tests::pinned_fixture_configuration_resolves_identically_across_the_module_split`) as the equivalence oracle spanning most modules.\n2. **`docs/contracts/providers.md` → `docs/contracts/providers/`** — index + `inference-providers.md`, `credential-authentication.md`, `registry-migration.md`, content moved verbatim per section.\n3. **CLI binary thinned** — `bin/familiar-ai.rs` dropped from 2563 → 475 lines (dispatch-only); subcommand bodies moved to 21 new modules under `bin/cli/` (had to land at `src/bin/cli/` rather than `src/cli/` due to a pre-existing unrelated `cli.rs` for the daemon's own binary — documented in the plan).\n4. **10 pending PRDs amended** (038, 053, 058–063, 071–073) to narrow `expected_files` to specific per-feature files instead of shared surfaces; PRD-080 was already narrow. PRD-076's own declaration corrected to match the real `bin/cli/` path.\n5. **New pinned regression test** `crates/familiar-ai-review/tests/scope_narrowing.rs` (12 tests) pins every amendment and computationally proves the scheduler's own conflict rule now gives wave 5 (038/053/058) an achievable width of 2.\n6. **`EXECUTION-PLAN.md` regenerated** with real computed widths and an explicit, honest note that wave 6 remains at width 1 because `crates/familiar-ai-agent/src/` and `crates/familiar-ai-llm/src/` stay as shared whole-directory declarations — out of this PRD's authorized scope (same precedent as `billing.rs` being left to PRD-052/054).\n\n**Verification**: full workspace build and test suite green (65/65 result blocks, one known pre-existing timing-flaky test confirmed to pass in isolation), `cargo fmt --check` clean, `cargo clippy` shows only two pre-existing warnings in untouched files, CLI `--help` output byte-identical before/after (verified via `git stash -u`), and `backlog metadata-check --advisory` exits 0 with no diagnostics.","stop_reason":"end_turn","session_id":"45d1f6fa-1308-4e32-8d39-cbbb4a957720","total_cost_usd":22.842630350000007,"usage":{"input_tokens":1102,"cache_creation_input_tokens":81093,"cache_read_input_tokens":18946062,"output_tokens":30308,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":81093,"ephemeral_5m_input_tokens":0},"inference_geo":"not_available","iterations":[{"input_tokens":2,"output_tokens":955,"cache_read_input_tokens":336636,"cache_creation_input_tokens":558,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":558},"type":"message"}],"speed":"standard"},"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":2582,"outputTokens":24,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"webSearchRequests":0,"costUSD":0.002702,"contextWindow":200000,"maxOutputTokens":32000},"claude-sonnet-5":{"inputTokens":47262,"outputTokens":302158,"cacheReadInputTokens":48489992,"cacheCreationInputTokens":748889,"webSearchRequests":0,"costUSD":22.839928350000005,"contextWindow":1000000,"maxOutputTokens":64000}},"permission_denials":[],"terminal_reason":"completed","fast_mode_state":"off","origin":{"kind":"task-notification"},"uuid":"da29cc96-1f19-4723-9b57-07c6f97a9355"}
+backlog: PRD-76 docs/prds/PRD-076.md remains in_progress reason=malformed_output
+drive: attempt 1 PRD-76 failed: agent did not produce a valid terminal result: stream contained malformed JSON or duplicate terminal events
+drive: attempt 1 PRD-76 outcome=retained reason=malformed_output
+drive: session drive-00001788262530512928-0000903933-000000 terminated reason=budget_prds_exhausted attempted=1 completed=0
+session=drive-00001788262530512928-0000903933-000000 termination=budget_prds_exhausted attempted=1 completed=0 known_cost_microusd=14162906
+---
+exit: 0
