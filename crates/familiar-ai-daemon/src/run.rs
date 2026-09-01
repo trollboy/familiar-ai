@@ -3202,6 +3202,29 @@ mod tests {
         }
     }
 
+    /// The Docker tester image strips `.git` from the build context, and
+    /// these tests exercise real repository context compilation; provide the
+    /// checkout with a git identity when the environment lacks one.
+    fn ensure_git_checkout(repository: &Path) {
+        if repository.join(".git").exists() {
+            return;
+        }
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "tester@familiar-ai.invalid"],
+            vec!["config", "user.name", "familiar-ai-tester"],
+            vec!["add", "-A"],
+            vec!["commit", "-qm", "tester snapshot"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repository)
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
     #[test]
     fn prompt_places_stable_context_before_volatile_prd() {
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3211,6 +3234,7 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
+        ensure_git_checkout(&repository);
         let prd = repository.join("docs/prds/done/PRD-003.md");
         let prompt = build_prompt(&repository, &prd).unwrap();
         let stable = prompt.find("## Stable repository context").unwrap();
@@ -3385,6 +3409,7 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
+        ensure_git_checkout(&repository);
         let database_path = temp.path().join("history.db");
         let mut config = Config::default();
         config.execution_context.hard_ceiling_tokens = Some(0);
