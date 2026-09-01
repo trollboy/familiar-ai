@@ -62,16 +62,31 @@ static EXECUTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 struct TailTee<W: io::Write> {
     inner: W,
     tail: std::collections::VecDeque<u8>,
+    /// When set, completed stream lines are scanned for tool events and
+    /// surfaced as one-line operator activity ("worker PRD-x: Edit src/…") —
+    /// the difference between a heartbeat and knowing what the worker is
+    /// actually doing.
+    activity_label: Option<String>,
+    line: Vec<u8>,
 }
 
 impl<W: io::Write> TailTee<W> {
     const CAPACITY: usize = 16 * 1024;
+    const MAX_LINE: usize = 64 * 1024;
 
     fn new(inner: W) -> Self {
         Self {
             inner,
             tail: std::collections::VecDeque::with_capacity(Self::CAPACITY),
+            activity_label: None,
+            line: Vec::new(),
         }
+    }
+
+    fn with_activity(inner: W, label: String) -> Self {
+        let mut tee = Self::new(inner);
+        tee.activity_label = Some(label);
+        tee
     }
 
     fn tail_text(&self) -> String {
@@ -87,6 +102,62 @@ impl<W: io::Write> TailTee<W> {
     }
 }
 
+/// Extract a one-line operator-facing activity from one agent stream event.
+/// Understands Claude stream-json tool_use blocks and Codex typed items;
+/// everything else (text, usage, unknown) is silent.
+fn stream_activity(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let detail_of = |input: &serde_json::Value| -> String {
+        for key in ["file_path", "path", "pattern", "url"] {
+            if let Some(text) = input.get(key).and_then(serde_json::Value::as_str) {
+                return text.chars().take(120).collect();
+            }
+        }
+        if let Some(command) = input.get("command") {
+            let rendered = match command {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => String::new(),
+            };
+            return rendered.chars().take(120).collect();
+        }
+        String::new()
+    };
+    match value.get("type").and_then(serde_json::Value::as_str)? {
+        "assistant" => {
+            let content = value.get("message")?.get("content")?.as_array()?;
+            let tool = content.iter().find(|block| {
+                block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+            })?;
+            let name = tool.get("name").and_then(serde_json::Value::as_str)?;
+            let detail = tool.get("input").map(detail_of).unwrap_or_default();
+            Some(if detail.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{name} {detail}")
+            })
+        }
+        "item.completed" => {
+            let item = value.get("item")?;
+            let kind = item.get("type").and_then(serde_json::Value::as_str)?;
+            if matches!(kind, "agent_message" | "reasoning") {
+                return None;
+            }
+            let detail = detail_of(item);
+            Some(if detail.is_empty() {
+                kind.to_owned()
+            } else {
+                format!("{kind} {detail}")
+            })
+        }
+        _ => None,
+    }
+}
+
 impl<W: io::Write> io::Write for TailTee<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let written = self.inner.write(buf)?;
@@ -95,6 +166,18 @@ impl<W: io::Write> io::Write for TailTee<W> {
                 self.tail.pop_front();
             }
             self.tail.push_back(*byte);
+            if let Some(label) = &self.activity_label {
+                if *byte == b'\n' {
+                    if let Ok(line) = std::str::from_utf8(&self.line) {
+                        if let Some(activity) = stream_activity(line) {
+                            eprintln!("worker {label}: {activity}");
+                        }
+                    }
+                    self.line.clear();
+                } else if self.line.len() < Self::MAX_LINE {
+                    self.line.push(*byte);
+                }
+            }
         }
         Ok(written)
     }
@@ -1344,7 +1427,7 @@ fn execute_tracked_inner(
         rusqlite::params![id, i64::from(repository_map.is_some()), Utc::now().to_rfc3339(), if repository_map.is_some(){"approved per-repository repository_map_enabled"}else{"repository map injection disabled"}],
     ).map_err(|e| RunError::Storage(e.to_string()))?;
 
-    let mut implementation_stream = TailTee::new(io::stdout());
+    let mut implementation_stream = TailTee::with_activity(io::stdout(), target.id.to_string());
     let execution = agents.implementation.execute(
         ExecutionRequest {
             working_directory: &context.repository.worktree,
@@ -3803,6 +3886,43 @@ mod tests {
             familiar_ai_review::ScopeDecision::JustifiedExpectedFileChange
         );
         assert_eq!(justified.rule_id, "prd_expected_file_expansion");
+    }
+
+    /// PRD observability: the activity extractor turns already-parsed stream
+    /// events into operator lines and stays silent on prose and unknowns.
+    #[test]
+    fn stream_activity_extracts_tool_events_and_ignores_prose() {
+        assert_eq!(
+            stream_activity(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/config/providers.rs"}}]}}"#
+            )
+            .as_deref(),
+            Some("Edit src/config/providers.rs")
+        );
+        assert_eq!(
+            stream_activity(
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test -p familiar-ai-core"}}]}}"#
+            )
+            .as_deref(),
+            Some("Bash cargo test -p familiar-ai-core")
+        );
+        assert_eq!(
+            stream_activity(
+                r#"{"type":"item.completed","item":{"type":"command_execution","command":"cargo fmt"}}"#
+            )
+            .as_deref(),
+            Some("command_execution cargo fmt")
+        );
+        // Prose, reasoning, usage, and non-JSON are silent.
+        assert!(stream_activity(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking"}]}}"#
+        )
+        .is_none());
+        assert!(stream_activity(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#
+        )
+        .is_none());
+        assert!(stream_activity("not json at all").is_none());
     }
 
     #[test]

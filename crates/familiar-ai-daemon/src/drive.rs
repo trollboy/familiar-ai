@@ -1052,6 +1052,7 @@ pub fn drive(
         "drive: session {session_id} started warrant={}",
         warrant.as_json()
     );
+    eprintln!("drive: {}", checkout_sync_line(&repository.worktree));
     DriverRepository::new(db.conn())
         .heartbeat(&session_id, &session_id)
         .map_err(|error| DriveError::Storage(error.to_string()))?;
@@ -2554,6 +2555,47 @@ fn validate_reserved_migration(
         ));
     }
     Ok(())
+}
+
+/// One line answering "is this checkout what I think it is?" — HEAD, and its
+/// relation to the locally known origin/main (as of the last fetch; no
+/// network). Stale-checkout sessions self-identify instead of costing a
+/// 13-minute preflight to discover.
+fn checkout_sync_line(worktree: &Path) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let head = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    let dirty = git(&["status", "--porcelain"])
+        .map(|status| status.lines().count())
+        .unwrap_or(0);
+    let relation = match git(&["rev-list", "--left-right", "--count", "HEAD...origin/main"]) {
+        Some(counts) => {
+            let mut parts = counts.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some("0"), Some("0")) => "in sync with origin/main (as of last fetch)".into(),
+                (Some(ahead), Some("0")) => format!("ahead of origin/main by {ahead}"),
+                (Some("0"), Some(behind)) => {
+                    format!("BEHIND origin/main by {behind} — did this machine pull?")
+                }
+                (Some(ahead), Some(behind)) => {
+                    format!("diverged from origin/main (+{ahead}/-{behind})")
+                }
+                _ => "origin/main relation unknown".into(),
+            }
+        }
+        None => "origin/main unknown".into(),
+    };
+    format!("checkout HEAD={head} dirty_files={dirty} {relation}")
 }
 
 fn component_parallelism(config: &Config, warrant: &DriveWarrant) -> usize {

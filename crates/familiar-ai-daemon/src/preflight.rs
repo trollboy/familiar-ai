@@ -396,8 +396,11 @@ fn execute_command(
     preflight_heartbeat(check_id, started.elapsed(), child_id);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_thread = thread::spawn(move || read_bounded(stdout));
-    let stderr_thread = thread::spawn(move || read_bounded(stderr));
+    let last_line = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stdout_line = std::sync::Arc::clone(&last_line);
+    let stderr_line = std::sync::Arc::clone(&last_line);
+    let stdout_thread = thread::spawn(move || read_bounded(stdout, &stdout_line));
+    let stderr_thread = thread::spawn(move || read_bounded(stderr, &stderr_line));
     let mut next_heartbeat = HEARTBEAT_INTERVAL;
     let (status, timed_out) = loop {
         match child.try_wait() {
@@ -410,7 +413,11 @@ fn execute_command(
             Err(error) => break (Err(error), false),
         }
         if started.elapsed() >= next_heartbeat {
-            preflight_heartbeat(check_id, started.elapsed(), child_id);
+            let recent = last_line
+                .lock()
+                .map(|line| line.clone())
+                .unwrap_or_default();
+            preflight_heartbeat_with_activity(check_id, started.elapsed(), child_id, &recent);
             next_heartbeat = next_heartbeat.saturating_add(HEARTBEAT_INTERVAL);
         }
         thread::sleep(Duration::from_millis(5));
@@ -475,16 +482,36 @@ fn output_indicates_environment_denial(stdout: &[u8], stderr: &[u8]) -> bool {
     .any(|marker| output.contains(marker))
 }
 
-fn read_bounded<R: Read>(reader: Option<R>) -> (Vec<u8>, usize) {
+fn read_bounded<R: Read>(
+    reader: Option<R>,
+    last_line: &std::sync::Arc<std::sync::Mutex<String>>,
+) -> (Vec<u8>, usize) {
     let Some(mut reader) = reader else {
         return (Vec::new(), 0);
     };
     let mut retained = Vec::new();
     let mut omitted = 0usize;
     let mut buffer = [0u8; 4096];
+    let mut current = Vec::new();
     while let Ok(count) = reader.read(&mut buffer) {
         if count == 0 {
             break;
+        }
+        // Track the most recent complete line so heartbeats can say what the
+        // child is doing, not merely that it is alive (the lock-collision
+        // diagnosis took twenty minutes that this line answers at thirty
+        // seconds).
+        for byte in &buffer[..count] {
+            if *byte == b'\n' {
+                if !current.is_empty() {
+                    if let Ok(mut guard) = last_line.lock() {
+                        *guard = String::from_utf8_lossy(&current).into_owned();
+                    }
+                }
+                current.clear();
+            } else if current.len() < 200 {
+                current.push(*byte);
+            }
         }
         let available = MAX_RETAINED_OUTPUT.saturating_sub(retained.len());
         let keep = count.min(available);
@@ -530,6 +557,33 @@ fn retained_output(
 
 fn preflight_heartbeat(check_id: &str, elapsed: Duration, child_id: u32) {
     preflight_phase_heartbeat(check_id, elapsed, &format!("pid:{child_id}"));
+}
+
+/// Heartbeat carrying the child's most recent output line, redacted per the
+/// same rules as retained evidence and truncated for one-line legibility.
+fn preflight_heartbeat_with_activity(
+    check_id: &str,
+    elapsed: Duration,
+    child_id: u32,
+    recent: &str,
+) {
+    if recent.is_empty() {
+        preflight_heartbeat(check_id, elapsed, child_id);
+        return;
+    }
+    let shown = if contains_secret(recent.as_bytes()) {
+        "[REDACTED LINE]".to_owned()
+    } else {
+        let mut line: String = recent.chars().take(120).collect();
+        if line.len() < recent.len() {
+            line.push('…');
+        }
+        line
+    };
+    eprintln!(
+        "preflight: heartbeat check={check_id} elapsed_ms={} child=pid:{child_id} last={shown:?}",
+        elapsed.as_millis()
+    );
 }
 
 fn preflight_phase_heartbeat(check_id: &str, elapsed: Duration, child_identity: &str) {
