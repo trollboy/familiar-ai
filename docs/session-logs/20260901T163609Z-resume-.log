@@ -1,0 +1,34 @@
+command: familiar-ai resume PRD-76
+date: Tue Sep  1 04:36:09 PM UTC 2026
+host: trollboy (Linux)
+head: e4f8306a7f1637f44100bf657ad6571da94b96dd (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2251911
+verification: heartbeat check=format elapsed_ms=3782 child=pid:2251911
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2252447
+verification: heartbeat check=lint elapsed_ms=26764 child=pid:2252447
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2256532
+verification: heartbeat check=tests-green-crates elapsed_ms=30001 child=pid:2256532
+verification: heartbeat check=tests-green-crates elapsed_ms=51607 child=pid:2256532
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2262292
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30002 child=pid:2262292
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60003 child=pid:2262292
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90001 child=pid:2262292
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120003 child=pid:2262292
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=139543 child=pid:2262292
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788278098454300-0002093630-000001-cycle-review-1","reviewed_manifest_hash":"sha256:8efc15a1b554c52325c9b86f1c9c52955b72e6fc0c0aa3b2725c321de61249cb","findings":[{"finding_id":"F1-workspace-tests-fail","category":"unverifiable_claim","severity":"medium","blocking":false,"title":"Behavior-preserving claim not fully verified: workspace test suite failed","claim":"Acceptance criterion #1 requires that this refactor be behavior-preserving and that the full workspace test suite pass. The `tests-workspace-advisory` check (`cargo test --workspace --no-default-features --no-fail-fast`) failed with exit code 101. The narrower `tests-green-crates`, `format`, and `lint` checks passed, but the full-workspace run did not. Because the failing check's stdout/stderr are disclosed only as content-hash references and not as inline text, I cannot inspect the failing tests to determine whether the refactor introduced a regression or whether the failure is pre-existing/unrelated. The behavior-preservation acceptance criterion therefore cannot be confirmed as met from the disclosed evidence.","evidence":[{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:064cb88b7482baac17bf4b80a0490b45b078368cf6e5aa7e7a76ca07732e33d6","media_type":"text/plain","byte_size":84334,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788278018377552-0002093630-000000/PRD-76","revision":"sha256:bb0cff9c2e9e76f6f7597b9df9b7971c15b04582463da0d93a117d1455fc8c60","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-064cb88b7482baac17bf4b80a0490b45b078368cf6e5aa7e7a76ca07732e33d6-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Disclose the failing `tests-workspace-advisory` stdout/stderr so the failures can be triaged, or confirm on the base revision that the same workspace tests already fail (establishing the failure as pre-existing and independent of this refactor). If any failure traces to the config module split, CLI dispatch extraction, or contract-document reorganization, fix it before relying on the behavior-preservation claim.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+backlog: PRD-76 docs/prds/PRD-076.md remains in_progress reason=completion_conflict
+error: PRD-76: status transition conflict for docs/prds/PRD-076.md: expected in_progress, found in_progress
+---
+exit: 1
