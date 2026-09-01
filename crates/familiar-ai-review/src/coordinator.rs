@@ -92,11 +92,7 @@ fn human_review_absorbed(
             .all(|finding| match finding.decision {
                 ScopeDecision::ProhibitedChange => false,
                 ScopeDecision::AmbiguousHumanReview | ScopeDecision::UndeclaredScopeExpansion => {
-                    serde_json::to_string(finding)
-                        .map(|json| {
-                            approved.contains(&crate::evidence::content_hash(json.as_bytes()))
-                        })
-                        .unwrap_or(false)
+                    approved.contains(&crate::evidence::scope_finding_substance_hash(finding))
                 }
                 ScopeDecision::AllowedChange | ScopeDecision::JustifiedExpectedFileChange => true,
             })
@@ -1315,8 +1311,7 @@ mod tests {
             prohibited_rule_match: None,
             policy_snapshot_hash: "sha256:policy".into(),
         };
-        let hash =
-            crate::evidence::content_hash(serde_json::to_string(&finding).unwrap().as_bytes());
+        let hash = crate::evidence::scope_finding_substance_hash(&finding);
         let evaluation = ScopeEvaluation {
             findings: vec![finding.clone()],
             disposition: ScopeDisposition::HumanReviewRequired,

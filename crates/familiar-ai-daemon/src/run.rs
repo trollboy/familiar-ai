@@ -2457,6 +2457,11 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
     let approved_scope_findings = familiar_ai_storage::OrchestrationRepository::new(db.conn())
         .approved_scope_findings(&slash(&context.repository.repository))
         .map_err(|e| RunError::Storage(e.to_string()))?;
+    eprintln!(
+        "scope: durable approvals loaded={} key={}",
+        approved_scope_findings.len(),
+        slash(&context.repository.repository)
+    );
     let request = CoordinationRequest {
         cycle_id: format!("{execution_id}-cycle"),
         repository_key: slash(&context.repository.repository),
