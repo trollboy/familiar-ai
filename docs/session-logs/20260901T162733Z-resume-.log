@@ -1,0 +1,9 @@
+command: familiar-ai resume PRD-76
+date: Tue Sep  1 04:27:33 PM UTC 2026
+host: trollboy (Linux)
+head: b69489b0af063e9647303a9a4e4d6f5f398d64f2 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+error: PRD-76: authoritative input reference is missing: docs/contracts/providers.md
+---
+exit: 1
