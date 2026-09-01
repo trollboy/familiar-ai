@@ -623,3 +623,31 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
 - **Recorded, not carried:** waves' patch-application brittleness
   (wave-3 §8 / wave-4 §8) is Codex-CLI tool behavior, not Familiar code;
   tracked here for visibility only.
+
+## 2026-08-31 — PRD-077 landed (direct implementation)
+
+- **012 (dependency admitted past unintegrated predecessor): Fixed.**
+  Selection defers dependents of session-attempted, unintegrated
+  predecessors with a durable `dependency_not_integrated` decision, and
+  in-flight workers' scopes are held across scheduling passes
+  (`deferred_scope_held`) — the per-pass-local scope hole is closed.
+- **018 (recovery commit invalidates checkpoint): Fixed.** A stale-base
+  candidate with exactly the committed-candidate shape rebinds
+  (`rebound_operator_commit`); tampered worktrees stay invalid.
+- **021 (remediation orphans its own checkpoint): Fixed.** After a review
+  cycle with remediation, the candidate snapshot is recomputed and the
+  checkpoint's diff hash and manifest advance.
+- **019/022 (cascade-then-manual): Fix implemented; live confirmation
+  pending.** The closure regression passes — a two-PRD shared-scope wave
+  completes end to end through drive alone, integration-ordered, with the
+  circuit breaker (3 identical deterministic failures → stop with an
+  executable recovery plan) and `implementation_incomplete`
+  terminalization (empty manifest or a `FAMILIAR-INCOMPLETE:`
+  self-declaration retains before any review spend). `resume all` now
+  LANDS finished candidates into the checked-out branch. These entries
+  close for real when the M1's next live wave completes hands-off.
+- **New FAM-BUG-027:** `worker_lock::simultaneous_fallback_claims_have_
+  exactly_one_winner` flakes under full-suite parallel load (passes
+  targeted, twice). A flaky test inside the verification gate can halt
+  unattended sessions. Open; surfaced 2026-08-31 during PRD-077
+  verification.

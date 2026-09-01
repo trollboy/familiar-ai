@@ -36,21 +36,24 @@ exists to end that.
 
 **GATE — the bug wave (runs before all product work, per policy):**
 
-- **PRD-077 — autonomous wave delivery** (bugs 012, 018, 019, 021, 022,
-  the 009 circuit breaker): integration-contained dependency admission,
-  implementation_incomplete terminal class, deterministic-failure circuit
-  breaker with an executable recovery plan, remediation that advances its
-  own checkpoint, resume-to-completion. Its last acceptance criterion is
-  FAM-BUG-019's closure condition: a two-PRD wave end to end through
-  Familiar commands alone. Runs first and alone.
+- **PRD-077 — autonomous wave delivery: COMPLETE 2026-08-31** (implemented
+  directly by Claude; bugs 012, 018, 019, 021, 022, the 009 circuit
+  breaker). The FAM-BUG-019 closure regression passes: a two-PRD
+  shared-scope wave completes end to end through drive alone — clean
+  review, merge-queue integration in order, the second PRD provably built
+  on the first's integrated base. Live confirmation lands with the M1's
+  next real wave.
 - **PRD-078 — preflight/verification contract** (bugs 011, 015, 020, 024)
   and **PRD-079 — capability-probed review routing** (bugs 013, 025) run
   as a pair after 077 — their declared files are disjoint.
 - **PRD-080 — scope authority refinement** (bug 014; the wave-3 PRD-050
   and wave-4 PRD-055 scope walls) follows.
-- Direct fixes outside PRDs, first Claude session: **bug 017** (provider
-  verify renders invalid TOML) and **bug 023** (valid config uneditable
-  under disabled delivery defaults).
+- Direct fixes **done 2026-08-31**: bug 017 (provider-verify TOML) and
+  bug 023 (legacy disabled-delivery deserialization), commit `fcf0aef`.
+- New: **bug 027** — `worker_lock` simultaneous-fallback test flakes under
+  parallel suite load (passes targeted); a flaky test inside the
+  verification gate can halt unattended runs. Owner: PRD-078's
+  environment/verification work or a direct fix.
 
 **GATE — PRD-076 scope modularization** (owner-approved 2026-08-30):
 still required — the remaining product PRDs (058, 063, 072 especially)
@@ -60,7 +63,7 @@ PRDs' declarations.
 
 | Wave | PRDs | Graph width | Achievable width |
 |------|------|-------------|------------------|
-| bug gate | 077, then 078 ∥ 079, then 080 | 4 | 1 → 2 → 1 |
+| bug gate | 077 **done** → 078 ∥ 079 (Codex), then 080 | 4 | 2 → 1 |
 | gate | 076 | 1 | 1 |
 | 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
 | 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
