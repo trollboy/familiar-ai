@@ -17,9 +17,12 @@ fn main() {
     let (Some(database), Some(repository_key), Some(prd_id)) =
         (args.next(), args.next(), args.next())
     else {
-        eprintln!("usage: operator_rebind <database> <repository_key> <prd_id>");
+        eprintln!(
+            "usage: operator_rebind <database> <repository_key> <prd_id> [new_base_revision]"
+        );
         std::process::exit(2);
     };
+    let new_base = args.next();
     let db = Database::open(std::path::Path::new(&database)).expect("open database");
     let repository = CheckpointRepository::new(db.conn());
     let mut checkpoint = repository
@@ -31,6 +34,13 @@ fn main() {
         checkpoint.checkpoint_id, checkpoint.phase, checkpoint.worktree_path
     );
     println!("old diff_hash: {}", checkpoint.diff_hash);
+    if let Some(base) = new_base {
+        println!(
+            "rebasing checkpoint base {} -> {base}",
+            checkpoint.base_revision
+        );
+        checkpoint.base_revision = base;
+    }
     let (evidence, files) = familiar_ai_daemon::resume::candidate_snapshot(
         std::path::Path::new(&checkpoint.worktree_path),
         &checkpoint.base_revision,
