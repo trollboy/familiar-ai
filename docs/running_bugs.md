@@ -571,3 +571,23 @@ PRD-076.
   `familiar-ai drive --prd PRD-62 --max-prds 1`; (2) preflight and reviewer
   cascade; (3) PRD-062 finished individually outside Familiar. FAM-BUG-019's
   end-to-end exit criterion remains unmet.
+
+### FAM-BUG-026 — Fresh-database tests missed a production migration failure
+
+- **Status:** Fixed 2026-08-31 during PRD-062 release verification
+- **Observed:** PRD-062's candidate passed focused migration tests and the full
+  workspace suite, but the freshly installed binary failed `familiar-ai next`
+  against the real database: `migration 51 failed: worker specs are immutable`.
+  Migration 051 attempted to update historical `worker_specs`, contradicting
+  the immutability trigger installed by migration 041. Fresh fixtures contained
+  no existing Ollama worker spec and therefore never executed the failing row.
+- **Impact:** A fully green candidate made every installed CLI command that
+  opens storage unusable on the actual machine.
+- **Fix:** Migration 051 now leaves historical worker specs immutable and binds
+  their aliases to explicit degraded, unverified artifact records. A regression
+  upgrades a pre-051 database containing an Ollama worker, verifies the degraded
+  alias, and proves the historical worker row still rejects mutation.
+- **Required systemic follow-up:** Every data-migrating PRD needs at least one
+  populated prior-version fixture that exercises production constraints and
+  triggers; empty fresh-database migration tests are insufficient release
+  evidence.

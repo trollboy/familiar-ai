@@ -141,6 +141,18 @@ Both emitted repeated errors during otherwise understandable failures.
 invalidate cache incompatibility once, and never interpret an Ollama model list
 as a Codex-native models response.
 
+### 10. Green migration fixtures did not represent the production database
+
+After PRD-062 passed its candidate workspace suite and was installed,
+`familiar-ai next` failed because migration 051 attempted to update an existing
+immutable Ollama worker spec. Fresh test databases had no such row, so every
+migration test remained green. Release verification, not Familiar review,
+caught the blocker.
+
+**Correction landed:** migration 051 now preserves immutable worker history and
+creates only the degraded artifact/alias mapping. A populated pre-051 fixture
+pins the real upgrade path. This is FAM-BUG-026.
+
 ## Verification and closeout
 
 - PRD-062 focused artifact, storage, migration, and configuration tests passed.

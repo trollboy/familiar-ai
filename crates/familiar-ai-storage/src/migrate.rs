@@ -317,6 +317,65 @@ mod tests {
     }
 
     #[test]
+    fn artifact_registry_migrates_existing_ollama_spec_without_rewriting_it() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        let before_artifact_registry = super::MIGRATIONS.len() - 1;
+        for migration in &super::MIGRATIONS[..before_artifact_registry] {
+            db.conn().execute_batch(migration.sql).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,'before')",
+                    [migration.version],
+                )
+                .unwrap();
+        }
+        let spec = format!("wspec-sha256:{}", "a".repeat(64));
+        db.conn().execute(
+            "INSERT INTO worker_specs(
+                spec_identity,worker_alias,provider_id,runtime_id,model_state,
+                model_id,model_artifact_id,auth_profile_id,capability_profile_id,created_at
+             ) VALUES(?1,'ollama-review','local','ollama','known','llama3:latest',NULL,NULL,'review','before')",
+            [&spec],
+        ).unwrap();
+
+        assert_eq!(db.run_migrations().unwrap(), 1);
+        let artifact_id = format!("sha256:{}", "a".repeat(64));
+        let migrated: (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT a.model_artifact_id,m.verification_state
+             FROM model_artifact_aliases a
+             JOIN model_artifacts m USING(model_artifact_id)
+             WHERE a.alias='ollama-review'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated, (artifact_id, "degraded-unverified-alias".into()));
+        let historical_artifact: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT model_artifact_id FROM worker_specs WHERE spec_identity=?1",
+                [&spec],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(historical_artifact, None);
+        assert!(db.conn().execute(
+            "UPDATE worker_specs SET model_artifact_id='sha256:forbidden' WHERE spec_identity=?1",
+            [&spec],
+        ).is_err());
+    }
+
+    #[test]
     fn version_two_database_upgrades_additively_without_rewriting_summaries() {
         let db = crate::Database::open_in_memory().unwrap();
         db.conn()

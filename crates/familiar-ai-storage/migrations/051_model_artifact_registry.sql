@@ -18,7 +18,9 @@ CREATE INDEX model_artifact_alias_identity ON model_artifact_aliases(model_artif
 
 -- PRD-057 worker identities already provide a stable SHA-256 partition key.
 -- Reuse that key only for the explicitly degraded alias identity: it does not
--- claim a content digest and can be replaced only by registering new content.
+-- claim a content digest. Historical worker_specs are intentionally immutable,
+-- so migration binds their worker alias to this degraded artifact without
+-- rewriting the historical spec identity or pretending it was content-bound.
 INSERT OR IGNORE INTO model_artifacts
     (model_artifact_id, verification_state, manifest_json, provenance_json, created_at)
 SELECT replace(spec_identity, 'wspec-sha256:', 'sha256:'),
@@ -29,8 +31,4 @@ WHERE runtime_id = 'ollama' AND model_artifact_id IS NULL;
 INSERT OR IGNORE INTO model_artifact_aliases(alias, model_artifact_id, created_at)
 SELECT worker_alias, replace(spec_identity, 'wspec-sha256:', 'sha256:'), datetime('now')
 FROM worker_specs
-WHERE runtime_id = 'ollama' AND model_artifact_id IS NULL;
-
-UPDATE worker_specs
-SET model_artifact_id = replace(spec_identity, 'wspec-sha256:', 'sha256:')
 WHERE runtime_id = 'ollama' AND model_artifact_id IS NULL;
