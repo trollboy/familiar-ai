@@ -27,10 +27,15 @@ sign-off on scope-conformant work.
 | 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | complete 2026-08-31 — **all nine retained; integrated manually**; [after-action](../wave3_afteraction_report.md) |
 | 4 | 032, 055, 056, 062 | complete 2026-08-31 — **cascade-then-manual again**; [after-action](../wave4_afteraction_report.md) |
 
-The waves-3/4 caveat is the plan's dominant fact: Familiar has never
-integrated a multi-PRD wave autonomously (FAM-BUG-019/022). The delivered
-code is real; the delivery process was the operator. The bug gate below
-exists to end that.
+~~The waves-3/4 caveat: Familiar had never integrated a multi-PRD wave
+autonomously (FAM-BUG-019/022).~~ **Ended 2026-09-01 by wave 5:** the
+scheduler ran the computed width live (038∥053, 058 admitted on hold
+release), 053 and 058 completed hands-off through clean independent
+review and merge-queue integration, and 038 landed under the owner's
+recorded scope approvals, waiver, and manual completion override
+(FAM-BUG-044 tracks the waiver-identity gap that required the override).
+Recommendation standing with the owner: close 022; close 019 with the
+044 note.
 
 ## Remaining waves
 
@@ -78,21 +83,21 @@ authoring-time plan validation use, not an estimate.
 
 | Wave | PRDs | Graph width | Achievable width |
 |------|------|-------------|------------------|
-| bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
+| bug gate | 077, 078, 079, 080 — **complete** | 4 | done |
 | gate | 076 **complete** | 1 | 1 |
-| 5 | 038, 053, 058 **ALL LANDED 2026-09-01** | 3 | 2 (achieved: 038∥053, then 058 admitted on hold release) |
-| 5 | 038, 053, 058 | 3 | 2 — `053` and `058` both still declare `config/default.toml`; `038` is disjoint from both, so `{038, 053}` or `{038, 058}` run together |
+| 5 | 038, 053, 058 — **ALL LANDED 2026-09-01** | 3 | 2 — achieved live exactly as computed: 038∥053 in parallel, 058 admitted the moment 053 released the `config/default.toml` hold |
 | 6 | 059, 060, 061, 063, 072 | 5 | 3 — `059`/`060`/`061` still share `crates/familiar-ai-core/src/config/providers.rs` (each adds its own `InferenceRuntimeKind` variant to the same closed enum; splitting that enum is a semantic change, out of this PRD's scope) and serialize pairwise; `063` (registry_workers.rs) and `072` (agent_runtime.rs) are disjoint from that trio and from each other, so `{one of 059/060/061, 063, 072}` run together |
 | 7 | 071, 073 | 2 | 2 — fully disjoint post-076 (`config/review.rs` vs `config/registry_workers.rs`, `cli/batch_review.rs` vs `cli/model_residency.rs`, distinct repo/test files) |
 
 ## Critical path
 
-**077 → 076 → 058 → {059, 060, 061, 063} → {071, 073}** — 056 landing
-moved the control plane off the path; the raw runtime (058) is now the
-long pole, and it is ready the moment the gates clear. 038 (multi-repo
-acceptance — the forcing function that ends infrastructure work) and 053
-are dependency-ready NOW and must not keep slipping: schedule 038 in the
-first product session after the gates.
+**{059 | 060 | 061, 063, 072} → {071, 073}** — everything before this is
+landed as of 2026-09-01. Wave 6 runs at achievable width 3 with the
+059/060/061 providers-enum trio serializing pairwise through the merge
+queue; wave 7 is fully disjoint at width 2. Seven PRDs remain in the
+entire approved backlog. Per the bug policy, FAM-BUG-044 and frictions
+007/008 (delivery-machinery, direct-fix lane) are the first work of the
+next session, before wave 6.
 
 ## Scheduling guidance
 
