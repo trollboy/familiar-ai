@@ -1,0 +1,121 @@
+command: familiar-ai resume all
+date: Tue Sep  1 07:46:18 PM UTC 2026
+host: trollboy (Linux)
+head: bd32255a1e4c1d7495dacffac14b09a5873fa938 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3465169
+verification: heartbeat check=format elapsed_ms=8230 child=pid:3465169
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3465889
+verification: heartbeat check=lint elapsed_ms=30000 child=pid:3465889
+verification: heartbeat check=lint elapsed_ms=35219 child=pid:3465889
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3470339
+verification: heartbeat check=tests-green-crates elapsed_ms=30004 child=pid:3470339
+verification: heartbeat check=tests-green-crates elapsed_ms=52060 child=pid:3470339
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3476198
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30003 child=pid:3476198
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60004 child=pid:3476198
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90002 child=pid:3476198
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120001 child=pid:3476198
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=149379 child=pid:3476198
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788282460380264-0002412995-000002-cycle-review-1","reviewed_manifest_hash":"sha256:b1b7cb749dbb31365d5aae37e25beff2b144e42f2dae9b886dd3ab8afb13f7d8","findings":[{"finding_id":"scope-outside-crates","category":"scope_violation","severity":"medium","blocking":false,"title":"Change adds files outside the allowed `crates/` path","claim":"The task declares allowed_paths ['crates/'], but the change adds new files under docs/ and tests/fixtures/, which are outside that authorized scope. The daemon/mcp tests depend on these out-of-scope fixture trees (read via CARGO_MANIFEST_DIR/../../tests/fixtures), so the fixtures are functionally required yet were placed outside the granted path.","evidence":[{"kind":"file_range","path":"docs/acceptance/PRD-038-multi-repo-have-at-it.md","range":{"start":1,"end":49}},{"kind":"file_range","path":"tests/fixtures/repo-rust-cli/Cargo.toml","range":{"start":1,"end":7}},{"kind":"file_range","path":"tests/fixtures/repo-node-service/package.json","range":{"start":1,"end":12}}],"remediation":"Relocate the fixture repositories and acceptance doc under crates/ (e.g. a crate-local tests/fixtures directory), or obtain an explicitly widened allowed_paths authorization covering docs/ and tests/fixtures/ before landing.","status":"open","supersedes":null},{"finding_id":"acceptance-tests-unverified","category":"unverifiable_claim","severity":"medium","blocking":false,"title":"New acceptance suites are exercised only by a failing advisory check","claim":"The entire deliverable is the acceptance proof in crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs and crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs. The required check `tests-green-crates` runs only -p familiar-ai-core/-review/-agent/-storage and never compiles or runs these two packages' tests. The only check that would run them, `tests-workspace-advisory`, failed (exit_code 101) and is non-required, so there is no passing verification that the acceptance proof itself actually compiles and passes.","evidence":[{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:f73660b6aa5f5c0ed6f8a0a7e8c0dc6ca58d152687dcbf574b577614a073a882","media_type":"text/plain","byte_size":89394,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788282372975203-0002412995-000000/PRD-38","revision":"sha256:5828c6cf2e76076080c74dc74536d123a0b9e10ae9a8ddaae755634860004cbb","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-f73660b6aa5f5c0ed6f8a0a7e8c0dc6ca58d152687dcbf574b577614a073a882-stdout","truncated":false,"omitted_bytes":0}},{"kind":"file_range","path":"crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs","range":{"start":1,"end":30}}],"remediation":"Add familiar-ai-daemon and familiar-ai-mcp to a required, green test check (or make tests-workspace-advisory required and pass), so the acceptance proof has passing verification rather than resting on a failing advisory run.","status":"open","supersedes":null}]}
+I'll start by examining the current diff and file layout to understand what needs to move under `crates/`.
+Now update the two test files' fixture path references.
+Now update the doc's own path reference for consistency.
+Compiles clean. Now let's run the actual acceptance tests to confirm the relocated fixtures resolve correctly at runtime.
+All 17 tests pass with the relocated fixtures. Let's do a final scope check to confirm every changed file falls under `crates/`.
+All resulting file paths (old and new) resolve under `crates/`, so the diff is fully within `allowed_paths`. Note: I did not stage the commit — leaving the change staged but uncommitted, per the no-commit constraint.
+
+Summary of remediation for finding `scope-outside-crates`:
+
+1. Moved `tests/fixtures/repo-rust-cli/` and `tests/fixtures/repo-node-service/` → `crates/fixtures/` (shared by both `familiar-ai-daemon` and `familiar-ai-mcp` test crates).
+2. Moved `docs/acceptance/PRD-038-multi-repo-have-at-it.md` → `crates/docs/acceptance/PRD-038-multi-repo-have-at-it.md`.
+3. Updated `copy_fixture_repository()` in both `crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs` and `crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs` to resolve fixtures via `CARGO_MANIFEST_DIR/../fixtures` instead of `../../tests/fixtures`.
+4. Updated the one in-doc path reference (`tests/fixtures/` → `crates/fixtures/`) in the relocated acceptance doc.
+5. Verified: `cargo check` on both crates' test targets is clean, and both acceptance suites pass in full (13/13 in `familiar-ai-daemon`, 4/4 in `familiar-ai-mcp`) against the relocated fixtures.
+
+Untouched by design: `docs/prds/PRD-038.md` — it predates `base_revision` (unchanged) and lists the old `tests/fixtures/`/`docs/acceptance/` paths, but it's outside `allowed_paths` (`crates/`) so it's out of scope for this remediation.
+Review disposition: HumanReviewRequired; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [ScopeAmbiguous]
+Scope evaluation 'remediation-1' under policy sha256:eafda43c6331d654e3b6af761dacc5f7e2ec925e9a3ad233fa787d892f9997e5:
+scope: AllowedChange Added crates/docs/acceptance/PRD-038-multi-repo-have-at-it.md rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/fixtures/repo-node-service/README.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-node-service/design/feature-request.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-node-service/index.js rule=configured_allowed_path
+scope: AmbiguousHumanReview Added crates/fixtures/repo-node-service/package.json rule=file_class:dependency_manifest:human_review
+scope: AmbiguousHumanReview Added crates/fixtures/repo-rust-cli/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Added crates/fixtures/repo-rust-cli/README.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-rust-cli/design/feature-request.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-rust-cli/src/main.rs rule=configured_allowed_path
+HumanReviewRequired prd=PRD-38
+stop_reasons=["scope_ambiguous"]
+finding scope-outside-crates Medium: Change adds files outside the allowed `crates/` path
+finding acceptance-tests-unverified Medium: New acceptance suites are exercised only by a failing advisory check
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 6
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+non-interactive input: preserving checkpoint
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3505375
+verification: heartbeat check=format elapsed_ms=5481 child=pid:3505375
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3505986
+verification: heartbeat check=lint elapsed_ms=30002 child=pid:3505986
+verification: heartbeat check=lint elapsed_ms=40933 child=pid:3505986
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3512428
+verification: heartbeat check=tests-green-crates elapsed_ms=30004 child=pid:3512428
+verification: heartbeat check=tests-green-crates elapsed_ms=60003 child=pid:3512428
+verification: heartbeat check=tests-green-crates elapsed_ms=60596 child=pid:3512428
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3519727
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30001 child=pid:3519727
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60004 child=pid:3519727
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:3519727
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120003 child=pid:3519727
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150001 child=pid:3519727
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=155546 child=pid:3519727
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788285779241470-0002412995-000003-cycle-review-1","reviewed_manifest_hash":"sha256:0e95e96401eadde223f78d4ed89c98bed283b836226d3d585b2345fbdd4f4077","findings":[{"finding_id":"F1-truncate-panic","category":"correctness_defect","severity":"medium","blocking":false,"title":"run-command output truncation can panic on a non-char-boundary","claim":"`SandboxedToolExecutor::run_command` builds `combined` from `read_to_string` stdout/stderr (valid UTF-8, possibly multi-byte) and then calls `combined.truncate(self.max_output_bytes)` whenever the output exceeds the limit. `String::truncate` panics if `new_len` does not fall on a UTF-8 char boundary, so any tool command that emits enough output to cross `max_output_bytes` with a multi-byte character straddling that byte index will panic the executor thread instead of returning a truncated result.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/agent_runtime.rs","range":{"start":314,"end":320}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:1afb2b6456989bee8096f975351afa347236cee45c214afbe93aad0ea7a0ffa0","media_type":"text/plain","byte_size":32355,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788282372975203-0002412995-000000/PRD-58","revision":"sha256:68465d347edc7f9f96a1b1f5a9d249cecbcf6e62ba693f403c3edc668d2fd3d2","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-1afb2b6456989bee8096f975351afa347236cee45c214afbe93aad0ea7a0ffa0-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Truncate on a char boundary instead of a raw byte index — e.g. compute a safe boundary with `combined.floor_char_boundary(self.max_output_bytes)` (or iterate `char_indices`) before truncating, or operate on bytes with `String::from_utf8_lossy`. No existing test exercises multi-byte output over the limit, so add one.","status":"open","supersedes":null},{"finding_id":"F2-context-ceiling-unenforced","category":"correctness_defect","severity":"medium","blocking":false,"title":"Configured max_context_tokens ceiling is never enforced by the loop","claim":"`AgentRuntimeCeilingsConfig` defines and documents `max_context_tokens` (also surfaced in config/default.toml) as a ceiling, but the loop's `LoopCeilings` struct carries only `max_iterations`, `max_output_tokens`, and `max_wall_clock_ms`, and `run_loop` never checks any context-token total. The value is silently ignored, so acceptance criterion 'iteration, token, and context ceilings are enforced preemptively' is not met for the context dimension — an operator who sets `max_context_tokens` gets no context-window protection.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-core/src/config/agent_runtime.rs","range":{"start":82,"end":86}},{"kind":"file_range","path":"crates/familiar-ai-agent/src/raw_runtime.rs","range":{"start":1,"end":1306}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:1afb2b6456989bee8096f975351afa347236cee45c214afbe93aad0ea7a0ffa0","media_type":"text/plain","byte_size":32355,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788282372975203-0002412995-000000/PRD-58","revision":"sha256:68465d347edc7f9f96a1b1f5a9d249cecbcf6e62ba693f403c3edc668d2fd3d2","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-1afb2b6456989bee8096f975351afa347236cee45c214afbe93aad0ea7a0ffa0-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Either add a `max_context_tokens` field to `LoopCeilings` and enforce it preemptively before each submission (breaking with `StopReason::TokenOrContextCeiling` when the accumulated context total would exceed it), or, if context enforcement is deferred to a later phase, remove/clearly document `max_context_tokens` as inert so the config does not imply a protection that does not exist.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+backlog: PRD-58 docs/prds/PRD-058.md in_progress -> completed actor=system:familiar-ai-run:00001788285779241470-0002412995-000003
+error: PRD-38: human review required
+---
+exit: 1
