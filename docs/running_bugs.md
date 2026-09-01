@@ -527,3 +527,47 @@ PRD-076.
 - **Expected fix:** Legacy `enabled = false` must migrate or deserialize to
   disabled mode before validation. Add an edit regression starting from that
   exact historical table.
+
+### FAM-BUG-024 — Drive preflight drops verification configuration and hides failures
+
+- **Status:** Open; repeatedly blocked PRD-062 before claim
+- **Observed:** Five PRD-062 drive sessions spent roughly five to ten silent
+  minutes apiece running `verification.workspace-tests`, then reported only
+  `command exited with code Some(101)`. `preflight::run` reconstructs each
+  `ReviewVerificationConfig` as a `PreflightCommandConfig`, discarding its
+  configured `environment`, `timeout_ms`, applicability, and captured output;
+  `command_check` redirects stdout and stderr to null. Direct
+  `cargo test --workspace` passed on the same revision.
+- **Impact:** Operators cannot distinguish a code failure from an execution-
+  environment denial, and the configured verification contract is not the
+  contract preflight executes. Each retry pays for a full silent suite before
+  Familiar touches the PRD.
+- **Workaround used:** The duplicated pre-claim workspace check was marked
+  optional, Familiar generated the PRD-062 candidate, and the operator ran the
+  complete workspace suite manually before integration. The check still ran
+  during review and reproduced the environment-sensitive failure there.
+- **Expected fix:** Execute the original verification specification without
+  lossy conversion, enforce its finite timeout, retain bounded redacted stdout
+  and stderr as durable evidence, stream a heartbeat naming the active check,
+  and classify environment denial separately from test failure.
+
+### FAM-BUG-025 — Reviewer capability mismatch retries and forces manual recovery
+
+- **Status:** Open; PRD-062 retained after successful implementation
+- **Observed:** PRD-062 implementation and focused verification completed, but
+  review routed to Ollama `llama3:latest`. The runtime reported that the model
+  does not support tools. Familiar retried the same incompatible reviewer three
+  times, each including five transport reconnects, then converted the result to
+  `HumanReviewRequired` and retained the PRD.
+- **Impact:** A deterministic capability mismatch is treated as review judgment
+  rather than routing failure. The candidate can be correct and fully tested,
+  yet Familiar cannot finish it. The operator must inspect the preserved
+  worktree, run tests, commit, cherry-pick, and manually complete the backlog.
+- **Expected fix:** Probe and persist structured-review/tool capability before
+  selection. On a deterministic capability failure, quarantine that worker for
+  the session and reroute to an eligible independent reviewer; do not consume
+  all review attempts or label infrastructure failure as human judgment.
+- **Workflow evidence:** Wave 4 again followed the exact sequence: (1)
+  `familiar-ai drive --prd PRD-62 --max-prds 1`; (2) preflight and reviewer
+  cascade; (3) PRD-062 finished individually outside Familiar. FAM-BUG-019's
+  end-to-end exit criterion remains unmet.
