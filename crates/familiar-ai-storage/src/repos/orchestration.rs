@@ -277,15 +277,23 @@ impl<'a> OrchestrationRepository<'a> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT finding_hash FROM scope_decisions WHERE repository_key=?1 AND decision='approved'",
+                "SELECT finding_json FROM scope_decisions WHERE repository_key=?1 AND decision='approved'",
             )
             .map_err(db)?;
         let rows = stmt
             .query_map([repository], |row| row.get::<_, String>(0))
             .map_err(db)?
-            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .collect::<Result<Vec<String>, _>>()
             .map_err(db)?;
-        Ok(rows)
+        // Approvals are keyed by decision substance: the recorded finding
+        // with its policy snapshot hash normalized out, so unrelated
+        // landings that rotate the compiled policy hash cannot orphan a
+        // human decision (PRD-080).
+        Ok(rows
+            .iter()
+            .filter_map(|json| serde_json::from_str::<familiar_ai_review::ScopeFinding>(json).ok())
+            .map(|finding| familiar_ai_review::scope_finding_substance_hash(&finding))
+            .collect())
     }
 
     /// One snapshot of terminal PRDs from both authorities. Recovery callers

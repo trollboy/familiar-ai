@@ -1326,8 +1326,7 @@ mod tests {
         assert!(!human_review_absorbed(&evaluation, &Default::default()));
         let mut prohibited = finding;
         prohibited.decision = ScopeDecision::ProhibitedChange;
-        let prohibited_hash =
-            crate::evidence::content_hash(serde_json::to_string(&prohibited).unwrap().as_bytes());
+        let prohibited_hash = crate::evidence::scope_finding_substance_hash(&prohibited);
         let evaluation = ScopeEvaluation {
             findings: vec![prohibited],
             disposition: ScopeDisposition::HumanReviewRequired,

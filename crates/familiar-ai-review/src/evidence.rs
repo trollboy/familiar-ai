@@ -212,6 +212,21 @@ fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, EvidenceError> {
     }
     Ok(out.stdout)
 }
+/// Identity of a scope finding's decision substance: the finding with its
+/// policy snapshot hash normalized out. A durable human approval keyed this
+/// way survives unrelated landings that rotate the compiled policy hash,
+/// while any change to the path, rule, class, or decision still invalidates
+/// it (PRD-080).
+pub fn scope_finding_substance_hash(finding: &crate::ScopeFinding) -> String {
+    let mut canonical = finding.clone();
+    canonical.policy_snapshot_hash = String::new();
+    content_hash(
+        serde_json::to_string(&canonical)
+            .unwrap_or_default()
+            .as_bytes(),
+    )
+}
+
 pub fn content_hash(bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
     let hex = digest
