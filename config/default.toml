@@ -366,3 +366,23 @@ generated_artifact = "human_review"
 # fallback_enabled = true
 # max_concurrent_requests = 4
 # request_timeout_secs = 60
+
+# PRD-058: the Familiar-owned raw-model agent loop. Disabled by default; no
+# existing harness-driven execution path changes when this stays absent.
+[agent_runtime]
+# enabled = false
+# offered_capabilities = ["read-file", "search-list", "report-progress", "submit-evidence", "request-escalation"]
+# prompt_cache_enabled = true
+
+[agent_runtime.ceilings]
+# max_iterations = 20
+# max_output_tokens = 200000
+# max_context_tokens = 200000
+# max_wall_clock_ms = 600000
+
+[agent_runtime.sandbox]
+# Deny-by-default: run-command is refused unless offered_capabilities names
+# it AND this allowlist is non-empty.
+# allowed_commands = ["cargo", "git"]
+# network_allowed = false
+# allowed_environment = []

@@ -6,9 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+familiar-ai-llm = { path = "../familiar-ai-llm" }
 serde_json.workspace = true
 libc.workspace = true
 ring.workspace = true
+tokio = { workspace = true, features = ["time", "macros", "rt"] }
 
 # Review isolation is enforced by the kernel's Landlock API on Linux; other
 # platforms use their own mechanism (macOS sandbox-exec) or fail closed.
@@ -17,3 +19,4 @@ landlock.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

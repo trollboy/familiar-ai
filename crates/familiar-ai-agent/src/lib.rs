@@ -2,6 +2,7 @@ mod agent;
 mod claude_code;
 mod codex;
 mod isolation;
+pub mod raw_runtime;
 mod registry;
 
 pub use agent::{
@@ -12,6 +13,8 @@ pub use agent::{
 pub use claude_code::{ClaudeCodeAgent, ClaudeCodeSettings, READ_ONLY_RESTRICTIONS};
 pub use codex::CodexAgent;
 pub use isolation::isolated_command;
+#[cfg(unix)]
+pub use isolation::{finish_watchdog, spawn_watchdog, Watchdog};
 pub use registry::{
     builtin_adapter_factories, AdapterFactories, AdapterFactory, CandidateEvaluation,
     RejectionReason, RouteError, RouteRequest, RouteRule, SelectionRecord, WorkerCapability,
