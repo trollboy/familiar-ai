@@ -4,7 +4,7 @@ use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use familiar_ai_core::FamiliarError;
+use familiar_ai_core::{FamiliarError, ResourceType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageBucket {
@@ -100,6 +100,123 @@ pub struct UsageObservation<'a> {
     pub input_compression_version: &'a str,
     pub compression_experiment: Option<&'a str>,
     pub compression_lane: Option<&'a str>,
+}
+
+/// A closed reconciliation status vocabulary (PRD-053). Reconciliation rows
+/// are new append-only facts derived from PRD-051 local estimates and the
+/// PRD-052 current-effective provider projection; they never edit either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconciliationStatus {
+    Reconciled,
+    ReconciledWithVariance,
+    Pending,
+    Mismatch,
+    UnattributedProviderSpend,
+}
+
+impl ReconciliationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reconciled => "reconciled",
+            Self::ReconciledWithVariance => "reconciled-with-variance",
+            Self::Pending => "pending",
+            Self::Mismatch => "mismatch",
+            Self::UnattributedProviderSpend => "unattributed-provider-spend",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "reconciled" => Self::Reconciled,
+            "reconciled-with-variance" => Self::ReconciledWithVariance,
+            "pending" => Self::Pending,
+            "mismatch" => Self::Mismatch,
+            "unattributed-provider-spend" => Self::UnattributedProviderSpend,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ReconciliationRow {
+    pub row_id: String,
+    pub run_id: String,
+    pub billing_source: String,
+    pub day_start: String,
+    pub day_end: String,
+    pub match_key: String,
+    pub project_id: Option<String>,
+    pub status: String,
+    pub local_estimate_nanousd: Option<i64>,
+    pub authoritative_nanousd: Option<i64>,
+    pub variance_nanousd: Option<i64>,
+    pub tolerance_nanousd: i64,
+    pub provider_revision_ids: Vec<String>,
+    pub observation_ids: Vec<String>,
+    pub reservation_evidence_count: i64,
+    pub reservation_evidence_nanousd: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ReconciliationSummary {
+    pub run_id: String,
+    pub rows_appended: usize,
+    pub rows_unchanged: usize,
+    pub rows: Vec<ReconciliationRow>,
+}
+
+/// Month-to-date cost for one billing source. Every monetary field is kept
+/// distinct by authority so a caller can never sum an estimate and an
+/// authoritative figure into one ambiguous number; `completeness` and
+/// `freshness` label how current and settled the figures are.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceMonthSummary {
+    pub billing_source: String,
+    pub coverage_start: String,
+    pub coverage_end: String,
+    pub authoritative_nanousd: Option<i64>,
+    pub local_estimate_nanousd: Option<i64>,
+    pub unattributed_nanousd: Option<i64>,
+    pub reconciled_days: i64,
+    pub reconciled_with_variance_days: i64,
+    pub pending_days: i64,
+    pub mismatch_days: i64,
+    pub unattributed_provider_spend_days: i64,
+    pub completeness: String,
+    pub freshness: String,
+}
+
+/// A month-to-date aggregate across billing sources. Present alongside the
+/// per-source breakdown (`MonthToDateReport::sources`), never instead of it,
+/// so a caller can never lose which source contributed what.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AggregateMonthSummary {
+    pub coverage_start: String,
+    pub coverage_end: String,
+    pub authoritative_nanousd: Option<i64>,
+    pub local_estimate_nanousd: Option<i64>,
+    pub unattributed_nanousd: Option<i64>,
+    pub source_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MonthToDateReport {
+    pub sources: Vec<SourceMonthSummary>,
+    pub aggregate: AggregateMonthSummary,
+}
+
+/// PRD-032 scoring input: cost per (PRD, worker). Reconciliation's grain is
+/// workspace-day, not per-execution, so authority here is `"estimated"` (from
+/// local cost_estimates) or `"unknown"` (no cost_estimates row exists at
+/// all) — never `"authoritative"`. Callers ranking workers by cost MUST
+/// treat `authority == "unknown"` as unrankable, never as free/zero.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PrdCostScoreInput {
+    pub prd: String,
+    pub worker_identity: String,
+    pub local_estimate_nanousd: Option<i64>,
+    pub authority: String,
+    pub completeness: String,
 }
 
 pub struct AccountingRepository<'a> {
@@ -708,6 +825,425 @@ impl<'a> AccountingRepository<'a> {
         }
         Ok(out)
     }
+
+    /// Deterministic cost reconciliation (PRD-053). Compares the
+    /// current-effective provider-authoritative projection against locally
+    /// attributed estimates, one row per UTC day per (project or
+    /// `unattributed`) within `[window_start, window_end)`. Rows are new
+    /// facts: raw provider revisions and local estimates are never edited.
+    /// Re-running an unchanged window inserts nothing (`rows_unchanged`
+    /// grows instead); a changed local estimate or a superseding provider
+    /// revision appends a new row linked via `supersedes_row_id` to the
+    /// prior current-effective row for that key, which remains as history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_window(
+        &self,
+        billing_source: &str,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+        invoked_by: &str,
+        tolerance_nanousd: i64,
+        settlement_horizon_days: i64,
+        now: DateTime<Utc>,
+        actor: &str,
+    ) -> familiar_ai_core::Result<ReconciliationSummary> {
+        if window_start >= window_end {
+            return Err(FamiliarError::Database(
+                "reconciliation window must be non-empty".into(),
+            ));
+        }
+        if invoked_by != "collect" && invoked_by != "explicit" {
+            return Err(FamiliarError::Database(
+                "reconciliation invocation must be 'collect' or 'explicit'".into(),
+            ));
+        }
+        if tolerance_nanousd < 0 || settlement_horizon_days < 0 {
+            return Err(FamiliarError::Database(
+                "reconciliation tolerance and settlement horizon must be non-negative".into(),
+            ));
+        }
+        let run_id = format!("recr_{}", random_hex()?);
+        let tx = self.conn.unchecked_transaction().map_err(db)?;
+        tx.execute(
+            "INSERT INTO reconciliation_runs(run_id,billing_source,window_start,window_end,invoked_by,tolerance_nanousd,settlement_horizon_days,actor,started_at,now_reference) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![run_id,billing_source,window_start.to_rfc3339(),window_end.to_rfc3339(),invoked_by,tolerance_nanousd,settlement_horizon_days,actor,Utc::now().to_rfc3339(),now.to_rfc3339()],
+        ).map_err(db)?;
+
+        let mut rows_appended = 0usize;
+        let mut rows_unchanged = 0usize;
+        let mut rows = Vec::new();
+        let mut day = bucket_start(window_start, UsageBucket::Day);
+        while day < window_end {
+            let day_end = next_bucket(day, UsageBucket::Day);
+            // Authoritative side: current-effective provider revisions for
+            // this source and day, resolved to a project via the PRD-055
+            // workspace attribution binding where one exists.
+            let mut authoritative: BTreeMap<Option<String>, (i64, Vec<String>)> = BTreeMap::new();
+            {
+                let mut statement = tx.prepare("SELECT r.revision_id,r.amount_nanousd,b.project_id FROM current_provider_costs r LEFT JOIN provider_attribution_bindings b ON b.provider=?1 AND b.scope_kind='workspace' AND b.scope_value=r.workspace_id WHERE r.source_name=?1 AND r.bucket_start>=?2 AND r.bucket_start<?3").map_err(db)?;
+                let found = statement
+                    .query_map(
+                        params![billing_source, day.to_rfc3339(), day_end.to_rfc3339()],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                            ))
+                        },
+                    )
+                    .map_err(db)?;
+                for entry in found {
+                    let (revision_id, amount, project) = entry.map_err(db)?;
+                    let slot = authoritative.entry(project).or_insert((0, Vec::new()));
+                    slot.0 = slot.0.saturating_add(amount);
+                    slot.1.push(revision_id);
+                }
+            }
+            // Local side: local-estimate cost_estimates for observations
+            // covered by this day, resolved to a project (reattribution
+            // corrections take priority over the observation's original
+            // binding, matching `local_series_facts`). Degraded-identity
+            // observations have no project and are excluded from matching.
+            let mut local: BTreeMap<String, (i64, Vec<String>)> = BTreeMap::new();
+            {
+                let mut statement = tx.prepare("SELECT u.observation_id,coalesce((SELECT c.project_id FROM accounting_corrections c WHERE c.observation_id=u.observation_id AND c.correction_kind='reattribution' ORDER BY c.effective_at DESC,c.correction_id DESC LIMIT 1),u.project_id),(SELECT sum(amount) FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.billing_mode='local-estimate') FROM usage_observations u WHERE u.period_start>=?1 AND u.period_start<?2").map_err(db)?;
+                let found = statement
+                    .query_map(params![day.to_rfc3339(), day_end.to_rfc3339()], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    })
+                    .map_err(db)?;
+                for entry in found {
+                    let (observation_id, project, amount) = entry.map_err(db)?;
+                    let (Some(project), Some(amount)) = (project, amount) else {
+                        continue;
+                    };
+                    let slot = local.entry(project).or_insert((0, Vec::new()));
+                    slot.0 = slot.0.saturating_add(amount);
+                    slot.1.push(observation_id);
+                }
+            }
+            let mut projects: BTreeSet<String> = BTreeSet::new();
+            for key in authoritative.keys().flatten() {
+                projects.insert(key.clone());
+            }
+            for key in local.keys() {
+                projects.insert(key.clone());
+            }
+            // Provider spend never traced to a project: explicit visible
+            // unattributed spend, never an error, never distributed.
+            type Candidate = (
+                String,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+                Vec<String>,
+                Vec<String>,
+            );
+            let mut candidates: Vec<Candidate> = Vec::new();
+            if let Some((amount, revisions)) = authoritative.get(&None) {
+                if !revisions.is_empty() {
+                    candidates.push((
+                        "unattributed".into(),
+                        None,
+                        None,
+                        Some(*amount),
+                        revisions.clone(),
+                        Vec::new(),
+                    ));
+                }
+            }
+            for project in projects {
+                let auth = authoritative.get(&Some(project.clone()));
+                let loc = local.get(&project);
+                candidates.push((
+                    format!("project:{project}"),
+                    Some(project),
+                    loc.map(|v| v.0),
+                    auth.map(|v| v.0),
+                    auth.map(|v| v.1.clone()).unwrap_or_default(),
+                    loc.map(|v| v.1.clone()).unwrap_or_default(),
+                ));
+            }
+            for (
+                match_key,
+                project_id,
+                local_amount,
+                authoritative_amount,
+                provider_revision_ids,
+                observation_ids,
+            ) in candidates
+            {
+                let (status, variance) = classify_reconciliation(
+                    local_amount,
+                    authoritative_amount,
+                    tolerance_nanousd,
+                    day_end,
+                    settlement_horizon_days,
+                    now,
+                );
+                let (reservation_count, reservation_amount) = if let Some(project) = &project_id {
+                    reservation_evidence(&tx, project, day, day_end)?
+                } else {
+                    (0, None)
+                };
+                type ExistingRow = (String, String, Option<i64>, Option<i64>, Option<i64>, i64);
+                let existing: Option<ExistingRow> = tx
+                    .query_row(
+                        "SELECT row_id,status,local_estimate_nanousd,authoritative_nanousd,variance_nanousd,tolerance_nanousd FROM current_reconciliation WHERE billing_source=?1 AND day_start=?2 AND match_key=?3",
+                        params![billing_source, day.to_rfc3339(), match_key],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(db)?;
+                let unchanged = existing.as_ref().is_some_and(
+                    |(
+                        _,
+                        existing_status,
+                        existing_local,
+                        existing_auth,
+                        existing_variance,
+                        existing_tolerance,
+                    )| {
+                        existing_status == status.as_str()
+                            && *existing_local == local_amount
+                            && *existing_auth == authoritative_amount
+                            && *existing_variance == variance
+                            && *existing_tolerance == tolerance_nanousd
+                    },
+                );
+                if unchanged {
+                    rows_unchanged += 1;
+                    if let Some((row_id, ..)) = existing {
+                        rows.push(fetch_reconciliation_row(&tx, &row_id)?);
+                    }
+                    continue;
+                }
+                let row_id = format!("recw_{}", random_hex()?);
+                let created_at = Utc::now().to_rfc3339();
+                tx.execute(
+                    "INSERT INTO reconciliation_rows(row_id,run_id,billing_source,day_start,day_end,match_key,project_id,status,local_estimate_nanousd,authoritative_nanousd,variance_nanousd,tolerance_nanousd,provider_revision_ids,observation_ids,reservation_evidence_count,reservation_evidence_nanousd,supersedes_row_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                    params![
+                        row_id,
+                        run_id,
+                        billing_source,
+                        day.to_rfc3339(),
+                        day_end.to_rfc3339(),
+                        match_key,
+                        project_id,
+                        status.as_str(),
+                        local_amount,
+                        authoritative_amount,
+                        variance,
+                        tolerance_nanousd,
+                        serde_json::to_string(&provider_revision_ids)
+                            .map_err(|e| FamiliarError::Database(e.to_string()))?,
+                        serde_json::to_string(&observation_ids)
+                            .map_err(|e| FamiliarError::Database(e.to_string()))?,
+                        reservation_count,
+                        reservation_amount,
+                        existing.map(|(row_id, ..)| row_id),
+                        created_at,
+                    ],
+                )
+                .map_err(db)?;
+                rows_appended += 1;
+                rows.push(fetch_reconciliation_row(&tx, &row_id)?);
+            }
+            day = day_end;
+        }
+        tx.commit().map_err(db)?;
+        Ok(ReconciliationSummary {
+            run_id,
+            rows_appended,
+            rows_unchanged,
+            rows,
+        })
+    }
+
+    /// Current-effective reconciliation rows for one durable project,
+    /// cached-only and read-only — never a network call.
+    pub fn reconciliation_for_project(
+        &self,
+        project_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> familiar_ai_core::Result<Vec<ReconciliationRow>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {RECONCILIATION_COLUMNS} FROM current_reconciliation WHERE project_id=?1 AND day_start>=?2 AND day_start<?3 ORDER BY day_start,billing_source"
+        )).map_err(db)?;
+        let rows = statement
+            .query_map(
+                params![project_id, start.to_rfc3339(), end.to_rfc3339()],
+                map_reconciliation_row,
+            )
+            .map_err(db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db)
+    }
+
+    /// Month-to-date cost per billing source, computed only from the
+    /// current-effective reconciliation projection — cached-only, no
+    /// network. `now` bounds the "to-date" cutoff and must be caller-supplied
+    /// for determinism.
+    pub fn month_to_date_by_source(
+        &self,
+        now: DateTime<Utc>,
+    ) -> familiar_ai_core::Result<Vec<SourceMonthSummary>> {
+        let month_start = Utc
+            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+            .unwrap();
+        let mut statement = self.conn.prepare("SELECT billing_source,status,local_estimate_nanousd,authoritative_nanousd,created_at FROM current_reconciliation WHERE day_start>=?1 AND day_start<?2 ORDER BY billing_source,day_start").map_err(db)?;
+        let rows = statement
+            .query_map(params![month_start.to_rfc3339(), now.to_rfc3339()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(db)?;
+        let mut by_source: BTreeMap<String, SourceMonthSummary> = BTreeMap::new();
+        for entry in rows {
+            let (source, status, local, authoritative, created_at) = entry.map_err(db)?;
+            let summary = by_source
+                .entry(source.clone())
+                .or_insert_with(|| SourceMonthSummary {
+                    billing_source: source.clone(),
+                    coverage_start: month_start.to_rfc3339(),
+                    coverage_end: now.to_rfc3339(),
+                    authoritative_nanousd: None,
+                    local_estimate_nanousd: None,
+                    unattributed_nanousd: None,
+                    reconciled_days: 0,
+                    reconciled_with_variance_days: 0,
+                    pending_days: 0,
+                    mismatch_days: 0,
+                    unattributed_provider_spend_days: 0,
+                    completeness: "complete".into(),
+                    freshness: created_at.clone(),
+                });
+            if created_at > summary.freshness {
+                summary.freshness = created_at;
+            }
+            match ReconciliationStatus::parse(&status) {
+                Some(ReconciliationStatus::UnattributedProviderSpend) => {
+                    summary.unattributed_provider_spend_days += 1;
+                    add_optional(&mut summary.unattributed_nanousd, authoritative);
+                }
+                Some(ReconciliationStatus::Reconciled) => {
+                    summary.reconciled_days += 1;
+                    add_optional(&mut summary.authoritative_nanousd, authoritative);
+                    add_optional(&mut summary.local_estimate_nanousd, local);
+                }
+                Some(ReconciliationStatus::ReconciledWithVariance) => {
+                    summary.reconciled_with_variance_days += 1;
+                    add_optional(&mut summary.authoritative_nanousd, authoritative);
+                    add_optional(&mut summary.local_estimate_nanousd, local);
+                }
+                Some(ReconciliationStatus::Pending) => {
+                    summary.pending_days += 1;
+                    add_optional(&mut summary.local_estimate_nanousd, local);
+                    summary.completeness = "incomplete".into();
+                }
+                Some(ReconciliationStatus::Mismatch) => {
+                    summary.mismatch_days += 1;
+                    add_optional(&mut summary.authoritative_nanousd, authoritative);
+                    add_optional(&mut summary.local_estimate_nanousd, local);
+                    summary.completeness = "incomplete".into();
+                }
+                None => {}
+            }
+        }
+        Ok(by_source.into_values().collect())
+    }
+
+    /// Month-to-date per billing source plus an optional aggregate that
+    /// preserves source attribution — the aggregate total travels alongside
+    /// the per-source breakdown, never in place of it, so a caller can never
+    /// lose which source contributed what.
+    pub fn month_to_date_report(
+        &self,
+        now: DateTime<Utc>,
+    ) -> familiar_ai_core::Result<MonthToDateReport> {
+        let sources = self.month_to_date_by_source(now)?;
+        let month_start = Utc
+            .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
+            .unwrap();
+        let mut aggregate = AggregateMonthSummary {
+            coverage_start: month_start.to_rfc3339(),
+            coverage_end: now.to_rfc3339(),
+            source_count: sources.len(),
+            ..Default::default()
+        };
+        for source in &sources {
+            add_optional(
+                &mut aggregate.authoritative_nanousd,
+                source.authoritative_nanousd,
+            );
+            add_optional(
+                &mut aggregate.local_estimate_nanousd,
+                source.local_estimate_nanousd,
+            );
+            add_optional(
+                &mut aggregate.unattributed_nanousd,
+                source.unattributed_nanousd,
+            );
+        }
+        Ok(MonthToDateReport { sources, aggregate })
+    }
+
+    /// PRD-032 scoring input: known local-estimate cost per (PRD, worker).
+    /// `authority` is `"unknown"` when no observation for that PRD/worker
+    /// has any nanoUSD cost_estimates row at all — that state must never be
+    /// treated as free by a caller ranking workers by cost.
+    pub fn accepted_prd_cost(&self) -> familiar_ai_core::Result<Vec<PrdCostScoreInput>> {
+        let mut statement = self.conn.prepare("SELECT e.prd_path,u.worker_identity,sum(CASE WHEN EXISTS(SELECT 1 FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.billing_mode='local-estimate') THEN coalesce((SELECT sum(amount) FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.billing_mode='local-estimate'),0) ELSE 0 END),sum(CASE WHEN NOT EXISTS(SELECT 1 FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.billing_mode='local-estimate') THEN 1 ELSE 0 END),count(*) FROM usage_observations u JOIN execution_history e ON e.execution_id=u.execution_id GROUP BY e.prd_path,u.worker_identity ORDER BY e.prd_path,u.worker_identity").map_err(db)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(db)?;
+        let mut out = Vec::new();
+        for entry in rows {
+            let (prd, worker_identity, known_total, unknown_count, total_count) =
+                entry.map_err(db)?;
+            let all_unknown = unknown_count == total_count;
+            out.push(PrdCostScoreInput {
+                prd,
+                worker_identity,
+                local_estimate_nanousd: if all_unknown { None } else { Some(known_total) },
+                authority: if all_unknown { "unknown" } else { "estimated" }.into(),
+                completeness: if unknown_count > 0 {
+                    "incomplete"
+                } else {
+                    "complete"
+                }
+                .into(),
+            });
+        }
+        Ok(out)
+    }
 }
 
 fn random_hex() -> familiar_ai_core::Result<String> {
@@ -880,6 +1416,103 @@ fn signed_decimal_nanousd(value: &str) -> Option<i64> {
 }
 fn db(e: rusqlite::Error) -> FamiliarError {
     FamiliarError::Database(e.to_string())
+}
+
+/// Provider cost with no matching local estimate is explicit unattributed
+/// spend. A local estimate with no matching provider cost stays pending
+/// until the settlement horizon, then becomes an explicit mismatch.
+/// Unexplained variance beyond tolerance is reported as a mismatch, never
+/// distributed to force totals to agree.
+fn classify_reconciliation(
+    local: Option<i64>,
+    authoritative: Option<i64>,
+    tolerance_nanousd: i64,
+    day_end: DateTime<Utc>,
+    settlement_horizon_days: i64,
+    now: DateTime<Utc>,
+) -> (ReconciliationStatus, Option<i64>) {
+    match (local, authoritative) {
+        (None, Some(_)) => (ReconciliationStatus::UnattributedProviderSpend, None),
+        (Some(_), None) => {
+            if now < day_end + Duration::days(settlement_horizon_days) {
+                (ReconciliationStatus::Pending, None)
+            } else {
+                (ReconciliationStatus::Mismatch, None)
+            }
+        }
+        (Some(local), Some(authoritative)) => {
+            let variance = authoritative.saturating_sub(local);
+            if variance == 0 {
+                (ReconciliationStatus::Reconciled, Some(0))
+            } else if variance.abs() <= tolerance_nanousd {
+                (ReconciliationStatus::ReconciledWithVariance, Some(variance))
+            } else {
+                (ReconciliationStatus::Mismatch, Some(variance))
+            }
+        }
+        (None, None) => (ReconciliationStatus::Pending, None),
+    }
+}
+
+/// Settled (committed) PRD-064 reservations attributable to `project_id`'s
+/// bound repositories, within the day — read as reconciliation evidence
+/// only. This never mutates reservation state and never feeds back into
+/// live warrant enforcement.
+fn reservation_evidence(
+    conn: &Connection,
+    project_id: &str,
+    day_start: DateTime<Utc>,
+    day_end: DateTime<Utc>,
+) -> familiar_ai_core::Result<(i64, Option<i64>)> {
+    conn.query_row(
+        "SELECT count(*),sum(ri.observed_amount) FROM resource_reservation_items ri JOIN resource_reservations r ON r.reservation_id=ri.reservation_id WHERE ri.resource_type=?1 AND r.state='committed' AND r.resolved_at>=?2 AND r.resolved_at<?3 AND r.project_id IN (SELECT evidence_value FROM project_registry_bindings WHERE project_id=?4 AND evidence_kind='repository')",
+        params![
+            ResourceType::NanousdBudget.as_str(),
+            day_start.to_rfc3339(),
+            day_end.to_rfc3339(),
+            project_id
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(db)
+}
+
+const RECONCILIATION_COLUMNS: &str = "row_id,run_id,billing_source,day_start,day_end,match_key,project_id,status,local_estimate_nanousd,authoritative_nanousd,variance_nanousd,tolerance_nanousd,provider_revision_ids,observation_ids,reservation_evidence_count,reservation_evidence_nanousd,created_at";
+
+fn map_reconciliation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReconciliationRow> {
+    let provider_revision_ids: String = row.get(12)?;
+    let observation_ids: String = row.get(13)?;
+    Ok(ReconciliationRow {
+        row_id: row.get(0)?,
+        run_id: row.get(1)?,
+        billing_source: row.get(2)?,
+        day_start: row.get(3)?,
+        day_end: row.get(4)?,
+        match_key: row.get(5)?,
+        project_id: row.get(6)?,
+        status: row.get(7)?,
+        local_estimate_nanousd: row.get(8)?,
+        authoritative_nanousd: row.get(9)?,
+        variance_nanousd: row.get(10)?,
+        tolerance_nanousd: row.get(11)?,
+        provider_revision_ids: serde_json::from_str(&provider_revision_ids).unwrap_or_default(),
+        observation_ids: serde_json::from_str(&observation_ids).unwrap_or_default(),
+        reservation_evidence_count: row.get(14)?,
+        reservation_evidence_nanousd: row.get(15)?,
+        created_at: row.get(16)?,
+    })
+}
+
+fn fetch_reconciliation_row(
+    conn: &Connection,
+    row_id: &str,
+) -> familiar_ai_core::Result<ReconciliationRow> {
+    conn.query_row(
+        &format!("SELECT {RECONCILIATION_COLUMNS} FROM reconciliation_rows WHERE row_id=?1"),
+        [row_id],
+        map_reconciliation_row,
+    )
+    .map_err(db)
 }
 
 #[cfg(test)]
@@ -1121,5 +1754,468 @@ mod tests {
         assert!(repo.append_openai_cost_revision(&fact).unwrap());
         let rows: (i64, i64, i64) = db.conn().query_row("SELECT count(*), max(amount_nanousd), sum(supersedes_revision_id IS NOT NULL) FROM openai_cost_revisions", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert_eq!(rows, (2, 2, 1));
+    }
+
+    fn local_dollar_estimate(
+        repo: &AccountingRepository<'_>,
+        execution_id: &str,
+        repository_evidence: &str,
+        period_start: &str,
+        lexical_usd: &str,
+        hash: &str,
+    ) {
+        ExecutionHistoryRepository::new(repo.conn)
+            .insert_running(&ExecutionStart {
+                execution_id: execution_id.into(),
+                started_at: period_start.into(),
+                repository: repository_evidence.into(),
+                worktree: repository_evidence.into(),
+                git_commit: None,
+                prd_path: "docs/prds/PRD-053.md".into(),
+                unavailable_fields: BTreeMap::new(),
+            })
+            .unwrap();
+        let value = UsageObservation {
+            execution_id,
+            attempt_id: "attempt-1",
+            stage: "implementation",
+            session_id: None,
+            worker_identity: "anthropic/claude",
+            adapter: "claude-code",
+            cli_version: None,
+            model_identity: Some("claude"),
+            service_tier: None,
+            provider_request_id: None,
+            uncached_input_tokens: Some(1),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            output_tokens: Some(1),
+            reasoning_output_tokens: None,
+            unknown_reason: None,
+            period_start,
+            period_end: period_start,
+            terminal_status: "succeeded",
+            source_event_hash: hash,
+            provider_cost_lexical: Some(lexical_usd),
+            project_resolution_evidence: Some(repository_evidence),
+            output_register_id: "none",
+            output_register_version: "none",
+            input_compression_id: "none",
+            input_compression_version: "none",
+            compression_experiment: None,
+            compression_lane: None,
+        };
+        let observation = repo.append_observation(&value).unwrap().unwrap();
+        repo.append_vendor_estimate(&observation, lexical_usd)
+            .unwrap();
+    }
+
+    fn provider_row(workspace: &str, amount: &str) -> crate::repos::billing::ProviderCostRow {
+        crate::repos::billing::ProviderCostRow {
+            bucket_start: "2026-08-01T00:00:00Z".into(),
+            bucket_end: "2026-08-02T00:00:00Z".into(),
+            workspace_id: workspace.into(),
+            description: "usage".into(),
+            charge_class: "token-spend".into(),
+            currency: "USD".into(),
+            amount_lexical: amount.into(),
+            provider_payload: format!("{{\"workspace\":\"{workspace}\",\"amount\":\"{amount}\"}}"),
+        }
+    }
+
+    #[test]
+    fn reconciliation_matches_variance_unattributed_and_pending_then_mismatch() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repo = AccountingRepository::new(db.conn());
+        repo.register_project("prj_a00000000000001", "A", "repository", "repo-a", "test")
+            .unwrap();
+        repo.register_project("prj_b00000000000001", "B", "repository", "repo-b", "test")
+            .unwrap();
+        repo.register_project("prj_c00000000000001", "C", "repository", "repo-c", "test")
+            .unwrap();
+        local_dollar_estimate(
+            &repo,
+            "exec-a",
+            "repo-a",
+            "2026-08-01T10:00:00Z",
+            "1.00",
+            "h-a",
+        );
+        local_dollar_estimate(
+            &repo,
+            "exec-b",
+            "repo-b",
+            "2026-08-01T10:00:00Z",
+            "1.00",
+            "h-b",
+        );
+        local_dollar_estimate(
+            &repo,
+            "exec-c",
+            "repo-c",
+            "2026-08-01T10:00:00Z",
+            "0.50",
+            "h-c",
+        );
+        repo.bind_provider(
+            "prj_a00000000000001",
+            "org-main",
+            "workspace",
+            "wrk_a",
+            "exact",
+            "test",
+        )
+        .unwrap();
+        repo.bind_provider(
+            "prj_b00000000000001",
+            "org-main",
+            "workspace",
+            "wrk_b",
+            "exact",
+            "test",
+        )
+        .unwrap();
+
+        let billing = crate::repos::billing::BillingRepository::new(db.conn());
+        billing
+            .bind_source(&crate::repos::billing::BillingSource {
+                name: "org-main",
+                mode: "anthropic-organization",
+                organization_id: "org_main",
+                organization_name: "Main",
+                credential_reference: "env: ADMIN_MAIN",
+            })
+            .unwrap();
+        billing
+            .commit_complete(
+                "org-main",
+                "2026-08-01T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+                &[
+                    provider_row("wrk_a", "1.00"),
+                    provider_row("wrk_b", "1.01"),
+                    provider_row("wrk_unbound", "2.00"),
+                ],
+            )
+            .unwrap();
+
+        let start = parse_utc("2026-08-01T00:00:00Z".into()).unwrap();
+        let end = parse_utc("2026-08-02T00:00:00Z".into()).unwrap();
+        let within_horizon = parse_utc("2026-08-01T12:00:00Z".into()).unwrap();
+        let summary = repo
+            .reconcile_window(
+                "org-main",
+                start,
+                end,
+                "explicit",
+                10_000_000,
+                3,
+                within_horizon,
+                "operator",
+            )
+            .unwrap();
+        assert_eq!(summary.rows_appended, 4);
+        assert_eq!(summary.rows_unchanged, 0);
+        let by_key = |rows: &[ReconciliationRow], key: &str| {
+            rows.iter().find(|r| r.match_key == key).cloned().unwrap()
+        };
+        let a = by_key(&summary.rows, "project:prj_a00000000000001");
+        assert_eq!(a.status, "reconciled");
+        assert_eq!(a.variance_nanousd, Some(0));
+        assert_eq!(a.local_estimate_nanousd, Some(1_000_000_000));
+        assert_eq!(a.authoritative_nanousd, Some(1_000_000_000));
+
+        let b = by_key(&summary.rows, "project:prj_b00000000000001");
+        assert_eq!(b.status, "reconciled-with-variance");
+        assert_eq!(b.variance_nanousd, Some(10_000_000));
+
+        let unattributed = by_key(&summary.rows, "unattributed");
+        assert_eq!(unattributed.status, "unattributed-provider-spend");
+        assert_eq!(unattributed.project_id, None);
+        assert_eq!(unattributed.authoritative_nanousd, Some(2_000_000_000));
+        assert_eq!(unattributed.local_estimate_nanousd, None);
+
+        let c = by_key(&summary.rows, "project:prj_c00000000000001");
+        assert_eq!(c.status, "pending");
+        assert_eq!(c.local_estimate_nanousd, Some(500_000_000));
+        assert_eq!(c.authoritative_nanousd, None);
+
+        // Re-running the identical window is idempotent: no new rows.
+        let rerun = repo
+            .reconcile_window(
+                "org-main",
+                start,
+                end,
+                "explicit",
+                10_000_000,
+                3,
+                within_horizon,
+                "operator",
+            )
+            .unwrap();
+        assert_eq!(rerun.rows_appended, 0);
+        assert_eq!(rerun.rows_unchanged, 4);
+
+        // Past the settlement horizon, project C's unmatched local estimate
+        // becomes an explicit mismatch instead of staying pending forever.
+        let past_horizon = parse_utc("2026-08-06T00:00:00Z".into()).unwrap();
+        let later = repo
+            .reconcile_window(
+                "org-main",
+                start,
+                end,
+                "explicit",
+                10_000_000,
+                3,
+                past_horizon,
+                "operator",
+            )
+            .unwrap();
+        assert_eq!(later.rows_appended, 1);
+        assert_eq!(later.rows_unchanged, 3);
+        let c2 = by_key(&later.rows, "project:prj_c00000000000001");
+        assert_eq!(c2.status, "mismatch");
+
+        // history is preserved: two rows now exist for project C.
+        let total: i64 = db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM reconciliation_rows WHERE match_key='project:prj_c00000000000001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn reconciliation_reopens_window_on_superseding_provider_revision() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repo = AccountingRepository::new(db.conn());
+        repo.register_project("prj_a00000000000002", "A", "repository", "repo-a", "test")
+            .unwrap();
+        local_dollar_estimate(
+            &repo,
+            "exec-a",
+            "repo-a",
+            "2026-08-01T10:00:00Z",
+            "1.00",
+            "h-a",
+        );
+        repo.bind_provider(
+            "prj_a00000000000002",
+            "org-main",
+            "workspace",
+            "wrk_a",
+            "exact",
+            "test",
+        )
+        .unwrap();
+        let billing = crate::repos::billing::BillingRepository::new(db.conn());
+        billing
+            .bind_source(&crate::repos::billing::BillingSource {
+                name: "org-main",
+                mode: "anthropic-organization",
+                organization_id: "org_main",
+                organization_name: "Main",
+                credential_reference: "env: ADMIN_MAIN",
+            })
+            .unwrap();
+        billing
+            .commit_complete(
+                "org-main",
+                "2026-08-01T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+                &[provider_row("wrk_a", "1.00")],
+            )
+            .unwrap();
+        let start = parse_utc("2026-08-01T00:00:00Z".into()).unwrap();
+        let end = parse_utc("2026-08-02T00:00:00Z".into()).unwrap();
+        let now = parse_utc("2026-08-01T12:00:00Z".into()).unwrap();
+        let first = repo
+            .reconcile_window(
+                "org-main", start, end, "collect", 10_000_000, 3, now, "system",
+            )
+            .unwrap();
+        assert_eq!(first.rows_appended, 1);
+        assert_eq!(first.rows[0].status, "reconciled");
+        let first_row_id = first.rows[0].row_id.clone();
+
+        // A provider correction supersedes the original revision.
+        billing
+            .commit_complete(
+                "org-main",
+                "2026-08-01T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+                &[provider_row("wrk_a", "1.50")],
+            )
+            .unwrap();
+        let second = repo
+            .reconcile_window(
+                "org-main", start, end, "collect", 10_000_000, 3, now, "system",
+            )
+            .unwrap();
+        assert_eq!(second.rows_appended, 1);
+        assert_eq!(second.rows[0].status, "mismatch");
+        assert_eq!(second.rows[0].authoritative_nanousd, Some(1_500_000_000));
+        let row_id: String = db
+            .conn()
+            .query_row(
+                "SELECT supersedes_row_id FROM reconciliation_rows WHERE row_id=?1",
+                [&second.rows[0].row_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_id, first_row_id);
+
+        // History is retained: both rows still exist; only the newer is
+        // current-effective.
+        let total: i64 = db
+            .conn()
+            .query_row("SELECT count(*) FROM reconciliation_rows", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
+        let current: Vec<String> = {
+            let mut statement = db
+                .conn()
+                .prepare("SELECT row_id FROM current_reconciliation")
+                .unwrap();
+            statement
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(current, vec![second.rows[0].row_id.clone()]);
+    }
+
+    #[test]
+    fn month_to_date_and_prd_cost_score_labels_authority_and_unknown() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repo = AccountingRepository::new(db.conn());
+        repo.register_project("prj_m00000000000001", "M", "repository", "repo-m", "test")
+            .unwrap();
+        local_dollar_estimate(
+            &repo,
+            "exec-m",
+            "repo-m",
+            "2026-08-01T10:00:00Z",
+            "1.00",
+            "h-m",
+        );
+        repo.bind_provider(
+            "prj_m00000000000001",
+            "org-main",
+            "workspace",
+            "wrk_m",
+            "exact",
+            "test",
+        )
+        .unwrap();
+        let billing = crate::repos::billing::BillingRepository::new(db.conn());
+        billing
+            .bind_source(&crate::repos::billing::BillingSource {
+                name: "org-main",
+                mode: "anthropic-organization",
+                organization_id: "org_main",
+                organization_name: "Main",
+                credential_reference: "env: ADMIN_MAIN",
+            })
+            .unwrap();
+        billing
+            .commit_complete(
+                "org-main",
+                "2026-08-01T00:00:00Z",
+                "2026-08-02T00:00:00Z",
+                &[provider_row("wrk_m", "1.00")],
+            )
+            .unwrap();
+        let start = parse_utc("2026-08-01T00:00:00Z".into()).unwrap();
+        let end = parse_utc("2026-08-02T00:00:00Z".into()).unwrap();
+        let now = parse_utc("2026-08-15T00:00:00Z".into()).unwrap();
+        repo.reconcile_window(
+            "org-main", start, end, "explicit", 10_000_000, 3, now, "test",
+        )
+        .unwrap();
+
+        let months = repo.month_to_date_by_source(now).unwrap();
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].billing_source, "org-main");
+        assert_eq!(months[0].reconciled_days, 1);
+        assert_eq!(months[0].authoritative_nanousd, Some(1_000_000_000));
+        assert_eq!(months[0].local_estimate_nanousd, Some(1_000_000_000));
+        assert_eq!(months[0].completeness, "complete");
+
+        // The aggregate travels alongside the per-source breakdown, never
+        // instead of it.
+        let report = repo.month_to_date_report(now).unwrap();
+        assert_eq!(report.sources, months);
+        assert_eq!(report.aggregate.source_count, 1);
+        assert_eq!(report.aggregate.authoritative_nanousd, Some(1_000_000_000));
+        assert_eq!(report.aggregate.local_estimate_nanousd, Some(1_000_000_000));
+
+        // A separate execution with no cost estimate at all is unknown, not
+        // free — it must never be exposed as a rankable-cheap zero cost.
+        ExecutionHistoryRepository::new(db.conn())
+            .insert_running(&ExecutionStart {
+                execution_id: "exec-unknown".into(),
+                started_at: "2026-08-01T10:00:00Z".into(),
+                repository: "repo-m".into(),
+                worktree: "repo-m".into(),
+                git_commit: None,
+                prd_path: "docs/prds/PRD-053.md".into(),
+                unavailable_fields: BTreeMap::new(),
+            })
+            .unwrap();
+        let unknown = AccountingRepository::new(db.conn());
+        unknown
+            .append_observation(&UsageObservation {
+                execution_id: "exec-unknown",
+                attempt_id: "attempt-1",
+                stage: "implementation",
+                session_id: None,
+                worker_identity: "codex/gpt",
+                adapter: "codex",
+                cli_version: None,
+                model_identity: None,
+                service_tier: None,
+                provider_request_id: None,
+                uncached_input_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                output_tokens: None,
+                reasoning_output_tokens: None,
+                unknown_reason: Some("adapter never reports usage"),
+                period_start: "2026-08-01T10:00:00Z",
+                period_end: "2026-08-01T10:00:00Z",
+                terminal_status: "succeeded",
+                source_event_hash: "h-unknown",
+                provider_cost_lexical: None,
+                project_resolution_evidence: Some("repo-m"),
+                output_register_id: "none",
+                output_register_version: "none",
+                input_compression_id: "none",
+                input_compression_version: "none",
+                compression_experiment: None,
+                compression_lane: None,
+            })
+            .unwrap();
+
+        let scores = repo.accepted_prd_cost().unwrap();
+        let known = scores
+            .iter()
+            .find(|s| s.worker_identity == "anthropic/claude")
+            .unwrap();
+        assert_eq!(known.authority, "estimated");
+        assert_eq!(known.local_estimate_nanousd, Some(1_000_000_000));
+        let unknown_score = scores
+            .iter()
+            .find(|s| s.worker_identity == "codex/gpt")
+            .unwrap();
+        assert_eq!(unknown_score.authority, "unknown");
+        assert_eq!(unknown_score.local_estimate_nanousd, None);
     }
 }

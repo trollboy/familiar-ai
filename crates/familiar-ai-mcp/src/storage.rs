@@ -15,9 +15,9 @@ use familiar_ai_storage::repos::file_summary::{
     search_file_summaries as repo_search_summaries,
 };
 use familiar_ai_storage::{
-    BacklogEntryRow, BudgetSummary, DeliveryDecisionRow, DeliveryRepository, DriverAttempt,
-    DriverRepository, DriverSession, ExecutionCheckpoint, PendingGate, RecoveryEventRow,
-    ReviewFindingsRow, UsageSeriesPoint, UsageSeriesRequest,
+    AccountingRepository, BacklogEntryRow, BudgetSummary, DeliveryDecisionRow, DeliveryRepository,
+    DriverAttempt, DriverRepository, DriverSession, ExecutionCheckpoint, PendingGate,
+    ReconciliationRow, RecoveryEventRow, ReviewFindingsRow, UsageSeriesPoint, UsageSeriesRequest,
 };
 use familiar_ai_storage::{
     CheckpointRepository, Database, DecisionRepository, FileSummaryRepository, ProjectRepository,
@@ -30,6 +30,15 @@ pub enum StorageError {
     NotFound,
     #[error("storage error: {0}")]
     Other(String),
+}
+
+/// PRD-053 reconciliation query result. `project_id` is `None` when the
+/// repository has no durable project binding — the caller must never treat
+/// an empty `rows` in that case as "reconciled clean".
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReconciliationQueryResult {
+    pub project_id: Option<String>,
+    pub rows: Vec<ReconciliationRow>,
 }
 
 /// Storage abstraction for tools.
@@ -202,6 +211,19 @@ pub trait Storage: Send + Sync {
         _limit: usize,
     ) -> Result<Vec<PendingGate>, StorageError> {
         Ok(Vec::new())
+    }
+
+    /// PRD-053: current-effective cost reconciliation for the durable
+    /// project this repository resolves to. `project_id` is `None` when the
+    /// repository has no durable project binding — never another
+    /// repository's rows.
+    async fn get_reconciliation(
+        &self,
+        _repository_key: &str,
+        _start: &str,
+        _end: &str,
+    ) -> Result<ReconciliationQueryResult, StorageError> {
+        Ok(ReconciliationQueryResult::default())
     }
 
     // --- Stewardship mutations (PRD-035) ---
@@ -593,6 +615,32 @@ impl Storage for SqliteStorage {
     ) -> Result<Vec<PendingGate>, StorageError> {
         let db = self.db.lock().unwrap();
         familiar_ai_storage::pending_human_gates(db.conn(), repository_key, limit).map_err(map_err)
+    }
+
+    async fn get_reconciliation(
+        &self,
+        repository_key: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<ReconciliationQueryResult, StorageError> {
+        let db = self.db.lock().unwrap();
+        let accounting = AccountingRepository::new(db.conn());
+        let Ok(project_id) = accounting.project_id(repository_key) else {
+            return Ok(ReconciliationQueryResult::default());
+        };
+        let start = chrono::DateTime::parse_from_rfc3339(start)
+            .map_err(|e| StorageError::Other(format!("invalid start timestamp: {e}")))?
+            .with_timezone(&chrono::Utc);
+        let end = chrono::DateTime::parse_from_rfc3339(end)
+            .map_err(|e| StorageError::Other(format!("invalid end timestamp: {e}")))?
+            .with_timezone(&chrono::Utc);
+        let rows = accounting
+            .reconciliation_for_project(&project_id, start, end)
+            .map_err(map_err)?;
+        Ok(ReconciliationQueryResult {
+            project_id: Some(project_id),
+            rows,
+        })
     }
 
     async fn backlog_recover(

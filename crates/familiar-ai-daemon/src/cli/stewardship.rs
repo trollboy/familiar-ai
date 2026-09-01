@@ -64,6 +64,9 @@ pub enum StewardshipCommand {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Show current-effective cost reconciliation (PRD-053) for this
+    /// repository's durable project over a UTC range.
+    Reconciliation { start: String, end: String },
 }
 
 /// Read-only: shares its query implementation with the dashboard's
@@ -112,6 +115,9 @@ pub fn stewardship_command(command: StewardshipCommand) -> Result<(), String> {
         }
         StewardshipCommand::Gates { limit } => {
             crate::stewardship::list_pending_human_gates(&db, &repository, limit)
+        }
+        StewardshipCommand::Reconciliation { start, end } => {
+            crate::stewardship::get_reconciliation(&db, &repository, &start, &end)
         }
     }
     .map_err(|e| e.to_string())?;
