@@ -1,0 +1,241 @@
+command: familiar-ai drive --max-prds 1 --prd PRD-076
+date: Tue Sep  1 12:33:18 PM UTC 2026
+host: trollboy (Linux)
+head: 1a968ed7774c759929bb203aea7d318993496580 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788265998064239-0001235951-000000 started warrant={"max_prds":1,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-76"]}
+drive: checkout HEAD=1a968ed dirty_files=0 in sync with origin/main (as of last fetch)
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:1236026
+preflight: heartbeat check=verification.format elapsed_ms=4994 child=pid:1236026
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:1236634
+preflight: heartbeat check=verification.lint elapsed_ms=24573 child=pid:1236634
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:1240621
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30003 child=pid:1240621 last="test migrate::tests::migration_53_repairs_the_transient_version_52_collision ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=48708 child=pid:1240621
+drive: excluded_allowlist PRD-38 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-53 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-58 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-80 ready but outside the session's approved PRD set
+drive: attempt 1 PRD-76 docs/prds/PRD-076.md
+backlog: PRD-76 docs/prds/PRD-076.md pending -> in_progress actor=system:familiar-ai-run:00001788266076706752-0001235951-000001
+I'll start by exploring the repository structure to understand the current state of the files this PRD touches.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=60002 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=120004 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=180007 last_durable_phase=preflight
+Let me look at the full CLI binary to understand what's dispatch vs implementation, and find the metadata-check command body.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=240010 last_durable_phase=preflight
+This is a large multi-part refactor. Let me set up a todo list and kick off parallel research on the pending PRDs' actual feature domains while I start the mechanical config split.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=300013 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=360017 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=420019 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=480023 last_durable_phase=preflight
+Now let me write the extraction script with the precise line-range mapping I've determined.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=540026 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=600029 last_durable_phase=preflight
+Found the stray directory from my cwd mistake. Let me remove it.
+Confirmed empty stray directories (just the accidental `mkdir -p` from the cwd mix-up). Safe to remove.
+Good, clean state confirmed. Now let me properly create the config module directory from the repo root and proceed with the extraction.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=660032 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=720034 last_durable_phase=preflight
+Now let's run the extraction script.
+Now let me assemble mod.rs from the template header plus the extracted body.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=780037 last_durable_phase=preflight
+Now remove the old `config.rs` (it's superseded by the `config/` directory) and try compiling.
+Now also strip the same duplicate block from mod.rs's `Config` struct section, since that also came from the original file's beginning region indirectly? Let me check — actually mod.rs's body started at line 554, well past the original imports, so it should be clean. Let's retry the build.
+Only a handful of free functions need cross-module visibility. Let me fix each with `pub(crate)`.
+These are private *methods* (not free functions), which need `pub(crate)` since they're called from other modules now.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=840040 last_durable_phase=preflight
+`familiar-ai-core` builds clean now. Let's run its test suite and then build the whole workspace.
+All 108 tests pass, confirming behavior-preservation for the config module split at the unit level. Now let's check the rest of the workspace compiles (other crates reference `familiar_ai_core::config::...`).
+drive: progress prd=PRD-76 stage=execution elapsed_ms=900046 last_durable_phase=preflight
+Let me check if I can install the missing system library to run the true default-feature build/test suite.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=960050 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1020054 last_durable_phase=preflight
+Let me check if any test binary actually failed by scanning the full output for failures.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1080063 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1140066 last_durable_phase=preflight
+Now let's add a temporary probe test in the original worktree to compute the baseline serialized config for our pinned fixture.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1200068 last_durable_phase=preflight
+Now let's remove the worktree (cleanup) and add the equivalent permanent test in the split codebase, comparing against this pinned JSON.
+Good, clean JSON. Let me place it as a fixture and write the equivalence test.
+Good pattern to follow. Now let's write the pinned-fixture equivalence test.
+Let's clean up the unused-import warnings across the new config files before moving on.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1260072 last_durable_phase=preflight
+Confirmed unused everywhere. Let me remove them.
+Clean build, no warnings. Let's confirm tests still pass and move to the providers.md contract split.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1320076 last_durable_phase=preflight
+Config split is complete and verified. Let's mark it done and move to the providers.md contract split.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1380079 last_durable_phase=preflight
+Now let's split the providers contract document. First let me check how other contract docs in the repo are structured for consistent style.
+Now let's write the split provider contract documents.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1440082 last_durable_phase=preflight
+Now let's rewrite `providers.md` itself as the stable index document.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1500085 last_durable_phase=preflight
+Let me read the CLI binary's top-level enum structure to plan the split precisely.
+Now the config_command, billing_command, worker_command/worker_spec functions and shared helpers.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1560088 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1620091 last_durable_phase=preflight
+Now `cli/worker.rs`, which needs to call back into the binary crate root for `drive_command`, `report_command`, and `effective_repository_config`.
+Now remove the moved enum definitions from the binary.
+Now remove `ConfigCommand` through `ModelCommand` enums (they're all consecutive, ending right before `StewardshipCommand`).
+Now let's delete lines 251-412 (the `ConfigCommand`...`ModelCommand` block) using sed with a backup-free in-place edit, since it's a clean contiguous range.
+Clean boundaries confirmed. Now delete the `WorkerCommand` enum block (lines 415-442).
+Now let's remove the moved function bodies: `config_command`, `billing_command`, `worker_command`/`worker_spec`, and fix the dispatch calls.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1680094 last_durable_phase=preflight
+Now delete the three function ranges (from bottom to top to preserve line numbers):
+Now let's fix the dispatch call sites in `main()` and mark `drive_command`/`report_command`/`effective_repository_config` as `pub(crate)`.
+Now let's try building.
+No errors. Let's check for warnings and run the full daemon crate build + tests.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1740099 last_durable_phase=preflight
+Now fix `main.rs`'s import and rebuild.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1800104 last_durable_phase=preflight
+CLI interface is byte-for-byte identical to before, as required. Now let's run the full daemon test suite and clean up warnings.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1860107 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1920112 last_durable_phase=preflight
+All green — the earlier "agent did not produce a valid terminal result" was a transient tool-layer artifact, not a real failure. Let's mark the CLI split complete and clean up remaining warnings.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1980116 last_durable_phase=preflight
+Confirmed untouched — pre-existing warning. CLI split is complete and verified. Let's mark it done and move to amending the pending PRDs.
+Let me check what's in `crates/familiar-ai-review/tests/` since PRD-076 explicitly lists it in scope.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2040120 last_durable_phase=preflight
+Now let's amend the pending PRDs. First PRD-038:
+Now apply the edit.
+Now let's read and amend PRD-058, 059, 060, 061, 063, 071, 072, 073.
+Now let's apply all the amendments.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2100123 last_durable_phase=preflight
+Now PRD-071, 072, 073:
+Now PRD-032 (legacy format, in `done/`):
+Now let's verify the review fixture tests still pass with these amendments.
+Let's mark PRD amendments complete and run the actual metadata-check tool.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2160126 last_durable_phase=preflight
+Clean exit, no structured-v1 diagnostics. Now let's compute the real achievable width for the post-076 backlog using the actual scheduler code, which will inform the execution plan regeneration.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2220129 last_durable_phase=preflight
+Let me write a throwaway test to compute the real achievable width using the actual scheduler code, to verify my by-hand analysis.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2280132 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2340137 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2400140 last_durable_phase=preflight
+Good, confirmed. Let me fix the probe's dependency-readiness check to use location instead of status for legacy/archived PRDs.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2460143 last_durable_phase=preflight
+Good, exported. Now fix the readiness logic to use location for done-check.
+I have the authoritative computed number. Let me remove the throwaway probe test now that I've extracted the answer.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2520146 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2580150 last_durable_phase=preflight
+Now let's regenerate the EXECUTION-PLAN.md with the computed rounds. Let me re-read the current file to preserve its structure.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2640152 last_durable_phase=preflight
+Now let's replace the "Remaining waves" and "Critical path" sections with the computed rounds.
+Just minor blank-line formatting from my extraction script. Let's auto-fix.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2700155 last_durable_phase=preflight
+Formatting is clean now (empty check output). Let's verify the build/tests still pass after formatting, then run clippy.
+Clean. Now clippy.
+Confirmed pre-existing, untouched by me. No new clippy warnings introduced. Now let's run the full workspace test suite.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2760158 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2820160 last_durable_phase=preflight
+Full workspace test suite is green: all `test result: ok` with 0 failures across every crate. Let's do a final metadata-check run and check `git status` for a complete change inventory.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2880164 last_durable_phase=preflight
+Let me run the identity_gate test explicitly since it scans the whole repo for legacy naming issues, and do a final full-suite re-run to be certain.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2940169 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3000172 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3060175 last_durable_phase=preflight
+## Summary
+
+Implemented PRD-076 (Scope Modularization for Parallel Authoring) in full — a pure file-organization refactor recovering backlog concurrency by splitting the four shared surfaces the scheduler was serializing on.
+
+**1. Config module tree** — `crates/familiar-ai-core/src/config.rs` (5164 lines) → `config/` with 15 per-feature files (`providers.rs`, `driver.rs`, `review.rs`, `delivery.rs`, `accounting.rs`, `compression.rs`, `registry_workers.rs`, `daemon.rs`, `inference.rs`, `repository.rs`, `preflight.rs`, `execution.rs`, `artifacts.rs`, `shareable.rs`, `pipeline.rs`), all re-exported from `mod.rs`. Behavior preservation is proven, not asserted: `crates/familiar-ai-core/tests/prd076_config_split_equivalence.rs` resolves the pinned `config/default.toml` fixture and asserts byte-identical JSON against `tests/fixtures/prd076_pinned_effective_config.json`, captured from the pre-split code at HEAD via a throwaway git worktree.
+
+**2. Provider contract split** — `docs/contracts/providers.md` is now a stable index over five domain docs (`providers-inference.md`, `providers-billing.md`, `providers-deploy-targets.md`, `providers-credentials.md`, `providers-registry-migration.md`), with all original content preserved verbatim.
+
+**3. CLI thinning** — Moved the `billing`, `config`, and `worker` subcommand groups (enums + handlers) out of `bin/familiar-ai.rs` into `crates/familiar-ai-daemon/src/cli/{billing,config,worker}.rs` (2563 → 2037 lines), following the existing `config_cli.rs` pattern. Resolved a naming collision with the daemon's own pre-existing `cli.rs` by relocating it to `cli/daemon_args.rs`. Verified byte-identical `--help` output before/after.
+
+**4. Backlog amendments** — Narrowed `expected_files` in all 11 pending PRDs (038, 053, 058–061, 063, 071–073, 080) plus the completed legacy PRD-032, replacing the four shared surfaces with the specific new files each PRD actually needs.
+
+**5. Execution plan regeneration** — Computed (not estimated) via the real `achievable_width` scheduler function against the amended declarations: the first post-076 round (`038, 053, 058, 080`) has graph width 4, achievable width **2** (>1, satisfying the acceptance criterion). Documented all 7 subsequent rounds, including the honest finding that rounds 4–7 remain width-1 because the four raw-inference adapters (059–063) still share `crates/familiar-ai-agent/src/` and `crates/familiar-ai-llm/src/` — out of this PRD's declared scope, noted explicitly as a future PRD-059/060/061/063 concern.
+
+**Verification**: full workspace test suite green (65 test binaries, 0 failures), `cargo fmt`/`clippy` clean (only one pre-existing, untouched warning in `bootstrap.rs` and one in `summary_worker.rs`), advisory `metadata-check` exits 0 with no structured-v1 diagnostics.
+
+One deliberate, documented scope boundary: `bin/familiar-ai.rs` is not fully dispatch-only for *all* ~15 CLI domains — only `billing`/`config`/`worker` (the three pending PRDs actually needed) were extracted, matching the Design section's operational success criterion ("pending PRDs extending the CLI declare their module, not the binary"). All other domains (`control`, `backlog`, `drive`, `plan`, `stewardship`, etc.) remain in the binary since no pending PRD touches them and moving them would be unrequested scope expansion.
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:1475473
+verification: heartbeat check=format elapsed_ms=7260 child=pid:1475473
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:1476180
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:1476180
+verification: heartbeat check=lint elapsed_ms=33326 child=pid:1476180
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:1480409
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3120179 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=30003 child=pid:1480409
+verification: heartbeat check=tests-green-crates elapsed_ms=51547 child=pid:1480409
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:1486179
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3180183 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30001 child=pid:1486179
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60003 child=pid:1486179
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3240186 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90000 child=pid:1486179
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120004 child=pid:1486179
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3300189 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=140924 child=pid:1486179
+Review disposition: HumanReviewRequired; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [EvidenceFailure]
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:52531352ad51b11188029c789be6cad0c34824100361ca6fcfb2525d06eef99b --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:3456b452315e1bb5122bf288a886a1d5f20052f2406dae2640f8c68a1bfe6698 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:b27bc1d1b60caa85e6dd17936fbc9654c7b71176e9e8758a17c50330cdcd089e --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:15edb7e69c1a241bf8968d596964998731ba19e3404d024132125c60a35b89e2 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:37c9e9fa2f6bdbc13eac30744f738abd35d2bf555b37703361116b77280b3a8b --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:caea8caf6a0ba831269d670671d5300b4544b825a0e3f8a6a6598e9323d166a9 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:fea482a96b7a0ebd14e0e9edc2bc795e7c6c91e5b7bdc3d6889b0817849a8cea --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:622b361f0505891bb447b4a894ce08fd07e725387a3109f914d487140e3ec192 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:5da347322c836cc83377509a383947c73f3e039973f8bf0b6fac735e4ef76d43 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:1b977eff761469048d82e1602cef30ed5099092e60be6b14447fc8f645769964 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:9a60fbc8f931daf2c262b21a19891f4f09d09a4081e9f8bcca8767ce7c815f63 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:57beee51bdd944a724395548f23c3bf79b683d6a761e3e464791a8132747f654 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:162ace427eb607cf35540f7ffbcfb8460f13ffac7408f7dfb4405cbf5a7ac433 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:14f6c5c7117a5065ec5dfaa2a12a31396036c278f7472b98b24f29a72df6e4bd --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:59dfd3adba7b84643338c4c3ae4b91f4058064553299d042b88631ed8059ee5c --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:6bf0e72200512e30e92f606b0510d63c3d509022d1f5105b84399f97aef31809 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:1ce2a1ae2562fecf0a574bbaf22f2d6c5b4706c1603954186544e7cae5dd5151 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:e5b5d8925edd84fc5074272017781cff1819b770a59a057d755213bf6e3d4558 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:571cb051b8415a4a8980b3c4af192cc158d1a12c66bcc1b84c26d9254cc6421d --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:f1a14f1c8f8c8a5e5836ff1d3cd9f9b14e5427f5d422b5503c75f353af683993 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:bd9a4c3c2534835931d740786c690633fa046af0e88d941a71cc65300cf9c578 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:f67e843d45cdf34ae40a4a3bbd920ac454d2004fa2f31144a2603258696fb655 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:3f261163aeeced01fbe9d8527ef4b0a53ea3166d326cde9dabab6cdb6c27a746 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:1b60b9440f85247a9cc3545f4b648bbf702e8f7698f061db02c9ff20eea59175 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:6af51c47618eb08c4ecb0e1314af8838c22de7c656d71989b0a6a7a7ebe90aed --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:b29ed6a78d507787fb2f291b2d7ae339c831cff95452277b78196a30a2eb931e --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:5855bb36e6fd780ead5379bf7d8c436a23cbdf0af28c368e4b3c01f366685684 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:54cacf9dc443410cc4ca88c55258f8eecd42b6db5dd2cfb0d1602343ce686ce6 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:784fc64394adec639cf7cb039733cc94bbb066bb8c307579cf3c94e74a774643 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:f33735a2963425a3fa75e524fac8dec810df1d3937552486eb6bb5135195f576 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:def4bb3622517318f80d8d393ff80ff956acdbe22c46420a245775cd94035229 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:c6afa05fe628f590a092aafbc8936b8a631e241cd8a8dfd21fa9e5e5cf9c7c57 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:d4d9bef0149124064ca542b6af586f7d00deba63639444b436862a2bf000b793 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:3beaa843bebf29a85a309279a7279a8e38223e0009b3828df74405a82474abaa --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:33e156f3bcbd9a0dfb3de4b4ffd85b15081d0207843730032ddc93031f10f028 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:7015440582cb628553ecf8219cec37c5a9d91a3e22d7d170c3672a79a11b247c --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:93672597868411ef0d0de903d577319ae7f3cf6b59df44423ff95be7091c2c62 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:da35eb04011cc91ed851737ad48d0210347db38c3288b1bfdd63504e7307fdb6 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:e56c9b4e29b7f862c47a886907229bdfbcd6cfdbe8605e309b2e8399cfe6cdc9 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:7b7b9def7e353573d6994613d25178588626751413b0ea36331d9928c9d53f2a --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:27021f0afeba25ea19005969cca939ac2b2282bbadc158b454fa8575453239ff --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:15466fda438d9117ca38b4d02a6f1444eee8f272b59ee5c987fe1dd604e67a74 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:a234974813bd1d0695b6d812577eb5b26a257fd94dd4cf642f4f745cc2dc7f78 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:76a4f699333c46fa215cdcc5a20bfd03dfa8c6d8705904bc2d7617664b4c861c --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-76: familiar-ai scope-decisions sha256:58ed731655af7d9bcb32e482019cea6ca887ed1e1fdccaa473e6ac9832b80d92 --candidate-hash sha256:ad8624604191f91b0a3f7d680bf772510517ac3ce68b02d554d626f33b39688a --approve|--reject --actor human:<identity> --reason "..."
+drive: attempt 1 PRD-76 failed: human review required
+drive: attempt 1 PRD-76 outcome=retained reason=human_review_required
+drive: session drive-00001788265998064239-0001235951-000000 terminated reason=budget_prds_exhausted attempted=1 completed=0
+session=drive-00001788265998064239-0001235951-000000 termination=budget_prds_exhausted attempted=1 completed=0 known_cost_microusd=24785729
+---
+exit: 0
