@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use familiar_ai_daemon::cli::accounting::AccountingCommand;
 use familiar_ai_daemon::cli::backlog::BacklogCommand;
 use familiar_ai_daemon::cli::billing::BillingCommand;
 use familiar_ai_daemon::cli::control::ControlCommand;
@@ -39,6 +40,11 @@ enum Command {
     Billing {
         #[command(subcommand)]
         command: BillingCommand,
+    },
+    /// Reconciliation-aware, source-attributed cost reporting; cached-only.
+    Accounting {
+        #[command(subcommand)]
+        command: AccountingCommand,
     },
     /// Show repository project-configuration approval and binding state.
     Status {
@@ -392,6 +398,12 @@ fn main() -> ExitCode {
         },
         Command::Billing { command } => {
             match familiar_ai_daemon::cli::billing::billing_command(command) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::Accounting { command } => {
+            match familiar_ai_daemon::cli::accounting::accounting_command(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail(error),
             }

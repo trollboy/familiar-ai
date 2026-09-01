@@ -11,8 +11,8 @@ use std::fmt::Write as _;
 
 use familiar_ai_review::ScopeDecision;
 use familiar_ai_storage::{
-    CheckpointRepository, Database, DeliveryRepository, DriverAttempt, ExecutionHistoryRepository,
-    ReviewRepository,
+    AccountingRepository, CheckpointRepository, Database, DeliveryRepository, DriverAttempt,
+    ExecutionHistoryRepository, ReviewRepository,
 };
 use familiar_ai_storage::{DriverRepository, DriverSession};
 
@@ -68,6 +68,7 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
     render_authority(db, &mut out, &session.session_id)?;
     render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
+    render_reconciliation(db, &mut out, &session.repository_key)?;
     render_judgment(&mut out, &session, &stopped);
     Ok(familiar_ai_agent::redact_sensitive(out))
 }
@@ -437,6 +438,72 @@ fn render_cost(
     Ok(())
 }
 
+/// PRD-053: current-effective reconciliation rows for this repository's
+/// durable project, most recent first. Renders exactly what is already
+/// stored — no "now" or elapsed-since computation — so the report stays
+/// byte-identical for identical database state. Every amount keeps its
+/// authority label (`local`/`authoritative`) distinct; estimated and
+/// authoritative figures are never summed into one number.
+fn render_reconciliation(
+    db: &Database,
+    out: &mut String,
+    repository_key: &str,
+) -> Result<(), ReportError> {
+    let _ = writeln!(out, "\nRECONCILIATION");
+    let accounting = AccountingRepository::new(db.conn());
+    let project_id = match accounting.project_id(repository_key) {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = writeln!(out, "  repository is not bound to a durable project");
+            return Ok(());
+        }
+    };
+    let mut rows = accounting
+        .reconciliation_for_project(
+            &project_id,
+            chrono::DateTime::<chrono::Utc>::MIN_UTC,
+            chrono::DateTime::<chrono::Utc>::MAX_UTC,
+        )
+        .map_err(storage)?;
+    if rows.is_empty() {
+        let _ = writeln!(out, "  (none)");
+        return Ok(());
+    }
+    rows.sort_by(|a, b| {
+        b.day_start
+            .cmp(&a.day_start)
+            .then(a.billing_source.cmp(&b.billing_source))
+    });
+    for row in rows.iter().take(MAX_LISTED_ATTEMPTS) {
+        let _ = writeln!(
+            out,
+            "  {} {} status={} local={} authoritative={} variance={} tolerance={}nanoUSD",
+            row.day_start,
+            row.billing_source,
+            row.status,
+            amount_label(row.local_estimate_nanousd),
+            amount_label(row.authoritative_nanousd),
+            amount_label(row.variance_nanousd),
+            row.tolerance_nanousd,
+        );
+    }
+    if rows.len() > MAX_LISTED_ATTEMPTS {
+        let _ = writeln!(
+            out,
+            "  ... {} more row(s)",
+            rows.len() - MAX_LISTED_ATTEMPTS
+        );
+    }
+    Ok(())
+}
+
+fn amount_label(value: Option<i64>) -> String {
+    match value {
+        Some(nanousd) => format!("{nanousd}nanoUSD"),
+        None => "unknown".into(),
+    }
+}
+
 fn render_judgment(out: &mut String, session: &DriverSession, stopped: &[&DriverAttempt]) {
     let _ = writeln!(out, "\nNEEDS HUMAN JUDGMENT ({})", stopped.len());
     match session.termination_reason.as_deref() {
@@ -643,6 +710,9 @@ mod tests {
              unmeasured:   2 attempt(s)\n  \
              known savings: 0 micro-USD across 0 attempt(s) (persisted execution-history pricing)\n  \
              savings without pricing provenance: 0 attempt(s)\n\
+             \n\
+             RECONCILIATION\n  \
+             repository is not bound to a durable project\n\
              \n\
              NEEDS HUMAN JUDGMENT (1)\n  \
              PRD-18 docs/prds/PRD-018.md\n    \

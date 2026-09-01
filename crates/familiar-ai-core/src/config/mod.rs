@@ -93,6 +93,9 @@ pub struct Config {
     pub inference: InferenceConfig,
     #[serde(default)]
     pub execution_history: ExecutionHistoryConfig,
+    /// PRD-053 cost-reconciliation tolerance and settlement horizon.
+    #[serde(default)]
+    pub reconciliation: ReconciliationConfig,
     #[serde(default)]
     pub execution_context: ExecutionContextConfig,
     #[serde(default)]

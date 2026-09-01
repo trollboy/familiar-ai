@@ -476,3 +476,74 @@ impl Tool for ListPendingHumanGatesTool {
         }))
     }
 }
+
+pub struct GetReconciliationTool;
+
+#[async_trait]
+impl Tool for GetReconciliationTool {
+    fn name(&self) -> &'static str {
+        "stewardship.get_reconciliation"
+    }
+    fn description(&self) -> &'static str {
+        "Returns current-effective cost reconciliation (PRD-053) for this repository's durable project over a UTC range; cached-only, never contacts a provider."
+    }
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "repository_path": {"type": "string"},
+                "start": {"type": "string"},
+                "end": {"type": "string"},
+            },
+            "required": ["start", "end"],
+        })
+    }
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<Value, ToolError> {
+        #[derive(Debug, Deserialize)]
+        struct Args {
+            #[serde(default)]
+            repository_path: Option<String>,
+            start: String,
+            end: String,
+        }
+        let parsed: Args = serde_json::from_value(args)
+            .map_err(|e| ToolError::InvalidParams(format!("invalid args: {e}")))?;
+        let repository = resolve_repository(parsed.repository_path.as_deref())?;
+        let result = ctx
+            .storage
+            .get_reconciliation(&repository.key, &parsed.start, &parsed.end)
+            .await
+            .map_err(|e| ToolError::Internal(e.to_string()))?;
+        let mut by_source: std::collections::BTreeMap<String, (Option<i64>, Option<i64>)> =
+            std::collections::BTreeMap::new();
+        for row in &result.rows {
+            let entry = by_source
+                .entry(row.billing_source.clone())
+                .or_insert((None, None));
+            if let Some(value) = row.local_estimate_nanousd {
+                entry.0 = Some(entry.0.unwrap_or(0) + value);
+            }
+            if let Some(value) = row.authoritative_nanousd {
+                entry.1 = Some(entry.1.unwrap_or(0) + value);
+            }
+        }
+        let by_source: std::collections::BTreeMap<String, Value> = by_source
+            .into_iter()
+            .map(|(source, (local, authoritative))| {
+                (
+                    source,
+                    json!({"local_estimate_nanousd": local, "authoritative_nanousd": authoritative}),
+                )
+            })
+            .collect();
+        Ok(json!({
+            "repository_key": repository.key,
+            "project_id": result.project_id,
+            "range_start": parsed.start,
+            "range_end": parsed.end,
+            "rows": result.rows,
+            "by_source": by_source,
+            "network_collection": false,
+        }))
+    }
+}

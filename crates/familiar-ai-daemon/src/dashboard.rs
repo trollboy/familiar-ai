@@ -58,6 +58,10 @@ pub async fn run_dashboard(
         .route("/stewardship/recovery", get(stewardship_recovery))
         .route("/stewardship/delivery", get(stewardship_delivery))
         .route("/stewardship/gates", get(stewardship_gates))
+        .route(
+            "/stewardship/reconciliation",
+            get(stewardship_reconciliation),
+        )
         .route("/favicon.png", get(favicon))
         .route("/settings/inference", get(inference_settings_page))
         .route("/settings/inference/status", get(inference_status))
@@ -408,6 +412,28 @@ async fn stewardship_gates(
     }
 }
 
+async fn stewardship_reconciliation(
+    State(state): State<DashboardState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let identity = match resolve_repo_identity(&params) {
+        Ok(identity) => identity,
+        Err(response) => return *response,
+    };
+    let (Some(start), Some(end)) = (params.get("start"), params.get("end")) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "missing required query parameters: start, end"})),
+        )
+            .into_response();
+    };
+    let db = state.db.lock().unwrap();
+    match familiar_ai_daemon::stewardship::get_reconciliation(&db, &identity, start, end) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
+    }
+}
+
 async fn inference_status(State(state): State<DashboardState>) -> impl IntoResponse {
     let health = state.router.health().await;
     Json(json!(health))
@@ -686,6 +712,10 @@ mod tests {
             .route("/stewardship/recovery", get(stewardship_recovery))
             .route("/stewardship/delivery", get(stewardship_delivery))
             .route("/stewardship/gates", get(stewardship_gates))
+            .route(
+                "/stewardship/reconciliation",
+                get(stewardship_reconciliation),
+            )
             .with_state(state)
     }
 

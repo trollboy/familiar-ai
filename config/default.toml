@@ -33,6 +33,13 @@
 # host = "127.0.0.1:8888"
 # auth = "env: UNSLOTH_API_KEY"
 
+# Cost-reconciliation policy (PRD-053). Both values are operator policy, not
+# provider guarantees; the exact value in effect is recorded on every
+# reconciliation run for audit even after this default changes.
+# [reconciliation]
+# tolerance_nanousd = 10000000    # one cent; variance within this is "reconciled-with-variance"
+# settlement_horizon_days = 3     # a local estimate with no provider match past this many days becomes an explicit mismatch
+
 [execution_context]
 # repository_map_enabled = false # Per-repository approved override only.
 # hard_ceiling_tokens = 12000  # Optional; disabled when absent

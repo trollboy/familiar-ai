@@ -8,6 +8,7 @@
 //! Every function here is a verbatim move of what used to live inline in
 //! `bin/familiar-ai.rs`.
 
+pub mod accounting;
 pub mod backlog;
 pub mod billing;
 pub mod control;

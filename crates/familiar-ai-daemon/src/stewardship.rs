@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use familiar_ai_core::RepositoryIdentity;
 use familiar_ai_storage::{
     budget_summary, list_backlog_entries, list_recovery_events as repo_list_recovery_events,
-    pending_human_gates, review_findings_for_session, CheckpointRepository, Database,
-    DeliveryRepository, DriverRepository,
+    pending_human_gates, review_findings_for_session, AccountingRepository, CheckpointRepository,
+    Database, DeliveryRepository, DriverRepository,
 };
 
 #[derive(Debug)]
@@ -276,6 +276,70 @@ pub fn list_review_findings(
         "session_id": session_id,
         "items": items,
     }))
+}
+
+/// Current-effective reconciliation rows (PRD-053) for the durable project
+/// this repository resolves to. Cached-only, read-only — never contacts a
+/// provider. `NotFound` when the repository has no durable project binding
+/// (never a degraded-identity leak of another repository's rows).
+pub fn get_reconciliation(
+    db: &Database,
+    repository: &RepositoryIdentity,
+    start: &str,
+    end: &str,
+) -> Result<Value, StewardshipError> {
+    let accounting = AccountingRepository::new(db.conn());
+    let project_id = accounting.project_id(&repository.key).map_err(|_| {
+        StewardshipError::NotFound("repository is not bound to a durable project".into())
+    })?;
+    let start_time = chrono::DateTime::parse_from_rfc3339(start)
+        .map_err(|e| StewardshipError::Storage(format!("invalid start timestamp: {e}")))?
+        .with_timezone(&chrono::Utc);
+    let end_time = chrono::DateTime::parse_from_rfc3339(end)
+        .map_err(|e| StewardshipError::Storage(format!("invalid end timestamp: {e}")))?
+        .with_timezone(&chrono::Utc);
+    let rows = accounting
+        .reconciliation_for_project(&project_id, start_time, end_time)
+        .map_err(storage)?;
+    let by_source = reconciliation_by_source(&rows);
+    Ok(json!({
+        "repository_key": repository.key,
+        "project_id": project_id,
+        "range_start": start,
+        "range_end": end,
+        "rows": rows,
+        "by_source": by_source,
+    }))
+}
+
+/// Sums `rows` per billing source within the caller's range (e.g.
+/// month-to-date), preserving each amount's authority label — never mixing
+/// estimated and authoritative into one number.
+fn reconciliation_by_source(
+    rows: &[familiar_ai_storage::ReconciliationRow],
+) -> std::collections::BTreeMap<String, Value> {
+    let mut by_source: std::collections::BTreeMap<String, (Option<i64>, Option<i64>)> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let entry = by_source
+            .entry(row.billing_source.clone())
+            .or_insert((None, None));
+        if let Some(value) = row.local_estimate_nanousd {
+            entry.0 = Some(entry.0.unwrap_or(0) + value);
+        }
+        if let Some(value) = row.authoritative_nanousd {
+            entry.1 = Some(entry.1.unwrap_or(0) + value);
+        }
+    }
+    by_source
+        .into_iter()
+        .map(|(source, (local, authoritative))| {
+            (
+                source,
+                json!({"local_estimate_nanousd": local, "authoritative_nanousd": authoritative}),
+            )
+        })
+        .collect()
 }
 
 pub fn list_pending_human_gates(

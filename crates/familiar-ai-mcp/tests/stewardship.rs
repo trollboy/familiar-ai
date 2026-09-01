@@ -21,9 +21,10 @@ use familiar_ai_core::{
 use familiar_ai_mcp::storage::SqliteStorage;
 use familiar_ai_mcp::tool::{Tool, ToolContext};
 use familiar_ai_mcp::tools::{stewardship_mutations::*, stewardship_reads::*};
+use familiar_ai_storage::repos::billing::{BillingRepository, BillingSource, ProviderCostRow};
 use familiar_ai_storage::{
-    CheckpointRepository, Database, DeliveryRepository, DriverRepository, ExecutionCheckpoint,
-    SqliteBacklogRepository,
+    AccountingRepository, CheckpointRepository, Database, DeliveryRepository, DriverRepository,
+    ExecutionCheckpoint, ExecutionHistoryRepository, SqliteBacklogRepository, UsageObservation,
 };
 
 /// A temp Git repository with two active PRDs, reconciled into a fresh
@@ -459,4 +460,165 @@ async fn bootstrap_rollback_tool_matches_cli_semantics() {
         )
         .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn get_reconciliation_tool_is_project_scoped_and_labels_by_source() {
+    let (repo, database, identity, _discovered) = repo_fixture();
+    {
+        let db = Database::open(&database).unwrap();
+        let accounting = AccountingRepository::new(db.conn());
+        accounting
+            .register_project(
+                "prj_mcpfixture00001",
+                "MCP Fixture",
+                "repository",
+                &identity.key,
+                "test",
+            )
+            .unwrap();
+        accounting
+            .bind_provider(
+                "prj_mcpfixture00001",
+                "org-main",
+                "workspace",
+                "wrk_a",
+                "exact",
+                "test",
+            )
+            .unwrap();
+        ExecutionHistoryRepository::new(db.conn())
+            .insert_running(&familiar_ai_storage::ExecutionStart {
+                execution_id: "exec-a".into(),
+                started_at: "2020-01-01T10:00:00Z".into(),
+                repository: identity.key.clone(),
+                worktree: identity.key.clone(),
+                git_commit: None,
+                prd_path: "docs/prds/PRD-1.md".into(),
+                unavailable_fields: Default::default(),
+            })
+            .unwrap();
+        let observation = accounting
+            .append_observation(&UsageObservation {
+                execution_id: "exec-a",
+                attempt_id: "attempt-1",
+                stage: "implementation",
+                session_id: None,
+                worker_identity: "anthropic/claude",
+                adapter: "claude-code",
+                cli_version: None,
+                model_identity: Some("claude"),
+                service_tier: None,
+                provider_request_id: None,
+                uncached_input_tokens: Some(10),
+                cache_read_tokens: Some(0),
+                cache_write_tokens: Some(0),
+                output_tokens: Some(5),
+                reasoning_output_tokens: None,
+                unknown_reason: None,
+                period_start: "2020-01-01T10:00:00Z",
+                period_end: "2020-01-01T10:00:01Z",
+                terminal_status: "succeeded",
+                source_event_hash: "h-mcp-exec-a",
+                provider_cost_lexical: Some("1.00"),
+                project_resolution_evidence: Some(&identity.key),
+                output_register_id: "none",
+                output_register_version: "none",
+                input_compression_id: "none",
+                input_compression_version: "none",
+                compression_experiment: None,
+                compression_lane: None,
+            })
+            .unwrap()
+            .unwrap();
+        accounting
+            .append_vendor_estimate(&observation, "1.00")
+            .unwrap();
+
+        let billing = BillingRepository::new(db.conn());
+        billing
+            .bind_source(&BillingSource {
+                name: "org-main",
+                mode: "anthropic-organization",
+                organization_id: "org_main",
+                organization_name: "Main",
+                credential_reference: "env: ADMIN_MAIN",
+            })
+            .unwrap();
+        billing
+            .commit_complete(
+                "org-main",
+                "2020-01-01T00:00:00Z",
+                "2020-01-02T00:00:00Z",
+                &[ProviderCostRow {
+                    bucket_start: "2020-01-01T00:00:00Z".into(),
+                    bucket_end: "2020-01-02T00:00:00Z".into(),
+                    workspace_id: "wrk_a".into(),
+                    description: "usage".into(),
+                    charge_class: "token-spend".into(),
+                    currency: "USD".into(),
+                    amount_lexical: "1.00".into(),
+                    provider_payload: r#"{"workspace":"wrk_a","amount":"1.00"}"#.into(),
+                }],
+            )
+            .unwrap();
+        accounting
+            .reconcile_window(
+                "org-main",
+                chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::DateTime::parse_from_rfc3339("2020-01-02T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                "explicit",
+                10_000_000,
+                3,
+                chrono::DateTime::parse_from_rfc3339("2020-01-01T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                "test",
+            )
+            .unwrap();
+    }
+    let ctx = ctx_for(&database);
+
+    let result = GetReconciliationTool
+        .call(
+            json!({
+                "repository_path": repo.path().to_str().unwrap(),
+                "start": "2020-01-01T00:00:00Z",
+                "end": "2020-01-02T00:00:00Z",
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["project_id"], "prj_mcpfixture00001");
+    assert_eq!(result["network_collection"], false);
+    let rows = result["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["status"], "reconciled");
+    assert_eq!(
+        result["by_source"]["org-main"]["local_estimate_nanousd"],
+        1_000_000_000
+    );
+    assert_eq!(
+        result["by_source"]["org-main"]["authoritative_nanousd"],
+        1_000_000_000
+    );
+
+    // A different repository never sees this project's reconciliation.
+    let other = tempdir().unwrap();
+    let outside = GetReconciliationTool
+        .call(
+            json!({
+                "repository_path": other.path().to_str().unwrap(),
+                "start": "2020-01-01T00:00:00Z",
+                "end": "2020-01-02T00:00:00Z",
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(outside.is_err());
 }
