@@ -23,10 +23,6 @@ fn next_command(repo: &tempfile::TempDir, database: &std::path::Path) -> Command
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
-        )
-        .env(
-            "XDG_RUNTIME_DIR",
-            database.parent().unwrap().join("xdg-runtime"),
         );
     command
 }
@@ -150,6 +146,7 @@ fn next_fails_outside_a_git_repository() {
             "FAMILIAR_AI_DATABASE__PATH",
             temp.path().join("familiar.db"),
         )
+        .env("XDG_RUNTIME_DIR", temp.path().join("xdg-runtime"))
         .output()
         .unwrap();
     assert!(!output.status.success());

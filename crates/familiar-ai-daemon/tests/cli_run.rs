@@ -67,10 +67,6 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )
-        .env(
-            "XDG_RUNTIME_DIR",
-            database.parent().unwrap().join("xdg-runtime"),
-        )
         .output()
         .unwrap();
 
@@ -119,10 +115,6 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )
-        .env(
-            "XDG_RUNTIME_DIR",
-            database.parent().unwrap().join("xdg-runtime"),
-        )
         .output()
         .unwrap();
     assert!(history.status.success());
@@ -134,10 +126,6 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .arg("usage")
         .env("HOME", temp.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
-        .env(
-            "XDG_RUNTIME_DIR",
-            database.parent().unwrap().join("xdg-runtime"),
-        )
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
@@ -172,6 +160,7 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
         .args(["run", "docs/prds/PRD-001.md"])
         .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
+        .env("XDG_RUNTIME_DIR", temp.path().join("xdg-runtime"))
         .env(
             "FAMILIAR_AI_DATABASE__PATH",
             temp.path().join("familiar.db"),
