@@ -1,0 +1,35 @@
+command: familiar-ai resume PRD-76
+date: Tue Sep  1 04:44:54 PM UTC 2026
+host: trollboy (Linux)
+head: 352ca2b71458b43ce025e189631b9fb7e810166e (2 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2290364
+verification: heartbeat check=format elapsed_ms=3957 child=pid:2290364
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2290941
+verification: heartbeat check=lint elapsed_ms=26917 child=pid:2290941
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2294958
+verification: heartbeat check=tests-green-crates elapsed_ms=30000 child=pid:2294958
+verification: heartbeat check=tests-green-crates elapsed_ms=52238 child=pid:2294958
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2300689
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30000 child=pid:2300689
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60004 child=pid:2300689
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90004 child=pid:2300689
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:2300689
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=143584 child=pid:2300689
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788278098454300-0002093630-000001-cycle-review-1","reviewed_manifest_hash":"sha256:8efc15a1b554c52325c9b86f1c9c52955b72e6fc0c0aa3b2725c321de61249cb","findings":[{"finding_id":"F1-workspace-suite-unverified","category":"unverifiable_claim","severity":"medium","blocking":false,"title":"Behavior-preservation AC unverifiable: daemon crate not in required gate and the only check covering it failed","claim":"Acceptance criterion 1 requires the full workspace test suite to pass, but the package's required test gate (`tests-green-crates`) runs only familiar-ai-core, familiar-ai-review, familiar-ai-agent, and familiar-ai-storage — it deliberately excludes familiar-ai-daemon, which carries the largest behavioral surface of this change (the CLI dispatch restructure moving every subcommand body from bin/familiar-ai.rs into src/cli/*). The only check that does exercise the daemon crate, `tests-workspace-advisory` (`cargo test --workspace`), failed with exit_code 101, and its stdout was omitted from this package (retained only by content hash). Therefore the behavior-preserving claim for the refactored daemon CLI cannot be confirmed from the evidence provided; it is neither proven green nor shown to be a pre-existing/unrelated failure.","evidence":[{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:6e8a5ea1cda433cac87d623e73cb96ccc249183be38ac3448687eed9a591cbaf","media_type":"text/plain","byte_size":84334,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788278018377552-0002093630-000000/PRD-76","revision":"sha256:bb0cff9c2e9e76f6f7597b9df9b7971c15b04582463da0d93a117d1455fc8c60","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-6e8a5ea1cda433cac87d623e73cb96ccc249183be38ac3448687eed9a591cbaf-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Either add familiar-ai-daemon to the required green test gate so the CLI restructure is proven behavior-preserving, or disclose the `tests-workspace-advisory` stdout and confirm that every failure is pre-existing and unrelated to this refactor (e.g., attributable to the pending bug PRDs 077–080), so acceptance criterion 1 can be evaluated against actual output rather than an omitted artifact.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+backlog: completion content-hash conflict for docs/prds/PRD-076.md: row=acf2e7df60e7f8cece8607ebde1ba7f3b23f1c3abae3dddf81747c7eaa68321f discovered=f7ed46b481d3a9911e0e0f46dc59c668919457f512f08f4bd9483422f3139c3d
+backlog: PRD-76 docs/prds/PRD-076.md remains in_progress reason=completion_conflict
+error: PRD-76: status transition conflict for docs/prds/PRD-076.md: expected in_progress, found in_progress with a different content hash
+---
+exit: 1
