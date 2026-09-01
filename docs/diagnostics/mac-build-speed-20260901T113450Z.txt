@@ -1,0 +1,318 @@
+FAM-BUG-030 build-speed + hang diagnosis run
+date: Tue Sep  1 11:34:50 UTC 2026
+host: Darwin MacBook-Pro-5.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:53:15 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T6000 arm64
+head: 5cf556c6ed1bec38cefa31f10c2eee6abc1cbda2
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo: cargo 1.97.1 (c980f4866 2026-06-30)
+
+== fix candidate 5f517db2b (daemon integration.rs process-group SIGKILL) is ancestor of HEAD: yes
+-- CARGO/RUST environment (cache-busting suspects) --
+
+== target/ before: existed,  41G (incremental expected)
+== cargo per-crate timings support: --timings (probed on a throwaway crate)
+-- suspect snapshot (pre-build) 11:35:15Z --
+- df -h . (full disk makes APFS crawl):
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   562Gi   315Gi    65%    4.1M  3.3G    0%   /System/Volumes/Data
+- mdutil -s / (Spotlight volume indexing state):
+/:
+	Indexing enabled. 
+- Spotlight exclusion markers (per-folder Privacy exclusions are root-only; watch mds_stores CPU in the mid-build snapshots instead):
+  repo/.metadata_never_index: absent
+  target/.metadata_never_index: absent
+  target/CACHEDIR.TAG: present (Spotlight does NOT honor CACHEDIR.TAG)
+- vm_stat (pageouts/swapins rising across snapshots = memory pressure):
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                              978954.
+Pages active:                           1069849.
+Pages inactive:                         1050205.
+Pages speculative:                       206916.
+Pages throttled:                              0.
+Pages wired down:                        281244.
+Pages purgeable:                          52205.
+"Translation faults":                5196152876.
+Pages copy-on-write:                  370667075.
+Pages zero filled:                   2171893586.
+Pages reactivated:                     63709666.
+Pages purged:                          25095025.
+File-backed pages:                       828084.
+Anonymous pages:                        1498886.
+Pages stored in compressor:             2633632.
+Pages occupied by compressor:            550415.
+Decompressions:                        30453488.
+Compressions:                          39815777.
+Pageins:                               65381513.
+Pageouts:                                629884.
+Swapins:                                 338836.
+Swapouts:                               1548349.
+- memory_pressure -Q:
+The system has 68719476736 (4194304 pages with a page size of 16384).
+System-wide memory free percentage: 79%
+- sysctl hw.memsize / kern.memorystatus_vm_pressure_level:
+68719476736
+1
+- pmset -g therm (thermal throttle):
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+- tmutil listlocalsnapshots / (APFS local snapshots pin disk space):
+Snapshots for volume group containing disk /:
+com.apple.os.update-5FBACC4146FB61534138E8CB32B75850AAA6E2EF4E13B81BCC92D3D7DC52AA8978872D7E9B10EB9EBB425EAB5107A836
+com.apple.os.update-CF9513BCD92B3766A60BDBD4D2EDBAE4750AF74781836A8C6C16E37CA65CAE0F
+com.apple.os.update-MSUPrepareUpdate
+- top processes by RSS (is Codex/another cargo running?):
+USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
+trollboy         58186   1.2  2.1 443849056 1432480   ??  Ss   23Aug26 1237:03.32 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+trollboy         58495   0.0  1.6 1949418784 1066864   ??  S    16Aug26  16:26.02 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=719 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=974630482234 --shared-files --metrics-shmem-handle=1752395122,r,5387599103920797963,12477838279285223534,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709660044960925 --seatbelt-client=65
+trollboy         21743   0.1  1.4 1957363968 969184   ??  S    22Aug26 285:00.87 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=1204 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=1012368205554 --shared-files --metrics-shmem-handle=1752395122,r,9344712878641675116,1661509810800285213,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190710114510257690 --seatbelt-client=251
+trollboy         73107   0.0  1.3 1949312064 862496   ??  S    15Aug26  67:09.21 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=469 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=954686342017 --shared-files --metrics-shmem-handle=1752395122,r,3558438921762102450,17007553312533850429,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709425784498675 --seatbelt-client=37
+trollboy         53278   0.1  1.2 537453744 794336   ??  S    15Aug26 207:02.98 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --restart --restart
+trollboy         53318   0.0  1.0 1951332000 698752   ??  S    15Aug26 142:55.33 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=10 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=950075270633 --shared-files --metrics-shmem-handle=1752395122,r,12406810012088709100,10513508812705779828,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190708995682289984 --seatbelt-client=98
+trollboy         20885   0.0  0.9 1949476848 625232   ??  S    16Aug26  73:43.78 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=16 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=965936657045 --shared-files --metrics-shmem-handle=1752395122,r,11337323047857735200,9581554445206358750,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709001304541078 --seatbelt-client=63
+trollboy         73283   0.0  0.9 1949233392 606144   ??  S    15Aug26 140:14.93 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=475 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=954727869257 --shared-files --metrics-shmem-handle=1752395122,r,17906884094092072154,10594314758476383626,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709431406749769 --seatbelt-client=37
+trollboy         41123   0.0  0.9 1953248880 602016   ??  S    Tue06PM   8:42.06 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=1364 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=1236117137976 --shared-files --metrics-shmem-handle=1752395122,r,7809770260444578496,13648145361419747958,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190710264436953530 --seatbelt-client=144
+trollboy         16372   0.0  0.8 1953365584 528160   ??  S    17Aug26  29:24.22 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=936 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=988054477307 --shared-files --metrics-shmem-handle=1752395122,r,4821306107301017410,1761506255087338869,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709863383042158 --seatbelt-client=497
+trollboy           688   0.0  0.8 462299088 523968   ??  S    15Jul26 123:31.04 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+trollboy         22683   0.0  0.8 1949432640 510784   ??  S    16Aug26   8:39.00 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=636 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=966355411311 --shared-files --metrics-shmem-handle=1752395122,r,12038075760706515832,13439932599286026628,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709582270487458 --seatbelt-client=261
+- build/agent/scanner processes (cargo, rustc, dsymutil, codex, mds, XProtect, syspolicyd):
+root              1107   1.0  0.0 435345408  13440   ??  Ss   15Jul26   4:18.13 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectBridgeService.xpc/Contents/MacOS/XProtectBridgeService
+root               529   1.0  0.1 435404480  41696   ??  Ss   15Jul26 462:55.87 /usr/libexec/syspolicyd
+_mds_stores        521   0.6  0.7 456863616 481232   ??  Ss   15Jul26 396:45.70 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+trollboy         63353   0.0  0.4 435783920 269136 s002  S+    9:57PM   0:37.17 codex
+root             61557   0.0  0.0 435321984   2960   ??  Ss   Fri01PM   0:00.04 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdsync -s mdworker-scan -c MDSSyncScanWorker -m com.apple.metadata.mds.scan
+trollboy         20107   0.0  0.0 1879781312  19664 s000  S    24Aug26   0:21.22 /opt/homebrew/Caskroom/codex/0.149.1/bin/codex-code-mode-host
+trollboy         19944   0.0  0.5 435785072 307008 s000  S+   24Aug26  43:55.06 codex
+trollboy           324   0.0  0.0 435356928   8416   ??  S    24Aug26   0:38.70 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService
+root             87199   0.0  0.0 435356160   8432   ??  Ss   24Aug26   0:44.31 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService
+root             23451   0.0  0.1 435384192  51744   ??  Ss   17Aug26 131:14.59 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+root             48055   0.0  0.0 435356816   9616   ??  Ss   16Aug26   0:00.76 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectUpdateService.xpc/Contents/MacOS/XProtectUpdateService
+trollboy         72766   0.0  0.0 435339024   4928   ??  S    15Aug26   0:00.67 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect
+root             52848   0.0  0.0 435339040   4832   ??  Ss   15Aug26   0:00.64 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect
+_mds_stores       2210   0.0  0.0 435356992   4144   ??  Ss   15Jul26   0:10.61 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+postgres          1232   0.0  0.0 435366928   8560   ??  SN   15Jul26   0:01.39 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport
+trollboy           952   0.0  0.0 435367728  22912   ??  SN   15Jul26   0:40.03 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport
+root               388   0.0  0.0 435341424   4752   ??  Ss   15Jul26   0:00.10 /usr/libexec/xprotectd
+trollboy           197   0.0  0.0 435373376  19520   ??  S     7:34AM   0:00.08 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared
+trollboy           195   0.0  0.0 435375056  23024   ??  S     7:34AM   0:00.05 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared
+trollboy           196   0.0  0.0 435374528  22736   ??  S     7:34AM   0:00.06 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared
+
+== phase 1 (build): cargo test --workspace --no-run --timings (cap 90m, no stall detector — slow IS the finding; log=/var/folders/m5/ydk1542x7kq_bqdjdl98bklc0000gn/T//familiar-build-log.9jf1AE)
+== phase 1 build finished: exit=0 wall=230s (3m50s)
+== phase 1 compiled units: 11 (0-5 means the incremental cache was warm; hundreds means cold/invalidated — see FAM-BUG-030 hypotheses)
+== phase 1 last build-log lines:
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_mcp-c713bd066dc2e8f5)
+  Executable unittests src/bin/familiar-ai-mcp.rs (target/debug/deps/familiar_ai_mcp-3499e262b8441e36)
+  Executable tests/integration.rs (target/debug/deps/integration-2be41fe76f7c7653)
+  Executable tests/stewardship.rs (target/debug/deps/stewardship-803991db4636833e)
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_repomap-64424e3e953c22bc)
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_review-aed28eac9417042a)
+  Executable tests/prd_fixtures.rs (target/debug/deps/prd_fixtures-45a306d180f27400)
+  Executable tests/security_burn_in.rs (target/debug/deps/security_burn_in-05094f30a392e100)
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_storage-a318b2fa676d8fbd)
+  Executable tests/integration.rs (target/debug/deps/integration-603469138e180732)
+  Executable tests/security_burn_in.rs (target/debug/deps/security_burn_in-cb58a12699f867a8)
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_summary-3a86629145beabf3)
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_testutil-9b4b66968eea187a)
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_tokens-a5641c2e01c1b2e7)
+  Executable unittests src/lib.rs (target/debug/deps/familiar_ai_watcher-0fd077ed1460ad8e)
+== target/ after:  41G
+== per-crate timings captured: docs/diagnostics/mac-build-speed-20260901T113450Z-timings.html (open in a browser; the widest bars name the slow crates)
+-- suspect snapshot (pre-tests) 11:39:50Z --
+- df -h . (full disk makes APFS crawl):
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   563Gi   315Gi    65%    4.1M  3.3G    0%   /System/Volumes/Data
+- mdutil -s / (Spotlight volume indexing state):
+/:
+	Indexing enabled. 
+- Spotlight exclusion markers (per-folder Privacy exclusions are root-only; watch mds_stores CPU in the mid-build snapshots instead):
+  repo/.metadata_never_index: absent
+  target/.metadata_never_index: absent
+  target/CACHEDIR.TAG: present (Spotlight does NOT honor CACHEDIR.TAG)
+- vm_stat (pageouts/swapins rising across snapshots = memory pressure):
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                              813748.
+Pages active:                           1052722.
+Pages inactive:                         1156798.
+Pages speculative:                       290884.
+Pages throttled:                              0.
+Pages wired down:                        273064.
+Pages purgeable:                          52371.
+"Translation faults":                5199620267.
+Pages copy-on-write:                  370720336.
+Pages zero filled:                   2173863269.
+Pages reactivated:                     63710819.
+Pages purged:                          25097539.
+File-backed pages:                       989654.
+Anonymous pages:                        1510750.
+Pages stored in compressor:             2633450.
+Pages occupied by compressor:            550359.
+Decompressions:                        30453688.
+Compressions:                          39815777.
+Pageins:                               65519837.
+Pageouts:                                629884.
+Swapins:                                 338836.
+Swapouts:                               1548349.
+- memory_pressure -Q:
+The system has 68719476736 (4194304 pages with a page size of 16384).
+System-wide memory free percentage: 80%
+- sysctl hw.memsize / kern.memorystatus_vm_pressure_level:
+68719476736
+1
+- pmset -g therm (thermal throttle):
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+- tmutil listlocalsnapshots / (APFS local snapshots pin disk space):
+Snapshots for volume group containing disk /:
+com.apple.os.update-5FBACC4146FB61534138E8CB32B75850AAA6E2EF4E13B81BCC92D3D7DC52AA8978872D7E9B10EB9EBB425EAB5107A836
+com.apple.os.update-CF9513BCD92B3766A60BDBD4D2EDBAE4750AF74781836A8C6C16E37CA65CAE0F
+com.apple.os.update-MSUPrepareUpdate
+- top processes by RSS (is Codex/another cargo running?):
+USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
+trollboy         58186   1.5  2.1 443849056 1432480   ??  Ss   23Aug26 1237:13.74 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+trollboy         58495   0.0  1.6 1949418784 1065888   ??  S    16Aug26  16:26.16 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=719 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=974630482234 --shared-files --metrics-shmem-handle=1752395122,r,5387599103920797963,12477838279285223534,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709660044960925 --seatbelt-client=65
+trollboy         21743   0.2  1.4 1957365136 966752   ??  S    22Aug26 285:06.12 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=1204 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=1012368205554 --shared-files --metrics-shmem-handle=1752395122,r,9344712878641675116,1661509810800285213,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190710114510257690 --seatbelt-client=251
+trollboy         73107   0.0  1.3 1953260672 862800   ??  S    15Aug26  67:10.04 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=469 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=954686342017 --shared-files --metrics-shmem-handle=1752395122,r,3558438921762102450,17007553312533850429,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709425784498675 --seatbelt-client=37
+trollboy         53278   0.0  1.2 537453744 794336   ??  S    15Aug26 207:06.27 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --restart --restart
+trollboy         53318   0.0  1.0 1951332000 697296   ??  S    15Aug26 142:55.93 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=10 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=950075270633 --shared-files --metrics-shmem-handle=1752395122,r,12406810012088709100,10513508812705779828,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190708995682289984 --seatbelt-client=98
+trollboy         20885   0.0  0.9 1953425456 628736   ??  S    16Aug26  73:44.51 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=16 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=965936657045 --shared-files --metrics-shmem-handle=1752395122,r,11337323047857735200,9581554445206358750,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709001304541078 --seatbelt-client=63
+trollboy         73283   1.5  0.9 1949233392 605120   ??  S    15Aug26 140:18.64 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=475 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=954727869257 --shared-files --metrics-shmem-handle=1752395122,r,17906884094092072154,10594314758476383626,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709431406749769 --seatbelt-client=37
+trollboy         41123   0.0  0.9 1953248880 601952   ??  S    Tue06PM   8:42.13 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=1364 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=1236117137976 --shared-files --metrics-shmem-handle=1752395122,r,7809770260444578496,13648145361419747958,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190710264436953530 --seatbelt-client=144
+trollboy         16372   0.0  0.8 1953365584 526112   ??  S    17Aug26  29:25.26 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=936 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=988054477307 --shared-files --metrics-shmem-handle=1752395122,r,4821306107301017410,1761506255087338869,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709863383042158 --seatbelt-client=497
+trollboy           688   0.0  0.8 462299088 524000   ??  S    15Jul26 123:31.05 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+trollboy         22683   0.0  0.8 1949432640 511920   ??  S    16Aug26   8:39.23 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=636 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=966355411311 --shared-files --metrics-shmem-handle=1752395122,r,12038075760706515832,13439932599286026628,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709582270487458 --seatbelt-client=261
+- build/agent/scanner processes (cargo, rustc, dsymutil, codex, mds, XProtect, syspolicyd):
+root               529  29.7  0.1 435403360  41856   ??  Rs   15Jul26 464:29.76 /usr/libexec/syspolicyd
+_mds_stores        521   0.3  0.7 456748688 476496   ??  Ss   15Jul26 397:08.16 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+trollboy         63975   0.0  0.0 1879786688  23840 s002  S    10:00PM   0:00.07 /Users/trollboy/.codex/packages/standalone/releases/0.151.0-aarch64-apple-darwin/bin/codex-code-mode-host
+trollboy         63353   0.0  0.4 435781648 269072 s002  S+    9:57PM   0:37.37 codex
+root             61557   0.0  0.0 435321984   2960   ??  Ss   Fri01PM   0:00.04 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdsync -s mdworker-scan -c MDSSyncScanWorker -m com.apple.metadata.mds.scan
+trollboy         20107   0.0  0.0 1879781312  19664 s000  S    24Aug26   0:21.22 /opt/homebrew/Caskroom/codex/0.149.1/bin/codex-code-mode-host
+trollboy         19944   0.0  0.5 435785072 307008 s000  S+   24Aug26  43:55.29 codex
+trollboy           324   0.0  0.0 435356928   8416   ??  S    24Aug26   0:38.70 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService
+root             87199   0.0  0.0 435356160   8432   ??  Ss   24Aug26   0:44.31 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService
+root             23451   0.0  0.1 435384192  51744   ??  Ss   17Aug26 131:14.73 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+root             48055   0.0  0.0 435356816   9616   ??  Ss   16Aug26   0:00.76 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectUpdateService.xpc/Contents/MacOS/XProtectUpdateService
+trollboy         72766   0.0  0.0 435339024   4928   ??  S    15Aug26   0:00.67 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect
+root             52848   0.0  0.0 435339040   4832   ??  Ss   15Aug26   0:00.64 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect
+_mds_stores       2210   0.0  0.0 435356992   4144   ??  Ss   15Jul26   0:10.61 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+postgres          1232   0.0  0.0 435366928   8560   ??  SN   15Jul26   0:01.39 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport
+root              1107   0.0  0.0 435344288  13344   ??  Ss   15Jul26   4:18.15 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectBridgeService.xpc/Contents/MacOS/XProtectBridgeService
+trollboy           952   0.0  0.0 435367728  22912   ??  SN   15Jul26   0:40.03 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport
+root               388   0.0  0.0 435341424   4752   ??  Ss   15Jul26   0:00.10 /usr/libexec/xprotectd
+trollboy          1296   0.0  0.0 435375008  18960   ??  S     7:39AM   0:00.08 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared
+trollboy          1298   0.0  0.0 435374832  18960   ??  S     7:39AM   0:00.08 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared
+
+== phase 2 (tests): cargo test --workspace on the warm build (stdin=/dev/null, stall=180s, cap=20m, log=/var/folders/m5/ydk1542x7kq_bqdjdl98bklc0000gn/T//familiar-test-log.utmO58)
+== phase 2 suite COMPLETED with exit 101 in 281s
+== result summary:
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+test config::tests::agents_env_overrides_round_trip_through_existing_mapping ... FAILED
+test config::tests::agents_section_parses_canonical_toml_and_defaults_to_absent ... FAILED
+test config::tests::env_overrides_file ... FAILED
+test config::tests::execution_context_budget_is_optional_and_accepts_zero ... FAILED
+test config::tests::execution_context_budget_uses_existing_environment_mapping ... FAILED
+test config::tests::invalid_execution_context_budget_fails_configuration ... FAILED
+test config::tests::legacy_driver_model_routes_name_registry_replacement ... FAILED
+test config::tests::load_without_file_succeeds ... FAILED
+test config::tests::missing_config_file_does_not_error ... FAILED
+test config::tests::load_with_overrides_takes_priority ... FAILED
+test config::tests::load_from_toml_file ... FAILED
+test config::tests::loads_exact_model_execution_pricing ... FAILED
+test config::tests::provider_validation_names_unknown_kind_and_malformed_host ... FAILED
+test config::tests::generated_repository_fragments_merge_additively_and_refuse_collisions ... FAILED
+test config::tests::repository_execution_validation_and_closed_keys_fail_at_load ... FAILED
+test config::tests::unsloth_is_a_typed_inference_runtime ... FAILED
+test result: FAILED. 89 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+-- suspect snapshot (post-tests) 11:44:32Z --
+- df -h . (full disk makes APFS crawl):
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   563Gi   315Gi    65%    4.1M  3.3G    0%   /System/Volumes/Data
+- mdutil -s / (Spotlight volume indexing state):
+/:
+	Indexing enabled. 
+- Spotlight exclusion markers (per-folder Privacy exclusions are root-only; watch mds_stores CPU in the mid-build snapshots instead):
+  repo/.metadata_never_index: absent
+  target/.metadata_never_index: absent
+  target/CACHEDIR.TAG: present (Spotlight does NOT honor CACHEDIR.TAG)
+- vm_stat (pageouts/swapins rising across snapshots = memory pressure):
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                              820274.
+Pages active:                           1050219.
+Pages inactive:                         1157153.
+Pages speculative:                       288420.
+Pages throttled:                              0.
+Pages wired down:                        271294.
+Pages purgeable:                          53208.
+"Translation faults":                5202832771.
+Pages copy-on-write:                  370787244.
+Pages zero filled:                   2175588471.
+Pages reactivated:                     63711985.
+Pages purged:                          25100489.
+File-backed pages:                       991613.
+Anonymous pages:                        1504179.
+Pages stored in compressor:             2633000.
+Pages occupied by compressor:            550215.
+Decompressions:                        30454167.
+Compressions:                          39815777.
+Pageins:                               65530518.
+Pageouts:                                629884.
+Swapins:                                 338836.
+Swapouts:                               1548349.
+- memory_pressure -Q:
+The system has 68719476736 (4194304 pages with a page size of 16384).
+System-wide memory free percentage: 80%
+- sysctl hw.memsize / kern.memorystatus_vm_pressure_level:
+68719476736
+1
+- pmset -g therm (thermal throttle):
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+- tmutil listlocalsnapshots / (APFS local snapshots pin disk space):
+Snapshots for volume group containing disk /:
+com.apple.os.update-5FBACC4146FB61534138E8CB32B75850AAA6E2EF4E13B81BCC92D3D7DC52AA8978872D7E9B10EB9EBB425EAB5107A836
+com.apple.os.update-CF9513BCD92B3766A60BDBD4D2EDBAE4750AF74781836A8C6C16E37CA65CAE0F
+com.apple.os.update-MSUPrepareUpdate
+- top processes by RSS (is Codex/another cargo running?):
+USER               PID  %CPU %MEM      VSZ    RSS   TT  STAT STARTED      TIME COMMAND
+trollboy         58186   3.5  2.1 443849056 1432752   ??  Ss   23Aug26 1237:25.23 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+trollboy         58495   0.0  1.6 1949418784 1066080   ??  S    16Aug26  16:26.23 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=719 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=974630482234 --shared-files --metrics-shmem-handle=1752395122,r,5387599103920797963,12477838279285223534,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709660044960925 --seatbelt-client=65
+trollboy         21743   0.1  1.4 1957365136 966656   ??  S    22Aug26 285:08.05 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=1204 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=1012368205554 --shared-files --metrics-shmem-handle=1752395122,r,9344712878641675116,1661509810800285213,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190710114510257690 --seatbelt-client=251
+trollboy         73107   0.0  1.3 1949312064 860464   ??  S    15Aug26  67:10.70 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=469 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=954686342017 --shared-files --metrics-shmem-handle=1752395122,r,3558438921762102450,17007553312533850429,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709425784498675 --seatbelt-client=37
+trollboy         53278   1.6  1.2 537453744 794384   ??  S    15Aug26 207:09.68 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --restart --restart
+trollboy         53318   0.0  1.0 1951332000 699216   ??  S    15Aug26 142:56.54 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=10 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=950075270633 --shared-files --metrics-shmem-handle=1752395122,r,12406810012088709100,10513508812705779828,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190708995682289984 --seatbelt-client=98
+trollboy         20885   0.0  0.9 1949476848 627856   ??  S    16Aug26  73:45.18 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=16 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=965936657045 --shared-files --metrics-shmem-handle=1752395122,r,11337323047857735200,9581554445206358750,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709001304541078 --seatbelt-client=63
+trollboy         73283   0.0  0.9 1949233392 606048   ??  S    15Aug26 140:20.54 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=475 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=954727869257 --shared-files --metrics-shmem-handle=1752395122,r,17906884094092072154,10594314758476383626,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709431406749769 --seatbelt-client=37
+trollboy         41123   0.0  0.9 1953248880 603808   ??  S    Tue06PM   8:42.20 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=1364 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=1236117137976 --shared-files --metrics-shmem-handle=1752395122,r,7809770260444578496,13648145361419747958,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190710264436953530 --seatbelt-client=144
+trollboy         16372   0.0  0.8 1953365584 526928   ??  S    17Aug26  29:25.61 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=936 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=988054477307 --shared-files --metrics-shmem-handle=1752395122,r,4821306107301017410,1761506255087338869,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709863383042158 --seatbelt-client=497
+trollboy           688   0.0  0.8 462308320 525376   ??  S    15Jul26 123:33.44 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+trollboy         22683   0.0  0.8 1949432640 511312   ??  S    16Aug26   8:39.35 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/151.0.7922.138/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --origin-trial-disabled-features=CanvasTextNg|WebAssemblyCustomDescriptors --force-color-profile=srgb --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=636 --time-ticks-at-unix-epoch=-1785887837383295 --launch-time-ticks=966355411311 --shared-files --metrics-shmem-handle=1752395122,r,12038075760706515832,13439932599286026628,2097152 --field-trial-handle=1718379636,r,14548954130385624381,8431448827546176160,262144 --variations-seed-version=20260815-030035.901000-production --pseudonymization-salt-handle=1935764596,r,5571933849103364594,17325632822099413450,4 --trace-process-track-uuid=3190709582270487458 --seatbelt-client=261
+- build/agent/scanner processes (cargo, rustc, dsymutil, codex, mds, XProtect, syspolicyd):
+root               529  48.6  0.1 435404480  41904   ??  Us   15Jul26 465:41.62 /usr/libexec/syspolicyd
+_mds_stores        521   0.1  0.7 456755760 490656   ??  Ss   15Jul26 397:29.65 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+root             61557   0.0  0.0 435321984   2960   ??  Ss   Fri01PM   0:00.04 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdsync -s mdworker-scan -c MDSSyncScanWorker -m com.apple.metadata.mds.scan
+trollboy         20107   0.0  0.0 1879781312  19664 s000  S    24Aug26   0:21.22 /opt/homebrew/Caskroom/codex/0.149.1/bin/codex-code-mode-host
+trollboy         19944   0.0  0.5 435785072 307008 s000  S+   24Aug26  43:55.62 codex
+trollboy           324   0.0  0.0 435356928   8416   ??  S    24Aug26   0:38.70 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService
+root             87199   0.0  0.0 435356160   8432   ??  Ss   24Aug26   0:44.31 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService
+root             23451   0.0  0.1 435384192  51744   ??  Ss   17Aug26 131:25.46 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+root             48055   0.0  0.0 435356816   9616   ??  Ss   16Aug26   0:00.76 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectUpdateService.xpc/Contents/MacOS/XProtectUpdateService
+trollboy         72766   0.0  0.0 435339024   4928   ??  S    15Aug26   0:00.67 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect
+root             52848   0.0  0.0 435339040   4832   ??  Ss   15Aug26   0:00.64 /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect
+_mds_stores       2210   0.0  0.0 435356992   4144   ??  Ss   15Jul26   0:10.62 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+postgres          1232   0.0  0.0 435366928   8560   ??  SN   15Jul26   0:01.39 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport
+root              1107   0.0  0.0 435344288  13344   ??  Ss   15Jul26   4:18.17 /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectBridgeService.xpc/Contents/MacOS/XProtectBridgeService
+trollboy           952   0.0  0.0 435367728  22912   ??  SN   15Jul26   0:40.03 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport
+root               388   0.0  0.0 435341424   4752   ??  Ss   15Jul26   0:00.10 /usr/libexec/xprotectd
+trollboy          1740   0.0  0.0 435374208  26640   ??  S     7:41AM   0:01.30 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared -s mdworker -c MDSImporterWorker -m com.apple.mdworker.shared
+trollboy         63975   0.0  0.0 1879786688  23840 s002  S    10:00PM   0:00.07 /Users/trollboy/.codex/packages/standalone/releases/0.151.0-aarch64-apple-darwin/bin/codex-code-mode-host
+trollboy         63353   0.0  0.4 435786720 269184 s002  S+    9:57PM   0:37.64 codex
+
+== SUMMARY: head=5cf556c6ed1bec38cefa31f10c2eee6abc1cbda2 fix_candidate_in_tree=yes
+== SUMMARY: phase 1 (build): completed exit=0 wall=230s compiled_units=11 target_before=existed,  41G (incremental expected)
+== SUMMARY: phase 2 (tests): completed exit=101
+== VERDICT: FAM-BUG-030 hang NOT REPRODUCED at this HEAD (fix candidate 5f517db2b validated by this clean unattended run)
