@@ -900,3 +900,43 @@ reinstall the binary, then rerun the 076 drive.
   belongs on ambiguity about durable facts, not on cosmetic stream
   noise. Codex adapter reviewed: its malformed handling is
   contract-distinct and was left untouched.
+
+### FAM-BUG-035 — Phantom scope decisions for a fully approved candidate
+
+- **Status:** Fixed (this commit)
+- **Observed:** Session 6's scope evaluation approved all 45 changed
+  files (25 `allowed_change`, 20 `justified_expected_file_change` — zero
+  undecided), yet the drive printed 24 "scope decision pending" commands
+  and enrolled them in the checkpoint's decision ledger, gating the
+  candidate on human approvals the policy had already granted.
+- **Fix:** only `prohibited_change`, `undeclared_scope_expansion`, and
+  `ambiguous_human_review` findings enroll as pending decisions.
+
+### FAM-BUG-036 — Review package self-defeats on large refactors
+
+- **Status:** Fixed (this commit); root cause of session 6's
+  `evidence_failure`
+- **Observed:** Session 6's completed PRD-076 candidate ($24.79, 51 min)
+  reached packaging and died with `EvidenceFailure` → human review, with
+  no detail (the coordinator swallowed the error). Probing the retained
+  worktree reproduced it: `RequiredEvidenceOverBudget` for a 470KB diff
+  against the 250KB/60k-token budget — which the omission machinery
+  exists to handle.
+- **Root causes (three):** (1) greedy file-order packing disclosed the
+  195KB whole-file `config.rs` deletion hunk first, starving 53
+  substantive hunks; (2) each omitted hunk appends a ~530-byte duplicate
+  retained-ref to the manifest, so heavy omission pushed even a
+  one-hunk package over the token ceiling, and the final render check
+  hard-failed instead of shedding load — the packer defeated by its own
+  bookkeeping; (3) `RequiredEvidenceOverBudget` also masked the
+  unrelated base-revision-mismatch condition, and three coordinator
+  `Err(_)` arms discarded error detail entirely.
+- **Fix:** hunks pack smallest-first (document order preserved in the
+  disclosed diff), the complete rendered request is the fit arbiter
+  with largest-hunk eviction as backstop, base mismatch got its own
+  named error, and every coordinator evidence arm now prints its error.
+  The retained session-6 candidate packages at 225,899 bytes with 2
+  omissions (56 of 58 hunks disclosed) under the unchanged budget.
+- **Cost note:** sessions 5 and 6 together spent ~$39 on completed
+  implementations voided by gate defects (034, 036). Both defects were
+  in machinery, not the work; both now carry regressions.

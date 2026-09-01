@@ -307,7 +307,10 @@ impl ReviewCoordinator<'_> {
                 budget: request.package_budget.clone(),
             }) {
                 Ok(value) => value,
-                Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
+                Err(error) => {
+                    eprintln!("review: package assembly failed: {error}");
+                    return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+                }
             };
             let package_bytes = serde_json::to_vec(&package)
                 .map_err(|e| CoordinatorError::Persistence(e.to_string()))?;
@@ -589,11 +592,17 @@ impl ReviewCoordinator<'_> {
                 .capture(repository, &request.task.base_revision)
             {
                 Ok(value) => value,
-                Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
+                Err(error) => {
+                    eprintln!("review: re-capture before review failed: {error}");
+                    return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+                }
             };
             let scope_evidence = match collect_scope_evidence(repository, &captured.changed_files) {
                 Ok(value) => value,
-                Err(_) => return self.stop(cycle, ReviewStopReason::EvidenceFailure),
+                Err(error) => {
+                    eprintln!("review: scope evidence re-collection failed: {error}");
+                    return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+                }
             };
             let evaluation = evaluate_scope(
                 &request.scope_policy,

@@ -1609,6 +1609,17 @@ pub fn drive(
                                 .scope_evaluations
                                 .iter()
                                 .flat_map(|evaluation| &evaluation.findings)
+                                // Only undecided findings need a human; enrolling
+                                // policy-approved ones printed 24 phantom decisions
+                                // for a fully in-scope candidate (FAM-BUG-035).
+                                .filter(|finding| {
+                                    matches!(
+                                        finding.decision,
+                                        familiar_ai_review::ScopeDecision::ProhibitedChange
+                                            | familiar_ai_review::ScopeDecision::UndeclaredScopeExpansion
+                                            | familiar_ai_review::ScopeDecision::AmbiguousHumanReview
+                                    )
+                                })
                             {
                                 if let Ok(json) = serde_json::to_string(finding) {
                                     let hash = familiar_ai_review::content_hash(json.as_bytes());

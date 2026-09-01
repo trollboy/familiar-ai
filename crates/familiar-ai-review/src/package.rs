@@ -49,8 +49,14 @@ pub fn build_review_request(mut input: ReviewPackageInput) -> Result<ReviewReque
             .iter()
             .map(|v| format!("check:{}", v.check_id)),
     );
-    if input.captured.diff.truncated || input.captured.base_revision != input.task.base_revision {
+    if input.captured.diff.truncated {
         return Err(PackageError::RequiredEvidenceOverBudget);
+    }
+    if input.captured.base_revision != input.task.base_revision {
+        return Err(PackageError::BaseRevisionMismatch {
+            task: input.task.base_revision.clone(),
+            captured: input.captured.base_revision.clone(),
+        });
     }
     reject_secrets(
         &serde_json::to_vec(&(
@@ -75,15 +81,45 @@ pub fn build_review_request(mut input: ReviewPackageInput) -> Result<ReviewReque
             _ => None,
         })
         .collect();
-    let mut disclosed = Vec::new();
+    let mut disclosed_hunks: Vec<(usize, &Vec<u8>)> = Vec::new();
     let mut omissions = Vec::new();
-    for (index, hunk) in hunks.iter().enumerate() {
-        let mut candidate = disclosed.clone();
-        candidate.extend_from_slice(hunk);
+    let omission_for = |index: usize, hunk: &Vec<u8>| -> Result<PackageOmission, PackageError> {
+        Ok(PackageOmission {
+            source: format!("diff:hunk:{index}"),
+            content_hash: crate::evidence::content_hash(hunk),
+            byte_size: u64::try_from(hunk.len()).map_err(|_| PackageError::Overflow)?,
+            reason: "whole_hunk_exceeds_review_package_budget".into(),
+            retained_ref: Some(input.captured.diff.clone()),
+        })
+    };
+    let hunk_is_required = |hunk: &[u8]| {
+        let hunk_text = String::from_utf8_lossy(hunk);
+        required_paths.iter().any(|path| {
+            hunk_text.contains(&format!(" a/{path} b/{path}"))
+                || hunk_text.contains(&format!("+++ b/{path}"))
+        })
+    };
+    let flatten = |hunks: &[(usize, &Vec<u8>)]| -> Vec<u8> {
+        hunks
+            .iter()
+            .flat_map(|(_, hunk)| hunk.iter().copied())
+            .collect()
+    };
+    // Disclose smallest hunks first: a giant low-information hunk (a whole-
+    // file deletion, say) must not consume the budget that could disclose
+    // dozens of substantive hunks (FAM-BUG-036). The flatten keeps document
+    // order, so the reviewer still reads the diff in file order.
+    let mut order: Vec<usize> = (0..hunks.len()).collect();
+    order.sort_by_key(|index| (hunks[*index].len(), *index));
+    for index in order {
+        let hunk = &hunks[index];
+        let mut candidate = disclosed_hunks.clone();
+        candidate.push((index, hunk));
+        candidate.sort_by_key(|(index, _)| *index);
         let provisional = request_with_manifest(
             &input,
             &included_sources,
-            &candidate,
+            &flatten(&candidate),
             omissions.clone(),
             0,
             0,
@@ -91,61 +127,76 @@ pub fn build_review_request(mut input: ReviewPackageInput) -> Result<ReviewReque
         )?;
         let bytes = render_review_prompt(&provisional)?;
         if fits(&input.budget, bytes.len())? {
-            disclosed = candidate;
+            disclosed_hunks = candidate;
         } else {
-            let hunk_text = String::from_utf8_lossy(hunk);
-            if required_paths.iter().any(|path| {
-                hunk_text.contains(&format!(" a/{path} b/{path}"))
-                    || hunk_text.contains(&format!("+++ b/{path}"))
-            }) {
+            if hunk_is_required(hunk) {
                 return Err(PackageError::RequiredEvidenceOverBudget);
             }
-            omissions.push(PackageOmission {
-                source: format!("diff:hunk:{index}"),
-                content_hash: crate::evidence::content_hash(hunk),
-                byte_size: u64::try_from(hunk.len()).map_err(|_| PackageError::Overflow)?,
-                reason: "whole_hunk_exceeds_review_package_budget".into(),
-                retained_ref: Some(input.captured.diff.clone()),
-            });
+            omissions.push(omission_for(index, hunk)?);
         }
     }
-    if !input.captured.bytes.is_empty() && disclosed.is_empty() {
-        return Err(PackageError::RequiredEvidenceOverBudget);
-    }
-    let mut total_bytes = 0;
-    let request = loop {
-        let estimated_tokens = estimate_tokens(total_bytes)?;
-        let identity = serde_json::to_vec(&(
-            &input.captured.diff.content_hash,
-            &input.captured.resulting_tree,
-            &included_sources,
-            &omissions,
-            total_bytes,
-            estimated_tokens,
-            crate::evidence::content_hash(&disclosed),
-        ))
-        .map_err(PackageError::Serialize)?;
-        let candidate = request_with_manifest(
-            &input,
-            &included_sources,
-            &disclosed,
-            omissions.clone(),
-            total_bytes,
-            estimated_tokens,
-            crate::evidence::content_hash(&identity),
-        )?;
-        let actual = u64::try_from(render_review_prompt(&candidate)?.len())
-            .map_err(|_| PackageError::Overflow)?;
-        if actual == total_bytes {
-            break candidate;
+    omissions.sort_by_key(|omission| omission.source.clone());
+    // The greedy pass measures against the omission list as it stood at each
+    // step; every hunk omitted later grows that manifest, so a package packed
+    // to the brim can exceed the budget on its final render purely from its
+    // own bookkeeping (FAM-BUG-036). The complete rendered request is the
+    // arbiter: evict the most recently disclosed hunk and rebuild until it
+    // genuinely fits.
+    loop {
+        let disclosed = flatten(&disclosed_hunks);
+        if !input.captured.bytes.is_empty() && disclosed.is_empty() {
+            return Err(PackageError::RequiredEvidenceOverBudget);
         }
-        total_bytes = actual
-    };
-    let actual = render_review_prompt(&request)?;
-    if !fits(&input.budget, actual.len())? {
-        return Err(PackageError::RequiredEvidenceOverBudget);
+        let mut total_bytes = 0;
+        let request = loop {
+            let estimated_tokens = estimate_tokens(total_bytes)?;
+            let identity = serde_json::to_vec(&(
+                &input.captured.diff.content_hash,
+                &input.captured.resulting_tree,
+                &included_sources,
+                &omissions,
+                total_bytes,
+                estimated_tokens,
+                crate::evidence::content_hash(&disclosed),
+            ))
+            .map_err(PackageError::Serialize)?;
+            let candidate = request_with_manifest(
+                &input,
+                &included_sources,
+                &disclosed,
+                omissions.clone(),
+                total_bytes,
+                estimated_tokens,
+                crate::evidence::content_hash(&identity),
+            )?;
+            let actual = u64::try_from(render_review_prompt(&candidate)?.len())
+                .map_err(|_| PackageError::Overflow)?;
+            if actual == total_bytes {
+                break candidate;
+            }
+            total_bytes = actual
+        };
+        let actual = render_review_prompt(&request)?;
+        if fits(&input.budget, actual.len())? {
+            return Ok(request);
+        }
+        // Evict the largest disclosed hunk: it frees the most room per
+        // omission-manifest entry added.
+        let Some(largest) = disclosed_hunks
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (_, hunk))| hunk.len())
+            .map(|(position, _)| position)
+        else {
+            return Err(PackageError::RequiredEvidenceOverBudget);
+        };
+        let (index, hunk) = disclosed_hunks.remove(largest);
+        if hunk_is_required(hunk) {
+            return Err(PackageError::RequiredEvidenceOverBudget);
+        }
+        omissions.push(omission_for(index, hunk)?);
+        omissions.sort_by_key(|omission| omission.source.clone());
     }
-    Ok(request)
 }
 
 fn request_with_manifest(
@@ -244,6 +295,8 @@ fn reject_secrets(bytes: &[u8]) -> Result<(), PackageError> {
 pub enum PackageError {
     #[error("required review evidence exceeds package budget")]
     RequiredEvidenceOverBudget,
+    #[error("captured base {captured} does not match task base {task}")]
+    BaseRevisionMismatch { task: String, captured: String },
     #[error("package arithmetic overflow")]
     Overflow,
     #[error("cannot serialize canonical package: {0}")]
@@ -352,6 +405,64 @@ mod tests {
             .iter()
             .all(|item| item.source.starts_with("diff:hunk:")));
         assert!(!bounded.disclosed_diff.contains("second long value"));
+    }
+
+    #[test]
+    fn small_hunks_win_the_budget_over_one_giant_hunk() {
+        // FAM-BUG-036: greedy file-order packing disclosed a 195KB whole-file
+        // deletion first and starved 53 substantive hunks; the omission
+        // manifest for those then pushed the final render over budget and the
+        // whole package hard-failed despite ample room for real content.
+        let mut value = input();
+        let giant = format!(
+            "diff --git a/src/monolith.rs b/src/monolith.rs\n--- a/src/monolith.rs\n+++ /dev/null\n@@ -1,2000 +0,0 @@\n-{}\n",
+            "deleted line of the monolith\n-".repeat(400)
+        );
+        let mut diff = giant.clone();
+        for index in 0..12 {
+            diff.push_str(&format!(
+                "diff --git a/src/mod_{index}.rs b/src/mod_{index}.rs\n--- a/src/mod_{index}.rs\n+++ b/src/mod_{index}.rs\n@@ -1 +1 @@\n-old_{index}\n+new_{index} {}\n",
+                "content ".repeat(30)
+            ));
+        }
+        let bytes = diff.into_bytes();
+        value.captured.diff.byte_size = bytes.len() as u64;
+        value.captured.diff.content_hash = crate::content_hash(&bytes);
+        value.captured.bytes = bytes;
+        value.budget.max_bytes = 9000;
+        value.budget.max_estimated_tokens = 10_000;
+        let request = build_review_request(value).expect("package must degrade, not fail");
+        let rendered = render_review_prompt(&request).unwrap();
+        assert!(rendered.len() as u64 <= request.budget.max_bytes);
+        assert!(
+            !request.disclosed_diff.contains("monolith"),
+            "giant hunk must be omitted"
+        );
+        let disclosed: Vec<bool> = (0..12)
+            .map(|index| request.disclosed_diff.contains(&format!("new_{index} ")))
+            .collect();
+        assert!(
+            disclosed.iter().filter(|present| **present).count() >= 6,
+            "most small hunks disclosed: {disclosed:?}"
+        );
+        assert!(request
+            .manifest
+            .omissions
+            .iter()
+            .any(|omission| omission.source.starts_with("diff:hunk:")));
+    }
+
+    #[test]
+    fn base_revision_mismatch_is_named_not_budget() {
+        let mut value = input();
+        value.captured.base_revision = "other".into();
+        match build_review_request(value) {
+            Err(PackageError::BaseRevisionMismatch { task, captured }) => {
+                assert_eq!(task, "base");
+                assert_eq!(captured, "other");
+            }
+            other => panic!("expected BaseRevisionMismatch, got {other:?}"),
+        }
     }
 
     #[test]
