@@ -37,11 +37,17 @@ finalize() {
   # -f: .gitignore's blanket *.log would silently drop the session log,
   # leaving finalize to report PUSH FAILED with nothing staged (FRICTION-005).
   git add -f "$LOG" 2>/dev/null
-  if git commit -q -m "session log: familiar-ai ${SLUG%-} ($STAMP, exit $CODE)" 2>/dev/null \
-     && git push -q origin main 2>/dev/null; then
-    echo "session log pushed: $LOG"
+  if git commit -q -m "session log: familiar-ai ${SLUG%-} ($STAMP, exit $CODE)" 2>/dev/null; then
+    # Rebase the fresh commit over any origin activity so overlapping
+    # sessions cannot strand the log (FAM-FRICTION-006).
+    git pull --rebase --autostash -q 2>/dev/null
+    if git push -q origin main 2>/dev/null; then
+      echo "session log pushed: $LOG"
+    else
+      echo "PUSH FAILED - log saved locally at $LOG (commit and push it when convenient)"
+    fi
   else
-    echo "PUSH FAILED - log saved locally at $LOG (commit and push it when convenient)"
+    echo "COMMIT FAILED - log saved locally at $LOG (commit and push it when convenient)"
   fi
 }
 trap 'finalize' EXIT

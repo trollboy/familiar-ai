@@ -192,8 +192,15 @@ where
                         (
                             candidate.prd_id.clone(),
                             candidate.worktree.clone(),
+                            // Repository identity (backlog discovery and the
+                            // completion target) must come from the PRIMARY
+                            // checkout; the fn reads candidate content from
+                            // the checkpoint's own worktree. Passing the
+                            // worktree here made completion compare a
+                            // self-amended PRD against its claim-time hash —
+                            // unlandable forever (FAM-BUG-040).
                             crate::run::resume_implemented_checkpoint(
-                                &candidate.worktree,
+                                &repository.worktree,
                                 &candidate.prd_id,
                                 &agents,
                                 &config,

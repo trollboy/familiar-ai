@@ -102,6 +102,11 @@ fi
 
 note "outcome: $OUTCOME"
 git add "$REPORT"
-git commit -q -m "diagnostics: FAM-BUG-030 suite run ($OUTCOME) $STAMP" && git push -q origin main \
-  && note "report pushed: $REPORT" \
-  || note "PUSH FAILED - report saved locally at $REPORT; commit and push it manually"
+if git commit -q -m "diagnostics: FAM-BUG-030 suite run ($OUTCOME) $STAMP"; then
+  git pull --rebase --autostash -q 2>/dev/null
+  git push -q origin main \
+    && note "report pushed: $REPORT" \
+    || note "PUSH FAILED - report saved locally at $REPORT; commit and push it manually"
+else
+  note "COMMIT FAILED - report saved locally at $REPORT; commit and push it manually"
+fi

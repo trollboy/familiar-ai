@@ -441,12 +441,27 @@ impl<'a> SqliteBacklogRepository<'a> {
         let (status, hash, missing) =
             row.ok_or_else(|| BacklogStoreError::NotFound(target.path.clone()))?;
         if status != "in_progress" || hash != target.content_hash || missing.is_some() {
+            // Name the failing predicate: "expected in_progress, found
+            // in_progress" (status fine, hash stale) is undiagnosable.
+            let actual = if status != "in_progress" {
+                BacklogStatus::parse(&status)
+                    .map(|s| s.as_str())
+                    .unwrap_or("conflict")
+            } else if hash != target.content_hash {
+                eprintln!(
+                    "backlog: completion content-hash conflict for {}: row={} discovered={}",
+                    target.path.as_str(),
+                    hash,
+                    target.content_hash
+                );
+                "in_progress with a different content hash"
+            } else {
+                "in_progress but marked missing"
+            };
             return Err(BacklogStoreError::Conflict {
                 path: target.path.clone(),
                 expected: "in_progress",
-                actual: BacklogStatus::parse(&status)
-                    .map(|s| s.as_str())
-                    .unwrap_or("conflict"),
+                actual,
             });
         }
         let latest_event: (String,String,String) = tx.query_row("SELECT old_status,new_status,actor FROM backlog_status_events WHERE repository_key=?1 AND prd_path=?2 ORDER BY event_id DESC LIMIT 1",params![repository.key,target.path.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(storage)?;

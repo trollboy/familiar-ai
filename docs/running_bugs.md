@@ -734,7 +734,13 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-030 — Workspace suite hangs on macOS at/after the mcp integration binary
 
-- **Status:** Open — fix candidate landed (`5f517db`) but UNVERIFIED; the
+- **Status:** CLOSED 2026-09-01 — fix candidate 5f517db validated by a clean
+  unattended Mac run (`mac-build-speed-20260901T113450Z`): build 3m50s warm,
+  full suite completed in 281s, no stall. The historical 45-minute runs were
+  cold-build time (41GB target/), not the hang. The suite's exit 101 on that
+  run was the control_plane_boundaries path-scan test, fixed separately with
+  the PRD-076 landing.
+- **Prior status:** Open — fix candidate landed (`5f517db`) but UNVERIFIED; the
   2026-09-01 diagnosis run splits the defect into two questions (see below)
 - **Observed:** The fourth PRD-076 preflight passed the previously-failing
   cli_run isolation, progressed through 20+ test binaries, then produced no
@@ -998,3 +1004,35 @@ reinstall the binary, then rerun the 076 drive.
   sequence (`{checkpoint_id}:{phase}:{n}`) — unique per occurrence.
   The two drive-side completion writers already used INSERT OR IGNORE
   and stay as-is.
+
+### FAM-BUG-040 — Self-amending PRDs could never complete
+
+- **Status:** Fixed (this commit); the fix landed PRD-076
+- **Observed:** Resume attempts 3-4 reached a clean opus review
+  (ReadyForHumanApproval, CleanReview, independence verified) and then
+  failed the completion transition with the absurd "expected
+  in_progress, found in_progress". Instrumentation (predicate now named
+  in the error, hashes printed) revealed a content-hash conflict: the
+  row held the claim-time hash of main's PRD-076.md while the
+  completion target hashed the WORKTREE's copy — which PRD-076 amends
+  by design.
+- **Root cause:** `resume` passed the candidate worktree as the
+  repository root to `resume_implemented_checkpoint`, conflating
+  repository identity (backlog discovery, completion target) with
+  candidate content (context, verification, capture). The function
+  already reads candidate content from the checkpoint's own worktree;
+  identity now comes from the primary checkout.
+- **Validated live:** the next resume completed PRD-76 and landed it —
+  `landed PRD-76 9ca865a`. Follow-up: a fake-agent regression for the
+  self-amending-PRD shape belongs in autonomous_delivery.rs.
+
+### FAM-FRICTION-006 — Unattended report pushes race origin and strand
+
+- **Status:** Fixed (this commit)
+- **Observed:** the Mac's first mac-build-speed report (the one that
+  validated the FAM-BUG-030 fix) failed to push: origin had advanced
+  during its 10-minute run. Same latent race in logged.sh and
+  diagnose-suite-hang.sh.
+- **Fix:** all three scripts commit first, then `git pull --rebase
+  --autostash` before pushing, with commit and push failures reported
+  distinctly.

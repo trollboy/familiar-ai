@@ -37,8 +37,7 @@ fn main() {
     )
     .expect("candidate snapshot");
     checkpoint.diff_hash = familiar_ai_review::content_hash(&evidence);
-    checkpoint.changed_files_json =
-        serde_json::to_string(&files).expect("serialize changed files");
+    checkpoint.changed_files_json = serde_json::to_string(&files).expect("serialize changed files");
     println!("new diff_hash: {}", checkpoint.diff_hash);
     println!("manifest files: {}", files.len());
     repository.put(&checkpoint).expect("rebind checkpoint");

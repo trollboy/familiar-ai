@@ -343,6 +343,11 @@ esac
 
 git add "$REPORT"
 [ -n "$TIMING_COPY" ] && git add "$TIMING_COPY"
-git commit -q -m "diagnostics: FAM-BUG-030 mac build-speed run (build=${BUILD_OUTCOME%% *}, tests=${TEST_OUTCOME%% *}) $STAMP" && git push -q origin main \
-  && note "report pushed: $REPORT" \
-  || note "PUSH FAILED - report saved locally at $REPORT; commit and push it manually"
+if git commit -q -m "diagnostics: FAM-BUG-030 mac build-speed run (build=${BUILD_OUTCOME%% *}, tests=${TEST_OUTCOME%% *}) $STAMP"; then
+  git pull --rebase --autostash -q 2>/dev/null
+  git push -q origin main \
+    && note "report pushed: $REPORT" \
+    || note "PUSH FAILED - report saved locally at $REPORT; commit and push it manually"
+else
+  note "COMMIT FAILED - report saved locally at $REPORT; commit and push it manually"
+fi
