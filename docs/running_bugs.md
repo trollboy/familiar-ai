@@ -591,3 +591,27 @@ PRD-076.
   populated prior-version fixture that exercises production constraints and
   triggers; empty fresh-database migration tests are insufficient release
   evidence.
+
+## 2026-08-31 — Disposition summary after waves 3–4 (bug-carrier PRDs created)
+
+Per the bugs-preempt policy, every open entry now has a carrier scheduled
+NEXT, closed evidence, or an explicit direct-fix assignment:
+
+- **Closed by landed PRDs:** 003 (PRD-074 platform credential stores),
+  006 residual (PRD-075 audited migration + whole-config validation),
+  007 (PRD-032 empirical probation; verify on next multi-worker session),
+  016 (fixed `22cc6f9`), 026 (fixed `299c013`), FRICTION-004 (fixed
+  `3a0ec95`). 001/FRICTION-002/FRICTION-003 are partially closed by
+  PRD-057's worker-spec identity; the remaining probe-before-eligible gap
+  continues as PRD-079.
+- **PRD-077 (runs first):** 012, 018, 019, 021, 022, and 009's
+  deterministic-failure circuit breaker. 077's final acceptance criterion
+  is 019's closure condition.
+- **PRD-078:** 011, 015, 020, 024.
+- **PRD-079:** 013, 025, and the probe-before-eligible residue of 009.
+- **PRD-080:** 014 and the wave-3 PRD-050 / wave-4 PRD-055 scope walls.
+- **Direct fixes, next Claude session:** 017 (provider-verify TOML
+  rendering), 023 (config edit blocked by disabled delivery defaults).
+- **Recorded, not carried:** waves' patch-application brittleness
+  (wave-3 §8 / wave-4 §8) is Codex-CLI tool behavior, not Familiar code;
+  tracked here for visibility only.

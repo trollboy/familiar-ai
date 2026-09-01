@@ -1,158 +1,92 @@
-# Backlog Execution Plan — 2026-08-30
+# Backlog Execution Plan — updated 2026-08-31
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
-**Approval:** All 37 pending PRDs (032, 036–038, 041, 044–064, 066–076) are
-approved for implementation. The owner-directed economy family
-(2026-08-30): PRD-069 native token compression (caveman functionality
-replicated first-party, no external dependency), PRD-070 daemon context
-service (incremental repo map, prefix-stable serving, per-project
-token-sink reports), PRD-071 batch-tier independent review (half-price
-async review under the 056 control plane), PRD-072 raw-runtime token
-discipline (targeted edits, bounded tool output), PRD-073 warm local model
-residency. Every economy mechanism defaults off and promotes only on a
-recorded PRD-051 measurement. The 046 and 051–064 family received adversarial
-review and sign-off by Sol 5.6; owner batch-approved the full set 2026-08-30. Every
-frontmatter PRD is `status: ready`. This document is the owner's standing
-authorization: workers must not pause for per-PRD plan sign-off on
-scope-conformant work.
+**Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
+dependency-ready AND mutually scope-disjoint.**
+**Policy: bugs preempt the backlog** (owner, 2026-08-31): open
+`docs/running_bugs.md` entries outrank all planned work; bug remediation is
+the first work of every session; "transferred to PRD-X" is valid only when
+PRD-X runs next; new bugs go to the top, never the end.
 
-## Dependency waves
+**Approval:** All 15 pending PRDs (038, 053, 058–061, 063, 071–073,
+076–080) are approved for implementation. PRDs 077–080 are the bug-carrier
+family created 2026-08-31 from waves 3–4 after-action findings and run
+first under the bug policy. Every economy mechanism still defaults off and
+promotes only on a recorded PRD-051 measurement. This document is the
+owner's standing authorization: workers must not pause for per-PRD plan
+sign-off on scope-conformant work.
 
-**Wave 1 completed 2026-08-30.** See
-[`../wave1_afteraction_report.md`](../wave1_afteraction_report.md) for delivery
-evidence and the orchestration defects observed during execution.
+## Completed
 
-**GATE SATISFIED (2026-08-30): PRD-065 merged; Wave 2 is unblocked.**
-Wave 1 exposed four orchestration defects (after-action defects 1–3 and 7);
-PRD-065 fixed all four: the scheduler now admits the full ready set
-(dependencies are admission gates, not mutual-exclusion edges; two ready
-PRDs serialize only on overlapping expected-file scopes, with every
-selection/deferral persisted in `driver_selection_decisions`), the session
-warrant accepts a repeatable `--prd` allowlist selection can never escape,
-worktrees resolve repository policy through Git common-directory identity,
-and `backlog approve-and-complete` completes a reviewed checkpoint in one
-transaction binding the approved hash and commit. A width-six regression
-test on the recorded Wave 1 graph pins the fix.
+| Wave | PRDs | Outcome |
+|------|------|---------|
+| 1 | 036, 037, 044, 045, 046, 047 | complete 2026-08-30 — width 1; [after-action](../wave1_afteraction_report.md) |
+| gate | 065 | complete 2026-08-30 |
+| 2 | 041, 048, 049, 051 | complete 2026-08-30 — width 1, manual landing; [after-action](../wave2_afteraction_report.md) |
+| gate | 066, 067, 068 | complete 2026-08-31 |
+| 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | complete 2026-08-31 — **all nine retained; integrated manually**; [after-action](../wave3_afteraction_report.md) |
+| 4 | 032, 055, 056, 062 | complete 2026-08-31 — **cascade-then-manual again**; [after-action](../wave4_afteraction_report.md) |
 
-**Wave 2 completed 2026-08-30.** See
-[`../wave2_afteraction_report.md`](../wave2_afteraction_report.md): all four
-PRDs integrated, but at achievable width ONE (every wave-2 PRD overlapped in
-configuration, storage, or run surfaces), with stale-base composition
-defects (duplicate migration numbers, completion before integration) and
-substantial manual landing work.
+The waves-3/4 caveat is the plan's dominant fact: Familiar has never
+integrated a multi-PRD wave autonomously (FAM-BUG-019/022). The delivered
+code is real; the delivery process was the operator. The bug gate below
+exists to end that.
 
-**GATE (2026-08-30): PRDs 066, 067, and 068 block Wave 3 — every wave-2
-defect is fixed before new product work runs.**
+## Remaining waves
 
-- **PRD-066** — integration-aware parallel orchestration: the merge queue
-  (parallel execution, ordered landing; scope release and completion at
-  integration, not review), continuous admission replacing batch lockstep,
-  authoring-time achievable-width validation, migration-number allocation,
-  hash-bound scope decisions, reconciled recovery, live worker heartbeats.
-  Covers defects 1–4 and 13–15. Runs first and alone:
-  `familiar-ai drive --max-prds 1 --prd PRD-066`.
-- **PRD-067** — durable verification truth: dispositions computed from
-  durable check records (narration that contradicts them fails the phase),
-  open findings block clean completion absent a recorded human waiver,
-  environment-denied checks classified distinctly with preflighted
-  writable paths. Covers defects 7, 8, and 17.
-- **PRD-068** — driver hygiene: precise context-failure classification
-  with continue-past-retained sessions, model-cache invalidate-once,
-  metadata-check strict/advisory exit modes. Covers defects 9, 16, 18.
+**GATE — the bug wave (runs before all product work, per policy):**
 
-067 and 068 run after 066 lands, through 066's own merge queue, as one
-session — their declared scopes are disjoint (review crate + run.rs +
-dedicated test file, versus context/agent/drive/bin + dedicated test
-file), making them the first honest width-2 test of the new machinery:
-`familiar-ai drive --max-prds 2 --prd PRD-067 --prd PRD-068`.
+- **PRD-077 — autonomous wave delivery** (bugs 012, 018, 019, 021, 022,
+  the 009 circuit breaker): integration-contained dependency admission,
+  implementation_incomplete terminal class, deterministic-failure circuit
+  breaker with an executable recovery plan, remediation that advances its
+  own checkpoint, resume-to-completion. Its last acceptance criterion is
+  FAM-BUG-019's closure condition: a two-PRD wave end to end through
+  Familiar commands alone. Runs first and alone.
+- **PRD-078 — preflight/verification contract** (bugs 011, 015, 020, 024)
+  and **PRD-079 — capability-probed review routing** (bugs 013, 025) run
+  as a pair after 077 — their declared files are disjoint.
+- **PRD-080 — scope authority refinement** (bug 014; the wave-3 PRD-050
+  and wave-4 PRD-055 scope walls) follows.
+- Direct fixes outside PRDs, first Claude session: **bug 017** (provider
+  verify renders invalid TOML) and **bug 023** (valid config uneditable
+  under disabled delivery defaults).
 
-**Definition (2026-08-31, owner's): a wave is a batch of PRDs runnable
-simultaneously — dependency-ready AND mutually scope-disjoint.** The rows
-below the next gate do not yet satisfy that definition: they are
-dependency layers only, and computed against the scheduler's conflict
-rules the backlog they hold is currently a width-one chain, because four
-shared surfaces (`config.rs`, `providers.md`, the CLI binary, shared test
-directories) sit in nearly every declared scope.
-
-**GATE (2026-08-31): PRD-076 blocks everything below it — owner-approved and prioritized 2026-08-31; it is the next PRD to run, before any remaining backlog item.** Scope
-modularization for parallel authoring: split the four hot surfaces into
-per-feature files (behavior-preserving, proven by fixture equivalence),
-amend every pending PRD's expected_files to the narrowed forms under this
-PRD's recorded authorization, and regenerate the rows below as computed
-true rounds (expected shape: ~9 rounds at widths 2–5 instead of ~23 at
-width 1). Runs alone: `familiar-ai drive --max-prds 1 --prd PRD-076`.
-
-A PRD may start only when its dependencies are complete AND it is inside
-the session's approved allowlist — the earlier "wave boundaries are
-guidance, not barriers" language is retracted; it authorized the Wave 1
-boundary escape (defect 2). Warrant each wave's session with its PRD set.
-
-The width columns are honest per wave-2 defect 1: **graph width** is what
-the dependency graph permits; **achievable width** is what the declared
-expected-file scopes and resources permit under the PRD-065 conflict rules.
-PRD-066 plan validation computes achievable width with the scheduler's scope
-and resource conflict rules. Historical measured values remain labelled;
-future authored waves must validate their claimed width before admission.
-Narrowing a wave's `expected_files` raises its achievable width; coarse
-whole-crate declarations forfeit concurrency by design.
+**GATE — PRD-076 scope modularization** (owner-approved 2026-08-30):
+still required — the remaining product PRDs (058, 063, 072 especially)
+declare whole-crate scopes that would serialize waves 5–6. Regenerates
+the rows below as computed true rounds after amending the remaining
+PRDs' declarations.
 
 | Wave | PRDs | Graph width | Achievable width |
 |------|------|-------------|------------------|
-| 1 | 036, 037, 044, 045, 046, 047 — **completed 2026-08-30** | 6 | 1 (measured) |
-| gate | 065 — orchestration reliability — **completed 2026-08-30** | 1 | 1 |
-| 2 | 041, 048, 049, 051 — **completed 2026-08-30** | 4 | 1 (measured) |
-| gate | 066 — integration-aware parallel orchestration | 1 | 1 |
-| gate | 067, 068 — verification truth, driver hygiene | 2 | 2 (disjoint by construction) |
-| gate | 076 — scope modularization (makes the rows below true waves) | 1 | 1 |
-| 3 | **057 first (open-bug carrier)**, 052, 054, 064, 069, 070, 074, 075 | 8 | **1 as declared (measured)** — 076 regenerates |
-| 4 | 032, 055, 056, 062 | 4 | ~2 |
-| 5 | 038, 053, 058 | 3 | ~2 |
-| 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 (per-adapter files disjoint; 072 shares 058's surfaces) |
-| 7 | 050, 071, 073 | 3 | ~2–3 (050 deferred here per bug policy 2026-08-31) |
+| bug gate | 077, then 078 ∥ 079, then 080 | 4 | 1 → 2 → 1 |
+| gate | 076 | 1 | 1 |
+| 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
+| 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
+| 7 | 071, 073 | 2 | 2 |
 
 ## Critical path
 
-**066 → 064 → 056 → 058 → {059, 060, 061, 063}** (044, 051 completed) —
-five PRDs deep with the gate; no amount of parallelism shortens it. Within
-any wave, schedule the critical-path member ahead of its siblings.
-
-Secondary chains: 032 → 038 (have-at-it acceptance; 041 completed) and
-057 → 062 → 063 (local-model execution).
+**077 → 076 → 058 → {059, 060, 061, 063} → {071, 073}** — 056 landing
+moved the control plane off the path; the raw runtime (058) is now the
+long pole, and it is ready the moment the gates clear. 038 (multi-repo
+acceptance — the forcing function that ends infrastructure work) and 053
+are dependency-ready NOW and must not keep slipping: schedule 038 in the
+first product session after the gates.
 
 ## Scheduling guidance
 
-- Use one worktree per PRD. After PRD-066, candidates land through the
-  session merge queue in review order and successors branch from the
-  session integration revision; do not merge worktrees to `main` by hand
-  mid-session.
-- Real concurrency is bounded by the achievable-width column, not the graph
-  column. Authors who want width declare file-level `expected_files` and
-  explicit `resources`, not whole-crate directories.
-- Heavy items that will pace their waves: 038 (multi-repo acceptance),
-  058 (raw runtime), 056 (control-plane migration).
-- Run `familiar-ai backlog metadata-check --advisory` as the unattended
-  pre-wave gate. It reports the 41 legacy PRDs as migration debt without a
-  failing exit; every structured-v1 diagnostic remains blocking. Use
-  `--strict` when legacy migration debt must also fail the check.
-
-## Bugs preempt the backlog (owner policy, 2026-08-31)
-
-Open entries in `docs/running_bugs.md` outrank all planned work. No bug
-waits for the wave that contains its owning PRD:
-
-1. Bug remediation is the first work of every session. A drive session
-   warranted while bugs are open starts with the bug-fix work, not the
-   next product PRD.
-2. "Transferred to PRD-X" is a valid disposition only when PRD-X is the
-   next thing scheduled to run. Otherwise the bug is fixed narrowly now
-   and the owning PRD generalizes later.
-3. New bugs go to the top of the priority order, never the end. Tech-debt
-   findings follow the same rule.
-4. Consequences applied now: **PRD-057 runs first in Wave 3** (open bugs
-   009 and 013 transfer into it); **PRD-050 is deferred to Wave 7** (least
-   urgent item in the backlog, and a scope hog); the 066 remediation batch
-   (bugs 011, 012, 014, 016, the 009 circuit breaker, the 015 fixture
-   seam) is being fixed directly, not scheduled.
+- One worktree per PRD; candidates land through the session merge queue;
+  do not merge worktrees to `main` by hand — if that becomes necessary,
+  it is a FAM-BUG-019 recurrence and goes in the bug log, not just the
+  terminal history.
+- Real concurrency is bounded by the achievable-width column. Authors
+  declare file-level `expected_files` and explicit `resources`, never
+  whole-crate directories.
+- `familiar-ai backlog metadata-check --advisory` is the unattended
+  pre-wave gate; `--strict` when legacy migration debt must fail.
+- Operator setup reference: `docs/guides/provider-setup.md`.
 
 ## Human-approval policy for unattended execution
 
@@ -162,23 +96,14 @@ Approvals are batched, never ad-hoc. Concretely:
    gate (PRD-019 model) for every listed PRD. A worker implementing within
    a PRD's declared `expected_files`, `acceptance_criteria`, and
    `risk_classes` proceeds without asking.
-2. **Risk acceptance follows declared tiering.** PRD-045 (wave 1) routes
-   review by declared risk class: low-risk work completes on a clean
-   independent review with no human in the loop; high-risk classes get
-   independent review, and only a reviewer-flagged unresolved objection
-   escalates to the owner.
-3. **Scope deviation blocks, it does not ask.** New dependency edges,
-   changes to expected files or acceptance criteria, failed external
-   gates, or anything that fails closed marks the PRD `blocked` with a
-   recorded reason, and the driver moves to the next ready PRD. The graph
-   is wide enough (~4 ready on average) that one blocked item never idles
-   the fleet.
-4. **Escalations queue; the owner drains the queue at wave boundaries.**
-   PRD-041 (wave 2, prioritize early) is the mechanism that turns
-   verification failures into recorded escalations instead of silent
-   retries or mid-run prompts. The owner reviews the blocked/escalation
-   queue once per wave (or daily), approves or amends in one sitting, and
-   unblocked PRDs rejoin the ready set.
-5. **Nothing outside this backlog is authorized.** Work not traceable to a
-   listed PRD's scope requires a new PRD and a new approval, not an
-   in-flight judgment call.
+2. **Declared manifests are pre-authorized.** A `Cargo.toml`/`Cargo.lock`
+   path in a PRD's `expected_files` carries this plan's standing approval;
+   PRD-080 makes that a minted hash-bound decision at admission.
+3. **Risk acceptance follows declared tiering** (PRD-045): low-risk work
+   completes on a clean independent review; high-risk classes get
+   independent review, and only an unresolved reviewer objection escalates.
+4. **Scope deviation pauses with a decidable finding** (PRD-080), or
+   blocks with a recorded reason; the driver moves to the next ready PRD.
+5. **Escalations queue; the owner drains the queue at wave boundaries.**
+6. **Nothing outside this backlog is authorized.** Work not traceable to a
+   listed PRD's scope requires a new PRD and a new approval.
