@@ -1,0 +1,38 @@
+command: familiar-ai resume PRD-38
+date: Tue Sep  1 08:52:57 PM UTC 2026
+host: trollboy (Linux)
+head: 0f9c254dedde43bcbcdfd9b74e0f569ed4479d5f (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3828828
+verification: heartbeat check=format elapsed_ms=4244 child=pid:3828828
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3829450
+verification: heartbeat check=lint elapsed_ms=30003 child=pid:3829450
+verification: heartbeat check=lint elapsed_ms=32244 child=pid:3829450
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3834047
+verification: heartbeat check=tests-green-crates elapsed_ms=30001 child=pid:3834047
+verification: heartbeat check=tests-green-crates elapsed_ms=60000 child=pid:3834047
+verification: heartbeat check=tests-green-crates elapsed_ms=60258 child=pid:3834047
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3841314
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30003 child=pid:3841314
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60005 child=pid:3841314
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90004 child=pid:3841314
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:3841314
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150002 child=pid:3841314
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=159172 child=pid:3841314
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788282460380264-0002412995-000002-cycle-review-1","reviewed_manifest_hash":"sha256:8fe137d2f87eb30abe1ab9f080b6239a29ba1400f691dac1e6fed649ee43e9cd","findings":[{"finding_id":"scope-outside-crates","category":"scope_violation","severity":"medium","blocking":false,"title":"Nine of eleven added files fall outside the single allowed path `crates/`","claim":"The task declares allowed_paths = [\"crates/\"], but this change adds files under `tests/fixtures/` (eight files) and `docs/acceptance/` (one file) in addition to the two files under `crates/`. Those nine paths lie outside the declared write boundary. The new crate tests hard-depend on the out-of-scope fixture trees (via `env!(\"CARGO_MANIFEST_DIR\").join(\"../..\").join(\"tests/fixtures\")`), so the change cannot be reduced to only the in-scope `crates/` files without breaking; the scope declaration and the implementation are therefore inconsistent.","evidence":[{"kind":"diff_hunk","path":"tests/fixtures/repo-rust-cli/Cargo.toml","hunk":"@@ -0,0 +1,7 @@\n+[package]\n+name = \"fixture-cli\"\n+version = \"0.1.0\"\n+edition = \"2021\"\n+\n+[dependencies]\n+serde = { version = \"1\", features = [\"derive\"] }"},{"kind":"diff_hunk","path":"tests/fixtures/repo-node-service/package.json","hunk":"@@ -0,0 +1,12 @@\n+{\n+  \"name\": \"fixture-service\",\n+  \"version\": \"0.1.0\",\n+  \"private\": true,\n+  \"main\": \"index.js\",\n+  \"scripts\": {\n+    \"test\": \"node --test\"\n+  },\n+  \"dependencies\": {\n+    \"express\": \"^4.19.0\"\n+  }\n+}"},{"kind":"diff_hunk","path":"docs/acceptance/PRD-038-multi-repo-have-at-it.md","hunk":"@@ -0,0 +1,49 @@\n+# PRD-038: Multi-Repository Have-At-It Acceptance\n+\n+This is the repository-agnostic product acceptance proof: design documents\n+in, one approved decomposition, unattended bounded execution, and an exact\n+morning report, exercised against materially different repositories."},{"kind":"file_range","path":"crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs","range":{"start":62,"end":66}}],"remediation":"Either widen the task's allowed_paths to include `tests/` and `docs/` (with explicit human authorization) so the declared scope matches the change, or relocate the required fixture trees and acceptance doc under `crates/` so the change stays within its declared boundary. Do not merge with the scope declaration and the change set inconsistent.","status":"open","supersedes":null}]}
+backlog: PRD-38 docs/prds/PRD-038.md remains in_progress reason=review_failed
+error: PRD-38: execution history failed: review workflow failed: persistence failed: FOREIGN KEY constraint failed
+---
+exit: 1
