@@ -1,0 +1,39 @@
+command: familiar-ai resume PRD-38
+date: Tue Sep  1 08:46:26 PM UTC 2026
+host: trollboy (Linux)
+head: 86925244860878ceb9188740a364069f4fec7bf9 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3791717
+verification: heartbeat check=format elapsed_ms=4534 child=pid:3791717
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3792277
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:3792277
+verification: heartbeat check=lint elapsed_ms=31335 child=pid:3792277
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3796530
+verification: heartbeat check=tests-green-crates elapsed_ms=30003 child=pid:3796530
+verification: heartbeat check=tests-green-crates elapsed_ms=60001 child=pid:3796530
+verification: heartbeat check=tests-green-crates elapsed_ms=61507 child=pid:3796530
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3803595
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30000 child=pid:3803595
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60004 child=pid:3803595
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90000 child=pid:3803595
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120001 child=pid:3803595
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150004 child=pid:3803595
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=168249 child=pid:3803595
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788282460380264-0002412995-000002-cycle-review-1","reviewed_manifest_hash":"sha256:8fe137d2f87eb30abe1ab9f080b6239a29ba1400f691dac1e6fed649ee43e9cd","findings":[{"finding_id":"scope-out-of-allowed-paths","category":"scope_violation","severity":"high","blocking":false,"title":"Candidate adds files outside the task's allowed_paths (crates/)","claim":"The task declares allowed_paths [\"crates/\"], but the candidate adds nine new files under docs/ and tests/fixtures/ (docs/acceptance/PRD-038-multi-repo-have-at-it.md and the entire tests/fixtures/repo-rust-cli and tests/fixtures/repo-node-service trees), all of which fall outside the crates/ boundary. Only the two *.rs files under crates/ are within scope.","evidence":[{"kind":"file_range","path":"docs/acceptance/PRD-038-multi-repo-have-at-it.md","range":{"start":1,"end":49}},{"kind":"file_range","path":"tests/fixtures/repo-rust-cli/Cargo.toml","range":{"start":1,"end":7}},{"kind":"file_range","path":"tests/fixtures/repo-rust-cli/src/main.rs","range":{"start":1,"end":3}},{"kind":"file_range","path":"tests/fixtures/repo-node-service/package.json","range":{"start":1,"end":12}},{"kind":"file_range","path":"tests/fixtures/repo-node-service/index.js","range":{"start":1,"end":6}}],"remediation":"Either relocate the acceptance doc and the fixture repository trees under crates/ (e.g. as test data inside the owning crate's directory, referenced relative to CARGO_MANIFEST_DIR without the ../.. escape) so they fall within the declared allowed_paths, or obtain an explicit expansion of allowed_paths to include docs/ and tests/fixtures/ before landing.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+backlog: PRD-38 docs/prds/PRD-038.md remains in_progress reason=completion_conflict
+error: PRD-38: storage failure: terminal review retains open finding scope-out-of-allowed-paths without a durable human waiver
+---
+exit: 1
