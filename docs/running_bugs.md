@@ -298,7 +298,11 @@ instead of deleting the history.
 
 ### FAM-BUG-017 — Provider verification constructs invalid TOML before atomic validation
 
-- **Status:** Open; live configuration was protected by validation
+- **Status:** Fixed 2026-08-31 — provenance comments now decorate the KEY
+  (rendering above `key = ...`); a value prefix rendered inside the
+  assignment (`models =# added by …`) and could never parse. Regression pins
+  a provider followed by a commented provider table, proves the render
+  reparses, and forbids the in-assignment shape.
 - **Observed:** After upgrading Ollama, `familiar-ai config provider verify
   ollama --actor human:trollboy` attempted to construct
   `models =# added by ...`, then failed full-configuration parsing with
@@ -515,7 +519,11 @@ PRD-076.
 
 ### FAM-BUG-023 — Valid config cannot be edited because disabled delivery defaults active
 
-- **Status:** Open; machine config repaired manually
+- **Status:** Fixed 2026-08-31 — a legacy `[delivery]` table with
+  `enabled = false` (or an empty table) now deserializes to disabled mode
+  through a compatibility deserializer; an explicit `mode` always wins.
+  Regression starts from the exact historical table shape and proves it
+  validates.
 - **Observed:** Every `config model disable` command failed atomic validation,
   first demanding `max_deliveries_per_session`, then a remote/base, because the
   existing `[delivery] enabled = false` table defaulted `mode` to

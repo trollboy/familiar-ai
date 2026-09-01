@@ -1815,9 +1815,12 @@ fn array_value(values: &[String]) -> Item {
     value(array)
 }
 
+/// FAM-BUG-017: the provenance comment must decorate the KEY (rendering as a
+/// line above `key = ...`), never the value — a value prefix renders between
+/// `=` and the value, producing unparseable TOML like `models =# added by …`.
 fn stamp_value(table: &mut Table, key: &str, command: &str, actor: &str, at: &str) {
-    if let Some(value) = table.get_mut(key).and_then(Item::as_value_mut) {
-        value.decor_mut().set_prefix(format!(
+    if let Some(decor) = table.key_decor_mut(key) {
+        decor.set_prefix(format!(
             "# added by familiar-ai config {command} — {actor} {at}\n"
         ));
     }
@@ -2127,6 +2130,40 @@ mod tests {
             data_dir: directory.path().join("data"),
         };
         (directory, context)
+    }
+
+    /// FAM-BUG-017 regression: stamping provenance on a value adjacent to a
+    /// following commented provider table must render parseable TOML with the
+    /// comment ABOVE the key, never between `=` and the value.
+    #[test]
+    fn stamped_provenance_renders_parseable_toml_above_the_key() {
+        let mut document: toml_edit::Document = concat!(
+            "[providers.ollama]\n",
+            "kind = \"inference\"\n",
+            "models = [\"llama3\"]\n",
+            "\n",
+            "# added by familiar-ai config provider add — human:t 2026-08-30\n",
+            "[providers.unsloth]\n",
+            "kind = \"inference\"\n",
+        )
+        .parse()
+        .unwrap();
+        let table = document["providers"]["ollama"].as_table_mut().unwrap();
+        table["models"] = array_value(&["llama3".into(), "qwen3".into()]);
+        stamp_value(table, "models", "provider verify", "human:t", "2026-08-31");
+        let rendered = document.to_string();
+        let reparsed: Result<toml_edit::Document, _> = rendered.parse();
+        assert!(reparsed.is_ok(), "rendered TOML must parse:\n{rendered}");
+        assert!(
+            rendered.contains(
+                "# added by familiar-ai config provider verify — human:t 2026-08-31\nmodels ="
+            ),
+            "comment must sit on the line above the key:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("models =#"),
+            "comment must never render inside the assignment:\n{rendered}"
+        );
     }
 
     #[test]

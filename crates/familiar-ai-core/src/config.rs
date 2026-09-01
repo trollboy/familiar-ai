@@ -1068,7 +1068,7 @@ impl WorkerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, from = "DeliveryConfigCompat")]
 pub struct DeliveryConfig {
     #[serde(default = "default_delivery_mode")]
     pub mode: DeliveryMode,
@@ -1126,6 +1126,85 @@ pub enum DeliveryMode {
 
 fn default_delivery_mode() -> DeliveryMode {
     DeliveryMode::ReviewedPrManual
+}
+
+/// FAM-BUG-023: a legacy `[delivery]` table carrying only `enabled = false`
+/// must deserialize to disabled mode, not to the reviewed-PR default that
+/// then demands delivery fields the operator never configured. When `mode`
+/// is absent, the legacy `enabled` flag decides between the reviewed-PR
+/// default and disabled; an explicit `mode` always wins.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryConfigCompat {
+    #[serde(default)]
+    mode: Option<DeliveryMode>,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    max_deliveries_per_session: u64,
+    #[serde(default = "default_delivery_command_timeout_ms")]
+    command_timeout_ms: u64,
+    #[serde(default = "default_delivery_remote")]
+    remote: String,
+    #[serde(default = "default_delivery_base")]
+    base: String,
+    #[serde(default)]
+    provider_argv: Vec<String>,
+    #[serde(default)]
+    auto_merge: bool,
+    #[serde(default)]
+    staging_environment: String,
+    #[serde(default)]
+    deploy_argv: Vec<String>,
+    #[serde(default)]
+    smoke_argv: Vec<String>,
+    #[serde(default)]
+    rollback_argv: Vec<String>,
+    #[serde(default)]
+    comment_blockers: bool,
+    #[serde(default)]
+    required_checks: Vec<String>,
+    #[serde(default)]
+    migration_gate_argv: Vec<String>,
+    #[serde(default)]
+    credential_references: Vec<String>,
+    #[serde(default)]
+    poc_warrant: Option<PocSelfApprovalWarrant>,
+    #[serde(default)]
+    review_gate: Option<ReviewGateConfig>,
+    #[serde(default)]
+    targets: BTreeMap<String, String>,
+}
+
+impl From<DeliveryConfigCompat> for DeliveryConfig {
+    fn from(compat: DeliveryConfigCompat) -> Self {
+        let mode = compat.mode.unwrap_or(if compat.enabled {
+            default_delivery_mode()
+        } else {
+            DeliveryMode::Disabled
+        });
+        Self {
+            mode,
+            enabled: compat.enabled,
+            max_deliveries_per_session: compat.max_deliveries_per_session,
+            command_timeout_ms: compat.command_timeout_ms,
+            remote: compat.remote,
+            base: compat.base,
+            provider_argv: compat.provider_argv,
+            auto_merge: compat.auto_merge,
+            staging_environment: compat.staging_environment,
+            deploy_argv: compat.deploy_argv,
+            smoke_argv: compat.smoke_argv,
+            rollback_argv: compat.rollback_argv,
+            comment_blockers: compat.comment_blockers,
+            required_checks: compat.required_checks,
+            migration_gate_argv: compat.migration_gate_argv,
+            credential_references: compat.credential_references,
+            poc_warrant: compat.poc_warrant,
+            review_gate: compat.review_gate,
+            targets: compat.targets,
+        }
+    }
 }
 
 impl Default for DeliveryConfig {
@@ -4000,6 +4079,33 @@ model = "legacy"
         worker.max_prds_per_run = 1;
         worker.restart_throttle_secs = 0;
         assert!(worker.validate().unwrap_err().contains("throttle"));
+    }
+
+    /// FAM-BUG-023 regression: a legacy `[delivery]` table with only
+    /// `enabled = false` deserializes to disabled mode; an explicit mode
+    /// always wins; an empty table is disabled (fail closed).
+    #[test]
+    fn legacy_disabled_delivery_deserializes_to_disabled_mode() {
+        let from =
+            |json: serde_json::Value| -> DeliveryConfig { serde_json::from_value(json).unwrap() };
+        assert_eq!(
+            from(serde_json::json!({"enabled": false})).mode,
+            DeliveryMode::Disabled
+        );
+        assert_eq!(from(serde_json::json!({})).mode, DeliveryMode::Disabled);
+        assert_eq!(
+            from(serde_json::json!({"enabled": true})).mode,
+            DeliveryMode::ReviewedPrManual
+        );
+        assert_eq!(
+            from(serde_json::json!({"enabled": false, "mode": "reviewed_pr_manual"})).mode,
+            DeliveryMode::ReviewedPrManual
+        );
+        // The historical bug shape validates instead of demanding delivery
+        // fields the operator never configured.
+        assert!(from(serde_json::json!({"enabled": false}))
+            .validate()
+            .is_ok());
     }
 
     #[test]
