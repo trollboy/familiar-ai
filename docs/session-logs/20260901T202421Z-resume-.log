@@ -1,0 +1,100 @@
+command: familiar-ai resume PRD-38
+date: Tue Sep  1 08:24:21 PM UTC 2026
+host: trollboy (Linux)
+head: 57c6c61901ab0c51c75e7a769a1d824f5ae4114d (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3669083
+verification: heartbeat check=format elapsed_ms=3997 child=pid:3669083
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3669599
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:3669599
+verification: heartbeat check=lint elapsed_ms=31708 child=pid:3669599
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3674189
+verification: heartbeat check=tests-green-crates elapsed_ms=30002 child=pid:3674189
+verification: heartbeat check=tests-green-crates elapsed_ms=60000 child=pid:3674189
+verification: heartbeat check=tests-green-crates elapsed_ms=62404 child=pid:3674189
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3681346
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30002 child=pid:3681346
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60005 child=pid:3681346
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:3681346
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:3681346
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150001 child=pid:3681346
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=163583 child=pid:3681346
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788282460380264-0002412995-000002-cycle-review-1","reviewed_manifest_hash":"sha256:36baeb8b21086e2f79aef076a15ac685880521a56d58a19d72a62340c688729e","findings":[{"finding_id":"scope-outside-crates","category":"scope_violation","severity":"medium","blocking":false,"title":"Change writes files outside the single allowed path prefix `crates/`","claim":"The task restricts changes to allowed_paths [\"crates/\"], but the candidate adds files under docs/ and tests/fixtures/, which are outside that prefix. The acceptance doc (docs/acceptance/PRD-038-multi-repo-have-at-it.md) and the fixture repositories (tests/fixtures/repo-rust-cli/*, tests/fixtures/repo-node-service/*) are all outside crates/. The fixtures are load-bearing (copy_fixture_repository reads env!(\"CARGO_MANIFEST_DIR\").join(\"../..\").join(\"tests/fixtures\")), so this is not incidental noise but a structural dependency on out-of-scope paths.","evidence":[{"kind":"file_range","path":"docs/acceptance/PRD-038-multi-repo-have-at-it.md","range":{"start":1,"end":49}},{"kind":"file_range","path":"tests/fixtures/repo-rust-cli/Cargo.toml","range":{"start":1,"end":7}},{"kind":"file_range","path":"tests/fixtures/repo-node-service/package.json","range":{"start":1,"end":12}}],"remediation":"Either relocate the fixture trees and acceptance doc under crates/ (e.g. as crate-local test data / crate docs) so they fall within the allowed `crates/` prefix, or obtain an explicit allowed_paths expansion covering docs/ and tests/fixtures/ before landing.","status":"open","supersedes":null},{"finding_id":"acceptance-tests-uncovered-by-required-checks","category":"unverifiable_claim","severity":"high","blocking":false,"title":"The added acceptance tests are not exercised by any passing required check; the only check that runs them failed","claim":"The deliverable is the acceptance test suite in familiar-ai-daemon and familiar-ai-mcp. The required test check `tests-green-crates` runs only -p familiar-ai-core -p familiar-ai-review -p familiar-ai-agent -p familiar-ai-storage, so it never compiles or runs the new crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs or crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs. The only check that would run them is `tests-workspace-advisory` (cargo test --workspace), which is marked required:false and FAILED with exit_code 101. Consequently there is no green evidence that the newly added acceptance tests actually pass, and the sole check that covers them is red — the claim that these tests demonstrate the acceptance criteria cannot be verified from the provided checks.","evidence":[{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:221f61d9912b84448f2c1a1a404c796ab2d4eff7ac4ef9cacb2fedea95a49dc7","media_type":"text/plain","byte_size":87007,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788282372975203-0002412995-000000/PRD-38","revision":"sha256:d8191c741625c59221b35ccfd46316642a93045af613e447c3774f097625ba67","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-221f61d9912b84448f2c1a1a404c796ab2d4eff7ac4ef9cacb2fedea95a49dc7-stdout","truncated":false,"omitted_bytes":0}},{"kind":"file_range","path":"crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs","range":{"start":1,"end":50}}],"remediation":"Add the two new test targets to a required, passing check (e.g. include -p familiar-ai-daemon and -p familiar-ai-mcp in tests-green-crates), and resolve the tests-workspace-advisory failure so the deliverable's own tests are demonstrably green rather than only advisory-and-red.","status":"open","supersedes":null}]}
+I'll start by exploring the repository structure to understand where these files currently live and how the verification checks are configured.
+All 13 tests in `familiar-ai-daemon`'s `multi_repo_acceptance.rs` pass locally. Let me check the mcp crate's test too, and confirm the two unrelated `run.rs` failures are pre-existing (not caused by this diff).
+Now update the two test files' fixture path resolution and the doc's internal references.
+Now update the acceptance doc's internal path references to reflect its new location.
+Now let's verify both test suites still pass after relocation.
+Finding 1 is resolved: all files now live under `crates/`. Now let's investigate the two pre-existing `run.rs` test failures that block `tests-workspace-advisory` (finding 2's second remediation item).
+Let me verify nothing else broke — run the required `tests-green-crates` package set plus fmt/clippy checks on the touched files.
+Clean. Let's do a final review of the diff and git status to confirm the working tree reflects exactly the intended remediation.
+Remediation complete for what's achievable within `crates/`; one piece of finding 2 is structurally blocked outside my scope. Summary:
+
+**Finding 1 (scope-outside-crates) — resolved.**
+- `tests/fixtures/repo-rust-cli/` and `repo-node-service/` → `crates/fixtures/...`
+- `docs/acceptance/PRD-038-multi-repo-have-at-it.md` → `crates/docs/acceptance/PRD-038-multi-repo-have-at-it.md`
+- Updated both `multi_repo_acceptance.rs` test files' `copy_fixture_repository` to resolve `CARGO_MANIFEST_DIR/../fixtures/<name>` instead of the old workspace-root `../../tests/fixtures`, and fixed the one path reference inside the doc.
+- Verified: `cargo test -p familiar-ai-daemon --test multi_repo_acceptance` → 13/13 pass; `-p familiar-ai-mcp` → 4/4 pass; `cargo fmt --all -- --check` clean; `cargo clippy -p familiar-ai-daemon -p familiar-ai-mcp --all-targets` clean. All changes now sit entirely under `crates/`.
+
+**Finding 2 (acceptance-tests-uncovered) — partially addressed, one part structurally out of scope.**
+- I got fresh, real evidence the new acceptance tests pass (above) — that resolves the "unverifiable" concern for the tests themselves.
+- The remediation asks for two things: (a) add the new crates to the required `tests-green-crates` check, and (b) fix why `tests-workspace-advisory` is red. Neither is fixable from inside `crates/`:
+  - (a) The check command isn't defined anywhere in this repo (it's owned by the orchestrator's verification-plan config), so there's no in-scope file to edit.
+  - (b) I traced the `tests-workspace-advisory` failure to two **pre-existing** tests in `crates/familiar-ai-daemon/src/run.rs` (`prd_over_budget_fails_before_history_and_agent`, `prompt_places_stable_context_before_volatile_prd`) — untouched by this diff, and they pass in a real git checkout (confirmed locally) but fail in Docker because root `.dockerignore` excludes `.git/`, so `/app` has no git repo and `git rev-parse` fails. The fix lives in `.dockerignore`/`Dockerfile` at the repo root — outside `allowed_paths: ["crates/"]`. Editing it would violate the scope constraint, so I left it alone rather than force a fix.
+
+Nothing has been committed — the working tree just has the relocation/path-fix changes described above, staged renames plus unstaged edits. Flagging the Docker `.git` exclusion issue back for a human/orchestrator decision since it needs a path outside `crates/`.
+Review disposition: HumanReviewRequired; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [ScopeAmbiguous]
+Scope evaluation 'remediation-1' under policy sha256:aed8cd68f368e30ac596e500c8b3d20e5977da26add5976421c3498bb8cb6c7a:
+scope: AllowedChange Added crates/docs/acceptance/PRD-038-multi-repo-have-at-it.md rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-mcp/tests/multi_repo_acceptance.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/fixtures/repo-node-service/README.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-node-service/design/feature-request.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-node-service/index.js rule=configured_allowed_path
+scope: AmbiguousHumanReview Added crates/fixtures/repo-node-service/package.json rule=file_class:dependency_manifest:human_review
+scope: AmbiguousHumanReview Added crates/fixtures/repo-rust-cli/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Added crates/fixtures/repo-rust-cli/README.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-rust-cli/design/feature-request.md rule=configured_allowed_path
+scope: AllowedChange Added crates/fixtures/repo-rust-cli/src/main.rs rule=configured_allowed_path
+HumanReviewRequired prd=PRD-38
+stop_reasons=["scope_ambiguous"]
+finding scope-outside-crates Medium: Change writes files outside the single allowed path prefix `crates/`
+finding acceptance-tests-uncovered-by-required-checks High: The added acceptance tests are not exercised by any passing required check; the only check that runs them failed
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 6
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+non-interactive input: preserving checkpoint
+error: PRD-38: human review required
+---
+exit: 1
