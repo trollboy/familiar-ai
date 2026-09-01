@@ -1,0 +1,122 @@
+command: familiar-ai drive --max-prds 1 --prd PRD-076
+date: Tue Sep  1 03:53:38 PM UTC 2026
+host: trollboy (Linux)
+head: fc6a5950e7c820c50c94d6225208d73b59918773 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788278018377552-0002093630-000000 started warrant={"max_prds":1,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-76"]}
+drive: checkout HEAD=fc6a595 dirty_files=0 in sync with origin/main (as of last fetch)
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:2093712
+preflight: heartbeat check=verification.format elapsed_ms=5502 child=pid:2093712
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:2094296
+preflight: heartbeat check=verification.lint elapsed_ms=23979 child=pid:2094296
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:2098299
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30001 child=pid:2098299 last="running 109 tests"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=49439 child=pid:2098299
+drive: excluded_allowlist PRD-38 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-53 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-58 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-80 ready but outside the session's approved PRD set
+drive: attempt 1 PRD-76 docs/prds/PRD-076.md
+backlog: PRD-76 docs/prds/PRD-076.md pending -> in_progress actor=system:familiar-ai-run:00001788278098454300-0002093630-000001
+I'll start by surveying the current state of the repository — the config module, providers contract, CLI binary, execution plan, and pending PRDs — before making any changes.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=60002 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=120005 last_durable_phase=preflight
+Now let me check the metadata-check command and the CLI's structure (bin/familiar-ai.rs) plus cli.rs/command.rs to understand the dispatch pattern already used for config_cli.rs.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=180008 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=240011 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=300014 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=360017 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=420020 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=480023 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=540026 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=600029 last_durable_phase=preflight
+Now I'll launch two background agents for the large mechanical splits (config.rs and the CLI binary) while I handle the contracts split and PRD amendments myself.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=660032 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=720035 last_durable_phase=preflight
+Good, no multi-line derive attributes. Now let me write a script to compute item boundaries (including leading doc comments/attributes) and end boundaries (matching closing brace at column 0, or for statics/consts, the line ending with `;`).
+Both refactor agents are running. Now I'll write the docs/contracts split.
+Now remove the original providers.md since its content has moved verbatim into the new domain docs.
+Need to read each file first before editing.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=780038 last_durable_phase=preflight
+Now applying the edits.
+Now let me fix the scanner to track brackets too and recompute.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=840041 last_durable_phase=preflight
+While the two refactor agents run, let me look at the review fixture pins that need updating.
+Now let's do the rename first and verify the daemon binary still builds.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=900046 last_durable_phase=preflight
+No overlap issues reported and the two array constants now resolve correctly (1685 and 2500). Let me view the full corrected ranges file and check gaps (blank lines) between items are all small/expected.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=960049 last_durable_phase=preflight
+Both background refactors are substantial; I'll wait for them to complete before verifying the width computations and running the full suite. Let me check the review-fixture question is settled and prepare a verification test to run once the crates compile.
+I'll wait for the background agents to complete rather than poll — the harness will notify me automatically when they finish.
+Confirmed: only the top `use` block and the two special comments are outside coverage. Now let's verify no overlaps between ranges (each line covered by at most one range).
+Good — baseline builds. Now let's create the `cli/` module structure.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1020051 last_durable_phase=preflight
+Now I have precise, verified line ranges for all 212 top-level items with zero gaps/overlaps. Let me build the extraction mapping and generate all the files.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1080054 last_durable_phase=preflight
+Now let me inspect a couple of the generated bodies to sanity-check boundaries before adding `use` statements.
+Good, this confirms it works fine as-is. Now write cli/resume.rs.
+Now cli/preflight.rs:
+Now cli/report.rs and cli/history.rs and cli/usage.rs:
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1140057 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1200059 last_durable_phase=preflight
+Now add `pub mod cli;` to lib.rs:
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1260062 last_durable_phase=preflight
+Now let me write all the submodule files with appropriate `use` headers. First let's bump the two visibility issues in the extracted bodies (providers.rs, context_service.rs, artifacts.rs, inference.rs) before assembling.
+Now let's assemble each final file with its header and body.
+Now let's rewrite `bin/familiar-ai.rs`. Let me build the new file content.
+Now let's build mod.rs.
+Yes, needed. Let me add it to the header.
+Now let's delete the old config.rs and attempt a build.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1320065 last_durable_phase=preflight
+Now fix the private `validate_risk_vocabulary` method:
+Clean build with no warnings. Now let's run the crate's tests.
+Now let's build and iterate.
+Excellent, clean build on first try. Now let's build the whole workspace and run tests.
+The identity_gate test flags `familiar_toml` (matches forbidden pre-rename `familiar_` pattern not followed by `ai_`). I need to rename the module file — the type name `FamiliarToml` itself is untouched since it's PascalCase and doesn't match that pattern.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1380070 last_durable_phase=preflight
+All tests pass now, including the identity gate. Let's build the whole workspace.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1440073 last_durable_phase=preflight
+This linker failure (`unable to find library -lxdo`) is a pre-existing system dependency issue unrelated to the config split — it's failing at the final binary link stage for `familiar-ai-daemon` due to a missing system X11 library. Let me confirm this is pre-existing by checking against the original code.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1500076 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1560079 last_durable_phase=preflight
+Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2175921
+verification: heartbeat check=format elapsed_ms=4406 child=pid:2175921
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2176479
+verification: heartbeat check=lint elapsed_ms=24241 child=pid:2176479
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2180453
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1620082 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=30000 child=pid:2180453
+verification: heartbeat check=tests-green-crates elapsed_ms=49350 child=pid:2180453
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2186164
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1680085 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30004 child=pid:2186164
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60000 child=pid:2186164
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1740090 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90004 child=pid:2186164
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:2186164
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=136455 child=pid:2186164
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [VerificationUnsuccessful]
+drive: attempt 1 PRD-76 failed: execution history failed: database error: UNIQUE constraint failed: execution_checkpoint_events.event_id
+drive: attempt 1 PRD-76 outcome=retained reason=verification_failed
+drive: session drive-00001788278018377552-0002093630-000000 terminated reason=budget_prds_exhausted attempted=1 completed=0
+session=drive-00001788278018377552-0002093630-000000 termination=budget_prds_exhausted attempted=1 completed=0 known_cost_microusd=6710197
+---
+exit: 0
