@@ -9,6 +9,12 @@ FROM rust:1.88-bookworm AS tester
 WORKDIR /app
 RUN cargo install cargo-llvm-cov
 RUN rustup component add llvm-tools-preview
+# The drive's merge queue commits during integration; without an identity
+# every git-exercising test fails ("unable to auto-detect email address"),
+# which is what kept tests-workspace-advisory permanently red in Docker.
+RUN git config --global user.email "tester@familiar-ai.invalid" \
+    && git config --global user.name "familiar-ai-tester" \
+    && git config --global init.defaultBranch main
 COPY . .
 
 # Stage 5: Runtime

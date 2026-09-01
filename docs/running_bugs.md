@@ -1058,3 +1058,38 @@ reinstall the binary, then rerun the 076 drive.
   integration commit stays on the session branch under disabled
   delivery — operator-merged to main this session. Both queued as
   polish.
+
+### FAM-BUG-042 — Remediation vandalized a coherent candidate on a misinformed scope claim
+
+- **Status:** Fixed (this commit)
+- **Observed:** Opus reviewed PRD-38's candidate and alleged a scope
+  violation for `docs/` and `tests/fixtures/` paths — paths the scope
+  policy had already adjudicated as justified expected-file expansions
+  (the reviewer's package carries no scope-authority context).
+  `scope_violation` is a default blocking category, so policy recomputed
+  the reviewer's `blocking:false` into blocking, remediation ran, and
+  the remediation agent `git mv`-ed the declared fixtures and acceptance
+  doc into `crates/` — moving a coherent candidate's files OUT of their
+  declared scope. The post-remediation capture then flagged the new
+  paths ambiguous and wedged the cycle. Recovered by resetting the
+  worktree to the frozen implementation commit and rebinding.
+- **Fix:** the scope policy engine is the single authority on scope. A
+  reviewer scope-violation claim whose evidenced paths this cycle's own
+  evaluation adjudicated (allowed or justified) is downgraded from the
+  blocking set; claims citing unadjudicated paths still block. Package-
+  level scope-summary disclosure for reviewers is the follow-up so the
+  claim isn't made in the first place.
+
+### FAM-BUG-043 — Docker test image has no git identity
+
+- **Status:** Fixed (this commit)
+- **Observed:** every git-exercising test fails in the tester image
+  with "fatal: unable to auto-detect email address" — the drive's merge
+  queue commits during integration. This single gap is why
+  tests-workspace-advisory was permanently red in Docker (898 tests
+  pass around it), why PRD-38's acceptance proof had no passing
+  verification (opus's finding), and part of the historical "seven
+  known pre-existing Docker failures".
+- **Fix:** tester stage configures a git identity and default branch.
+  If the advisory check goes green in Docker, promoting it to required
+  closes opus's acceptance-verification gap properly.

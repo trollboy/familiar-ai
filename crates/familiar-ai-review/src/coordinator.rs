@@ -459,6 +459,38 @@ impl ReviewCoordinator<'_> {
             if findings_conflict(&result.findings) {
                 return self.stop(cycle, ReviewStopReason::ConflictingFindings);
             }
+            // The scope policy engine is the single authority on scope: a
+            // reviewer scope-violation claim whose evidenced paths this
+            // cycle's own evaluation already adjudicated (allowed or
+            // justified) is misinformed, not actionable — remediating one
+            // moved a coherent candidate's declared files out of scope
+            // (FAM-BUG-042).
+            let adjudicated: std::collections::BTreeSet<&str> = cycle
+                .scope_evaluations
+                .iter()
+                .flat_map(|evaluation| &evaluation.findings)
+                .filter(|finding| {
+                    matches!(
+                        finding.decision,
+                        ScopeDecision::AllowedChange | ScopeDecision::JustifiedExpectedFileChange
+                    )
+                })
+                .map(|finding| finding.path.as_str())
+                .collect();
+            let scope_claim_adjudicated = |finding: &ReviewFinding| {
+                finding.category == FindingCategory::ScopeViolation && {
+                    let paths: Vec<&str> = finding
+                        .evidence
+                        .iter()
+                        .filter_map(|evidence| match evidence {
+                            FindingEvidence::FileRange { path, .. }
+                            | FindingEvidence::DiffHunk { path, .. } => Some(path.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    !paths.is_empty() && paths.iter().all(|path| adjudicated.contains(path))
+                }
+            };
             let blocking: Vec<_> = deduplicate_findings(
                 result
                     .findings
@@ -466,6 +498,7 @@ impl ReviewCoordinator<'_> {
                     .filter(|f| {
                         f.status == FindingStatus::Open
                             && (f.blocking || f.acceptance_criterion_id.is_some())
+                            && !scope_claim_adjudicated(f)
                     })
                     .cloned()
                     .collect(),
