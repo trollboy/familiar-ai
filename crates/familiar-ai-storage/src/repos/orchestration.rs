@@ -246,8 +246,14 @@ impl<'a> OrchestrationRepository<'a> {
             )
             .map_err(db)?;
         if !approve || pending == 0 {
+            // Scope pauses precede independent review, so a fully approved
+            // candidate goes back to `implemented` — verification and review
+            // are still owed and resume re-enters from there. Stamping
+            // `reviewed` here both wedged resume ("reviewed cannot start
+            // review") and let the completion path fire on an unreviewed
+            // cycle (FAM-BUG-041).
             let phase = if approve && rejected == 0 {
-                "reviewed"
+                "implemented"
             } else {
                 "blocked"
             };
@@ -418,6 +424,8 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(phase, "reviewed");
+        // FAM-BUG-041: full approval re-opens the pipeline at `implemented`
+        // (review is still owed); it must never stamp `reviewed`.
+        assert_eq!(phase, "implemented");
     }
 }

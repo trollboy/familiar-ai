@@ -1036,3 +1036,25 @@ reinstall the binary, then rerun the 076 drive.
 - **Fix:** all three scripts commit first, then `git pull --rebase
   --autostash` before pushing, with commit and push failures reported
   distinctly.
+
+### FAM-BUG-041 — Scope approval stamped `reviewed` on never-reviewed candidates
+
+- **Status:** Fixed (this commit)
+- **Observed:** After the owner approved wave 5's four scope findings,
+  the final-approval path in `decide_scope` set both checkpoints to
+  phase `reviewed` — but scope pauses fire BEFORE independent review
+  (both cycles: `scope_ambiguous`, no review_result). The phantom phase
+  wedged resume ("checkpoint phase reviewed cannot start review") and
+  let the CLI's completion continuation fire on unreviewed cycles,
+  surfacing as the opaque "persisted review cycle columns are
+  inconsistent". The decisions themselves recorded correctly.
+- **Fix:** full approval re-opens the pipeline at `implemented` —
+  verification and review are still owed and resume re-enters from
+  there; rejections still block. Pin updated. The two live checkpoints
+  were repaired through the audited transition API
+  (`operator_set_phase` example, event trail kept).
+- **Also noted:** the drive's printed scope-decisions template omits
+  `--finding-hash` (not paste-runnable), and PRD-53's completed
+  integration commit stays on the session branch under disabled
+  delivery — operator-merged to main this session. Both queued as
+  polish.
