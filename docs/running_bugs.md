@@ -677,3 +677,30 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
   targeted, twice). A flaky test inside the verification gate can halt
   unattended sessions. Open; surfaced 2026-08-31 during PRD-077
   verification.
+
+## 2026-09-01 — PRD-076 first drive attempt: two bugs found, both fixed
+
+The first post-bug-gate drive (PRD-076) failed in preflight after 861s of
+workspace tests (exit 101) with `output=[REDACTED] omitted_bytes=20819`.
+Two defects, both fixed and pushed:
+
+- **FAM-BUG-027 — UPGRADED from flake to product race, fixed.**
+  `WorkerLock::create` wrote claim JSON into an O_EXCL file
+  non-atomically; a concurrent claimant reading the half-written file
+  judged it corrupt, "recovered" (deleted) the live winner's claim, and
+  claimed too — two owners of an exclusive lock. This is what failed the
+  workspace suite under load, and in production it could put two drivers
+  on one repository. Fixed: claims are written to a unique temp, synced,
+  and hard-linked into place (atomic appearance, AlreadyExists on loss);
+  the regression runs 25 iterations of the 8-thread claim storm.
+- **FAM-BUG-028 — evidence-erasing redaction, fixed.** Retained preflight
+  failure output redacted all-or-nothing: one credential-shaped string
+  anywhere (the repo's own auth-test fixtures print them) replaced the
+  entire capture with `[REDACTED]`, hiding the failing test's name — the
+  precise diagnosability FAM-BUG-024's fix promised. Redaction is now per
+  line; a failing-test name provably survives beside a redacted token.
+
+Operational note: heartbeats (078) worked as designed throughout — the
+861s run was visible the whole way, and the failure arrived classified.
+The rerun requires a FRESH BUILD on the operator machine: pull, rebuild,
+reinstall the binary, then rerun the 076 drive.
