@@ -258,11 +258,16 @@ fn loop_attempts_every_independent_prd_once_and_records_each() {
         .unwrap()
     });
 
-    // Review is disabled, so each attempt retains its PRD; the loop continues
-    // regardless and stops only when nothing is left to select.
+    // Review is disabled, so each attempt retains its PRD identically. Every
+    // PRD is still attempted exactly once — and since PRD-077 the THIRD
+    // identical deterministic failure trips the session circuit breaker
+    // instead of silently continuing until nothing is eligible.
     assert_eq!(summary.attempted, 3);
     assert_eq!(summary.completed, 0);
-    assert_eq!(summary.termination, DriveTermination::NothingEligible);
+    assert_eq!(
+        summary.termination,
+        DriveTermination::DeterministicFailureCascade
+    );
     assert_eq!(agent.calls.lock().unwrap().len(), 3);
 
     let db = Database::open(config.database.path.as_ref().unwrap()).unwrap();
@@ -271,7 +276,7 @@ fn loop_attempts_every_independent_prd_once_and_records_each() {
     assert_eq!(session.session_id, summary.session_id);
     assert_eq!(
         session.termination_reason.as_deref(),
-        Some("nothing_eligible")
+        Some("deterministic_failure_cascade")
     );
     assert!(session.ended_at.is_some());
 
@@ -286,7 +291,7 @@ fn loop_attempts_every_independent_prd_once_and_records_each() {
     assert_eq!(attempts[2].prd_path, "docs/prds/PRD-003.md");
     for attempt in &attempts {
         assert_eq!(attempt.outcome.as_deref(), Some("retained"));
-        assert_eq!(attempt.retained_reason.as_deref(), Some("review_disabled"));
+        assert_eq!(attempt.retained_reason.as_deref(), Some("implementation_incomplete"));
         assert!(attempt.ended_at.is_some());
         assert!(attempt.duration_ms.is_some());
         // No pricing configured: cost stays unknown, never zero.

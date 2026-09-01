@@ -1602,6 +1602,7 @@ pub fn drive(
                             familiar_ai_storage::CheckpointRepository::new(db.conn())
                                 .get(&repository.key, prd_id)
                         {
+                            let mut pending_hashes = Vec::new();
                             for finding in cycle
                                 .scope_evaluations
                                 .iter()
@@ -1609,7 +1610,7 @@ pub fn drive(
                             {
                                 if let Ok(json) = serde_json::to_string(finding) {
                                     let hash = familiar_ai_review::content_hash(json.as_bytes());
-                                    let _ = OrchestrationRepository::new(db.conn())
+                                    if OrchestrationRepository::new(db.conn())
                                         .record_scope_finding(
                                             &repository.key,
                                             &checkpoint.checkpoint_id,
@@ -1617,8 +1618,20 @@ pub fn drive(
                                             &checkpoint.diff_hash,
                                             &hash,
                                             &json,
-                                        );
+                                        )
+                                        .is_ok()
+                                    {
+                                        pending_hashes.push(hash);
+                                    }
                                 }
+                            }
+                            // PRD-080: a scope pause is decidable, not a dead
+                            // end — surface the exact command per finding.
+                            for hash in &pending_hashes {
+                                eprintln!(
+                                    "drive: scope decision pending for {prd_id}: familiar-ai scope-decisions {hash} --candidate-hash {} --approve|--reject --actor human:<identity> --reason \"...\"",
+                                    checkpoint.diff_hash
+                                );
                             }
                         }
                         if let Some(policy) = delivery_policy.filter(|policy| {

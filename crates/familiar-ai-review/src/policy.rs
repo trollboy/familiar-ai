@@ -283,6 +283,26 @@ struct Subject {
     kind: GitChangeKind,
 }
 
+/// PRD-080: for a path under a crate's canonical tests directory
+/// (`crates/<name>/tests/...`), the Expected Files entry that declares any
+/// part of that crate's subtree — proof the PRD owns the surface this test
+/// exercises. None for paths outside the canonical shape or undeclared
+/// crates.
+fn declared_test_surface(path: &str, contract: &[ExpectedFileEntry]) -> Option<String> {
+    let rest = path.strip_prefix("crates/")?;
+    let crate_name = rest.split('/').next()?;
+    let mut segments = rest.split('/');
+    segments.next();
+    if segments.next()? != "tests" {
+        return None;
+    }
+    let crate_root = format!("crates/{crate_name}/");
+    contract
+        .iter()
+        .find(|entry| entry.normalized.starts_with(&crate_root))
+        .map(|entry| entry.normalized.clone())
+}
+
 fn file_class_label(class: ScopeFileClass) -> &'static str {
     match class {
         ScopeFileClass::OrdinarySource => "ordinary_source",
@@ -551,6 +571,27 @@ fn evaluate_subject(
                 );
             }
             ScopeClassPolicy::HumanReview => {
+                // PRD-080 (FAM-BUG-014): a path EXACTLY declared in the PRD's
+                // authoritative Expected Files carries the execution plan's
+                // standing batch approval — the contract author deliberately
+                // named this manifest/lockfile/config file, so the class
+                // policy's human gate is already satisfied. Directory
+                // declarations never grant this: only a deliberate exact
+                // declaration authorizes a special-class file.
+                if expected_match
+                    .as_ref()
+                    .is_some_and(|entry| entry.match_kind == ExpectedMatchKind::ExactFile)
+                {
+                    return finding(
+                        ScopeDecision::JustifiedExpectedFileChange,
+                        format!("file_class:{class_label}:declared_expected_file"),
+                        ScopeRuleSource::ExpectedFiles,
+                        format!(
+                            "{class_label} file is exactly declared in Expected Files; the plan's standing batch approval covers declared manifests"
+                        ),
+                        None,
+                    );
+                }
                 return finding(
                     ScopeDecision::AmbiguousHumanReview,
                     format!("file_class:{class_label}:human_review"),
@@ -560,6 +601,25 @@ fn evaluate_subject(
                 );
             }
             ScopeClassPolicy::AllowWhenExpected if expected_match.is_none() => {
+                // PRD-080 (wave-4 PRD-055 shape): a test file under a crate's
+                // canonical tests/ directory whose crate surface IS declared
+                // in Expected Files is required coverage, not scope
+                // broadening — a PRD authorized to change `crates/x/src/...`
+                // is authorized to test what it changed.
+                if classified.class == ScopeFileClass::Test {
+                    if let Some(surface) = declared_test_surface(&subject.path, &snapshot.contract)
+                    {
+                        return finding(
+                            ScopeDecision::JustifiedExpectedFileChange,
+                            "file_class:test:declared_surface_coverage".into(),
+                            ScopeRuleSource::ExpectedFiles,
+                            format!(
+                                "test exercises the declared surface '{surface}'; required coverage is within scope authority"
+                            ),
+                            None,
+                        );
+                    }
+                }
                 return finding(
                     ScopeDecision::UndeclaredScopeExpansion,
                     format!("file_class:{class_label}:allow_when_expected"),
@@ -1065,6 +1125,106 @@ mod tests {
             .iter()
             .map(|f| (f.finding_id.clone(), f.decision, f.rule_id.clone()))
             .collect()
+    }
+
+    /// PRD-080 (FAM-BUG-014, wave-3 PRD-050 shape): a manifest EXACTLY
+    /// declared in Expected Files carries the standing batch approval and is
+    /// justified, never a human wall; an undeclared manifest still pauses,
+    /// and a directory declaration never authorizes a special-class file.
+    #[test]
+    fn exactly_declared_manifest_is_justified_by_standing_approval() {
+        let policy = snapshot(|input| {
+            // The fixture's blanket no_manifests prohibition models a
+            // stricter repo than production (wave-3 PRD-050 hit the
+            // human-review class gate, not a prohibition); drop it so the
+            // class-policy path under test is reachable.
+            input
+                .prohibited_rules
+                .retain(|rule| rule.rule_id != "no_manifests");
+            input.contract = vec![
+                contract_entry("Cargo.toml"),
+                contract_entry("Cargo.lock"),
+                contract_entry("crates/extra/"),
+            ];
+        });
+        let decisions = decide(
+            &policy,
+            &[
+                file("Cargo.toml", GitChangeKind::Modified, None),
+                file("Cargo.lock", GitChangeKind::Modified, None),
+            ],
+        );
+        for (id, decision, rule) in &decisions {
+            assert_eq!(
+                *decision,
+                ScopeDecision::JustifiedExpectedFileChange,
+                "{id}: {rule}"
+            );
+            assert!(rule.contains("declared_expected_file"), "{rule}");
+        }
+        // Undeclared manifest: the human gate stands.
+        let undeclared = snapshot(|input| {
+            input
+                .prohibited_rules
+                .retain(|rule| rule.rule_id != "no_manifests");
+        });
+        let decisions = decide(
+            &undeclared,
+            &[file("Cargo.toml", GitChangeKind::Modified, None)],
+        );
+        assert_eq!(decisions[0].1, ScopeDecision::AmbiguousHumanReview);
+        // A directory declaration covering the manifest path grants nothing.
+        let directory_only = snapshot(|input| {
+            input
+                .prohibited_rules
+                .retain(|rule| rule.rule_id != "no_manifests");
+            input.contract = vec![contract_entry("crates/extra/")];
+        });
+        let decisions = decide(
+            &directory_only,
+            &[file(
+                "crates/extra/Cargo.toml",
+                GitChangeKind::Modified,
+                None,
+            )],
+        );
+        assert_eq!(decisions[0].1, ScopeDecision::AmbiguousHumanReview);
+    }
+
+    /// PRD-080 (wave-4 PRD-055 shape): a test under a crate's canonical
+    /// tests/ directory whose crate surface is declared is required coverage,
+    /// not scope broadening; a test for an undeclared crate still expands
+    /// scope.
+    #[test]
+    fn declared_surface_test_coverage_is_within_scope_authority() {
+        let policy = snapshot(|input| {
+            input.contract = vec![contract_entry("crates/extra/src/lib.rs")];
+        });
+        let decisions = decide(
+            &policy,
+            &[file(
+                "crates/extra/tests/integration.rs",
+                GitChangeKind::Added,
+                None,
+            )],
+        );
+        assert_eq!(
+            decisions[0].1,
+            ScopeDecision::JustifiedExpectedFileChange,
+            "{}",
+            decisions[0].2
+        );
+        assert!(decisions[0].2.contains("declared_surface_coverage"));
+        // A test for a crate the PRD never declared still expands scope.
+        let decisions = decide(
+            &policy,
+            &[file(
+                "crates/unrelated/tests/integration.rs",
+                GitChangeKind::Added,
+                None,
+            )],
+        );
+        assert_eq!(decisions[0].1, ScopeDecision::UndeclaredScopeExpansion);
     }
 
     #[test]
