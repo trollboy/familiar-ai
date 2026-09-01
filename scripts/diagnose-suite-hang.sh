@@ -6,6 +6,16 @@
 # Usage:   ./scripts/diagnose-suite-hang.sh
 # Result:  docs/diagnostics/suite-hang-<timestamp>.txt committed to main.
 set -u
+
+# Self-update before diagnosing: the 20260901T093435Z run diagnosed a HEAD
+# that predated the fix under test. Pull, then re-exec the (possibly new)
+# script exactly once — bash reads scripts incrementally, so continuing after
+# the file changed underneath us would corrupt execution.
+if [ -z "${FAMILIAR_DIAGNOSE_PULLED:-}" ]; then
+  git pull --ff-only -q || echo "== WARNING: git pull failed; diagnosing current checkout" >&2
+  FAMILIAR_DIAGNOSE_PULLED=1 exec "$0" "$@"
+fi
+
 STALL_SECONDS=180          # no new output for this long = stalled
 MAX_MINUTES=45             # absolute cap
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
