@@ -1,0 +1,69 @@
+FAM-BUG-030 diagnosis run
+date: Tue Sep  1 09:34:35 UTC 2026
+host: Darwin MacBook-Pro-5.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:53:15 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T6000 arm64
+head: 2b0b8713d215355b7e9650bc322e08eecfed48c1
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+
+== starting: cargo test --workspace (stdin=/dev/null, log=/var/folders/m5/ydk1542x7kq_bqdjdl98bklc0000gn/T/familiar-suite-log.veVHTC3L0v)
+== REACHED 45m cap without a 180 s stall (very slow, not stuck)
+test repos::driver::tests::session_and_attempts_round_trip ... ok
+test repos::file_summary::tests::count_under_prefix ... ok
+test repos::file_summary::tests::create_and_get_by_path ... ok
+test repos::file_summary::tests::canonical_lookup_precedes_exact_legacy_fallback_without_mutation ... ok
+test repos::execution_history::tests::finalization_is_guarded_and_usage_excludes_unknowns ... ok
+test repos::execution_history::tests::running_history_preserves_nulls_and_reasons ... ok
+test repos::file_summary::tests::injected_failure_rolls_back_preservation_and_active_mutation ... ok
+test repos::file_summary::tests::delete_file_summary ... ok
+test repos::execution_history::tests::recent_order_has_stable_tie_breaker ... ok
+test repos::file_summary::tests::list_under_prefix_with_limit ... ok
+test repos::file_summary::tests::list_by_project ... ok
+test repos::file_summary::tests::persistence_rejects_noncanonical_paths ... ok
+test repos::file_summary::tests::retry_marks_abandoned_run_interrupted_before_new_work ... ok
+test repos::file_summary::tests::rollback_restores_exact_rows_and_refuses_later_state_conflict ... ok
+test repos::file_summary::tests::upsert_updates_existing ... ok
+test repos::file_summary::tests::reconciliation_is_project_isolated_and_canonical_only_is_unchanged ... ok
+test repos::file_summary::tests::project_isolation ... ok
+test repos::file_summary::tests::reconciliation_is_idempotent_and_processes_late_candidates ... ok
+test repos::file_summary::tests::reconciliation_converts_preserves_conflicts_and_reports_unresolved ... ok
+test repos::model_artifact::tests::same_friendly_lineage_can_have_separate_registry_entries ... ok
+test repos::model_artifact::tests::registration_is_idempotent_and_aliases_never_rewrite ... ok
+test repos::orchestration::tests::integration_revision_advances_by_compare_and_swap ... ok
+test repos::orchestration::tests::released_reservation_is_reactivated_for_retry_then_consumed_once ... ok
+test repos::orchestration::tests::scope_checkpoint_remains_gated_until_every_finding_is_approved ... ok
+test repos::probation::tests::failures_remain_evidence_and_reproduce_the_score ... ok
+test repos::orchestration::tests::reservations_are_distinct_persistent_and_resolve_once ... ok
+test repos::probation::tests::probation_is_bounded_and_operator_controls_override_it ... ok
+test repos::planner::tests::round_trip ... ok
+test repos::project::tests::create_and_get_by_id ... ok
+test repos::probation::tests::policy_cannot_reactivate_quarantined_or_retired_workers ... ok
+test repos::project::tests::get_nonexistent_returns_none ... ok
+test repos::project::tests::delete_project ... ok
+test repos::project::tests::get_by_repo_root ... ok
+test repos::project::tests::update_project ... ok
+test repos::project::tests::list_active_projects ... ok
+test repos::reservation::tests::all_or_nothing_and_partial_grants_are_atomic ... ok
+test repos::project::tests::duplicate_repo_root_fails ... ok
+test repos::probation::tests::routing_pin_cannot_reactivate_quarantined_or_retired_workers ... ok
+test repos::reservation::tests::concurrent_claimants_cannot_double_spend_capacity ... ok
+test repos::review::tests::cycle_round_trips_and_recovery_marks_it_interrupted_without_replay ... ok
+test repos::reservation::tests::expiry_renewal_overrun_and_unknown_settlement_are_explicit ... ok
+test repos::reservation::tests::recovery_requires_exact_provably_dead_owner_evidence ... ok
+test repos::session_rollup::tests::delete_rollup ... ok
+test repos::review::tests::legacy_cycle_json_without_scope_fields_still_deserializes ... ok
+test repos::session_rollup::tests::create_and_get_by_id ... ok
+test repos::review::tests::lesson_lifecycle_uses_canonical_finding_state_and_human_transitions ... ok
+test repos::session_rollup::tests::list_ordered_by_created_desc ... ok
+test repos::stats::tests::global_stats_on_empty_db ... ok
+test repos::stats::tests::global_stats_with_data ... ok
+test repos::worker_selection::tests::records_routing_inputs_for_recovery ... ok
+test repos::stats::tests::recent_queries_return_latest ... ok
+test repos::stewardship::tests::budget_summary_separates_known_and_unknown_cost ... ok
+test repos::stats::tests::projects_with_counts_returns_aggregates ... ok
+test repos::stewardship::tests::pending_human_gates_combines_stopped_attempts_and_blocked_checkpoints ... ok
+test repos::worker_spec::tests::review_probe_round_trips_provenance_and_age ... ok
+test repos::worker_spec::tests::capability_provenance_transitions_are_explicit_and_closed ... ok
+
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.60s
+
+     Running tests/integration.rs (target/debug/deps/integration-603469138e180732)
+== outcome: cap
