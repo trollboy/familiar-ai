@@ -51,7 +51,12 @@ format = "json"
     let bin = daemon_bin();
     assert!(bin.exists(), "daemon binary not found at {}", bin.display());
 
-    // Start daemon with stderr piped so we can read logs
+    // Start daemon with stderr piped so we can read logs. FAM-BUG-030: the
+    // daemon runs in its OWN process group so that any helper it spawns (the
+    // tray on macOS default-feature builds) can be killed with it — a leaked
+    // grandchild inheriting a pipe otherwise blocks the unbounded stderr read
+    // below, or holds cargo's pipe open after every test has passed.
+    use std::os::unix::process::CommandExt;
     let mut child = Command::new(&bin)
         .args(["--config", config_path.to_str().unwrap()])
         .env("XDG_RUNTIME_DIR", tmp.path().join("runtime"))
@@ -60,6 +65,7 @@ format = "json"
         .env("HOME", tmp.path().join("home"))
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
+        .process_group(0)
         .spawn()
         .expect("failed to start daemon");
 
@@ -83,9 +89,9 @@ format = "json"
     // Wait for at least one heartbeat
     std::thread::sleep(Duration::from_secs(2));
 
-    // Send SIGTERM
+    // Send SIGTERM to the daemon's whole process group.
     unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
+        libc::kill(-(child.id() as i32), libc::SIGTERM);
     }
 
     // Wait for exit without allowing a signal-handling regression to hang the
@@ -96,7 +102,9 @@ format = "json"
             break status;
         }
         if std::time::Instant::now() >= deadline {
-            child.kill().expect("failed to kill unresponsive daemon");
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
             let _ = child.wait();
             panic!("daemon did not exit within 10 seconds of SIGTERM");
         }
@@ -110,6 +118,12 @@ format = "json"
         "PID file was not cleaned up after shutdown"
     );
 
+    // Kill anything left in the daemon's process group BEFORE the stderr
+    // read: with every writer provably dead, read_to_string is guaranteed to
+    // reach EOF instead of blocking on a leaked helper's inherited pipe.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     // Read stderr (JSON format, so each line is a JSON object)
     let mut stderr_output = String::new();
     stderr_handle.read_to_string(&mut stderr_output).ok();

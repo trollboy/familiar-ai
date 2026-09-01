@@ -25,6 +25,8 @@ note() { echo "== $*" | tee -a "$REPORT"; }
   echo
 } > "$REPORT"
 
+# a daemon leaked by a previous run can hold pipes open and skew results
+pkill -f familiar-ai-daemon 2>/dev/null
 note "starting: cargo test --workspace (stdin=/dev/null, log=$LOG)"
 cargo test --workspace </dev/null >"$LOG" 2>&1 &
 SUITE_PID=$!
@@ -62,9 +64,18 @@ while kill -0 "$SUITE_PID" 2>/dev/null; do
   fi
   if [ $((NOW - START)) -ge $((MAX_MINUTES * 60)) ]; then
     OUTCOME="cap"
-    note "REACHED ${MAX_MINUTES}m cap without a $STALL_SECONDS s stall (very slow, not stuck)"
+    note "REACHED ${MAX_MINUTES}m cap without a $STALL_SECONDS s stall (slow or trickling output)"
     tail -60 "$LOG" >> "$REPORT"
+    note "processes at cap (test binaries and daemons):"
+    ps aux | grep -E 'target/debug/deps|familiar-ai-daemon' | grep -v grep | tee -a "$REPORT"
+    CAP_PIDS=$(ps aux | grep -E 'target/debug/deps|familiar-ai-daemon' | grep -v grep | awk '{print $2}')
+    for PID in $CAP_PIDS; do
+      note "sample of pid $PID at cap:"
+      sample "$PID" 3 2>/dev/null | head -80 >> "$REPORT" || echo "(sample unavailable)" >> "$REPORT"
+    done
     kill "$SUITE_PID" 2>/dev/null
+    pkill -f 'target/debug/deps' 2>/dev/null
+    pkill -f familiar-ai-daemon 2>/dev/null
     break
   fi
 done

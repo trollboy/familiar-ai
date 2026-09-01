@@ -16,6 +16,35 @@ OUT_DIR="docs/session-logs"
 LOG="$OUT_DIR/$STAMP-$SLUG.log"
 mkdir -p "$OUT_DIR"
 
+# The log must reach origin even if this script errors or is interrupted —
+# finalize exactly once from an EXIT trap.
+FINALIZED=0
+finalize() {
+  CODE=${1:-${CODE:-130}}
+  [ "$FINALIZED" = 1 ] && return
+  FINALIZED=1
+  {
+    echo "---"
+    echo "exit: $CODE"
+  } >> "$LOG" 2>/dev/null
+  TMP="$LOG.masking"
+  sed -E \
+    -e 's/.*[Aa]uthorization: [Bb]earer .*/[MASKED LINE]/' \
+    -e 's/.*sk-(proj|live|ant)-[A-Za-z0-9_-]{8,}.*/[MASKED LINE]/' \
+    -e 's/.*github_pat_[A-Za-z0-9_]{8,}.*/[MASKED LINE]/' \
+    -e 's/.*AWS_SECRET_ACCESS_KEY.*/[MASKED LINE]/' \
+    "$LOG" > "$TMP" 2>/dev/null && mv "$TMP" "$LOG"
+  git add "$LOG" 2>/dev/null
+  if git commit -q -m "session log: familiar-ai ${SLUG%-} ($STAMP, exit $CODE)" 2>/dev/null \
+     && git push -q origin main 2>/dev/null; then
+    echo "session log pushed: $LOG"
+  else
+    echo "PUSH FAILED - log saved locally at $LOG (commit and push it when convenient)"
+  fi
+}
+trap 'finalize' EXIT
+trap 'echo "logged.sh: error near line $LINENO" | tee -a "$LOG"' ERR
+
 {
   echo "command: familiar-ai $*"
   echo "date: $(date -u)"
@@ -28,24 +57,5 @@ mkdir -p "$OUT_DIR"
 # Live output on the terminal AND into the log.
 familiar-ai "$@" 2>&1 | tee -a "$LOG"
 CODE=${PIPESTATUS[0]}
-echo "---" >> "$LOG"
-echo "exit: $CODE" >> "$LOG"
 
-# Belt-and-braces masking of credential-shaped lines before the log is
-# published (the CLI already redacts its own evidence; this catches stray
-# provider/tool output).
-TMP="$LOG.masking"
-sed -E \
-  -e 's/.*[Aa]uthorization: [Bb]earer .*/[MASKED LINE]/' \
-  -e 's/.*sk-(proj|live|ant)-[A-Za-z0-9_-]{8,}.*/[MASKED LINE]/' \
-  -e 's/.*github_pat_[A-Za-z0-9_]{8,}.*/[MASKED LINE]/' \
-  -e 's/.*AWS_SECRET_ACCESS_KEY.*/[MASKED LINE]/' \
-  "$LOG" > "$TMP" && mv "$TMP" "$LOG"
-
-git add "$LOG"
-if git commit -q -m "session log: familiar-ai $1 ($STAMP, exit $CODE)" && git push -q origin main; then
-  echo "session log pushed: $LOG"
-else
-  echo "PUSH FAILED — log saved locally at $LOG (commit and push it when convenient)"
-fi
 exit "$CODE"
