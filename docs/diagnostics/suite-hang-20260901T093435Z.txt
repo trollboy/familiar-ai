@@ -67,3 +67,4 @@ test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fi
 
      Running tests/integration.rs (target/debug/deps/integration-603469138e180732)
 == outcome: cap
+== report pushed: docs/diagnostics/suite-hang-20260901T093435Z.txt
