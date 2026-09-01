@@ -1,0 +1,80 @@
+command: familiar-ai resume PRD-76
+date: Tue Sep  1 01:35:19 PM UTC 2026
+host: trollboy (Linux)
+head: 74abb2644183eaed53b38ade994b77a0a739c124 (2 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:1514649
+verification: heartbeat check=format elapsed_ms=4160 child=pid:1514649
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:1515211
+verification: heartbeat check=lint elapsed_ms=25325 child=pid:1515211
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:1519177
+verification: heartbeat check=tests-green-crates elapsed_ms=30005 child=pid:1519177
+verification: heartbeat check=tests-green-crates elapsed_ms=51061 child=pid:1519177
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:1524954
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30002 child=pid:1524954
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60002 child=pid:1524954
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90000 child=pid:1524954
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120003 child=pid:1524954
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=138722 child=pid:1524954
+review: package assembly failed: required review evidence exceeds package budget
+Review disposition: HumanReviewRequired; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [EvidenceFailure]
+HumanReviewRequired prd=PRD-76
+stop_reasons=["evidence_failure"]
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-core/src/config.rs'; required coverage is within scope authority
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-core/src/config.rs'; required coverage is within scope authority
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 8
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 8
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 8
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 8
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 8
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 8
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 9
+non-interactive input: preserving checkpoint
+error: PRD-76: human review required
+---
+exit: 1
