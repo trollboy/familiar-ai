@@ -377,6 +377,65 @@ mod tests {
     }
 
     #[test]
+    fn migration_53_repairs_the_transient_version_52_collision() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        let version_52 = super::MIGRATIONS
+            .iter()
+            .position(|migration| migration.version == 52)
+            .unwrap();
+        for migration in &super::MIGRATIONS[..version_52] {
+            db.conn().execute_batch(migration.sql).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,'before')",
+                    [migration.version],
+                )
+                .unwrap();
+        }
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE review_capability_probes (
+                    spec_identity TEXT PRIMARY KEY REFERENCES worker_specs(spec_identity),
+                    structured_output INTEGER NOT NULL CHECK(structured_output IN (0,1)),
+                    native_tool_calling INTEGER NOT NULL CHECK(native_tool_calling IN (0,1)),
+                    protocol TEXT NOT NULL,
+                    runtime_version TEXT NOT NULL,
+                    provenance TEXT NOT NULL CHECK(provenance IN ('probed','observed')),
+                    probed_at TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations(version,applied_at) VALUES(52,'collision');",
+            )
+            .unwrap();
+
+        assert_eq!(db.run_migrations().unwrap(), 1);
+        let selection_schema: String = db
+            .conn()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='driver_selection_decisions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(selection_schema.contains("dependency_not_integrated"));
+        assert!(db
+            .conn()
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_capability_probes'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn artifact_registry_migrates_existing_ollama_spec_without_rewriting_it() {
         let db = crate::Database::open_in_memory().unwrap();
         db.conn()
