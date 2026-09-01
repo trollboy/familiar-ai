@@ -60,19 +60,29 @@ exists to end that.
   verification gate can halt unattended runs. Owner: PRD-078's
   environment/verification work or a direct fix.
 
-**GATE — PRD-076 scope modularization** (owner-approved 2026-08-30):
-still required — the remaining product PRDs (058, 063, 072 especially)
-declare whole-crate scopes that would serialize waves 5–6. Regenerates
-the rows below as computed true rounds after amending the remaining
-PRDs' declarations.
+**GATE — PRD-076 scope modularization: COMPLETE** — the four hot shared
+surfaces (`config.rs`, `providers.md`, the CLI binary source, whole shared
+test/source directories) are split into per-feature files and every
+remaining pending PRD's `expected_files` is amended to a narrowed,
+per-feature form. The rows below are regenerated as **true rounds**: a
+round is the owner's wave definition applied literally — a set of PRDs
+that is simultaneously (a) dependency-ready (every dependency is
+`completed`) and (b) mutually scope-disjoint under the scheduler's own
+conflict rules (`achievable_width` in `crates/familiar-ai-daemon/src/drive.rs`:
+exact-file/directory-prefix overlap on the amended `expected_files`, with
+`crates/familiar-ai-storage/migrations/` exempted per PRD-066's allocation).
+Graph width is the round's PRD count; achievable width is
+`achievable_width()` computed against the amended declarations below —
+this is the same computation `familiar-ai backlog metadata-check` and
+authoring-time plan validation use, not an estimate.
 
 | Wave | PRDs | Graph width | Achievable width |
 |------|------|-------------|------------------|
 | bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
-| gate | 076 | 1 | 1 |
-| 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
-| 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
-| 7 | 071, 073 | 2 | 2 |
+| gate | 076 **complete** | 1 | 1 |
+| 5 | 038, 053, 058 | 3 | 2 — `053` and `058` both still declare `config/default.toml`; `038` is disjoint from both, so `{038, 053}` or `{038, 058}` run together |
+| 6 | 059, 060, 061, 063, 072 | 5 | 3 — `059`/`060`/`061` still share `crates/familiar-ai-core/src/config/providers.rs` (each adds its own `InferenceRuntimeKind` variant to the same closed enum; splitting that enum is a semantic change, out of this PRD's scope) and serialize pairwise; `063` (registry_workers.rs) and `072` (agent_runtime.rs) are disjoint from that trio and from each other, so `{one of 059/060/061, 063, 072}` run together |
+| 7 | 071, 073 | 2 | 2 — fully disjoint post-076 (`config/review.rs` vs `config/registry_workers.rs`, `cli/batch_review.rs` vs `cli/model_residency.rs`, distinct repo/test files) |
 
 ## Critical path
 

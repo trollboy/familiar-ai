@@ -1,4 +1,5 @@
 pub mod billing;
+pub mod cli;
 pub mod compress_cli;
 pub mod config_cli;
 pub mod context_service;
