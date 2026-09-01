@@ -1,0 +1,146 @@
+command: familiar-ai drive --max-prds 1 --prd PRD-076
+date: Tue Sep  1 01:50:17 PM UTC 2026
+host: trollboy (Linux)
+head: 130adfe9d74f1696b53f7174161dda4c4a0b3b72 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788270617711186-0001578626-000000 started warrant={"max_prds":1,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-76"]}
+drive: checkout HEAD=130adfe dirty_files=0 in sync with origin/main (as of last fetch)
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:1578761
+preflight: heartbeat check=verification.format elapsed_ms=4095 child=pid:1578761
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:1579319
+preflight: heartbeat check=verification.lint elapsed_ms=25651 child=pid:1579319
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:1583303
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30003 child=pid:1583303 last="running 108 tests"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=52339 child=pid:1583303
+drive: excluded_allowlist PRD-38 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-53 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-58 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-80 ready but outside the session's approved PRD set
+drive: attempt 1 PRD-76 docs/prds/PRD-076.md
+backlog: PRD-76 docs/prds/PRD-076.md pending -> in_progress actor=system:familiar-ai-run:00001788270701370684-0001578626-000001
+I'll start by surveying the current repository structure relevant to this PRD — the config module, CLI binary, contracts directory, and the execution plan/PRD scheduler tooling.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=60002 last_durable_phase=preflight
+This is a large structural refactor. Let me gather full context in parallel: the config/CLI code structure, and the PRD/execution-plan/tooling landscape.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=120006 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=180009 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=240012 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=300015 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=360018 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=420021 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=480024 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=540027 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=600030 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=660034 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=720037 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=780039 last_durable_phase=preflight
+Good, 64 hex chars as expected. Now let me remove the temporary probe test before starting the real refactor.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=840043 last_durable_phase=preflight
+Now let me get precise structural anchors for the CLI binary before dispatching that split.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=900044 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=960047 last_durable_phase=preflight
+Now I'll dispatch the two large mechanical refactors — config module split and CLI binary thinning — in parallel, each with exact line-range specifications derived from my structural analysis.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1020051 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1080054 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1140059 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1200064 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1260068 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1320071 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1380074 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1440077 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1500080 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1560083 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1620086 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1680090 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1740093 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1800096 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1860101 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1920106 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=1980111 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2040115 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2100117 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2160120 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2220124 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2280128 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2340133 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2400138 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2460143 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2520145 last_durable_phase=preflight
+Both agents worked in the same shared worktree simultaneously and interfered with each other's git operations. I need to verify the actual current state is coherent before trusting either report.
+Both splits appear present. Let me confirm the two stash entries are safe to drop and run a full workspace build/test to verify the combined state actually compiles.
+Both stashes are just the pre-existing `daemon_cli.rs`/`cli.rs` content (redundant, already reflected in the working tree). Safe to drop. Now let's build and test the whole workspace.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2580151 last_durable_phase=preflight
+Good, that compiles cleanly (the `-lxdo` failure is a pre-existing sandbox environment gap, confirmed unrelated). Now let's run the full test suite with the same feature flag and check the other crates that depend on daemon (mcp).
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2640157 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2700160 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2760165 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2820169 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2880172 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=2940179 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3000182 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3060185 last_durable_phase=preflight
+Full workspace test suite passes cleanly (config split + CLI thinning both verified in combination). Let's mark those two todos complete and run fmt/clippy sanity, then move to the contracts split.
+Both are confirmed pre-existing and untouched by this PRD. Now let's read `providers.md` to plan the contract split.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3120190 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3180193 last_durable_phase=preflight
+Now let's remove the old monolithic `providers.md` and check for any references to it elsewhere in the repo that need updating.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3240196 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3300199 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3360202 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3420205 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3480208 last_durable_phase=preflight
+Now I have a concrete amendment plan. Let me start applying it, beginning with the wave-5 PRDs (038, 053, 058) since they gate the acceptance criterion.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3540211 last_durable_phase=preflight
+Now the wave-6 PRDs (059, 060, 061, 063, 072):
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3600214 last_durable_phase=preflight
+Now the two legacy-format pending PRDs in `done/`: PRD-032 and PRD-041.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3660217 last_durable_phase=preflight
+All fixture pins still pass unchanged. Now let's finish the amendment sweep by checking PRD-080 and the docs/prds/ directory for anything else I might have missed, then move to the width computation.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3720220 last_durable_phase=preflight
+Confirmed real numbers: wave 5 = achievable width 2, wave 6 = 2, wave 7 = 2 — matching my by-hand analysis. Now let's revert the temporary probe from `drive.rs`.
+Now let's update `EXECUTION-PLAN.md` with the real computed rounds.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3780224 last_durable_phase=preflight
+This reads coherently. Now let's flip PRD-076's own frontmatter `status` to reflect completion, matching how other completed PRDs are marked, and verify there's no stale self-reference issue.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3840227 last_durable_phase=preflight
+Advisory metadata-check passes cleanly, exit 0, no structured-v1 diagnostics. Now let's run the full workspace verification suite.
+Both build clean. Now full test suite:
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3900230 last_durable_phase=preflight
+drive: progress prd=PRD-76 stage=execution elapsed_ms=3960234 last_durable_phase=preflight
+Full workspace test suite passes with zero failures. Now let's check clippy once more (confirming still only pre-existing issues) and do a final `git status` review.
+This matches my plan exactly. Let's do a final clippy sweep across the whole workspace to be thorough.
+Confirmed — same pre-existing, untouched `bootstrap.rs` lint blocks the whole-workspace clippy gate (unrelated to this PRD). Let's confirm the daemon crate's clippy is otherwise clean too.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=4020237 last_durable_phase=preflight
+Let me do an independent sanity check of the CLI surface and the pinned-hash test before wrapping up.
+CLI surface looks intact and complete. Let's confirm the pinned config-equivalence test is present and passing.
+Everything checks out. Let's finalize the todo list and do one last comprehensive `git diff` review of the PRD amendments to make sure nothing was missed.
+All the amendments are exactly as planned and complete. Let's mark the final todo complete and give a summary.
+drive: progress prd=PRD-76 stage=execution elapsed_ms=4080241 last_durable_phase=preflight
+## Summary
+
+Implemented PRD-076 (Scope Modularization for Parallel Authoring) in full. All six acceptance criteria are met.
+
+**Changed/added files** (50 total):
+- **Config split**: `crates/familiar-ai-core/src/config.rs` (5164 lines) → `config/` tree of 21 per-feature files (providers, registry, review, delivery, driver, accounting, compression, inference, daemon, watcher, tray, summary, rollup, packer, dashboard, artifacts, worker, repository, preflight, shareable_toml, mod.rs), all re-exported at the same paths. Behavior preservation proven by a pinned SHA-256 hash test of `Config::default()`'s serialization, computed against the pre-refactor code and asserted unchanged post-refactor.
+- **CLI thinning**: `bin/familiar-ai.rs` (2563 → 540 lines) now holds only arg-parsing types and dispatch; subcommand logic moved into 9 new `crates/familiar-ai-daemon/src/cli/*.rs` modules. Resolved a module-name collision by renaming the daemon's own unrelated `src/cli.rs` to `daemon_cli.rs`.
+- **Contracts split**: `docs/contracts/providers.md` → `providers-index.md` + 5 domain docs (inference, credentials, billing, deploy, registry), existing text preserved verbatim.
+- **PRD amendments**: narrowed `expected_files` in 038, 053, 058, 059, 060, 061, 063, 071, 072, 073 (structured) and 032 (legacy) to point at the new per-feature files instead of the four shared surfaces.
+- **Execution plan**: `EXECUTION-PLAN.md` regenerated with real numbers from the scheduler's own `achievable_width` function (verified via a temporary probe, then reverted) — wave 5 = achievable width 2 (was serializing at 1), wave 6 = 2, wave 7 = 2 (fully disjoint). PRD-076 itself marked completed and moved to `docs/prds/done/`.
+
+**Verification**: full workspace build and test suite green (workspace `--no-default-features` for the daemon crate, since this sandbox lacks `libxdo`/tray system libs — confirmed pre-existing by reproducing the same link failure on unmodified code); `cargo fmt --check` clean; `cargo clippy` clean except one pre-existing `bootstrap.rs` lint and one pre-existing `summary_worker.rs` dead-code warning, both confirmed untouched and reproducing identically before this change; `familiar-ai backlog metadata-check --advisory` exits 0 with zero structured-v1 diagnostics; `prd_fixtures.rs` pins unaffected.
+
+One operational note: the two subagents doing the config split and CLI split ran concurrently in the same shared worktree and briefly interfered with each other's git state (stash cycles). I verified the final combined result compiles and tests pass, and dropped the now-redundant leftover stash entries.
+backlog: PRD-76 docs/prds/PRD-076.md remains in_progress reason=checkpoint_failed
+drive: attempt 1 PRD-76 failed: execution history failed: database error: FOREIGN KEY constraint failed
+drive: attempt 1 PRD-76 outcome=retained reason=checkpoint_failed
+drive: session drive-00001788270617711186-0001578626-000000 terminated reason=budget_prds_exhausted attempted=1 completed=0
+session=drive-00001788270617711186-0001578626-000000 termination=budget_prds_exhausted attempted=1 completed=0 known_cost_microusd=29475677
+---
+exit: 0
