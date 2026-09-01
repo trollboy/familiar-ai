@@ -87,7 +87,7 @@ impl<'a> ReviewRepository<'a> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(db)?;
         let mut count = 0;
-        for (_id, raw) in rows {
+        for (id, raw) in rows {
             let mut cycle: ReviewCycle =
                 serde_json::from_str(&raw).map_err(|e| FamiliarError::Database(e.to_string()))?;
             cycle.state = familiar_ai_review::ReviewCycleState::Interrupted;
@@ -96,7 +96,24 @@ impl<'a> ReviewRepository<'a> {
                 .stop_reasons
                 .push(familiar_ai_review::ReviewStopReason::Interrupted);
             cycle.ended_at = Some(Utc::now().to_rfc3339());
-            self.save_cycle(&cycle).map_err(FamiliarError::Database)?;
+            // Recovery only marks the cycle interrupted; a full save_cycle
+            // would rewrite the evidence tables wholesale and refuses cycles
+            // whose JSON predates repository_key — one legacy row would then
+            // wedge every future attempt at startup (FAM-BUG-032).
+            let updated = serde_json::to_string(&cycle)
+                .map_err(|e| FamiliarError::Database(e.to_string()))?;
+            self.conn
+                .execute(
+                    "UPDATE review_cycles SET state=?2,disposition=?3,cycle_json=?4,ended_at=?5 WHERE cycle_id=?1",
+                    params![
+                        id,
+                        enum_json(&cycle.state).map_err(FamiliarError::Database)?,
+                        enum_json(&cycle.disposition).map_err(FamiliarError::Database)?,
+                        updated,
+                        cycle.ended_at
+                    ],
+                )
+                .map_err(db)?;
             count += 1;
         }
         Ok(count)
@@ -409,6 +426,116 @@ mod tests {
             recovered.disposition,
             ReviewDisposition::HumanReviewRequired
         );
+    }
+
+    #[test]
+    fn recovery_survives_legacy_keyless_cycle_and_preserves_evidence_rows() {
+        // FAM-BUG-032: a pre-repository_key cycle (empty key after serde
+        // default) with verification history sat non-terminal in the machine
+        // database; recovery re-saved it through save_cycle, which refuses
+        // keyless verification evidence — wedging every future attempt.
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = ReviewRepository::new(db.conn());
+        let task = ReviewTask {
+            task_id: "task".into(),
+            objective: "objective".into(),
+            acceptance_criteria: vec!["criterion".into()],
+            base_revision: "tree".into(),
+            allowed_paths: vec!["src/".into()],
+            prohibited_changes: vec![],
+            verification_plan_id: "checks".into(),
+        };
+        repository
+            .insert_task(&task, &BlockingPolicy::default())
+            .unwrap();
+        let legacy = serde_json::json!({
+            "cycle_id": "legacy-keyless",
+            "task_id": "task",
+            "attempt": 1,
+            "state": "awaiting_review",
+            "implementation": {
+                "assignment": {
+                    "adapter_id": "fake",
+                    "agent_id": "fake",
+                    "provider": null,
+                    "requested_model": null,
+                    "role": "implementation",
+                    "session_id": null
+                },
+                "agent_version": null,
+                "reported_model": null,
+                "unavailable_fields": {}
+            },
+            "implementation_execution": null,
+            "reviewer": null,
+            "independence": null,
+            "review_request": null,
+            "review_result": null,
+            "remediation_request": null,
+            "remediation_result": null,
+            "verification_before_review": [],
+            "verification_after_remediation": [],
+            "verification_history": [{
+                "check_id": "tests",
+                "argv": ["/usr/bin/true"],
+                "working_directory": ".",
+                "environment_identity": {},
+                "tool_identity": null,
+                "tested_identity": "tree",
+                "started_at": "2026-08-03T00:00:00Z",
+                "ended_at": "2026-08-03T00:00:01Z",
+                "duration_ms": 1000,
+                "exit_code": 0,
+                "signal": null,
+                "status": "passed",
+                "required": true,
+                "summary": "ok",
+                "stdout": null,
+                "stderr": null,
+                "truncated": false
+            }],
+            "aggregate_usage": ExecutionUsage::default(),
+            "aggregate_duration_ms": 0,
+            "started_at": "2026-08-03T00:00:00Z",
+            "ended_at": null,
+            "disposition": "pending",
+            "stop_reasons": [],
+            "review_attempts": [],
+            "remediation_attempts": []
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO review_cycles(cycle_id,task_id,attempt,state,disposition,cycle_json,started_at,ended_at) VALUES('legacy-keyless','task',1,'awaiting_review','pending',?1,'2026-08-03T00:00:00Z',NULL)",
+                params![legacy.to_string()],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO review_verification_evidence(cycle_id,check_id,phase,evidence_json,repository_key,environment_identity_json,classification) VALUES('legacy-keyless','tests','attempt-0','{}','old/repo/.git','{}','passed')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(repository.recover_incomplete().unwrap(), 1);
+        let recovered = repository.get_cycle("legacy-keyless").unwrap().unwrap();
+        assert_eq!(recovered.state, ReviewCycleState::Interrupted);
+        assert_eq!(
+            recovered.disposition,
+            ReviewDisposition::HumanReviewRequired
+        );
+        assert_eq!(recovered.repository_key, "");
+        // Recovery must not touch the evidence table it can no longer derive.
+        let evidence: i64 = db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM review_verification_evidence WHERE cycle_id='legacy-keyless'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(evidence, 1);
+        // Idempotent: interrupted cycles are terminal for recovery.
+        assert_eq!(repository.recover_incomplete().unwrap(), 0);
     }
 
     #[test]

@@ -824,3 +824,30 @@ reinstall the binary, then rerun the 076 drive.
   was defeated by a rule from before session logs existed.
 - **Fix:** `git add -f "$LOG"` with a comment naming this entry. The
   stranded log from the failed session is committed alongside.
+
+### FAM-BUG-032 — One legacy cycle row wedges every attempt at startup
+
+- **Status:** Fixed (this commit)
+- **Observed:** Session 3 on the Linux box passed preflight, claimed
+  PRD-76, then failed instantly — before spawning the worker — with
+  `execution history failed: database error: verification evidence
+  requires repository identity`, terminating `unclassified_result`.
+  Deterministic: every future attempt on this machine would fail the
+  same way.
+- **Root cause:** attempt start runs `recover_incomplete()`, which
+  re-persisted every non-terminal cycle through `save_cycle`. This
+  machine's database holds one August-era cycle (state
+  `awaiting_review`, 8 verification-history entries) whose JSON predates
+  `repository_key`; serde defaults the key to empty, and `save_cycle`'s
+  evidence invariant (rightly) refuses keyless verification evidence.
+  Recovery inherited an invariant meant for new evidence and turned one
+  stale row into a permanent startup wedge — same defect class as
+  FAM-BUG-016 (stale persisted state blocks all new work).
+- **Fix:** recovery now marks cycles interrupted with a targeted UPDATE
+  of the cycle row (state, disposition, cycle_json, ended_at) instead of
+  a full `save_cycle`. This also stops recovery from wholesale
+  rewriting evidence/finding tables it has no new information about.
+  Regression: legacy keyless cycle with verification history recovers,
+  existing evidence rows preserved, second recovery is a no-op.
+- **Note:** no manual database surgery — the next session's recovery
+  marks the stale row interrupted and moves on, which is the point.
