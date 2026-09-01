@@ -984,7 +984,12 @@ mod tests {
         request.timeout_ms = Some(50);
         let result = agent(settings(&executable)).execute(request, &mut Vec::new());
         assert!(matches!(result, Err(AgentExecutionError::Timeout { .. })));
-        assert!(started.elapsed().as_secs() < 2);
+        // The bound proves the kill fired long before the child's 10s sleep,
+        // not scheduler punctuality: under full-workspace parallel load a
+        // 2-second margin flaked (the third timing-margin flake in this
+        // crate). What matters is timeout enforcement, with the fake's sleep
+        // as the failure ceiling.
+        assert!(started.elapsed().as_secs() < 8);
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

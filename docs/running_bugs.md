@@ -731,3 +731,29 @@ reinstall the binary, then rerun the 076 drive.
   chain landed hours earlier — the atomic lock made the collision
   deterministic instead of racy, and per-line redaction let the evidence
   name the pid.
+
+### FAM-BUG-030 — Workspace suite hangs on macOS at/after the mcp integration binary
+
+- **Status:** Open; unattended diagnosis script committed
+- **Observed:** The fourth PRD-076 preflight passed the previously-failing
+  cli_run isolation, progressed through 20+ test binaries, then produced no
+  further output and hit the enforced 30-minute timeout. Retained stderr's
+  last line names `familiar-ai-mcp tests/integration.rs`, but output
+  bounding may have dropped later `Running` lines — the hang is at or after
+  that binary. Every test in that file is in-memory MockTransport
+  (structurally cannot hang); the wave-one watcher crate (macOS FSEvents
+  backend, documented unaudited debt) runs later and is the prime suspect.
+- **Control evidence (Linux, same revision):** the identical suite completes
+  in 16.8 seconds wall; the mcp, watcher, summary, review, and storage
+  suites each finish in under two seconds. The hang is macOS-specific.
+- **Diagnosis path:** `./scripts/diagnose-suite-hang.sh` on the Mac —
+  unattended: runs the suite with preflight-like stdin, detects a 3-minute
+  stall, captures the hung binary's ps row, a stack `sample`, and open
+  files, kills everything, and commits/pushes the report to
+  `docs/diagnostics/`. A clean completion is itself evidence (hang would
+  then be drive-context-specific).
+- **Also fixed while establishing the control:** the third timing-margin
+  flake in familiar-ai-agent (`bounded_execution_kills_a_timed_out_process`
+  asserted a sub-2s kill; under 20-thread suite load the margin slipped;
+  the bound is now 8s — well under the fake's 10s sleep ceiling, still
+  proving enforcement).
