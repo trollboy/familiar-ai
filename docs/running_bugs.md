@@ -734,7 +734,8 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-030 — Workspace suite hangs on macOS at/after the mcp integration binary
 
-- **Status:** Open; unattended diagnosis script committed
+- **Status:** Open — fix candidate landed (`5f517db`) but UNVERIFIED; the
+  2026-09-01 diagnosis run splits the defect into two questions (see below)
 - **Observed:** The fourth PRD-076 preflight passed the previously-failing
   cli_run isolation, progressed through 20+ test binaries, then produced no
   further output and hit the enforced 30-minute timeout. Retained stderr's
@@ -746,12 +747,45 @@ reinstall the binary, then rerun the 076 drive.
 - **Control evidence (Linux, same revision):** the identical suite completes
   in 16.8 seconds wall; the mcp, watcher, summary, review, and storage
   suites each finish in under two seconds. The hang is macOS-specific.
-- **Diagnosis path:** `./scripts/diagnose-suite-hang.sh` on the Mac —
-  unattended: runs the suite with preflight-like stdin, detects a 3-minute
-  stall, captures the hung binary's ps row, a stack `sample`, and open
-  files, kills everything, and commits/pushes the report to
-  `docs/diagnostics/`. A clean completion is itself evidence (hang would
-  then be drive-context-specific).
+- **Fix candidate (`5f517db`, UNVERIFIED):** the daemon integration test
+  now spawns the daemon with `.process_group(0)` and SIGKILLs the whole
+  group before reading stderr — theory: a leaked grandchild (tray helper,
+  Mac default features) inherited the stderr pipe, so `read_to_string`
+  blocked forever after the daemon itself died. Unverified because the only
+  Mac run since (`docs/diagnostics/suite-hang-20260901T093435Z.txt`)
+  diagnosed HEAD `2b0b8713`, which PREDATES the fix.
+- **2026-09-01 reframe — this is two questions now:** that run hit the 45 m
+  cap with explicitly NO 180 s output stall ("very slow, not stuck"); the
+  storage suite's test phase took 15.60 s, and the report's last line is an
+  integration.rs binary starting. So the 45 minutes are dominated by cargo
+  BUILD time, not test execution. Question 1: build throughput pathology
+  (~44 min on the Mac for a workspace this Linux box builds and tests in
+  seconds). Question 2: the original hang, possibly fixed by `5f517db`,
+  unconfirmed either way.
+- **Build-slowness hypotheses:** cold/invalidated `target/` — incremental
+  cache busted per run, so every run recompiles the world; Spotlight
+  indexing `target/` — mds_stores chasing thousands of fresh artifacts;
+  XProtect/Gatekeeper assessment of every freshly linked test binary —
+  macOS scans new unsigned binaries on first exec, and a workspace suite
+  links dozens; memory pressure/swap if Codex or another drive session runs
+  concurrently; thermal throttling; dsymutil debug-info cost per linked
+  binary.
+- **Next action:** run `./scripts/diagnose-mac-build-speed.sh` on the Mac —
+  one command, unattended, self-updating; commits and pushes its own
+  report to `docs/diagnostics/`.
+- **Diagnose scripts' division of labor:** `diagnose-suite-hang.sh` answers
+  "is it stuck" (180 s stall detector, stack `sample`, open files, 45 m
+  cap). `diagnose-mac-build-speed.sh` answers "why is it slow": phase 1
+  wall-clocks `cargo test --workspace --no-run` with per-crate cargo
+  timings (when the installed cargo supports them) plus macOS suspect
+  snapshots (Spotlight, memory, thermal, disk, APFS snapshots, concurrent
+  processes, mid-build top-CPU); phase 2 reruns the suite on the now-warm
+  build with the same stall detector and a 20 m cap, so the hang check —
+  and `5f517db` validation — rides along in the same run. Every report now
+  states whether `5f517db` is an ancestor of the HEAD under test, so no
+  future report is ambiguous about whether the fix was being tested. A
+  clean phase 2 completion is itself evidence (the hang would then be
+  drive-context-specific or fixed).
 - **Also fixed while establishing the control:** the third timing-margin
   flake in familiar-ai-agent (`bounded_execution_kills_a_timed_out_process`
   asserted a sub-2s kill; under 20-thread suite load the margin slipped;
