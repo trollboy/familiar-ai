@@ -500,24 +500,31 @@ fn retained_output(
     omitted: usize,
     environment: Option<&BTreeMap<String, String>>,
 ) -> String {
-    let secret = contains_secret(stdout)
-        || contains_secret(stderr)
-        || environment.is_some_and(|values| {
-            values.values().any(|value| {
-                !value.is_empty()
-                    && (stdout
-                        .windows(value.len())
-                        .any(|part| part == value.as_bytes())
-                        || stderr
-                            .windows(value.len())
-                            .any(|part| part == value.as_bytes()))
+    // FAM-BUG-028: redact per LINE, never the whole capture — one
+    // credential-shaped string (this repo's own auth-test fixtures print
+    // them) must not erase the failing test's name from the evidence.
+    let redact = |bytes: &[u8]| -> String {
+        String::from_utf8_lossy(bytes)
+            .trim()
+            .lines()
+            .map(|line| {
+                let secret = contains_secret(line.as_bytes())
+                    || environment.is_some_and(|values| {
+                        values
+                            .values()
+                            .any(|value| !value.is_empty() && line.contains(value.as_str()))
+                    });
+                if secret {
+                    "[REDACTED LINE]"
+                } else {
+                    line
+                }
             })
-        });
-    if secret {
-        return format!("output=[REDACTED] omitted_bytes={omitted}");
-    }
-    let stdout = String::from_utf8_lossy(stdout).trim().replace('\n', "\\n");
-    let stderr = String::from_utf8_lossy(stderr).trim().replace('\n', "\\n");
+            .collect::<Vec<_>>()
+            .join("\\n")
+    };
+    let stdout = redact(stdout);
+    let stderr = redact(stderr);
     format!("stdout={stdout:?} stderr={stderr:?} omitted_bytes={omitted}")
 }
 
@@ -571,6 +578,22 @@ impl Drop for PhaseHeartbeat {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_lines_redact_individually_and_failures_stay_named() {
+        let stdout = concat!(
+            "test billing::collects_costs ... ok\n",
+            "authorization: bearer sk-live-abc123def456ghi789\n",
+            "test worker_lock::tests::simultaneous_fallback_claims_have_exactly_one_winner ... FAILED\n",
+        );
+        let detail = super::retained_output(stdout.as_bytes(), b"", 0, None);
+        assert!(
+            detail.contains("simultaneous_fallback_claims_have_exactly_one_winner ... FAILED"),
+            "failing test must stay named: {detail}"
+        );
+        assert!(detail.contains("[REDACTED LINE]"), "{detail}");
+        assert!(!detail.contains("sk-live-abc123def456ghi789"), "{detail}");
+    }
+
     use super::*;
     use familiar_ai_agent::{AgentExecutionError, CodingAgent, ExecutionRequest, ExecutionResult};
 

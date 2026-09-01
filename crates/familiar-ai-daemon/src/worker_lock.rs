@@ -191,10 +191,31 @@ fn new_claim(
 }
 
 fn create(path: &Path, claim: &OwnershipClaim) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    serde_json::to_writer(&mut file, claim).map_err(io::Error::other)?;
-    writeln!(file)?;
-    file.sync_all()
+    // FAM-BUG-027: the claim must appear ATOMICALLY. Writing JSON into an
+    // O_EXCL-created file leaves a window where a concurrent claimant reads
+    // an empty/partial file, judges it corrupt, "recovers" it — deleting the
+    // live winner's claim — and claims too: two owners of an exclusive lock.
+    // Write-and-sync a unique temporary, then hard-link into place: link
+    // fails with AlreadyExists exactly like O_EXCL, and no reader can ever
+    // observe a partial claim.
+    static CREATE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = path.with_extension(format!(
+        "claim-tmp-{}-{}",
+        std::process::id(),
+        CREATE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        serde_json::to_writer(&mut file, claim).map_err(io::Error::other)?;
+        writeln!(file)?;
+        file.sync_all()?;
+        fs::hard_link(&temporary, path)
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
 }
 
 fn claim_process_matches(claim: &OwnershipClaim) -> bool {
@@ -307,25 +328,31 @@ mod tests {
 
     #[test]
     fn simultaneous_fallback_claims_have_exactly_one_winner() {
-        let temp = tempfile::tempdir().unwrap();
-        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let mut threads = Vec::new();
-        for _ in 0..8 {
-            let path = temp.path().to_path_buf();
-            let start = start.clone();
-            threads.push(std::thread::spawn(move || {
-                start.wait();
-                WorkerLock::acquire(&path).ok()
-            }));
+        // FAM-BUG-027 regression: repeated so the pre-fix torn-read window
+        // (a concurrent claimant reading a half-written claim, "recovering"
+        // it, and becoming a second owner) is statistically visible. With
+        // the atomic hard-link claim it must be exactly one winner, always.
+        for _ in 0..25 {
+            let temp = tempfile::tempdir().unwrap();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let mut threads = Vec::new();
+            for _ in 0..8 {
+                let path = temp.path().to_path_buf();
+                let start = start.clone();
+                threads.push(std::thread::spawn(move || {
+                    start.wait();
+                    WorkerLock::acquire(&path).ok()
+                }));
+            }
+            let claims = threads
+                .into_iter()
+                .filter_map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(claims.len(), 1, "exactly one owner per race");
+            assert!(matches!(
+                WorkerLock::inspect(temp.path()).unwrap(),
+                ClaimState::Live(_)
+            ));
         }
-        let claims = threads
-            .into_iter()
-            .filter_map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(claims.len(), 1);
-        assert!(matches!(
-            WorkerLock::inspect(temp.path()).unwrap(),
-            ClaimState::Live(_)
-        ));
     }
 }
