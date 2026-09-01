@@ -469,11 +469,19 @@ impl ReviewCoordinator<'_> {
                 .scope_evaluations
                 .iter()
                 .flat_map(|evaluation| &evaluation.findings)
-                .filter(|finding| {
-                    matches!(
-                        finding.decision,
-                        ScopeDecision::AllowedChange | ScopeDecision::JustifiedExpectedFileChange
-                    )
+                .filter(|finding| match finding.decision {
+                    ScopeDecision::AllowedChange | ScopeDecision::JustifiedExpectedFileChange => {
+                        true
+                    }
+                    // A durably human-approved finding is adjudicated too —
+                    // otherwise the reviewer's claim about the very paths the
+                    // owner approved stays blocking and remediation "fixes"
+                    // them (FAM-BUG-042's relapse).
+                    ScopeDecision::AmbiguousHumanReview
+                    | ScopeDecision::UndeclaredScopeExpansion => request
+                        .approved_scope_findings
+                        .contains(&crate::evidence::scope_finding_substance_hash(finding)),
+                    ScopeDecision::ProhibitedChange => false,
                 })
                 .map(|finding| finding.path.as_str())
                 .collect();
