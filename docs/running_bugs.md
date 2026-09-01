@@ -851,3 +851,25 @@ reinstall the binary, then rerun the 076 drive.
   existing evidence rows preserved, second recovery is a no-op.
 - **Note:** no manual database surgery — the next session's recovery
   marks the stale row interrupted and moves on, which is the point.
+
+### FAM-BUG-033 — Version-probe flake fails preflight (ETXTBSY class)
+
+- **Status:** Fixed (this commit); watch for recurrence at other spawn sites
+- **Observed:** Session 4's preflight failed `verification.tests-green-crates`
+  on `executes_fake_claude_streaming_output_and_mapping_results`:
+  `agent_version` was `None` while every other assertion in the same test —
+  including the main spawn of the same fake executable — passed. Session 3
+  ran the identical suite green in the identical Docker image: a flake,
+  not a regression.
+- **Probable cause:** the version probe is the first exec of the fake the
+  test just wrote; under parallel tests a sibling's fork can still hold
+  the script's write handle at exec time, and Linux refuses with ETXTBSY.
+  The probe swallowed the spawn error into `None`.
+- **Fix:** `probe_version` retries exec up to 5×10 ms on os error 26 only;
+  all other spawn errors still conclude the executable is unavailable.
+  If another fake-spawning test ever shows the same one-spawn-fails
+  signature, generalize the retry to a shared spawn helper — narrowly
+  fixed here first, per policy.
+- **Cost note:** each such flake burns an entire drive session at
+  preflight. Flakes in required verification checks are session killers
+  and get fixed immediately, not waived.

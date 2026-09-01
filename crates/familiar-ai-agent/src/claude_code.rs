@@ -37,12 +37,31 @@ impl ClaudeCodeAgent {
     }
 
     fn probe_version(&self) -> Option<String> {
-        let output = Command::new(&self.settings.executable)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
+        // A freshly written executable can transiently fail exec with
+        // ETXTBSY (os error 26) while a concurrently forked process still
+        // holds its write handle — the probe is the first spawn after test
+        // fixtures write their fakes, so it loses that race first
+        // (FAM-BUG-033). Retry briefly before concluding the executable is
+        // unavailable.
+        let mut probed = None;
+        for _ in 0..5 {
+            match Command::new(&self.settings.executable)
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+            {
+                Ok(value) => {
+                    probed = Some(value);
+                    break;
+                }
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return None,
+            }
+        }
+        let output = probed?;
         if !output.status.success() {
             return None;
         }
