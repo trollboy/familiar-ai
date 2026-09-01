@@ -209,7 +209,18 @@ where
         });
         for result in results {
             match result {
-                Ok((_, _, Ok(_))) => {}
+                Ok((id, worktree, Ok(_))) => {
+                    // PRD-077: a finished candidate lands into the current
+                    // branch through the same merge machinery drive uses — no
+                    // manual Git operations.
+                    match land_candidate(&repository.worktree, &worktree, &id) {
+                        Ok(merged) => output.push(format!("landed\t{id}\t{merged}")),
+                        Err(error) => {
+                            failed_prds.insert(id.clone());
+                            failures.push(format!("{id}: landing_failed: {error}"));
+                        }
+                    }
+                }
                 Ok((id, worktree, Err(error))) => {
                     if let Err(error) = review(error, &worktree, &config, &paths, &agents) {
                         failed_prds.insert(id.clone());
@@ -250,7 +261,7 @@ pub fn freeze_implementation(
     agent_identity: &str,
     usage_json: String,
     pending_review: bool,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let base_revision = git(worktree, &["rev-parse", "HEAD"])?;
     let branch = git(worktree, &["branch", "--show-current"])?;
     let (diff, manifest) = snapshot(worktree, &base_revision)?;
@@ -278,7 +289,57 @@ pub fn freeze_implementation(
     };
     CheckpointRepository::new(db.conn())
         .put(&checkpoint)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(manifest)
+}
+
+/// PRD-077 (FAM-BUG-018): an operator who reviews a preserved candidate and
+/// commits it in its own worktree must not invalidate the checkpoint. When a
+/// stale-base candidate has exactly the committed-candidate shape — HEAD's
+/// single parent is the recorded base and the working tree is clean — the
+/// checkpoint is rebound to the post-commit snapshot and resume proceeds.
+fn rebind_operator_commit(
+    db: &Database,
+    checkpoint: &ExecutionCheckpoint,
+) -> Result<Option<ResumeCandidate>, String> {
+    let worktree = PathBuf::from(&checkpoint.worktree_path);
+    if !worktree.is_dir() {
+        return Ok(None);
+    }
+    let head = git(&worktree, &["rev-parse", "HEAD"])?;
+    if head == checkpoint.base_revision {
+        return Ok(None);
+    }
+    let parent = match git(&worktree, &["rev-parse", "HEAD^"]) {
+        Ok(parent) => parent,
+        Err(_) => return Ok(None),
+    };
+    if parent != checkpoint.base_revision
+        || git(&worktree, &["rev-parse", "--verify", "--quiet", "HEAD^2"]).is_ok()
+    {
+        return Ok(None);
+    }
+    let dirty = git(&worktree, &["status", "--porcelain"])?;
+    if !dirty.is_empty() {
+        return Ok(None);
+    }
+    let (diff, manifest) = snapshot(&worktree, &checkpoint.base_revision)?;
+    let mut rebound = checkpoint.clone();
+    rebound.diff_hash = familiar_ai_review::content_hash(&diff);
+    rebound.changed_files_json = serde_json::to_string(&manifest).map_err(|e| e.to_string())?;
+    CheckpointRepository::new(db.conn())
+        .put(&rebound)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(ResumeCandidate {
+        checkpoint_id: rebound.checkpoint_id,
+        prd_id: rebound.prd_id,
+        prd_path: rebound.prd_path,
+        phase: rebound.phase,
+        worktree,
+        changed_files: manifest,
+        valid: true,
+        reason: Some("rebound_operator_commit".into()),
+    }))
 }
 
 pub fn discover(db: &Database, repository_key: &str) -> Result<Vec<ResumeCandidate>, String> {
@@ -294,7 +355,20 @@ pub fn discover(db: &Database, repository_key: &str) -> Result<Vec<ResumeCandida
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|checkpoint| !terminal.contains(&checkpoint.prd_id))
-        .map(validate)
+        .map(|checkpoint| {
+            let candidate = validate(checkpoint.clone())?;
+            if !candidate.valid
+                && candidate
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("stale_base"))
+            {
+                if let Some(rebound) = rebind_operator_commit(db, &checkpoint)? {
+                    return Ok(rebound);
+                }
+            }
+            Ok(candidate)
+        })
         .collect()
 }
 
@@ -415,6 +489,40 @@ pub fn discover_with_legacy(
     Ok(candidates)
 }
 
+/// PRD-077: merge a finished candidate into the repository's current branch.
+/// Commits the candidate in its worktree if needed, merges via the drive
+/// merge machinery, and fast-forwards the checked-out branch — failing
+/// closed if the operator's tree moved underneath.
+fn land_candidate(
+    repository_worktree: &Path,
+    candidate_worktree: &Path,
+    prd_id: &str,
+) -> Result<String, String> {
+    let dirty = git(candidate_worktree, &["status", "--porcelain"])?;
+    if !dirty.is_empty() {
+        git(candidate_worktree, &["add", "-A"])?;
+        git(
+            candidate_worktree,
+            &["commit", "-qm", &format!("{prd_id}: resumed candidate")],
+        )?;
+    }
+    let candidate = git(candidate_worktree, &["rev-parse", "HEAD"])?;
+    let prior = git(repository_worktree, &["rev-parse", "HEAD"])?;
+    if git(
+        repository_worktree,
+        &["merge-base", "--is-ancestor", &candidate, &prior],
+    )
+    .is_ok()
+    {
+        return Ok(prior);
+    }
+    let merged = crate::drive::merge_candidate(repository_worktree, &prior, &candidate)
+        .map_err(|error| format!("integration failed: {error}"))?;
+    git(repository_worktree, &["merge", "--ff-only", &merged])
+        .map_err(|error| format!("cannot fast-forward the checked-out branch: {error}"))?;
+    Ok(merged)
+}
+
 fn ownership_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -476,7 +584,18 @@ pub fn one(db: &Database, repository_key: &str, prd_id: &str) -> Result<ResumeCa
         .get(repository_key, prd_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no durable checkpoint for {prd_id}"))?;
-    validate(checkpoint)
+    let candidate = validate(checkpoint.clone())?;
+    if !candidate.valid
+        && candidate
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("stale_base"))
+    {
+        if let Some(rebound) = rebind_operator_commit(db, &checkpoint)? {
+            return Ok(rebound);
+        }
+    }
+    Ok(candidate)
 }
 
 fn validate(c: ExecutionCheckpoint) -> Result<ResumeCandidate, String> {
@@ -682,6 +801,16 @@ pub fn verify_commit_contains_candidate(
         }
     }
     Ok(resolved)
+}
+
+/// PRD-077: the candidate snapshot (diff bytes + changed-file manifest) for
+/// a worktree against its base — the same computation `freeze_implementation`
+/// and `validate` use, exposed so remediation can rebind the checkpoint.
+pub fn candidate_snapshot(
+    worktree: &Path,
+    base_revision: &str,
+) -> Result<(Vec<u8>, Vec<String>), String> {
+    snapshot(worktree, base_revision)
 }
 
 fn snapshot(path: &Path, base: &str) -> Result<(Vec<u8>, Vec<String>), String> {
@@ -948,6 +1077,91 @@ mod tests {
         );
         let error = one(&db, "repo", "PRD-9").unwrap_err();
         assert!(error.contains("already completed"), "{error}");
+    }
+
+    /// PRD-077 (FAM-BUG-018): an operator committing the candidate inside its
+    /// preserved worktree rebinds the checkpoint instead of invalidating it.
+    #[test]
+    fn operator_commit_rebinds_checkpoint_instead_of_stale_base() {
+        let root = tempfile::tempdir().unwrap();
+        command(root.path(), &["init", "-q"]);
+        command(
+            root.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        command(root.path(), &["config", "user.name", "Test"]);
+        std::fs::write(root.path().join("tracked"), "before").unwrap();
+        command(root.path(), &["add", "tracked"]);
+        command(root.path(), &["commit", "-qm", "base"]);
+        std::fs::write(root.path().join("tracked"), "after").unwrap();
+        std::fs::write(root.path().join("fresh"), "new file").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        freeze_implementation(
+            &db,
+            "repo",
+            "PRD-901",
+            "docs/prds/PRD-901.md",
+            "exec-901",
+            root.path(),
+            "agent",
+            "{}".into(),
+            false,
+        )
+        .unwrap();
+        // Operator reviews and commits the candidate in place.
+        command(root.path(), &["add", "-A"]);
+        command(root.path(), &["commit", "-qm", "reviewed candidate"]);
+        let candidate = one(&db, "repo", "PRD-901").unwrap();
+        assert!(candidate.valid, "{:?}", candidate.reason);
+        assert_eq!(candidate.reason.as_deref(), Some("rebound_operator_commit"));
+        assert!(candidate
+            .changed_files
+            .iter()
+            .any(|file| file == "tracked" || file == "fresh"));
+        // A worktree with EXTRA edits after the commit stays invalid — the
+        // rebind accepts exactly the committed-candidate shape.
+        std::fs::write(root.path().join("tracked"), "tampered").unwrap();
+        let tampered = one(&db, "repo", "PRD-901").unwrap();
+        assert!(!tampered.valid);
+    }
+
+    /// PRD-077: a finished candidate lands into the checked-out branch with
+    /// no manual Git operations, and landing is idempotent.
+    #[test]
+    fn land_candidate_merges_and_fast_forwards_the_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        command(&main, &["init", "-q", "-b", "main"]);
+        command(&main, &["config", "user.email", "test@example.invalid"]);
+        command(&main, &["config", "user.name", "Test"]);
+        std::fs::write(main.join("shared"), "base").unwrap();
+        command(&main, &["add", "shared"]);
+        command(&main, &["commit", "-qm", "base"]);
+        let worktree = temp.path().join("candidate");
+        command(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "familiar/test/PRD-9",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(worktree.join("feature"), "implemented").unwrap();
+        let merged = land_candidate(&main, &worktree, "PRD-9").unwrap();
+        assert_eq!(git(&main, &["rev-parse", "HEAD"]).unwrap(), merged);
+        assert_eq!(
+            std::fs::read_to_string(main.join("feature")).unwrap(),
+            "implemented"
+        );
+        // Idempotent: landing again changes nothing.
+        let again = land_candidate(&main, &worktree, "PRD-9").unwrap();
+        assert_eq!(again, merged);
     }
 
     #[test]

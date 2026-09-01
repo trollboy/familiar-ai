@@ -51,9 +51,58 @@ const EXECUTION_CONSTRAINTS: &str = r#"- Implement the supplied PRD exactly as w
 - Preserve existing user changes in the worktree.
 - When implementation is complete, audit every acceptance criterion, run focused tests, formatting, static analysis, and attempt the workspace test suite.
 - Distinguish implementation-caused failures from pre-existing failures and summarize changed files and deviations.
+- No human is present. If any acceptance criterion is NOT fully implemented, your final output MUST contain a line beginning exactly `FAMILIAR-INCOMPLETE: ` naming what is missing; never claim completion over unmet criteria.
 - Stop after completing and reporting the supplied PRD."#;
 
 static EXECUTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// PRD-077: tee the implementation agent's stream to stdout while keeping a
+/// bounded tail so a `FAMILIAR-INCOMPLETE:` self-declaration is detectable
+/// without persisting prose.
+struct TailTee<W: io::Write> {
+    inner: W,
+    tail: std::collections::VecDeque<u8>,
+}
+
+impl<W: io::Write> TailTee<W> {
+    const CAPACITY: usize = 16 * 1024;
+
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            tail: std::collections::VecDeque::with_capacity(Self::CAPACITY),
+        }
+    }
+
+    fn tail_text(&self) -> String {
+        String::from_utf8_lossy(&self.tail.iter().copied().collect::<Vec<u8>>()).into_owned()
+    }
+
+    /// The declared-incomplete line, if the worker emitted one.
+    fn incomplete_declaration(&self) -> Option<String> {
+        self.tail_text().lines().rev().find_map(|line| {
+            line.find("FAMILIAR-INCOMPLETE:")
+                .map(|start| line[start..].trim().to_owned())
+        })
+    }
+}
+
+impl<W: io::Write> io::Write for TailTee<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        for byte in &buf[..written] {
+            if self.tail.len() == Self::CAPACITY {
+                self.tail.pop_front();
+            }
+            self.tail.push_back(*byte);
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 #[derive(Debug)]
 pub enum RunError {
@@ -1295,6 +1344,7 @@ fn execute_tracked_inner(
         rusqlite::params![id, i64::from(repository_map.is_some()), Utc::now().to_rfc3339(), if repository_map.is_some(){"approved per-repository repository_map_enabled"}else{"repository map injection disabled"}],
     ).map_err(|e| RunError::Storage(e.to_string()))?;
 
+    let mut implementation_stream = TailTee::new(io::stdout());
     let execution = agents.implementation.execute(
         ExecutionRequest {
             working_directory: &context.repository.worktree,
@@ -1314,7 +1364,7 @@ fn execute_tracked_inner(
             timeout_ms: implementation_timeout_ms,
             budget: execution_budget,
         },
-        &mut io::stdout(),
+        &mut implementation_stream,
     );
     if let Some(register) = output_register {
         eprintln!("output-register: {}@{}", register.id(), REGISTER_VERSION);
@@ -1387,7 +1437,7 @@ fn execute_tracked_inner(
             "total_tokens": total,
             "estimated_cost_microusd": finalization.estimated_cost_microusd,
         });
-        crate::resume::freeze_implementation(
+        let manifest = crate::resume::freeze_implementation(
             &db,
             &repository.key,
             &target.id.to_string(),
@@ -1406,6 +1456,26 @@ fn execute_tracked_inner(
                 RunError::Storage(detail),
             )
         })?;
+        // PRD-077: an implementation that changed nothing, or that declared
+        // its own acceptance criteria unmet, terminalizes as incomplete
+        // BEFORE any verification or review spend — narration never
+        // substitutes for acceptance evidence, but a negative self-report
+        // fails closed.
+        let declared_incomplete = implementation_stream.incomplete_declaration();
+        if manifest.is_empty() || declared_incomplete.is_some() {
+            let detail = declared_incomplete.unwrap_or_else(|| {
+                "implementation produced no file changes for a PRD requiring them".into()
+            });
+            return Err(retained_traced(
+                trace,
+                &target,
+                "implementation_incomplete",
+                RunError::Workflow {
+                    result: Some(Box::new(result.clone())),
+                    detail,
+                },
+            ));
+        }
     }
     if config.driver.max_implementation_tokens > 0 {
         let total = result
@@ -1552,6 +1622,32 @@ fn finish_implementation(
         codex_session,
     })
     .map_err(|e| retained_traced(trace, target, "review_failed", e))?;
+    // PRD-077 (FAM-BUG-021): remediation mutates the worktree, so the durable
+    // checkpoint must advance to describe the candidate that actually exists —
+    // otherwise resume rejects Familiar's own remediated work as
+    // hash_mismatch. Recompute the candidate snapshot and rebind when it
+    // moved; base revision is unchanged (remediation never commits).
+    if !cycle.remediation_attempts.is_empty() {
+        let worktree = &context.repository.worktree;
+        let (diff, manifest) = crate::resume::candidate_snapshot(worktree, &preflight.baseline)
+            .map_err(RunError::Storage)?;
+        let current_hash = familiar_ai_review::content_hash(&diff);
+        let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+        if let Some(checkpoint) = checkpoints
+            .get(&repository.key, &target.id.to_string())
+            .map_err(|e| RunError::Storage(e.to_string()))?
+        {
+            if checkpoint.diff_hash != current_hash {
+                let mut advanced = checkpoint.clone();
+                advanced.diff_hash = current_hash;
+                advanced.changed_files_json = serde_json::to_string(&manifest)
+                    .map_err(|e| RunError::Storage(e.to_string()))?;
+                checkpoints
+                    .put(&advanced)
+                    .map_err(|e| RunError::Storage(e.to_string()))?;
+            }
+        }
+    }
     let clean = cycle.state == ReviewCycleState::Completed
         && cycle.disposition == ReviewDisposition::ReadyForHumanApproval
         && cycle.stop_reasons == [ReviewStopReason::CleanReview];
