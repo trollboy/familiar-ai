@@ -1,0 +1,9 @@
+command: familiar-ai resume all
+date: Tue Sep  1 07:22:56 PM UTC 2026
+host: trollboy (Linux)
+head: 55797581985fdde2e31b3059256283fe3404d3e9 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+error: PRD-38: configuration failed: checkpoint phase reviewed cannot start review; PRD-58: configuration failed: checkpoint phase reviewed cannot start review
+---
+exit: 1
