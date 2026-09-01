@@ -265,6 +265,10 @@ enum ConfigCommand {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommand,
+    },
     /// Migrate legacy configuration sections to supported replacements.
     Migrate {
         #[command(subcommand)]
@@ -286,6 +290,42 @@ enum ConfigCommand {
         effective: bool,
         #[arg(long, default_value = ".")]
         repository: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ArtifactCommand {
+    /// Probe and register externally prepared identity-bearing files.
+    Register {
+        alias: String,
+        root: PathBuf,
+        #[arg(long = "file", required = true)]
+        files: Vec<PathBuf>,
+        /// JSON object of identity-bearing configuration.
+        #[arg(long, default_value = "{}")]
+        identity: String,
+        /// JSON provenance record; omitted fields remain explicitly unknown.
+        #[arg(long, default_value = "{}")]
+        provenance: String,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long = "adapter")]
+        adapters: Vec<String>,
+        #[arg(long)]
+        merged: bool,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Record a legacy/runtime-only alias as degraded and unverified.
+    RegisterAlias {
+        alias: String,
+        runtime_alias: String,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    List,
+    Show {
+        alias: String,
     },
 }
 
@@ -791,6 +831,40 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             },
             ModelCommand::Disable { model, actor } => ConfigAction::ModelDisable { model, actor },
             ModelCommand::List => ConfigAction::ModelList,
+        },
+        ConfigCommand::Artifact { command } => match command {
+            ArtifactCommand::Register {
+                alias,
+                root,
+                files,
+                identity,
+                provenance,
+                base,
+                adapters,
+                merged,
+                actor,
+            } => ConfigAction::ArtifactRegister {
+                alias,
+                root,
+                files,
+                identity,
+                provenance,
+                base,
+                adapters,
+                merged,
+                actor,
+            },
+            ArtifactCommand::RegisterAlias {
+                alias,
+                runtime_alias,
+                actor,
+            } => ConfigAction::ArtifactRegisterAlias {
+                alias,
+                runtime_alias,
+                actor,
+            },
+            ArtifactCommand::List => ConfigAction::ArtifactList,
+            ArtifactCommand::Show { alias } => ConfigAction::ArtifactShow { alias },
         },
         ConfigCommand::Migrate { command } => match command {
             ConfigMigrateCommand::Agents { actor } => ConfigAction::MigrateAgents { actor },

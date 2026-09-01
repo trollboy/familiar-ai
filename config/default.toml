@@ -240,6 +240,16 @@ max_verification_log_bytes = 256000
 # Ollama uses adapter = "ollama" and model = "qwen3:8b"; Familiar invokes it
 # through the existing Codex OSS adapter path.
 
+# Local artifact aliases point to immutable canonical manifests. Registration
+# is performed with `familiar-ai config artifact register`; do not hand-author
+# digests. Runtime-only aliases are recorded as degraded-unverified and may be
+# rejected by routing policy. License metadata is advisory, not enforced.
+# [artifacts.qwen-local]
+# id = "sha256:..."
+# state = "verified"
+# manifest = { schema_version = 1, digest_algorithm = "sha256-v1", files = [] }
+# provenance = { license = "unknown", usage_restrictions = [] }
+
 [review.scope]
 allow_prd_expected_file_expansion = false
 declaration_mode = "expected_or_configured"

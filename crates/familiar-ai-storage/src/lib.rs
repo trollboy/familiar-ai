@@ -36,6 +36,7 @@ pub use repos::lifecycle::{
     LifecycleChange, LifecycleOutcome, LifecycleRepository, PendingSummaryWork, RetirementReason,
     ScanRun, ScanStatus,
 };
+pub use repos::model_artifact::ModelArtifactRepository;
 pub use repos::orchestration::{MigrationReservation, OrchestrationRepository, ScopeDecision};
 pub use repos::planner::{PlannerBatchRecord, PlannerBatchRepository};
 pub use repos::probation::{ProbationObservation, ProbationRepository};

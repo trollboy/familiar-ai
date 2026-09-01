@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -6,15 +6,17 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use familiar_ai_core::config::{
-    validate_cloud_cli, validate_host, validate_ssh_host, AgentAdapterKind, AuthDescriptor,
-    BillingMode, EndpointProviderKind, InferenceRuntimeKind, ProviderConfig, RegistryWorkerConfig,
-    WorkerCapabilityConfig,
+    derive_artifact_manifest, validate_cloud_cli, validate_host, validate_ssh_host,
+    AgentAdapterKind, ArtifactVerificationState, AuthDescriptor, BillingMode, EndpointProviderKind,
+    InferenceRuntimeKind, ModelArtifactConfig, ModelArtifactProvenance, ProviderConfig,
+    RegistryWorkerConfig, WorkerCapabilityConfig,
 };
 use familiar_ai_core::{
     AppPaths, BacklogDiscovery, Config, FamiliarToml, FilesystemBacklogDiscovery,
 };
 use familiar_ai_storage::{
     AccountingRepository, ConfigDecisionRepository, Database, FamiliarTomlRepository,
+    ModelArtifactRepository,
 };
 use ring::digest::{digest, SHA256};
 use toml_edit::{value, Array, Document, Item, Table};
@@ -204,6 +206,26 @@ pub enum ConfigAction {
         actor: Option<String>,
     },
     ModelList,
+    ArtifactRegister {
+        alias: String,
+        root: PathBuf,
+        files: Vec<PathBuf>,
+        identity: String,
+        provenance: String,
+        base: Option<String>,
+        adapters: Vec<String>,
+        merged: bool,
+        actor: Option<String>,
+    },
+    ArtifactRegisterAlias {
+        alias: String,
+        runtime_alias: String,
+        actor: Option<String>,
+    },
+    ArtifactList,
+    ArtifactShow {
+        alias: String,
+    },
     MigrateAgents {
         actor: Option<String>,
     },
@@ -270,6 +292,35 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
             model_disable(context, &model, actor.as_deref())
         }
         ConfigAction::ModelList => model_list(context),
+        ConfigAction::ArtifactRegister {
+            alias,
+            root,
+            files,
+            identity,
+            provenance,
+            base,
+            adapters,
+            merged,
+            actor,
+        } => artifact_register(
+            context,
+            &alias,
+            &root,
+            &files,
+            &identity,
+            &provenance,
+            base,
+            adapters,
+            merged,
+            actor.as_deref(),
+        ),
+        ConfigAction::ArtifactRegisterAlias {
+            alias,
+            runtime_alias,
+            actor,
+        } => artifact_register_alias(context, &alias, &runtime_alias, actor.as_deref()),
+        ConfigAction::ArtifactList => artifact_list(context),
+        ConfigAction::ArtifactShow { alias } => artifact_show(context, &alias),
         ConfigAction::MigrateAgents { actor } => migrate_agents(context, actor.as_deref()),
         ConfigAction::History { limit } => history(context, limit),
     }
@@ -1512,6 +1563,172 @@ fn migrate_agents(context: &ConfigContext, supplied_actor: Option<&str>) -> Resu
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn artifact_register(
+    context: &ConfigContext,
+    alias: &str,
+    root: &std::path::Path,
+    files: &[PathBuf],
+    identity_json: &str,
+    provenance_json: &str,
+    base: Option<String>,
+    adapters: Vec<String>,
+    merged: bool,
+    supplied_actor: Option<&str>,
+) -> Result<(), String> {
+    validate_name(alias, "artifact alias")?;
+    let actor = actor(supplied_actor)?;
+    let identity: BTreeMap<String, serde_json::Value> = serde_json::from_str(identity_json)
+        .map_err(|error| format!("identity must be a JSON object: {error}"))?;
+    let mut provenance: ModelArtifactProvenance = serde_json::from_str(provenance_json)
+        .map_err(|error| format!("invalid provenance JSON: {error}"))?;
+    if provenance
+        .operator
+        .as_ref()
+        .is_some_and(|value| value != &actor)
+    {
+        return Err("provenance operator contradicts mutation actor".into());
+    }
+    provenance.operator = Some(actor.clone());
+    provenance.imported_at = Some(Utc::now().to_rfc3339());
+    provenance.adapters = adapters.clone();
+    provenance.adapter_application = Some(if merged { "merged" } else { "dynamic" }.into());
+    let (id, manifest) = derive_artifact_manifest(root, files, base, adapters, merged, identity)
+        .map_err(|error| error.to_string())?;
+    let artifact = ModelArtifactConfig {
+        id: id.clone(),
+        state: ArtifactVerificationState::Verified,
+        runtime_alias: None,
+        manifest: Some(manifest),
+        provenance,
+    };
+    persist_artifact(context, alias, artifact, &actor)?;
+    println!(
+        "{alias}: {id} (verified; license={}, restrictions={})",
+        display_unknown(&load_config(context)?.artifacts[alias].provenance.license),
+        display_restrictions(
+            &load_config(context)?.artifacts[alias]
+                .provenance
+                .usage_restrictions
+        )
+    );
+    Ok(())
+}
+
+fn artifact_register_alias(
+    context: &ConfigContext,
+    alias: &str,
+    runtime_alias: &str,
+    supplied_actor: Option<&str>,
+) -> Result<(), String> {
+    validate_name(alias, "artifact alias")?;
+    if runtime_alias.trim().is_empty() {
+        return Err("runtime alias must not be empty".into());
+    }
+    let actor = actor(supplied_actor)?;
+    let material = format!("degraded-unverified-alias-v1\n{runtime_alias}");
+    let artifact = ModelArtifactConfig {
+        id: format!("sha256:{}", sha256(material.as_bytes())),
+        state: ArtifactVerificationState::DegradedUnverifiedAlias,
+        runtime_alias: Some(runtime_alias.into()),
+        manifest: None,
+        provenance: ModelArtifactProvenance {
+            imported_at: Some(Utc::now().to_rfc3339()),
+            operator: Some(actor.clone()),
+            ..Default::default()
+        },
+    };
+    let id = artifact.id.clone();
+    persist_artifact(context, alias, artifact, &actor)?;
+    println!("{alias}: {id} (DEGRADED unverified alias; routing policy may reject)");
+    Ok(())
+}
+
+fn persist_artifact(
+    context: &ConfigContext,
+    alias: &str,
+    artifact: ModelArtifactConfig,
+    actor: &str,
+) -> Result<(), String> {
+    let config = load_config(context)?;
+    if let Some(existing) = config.artifacts.get(alias) {
+        if existing.id == artifact.id {
+            return Ok(());
+        }
+        return Err(format!(
+            "artifact alias '{alias}' already exists and is immutable"
+        ));
+    }
+    let db = open_database(context, &config)?;
+    ModelArtifactRepository::new(&db)
+        .register(alias, &artifact)
+        .map_err(|error| error.to_string())?;
+    let wrapper = toml::to_string(&BTreeMap::from([(alias.to_owned(), artifact)]))
+        .map_err(|error| error.to_string())?;
+    let encoded_header = format!("[{alias}");
+    let nested_header = format!("[artifacts.{alias}");
+    let parsed = wrapper
+        .replace(&encoded_header, &nested_header)
+        .parse::<Document>()
+        .map_err(|error| error.to_string())?;
+    let item = parsed
+        .get("artifacts")
+        .and_then(Item::as_table)
+        .and_then(|table| table.get(alias))
+        .cloned()
+        .ok_or("cannot encode artifact")?;
+    mutate(
+        context,
+        "familiar-ai config artifact register",
+        actor,
+        |document| {
+            let artifacts = root_table(document, "artifacts")?;
+            if artifacts.contains_key(alias) {
+                return Err(format!("artifact alias '{alias}' already exists"));
+            }
+            artifacts.insert(alias, item);
+            Ok(())
+        },
+    )
+}
+
+fn artifact_list(context: &ConfigContext) -> Result<(), String> {
+    for (alias, artifact) in load_config(context)?.artifacts {
+        println!(
+            "{alias}\t{}\t{:?}\tlicense={}\trestrictions={}",
+            artifact.id,
+            artifact.state,
+            display_unknown(&artifact.provenance.license),
+            display_restrictions(&artifact.provenance.usage_restrictions)
+        );
+    }
+    Ok(())
+}
+
+fn artifact_show(context: &ConfigContext, alias: &str) -> Result<(), String> {
+    let config = load_config(context)?;
+    let artifact = config
+        .artifacts
+        .get(alias)
+        .ok_or_else(|| format!("unknown artifact '{alias}'"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(artifact).map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn display_unknown(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or("unknown")
+}
+fn display_restrictions(values: &[String]) -> String {
+    if values.is_empty() {
+        "unknown".into()
+    } else {
+        values.join(",")
+    }
+}
+
 fn mutate<F>(context: &ConfigContext, command: &str, actor: &str, edit: F) -> Result<(), String>
 where
     F: FnOnce(&mut Document) -> Result<(), String>,
@@ -2244,5 +2461,48 @@ mod tests {
             fs::read_to_string(repository.join("familiar.toml")).unwrap(),
             shared
         );
+    }
+
+    #[test]
+    fn artifact_registration_probes_persists_audits_and_is_idempotent() {
+        let (directory, context) = context();
+        let root = directory.path().join("artifact");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("weights.gguf"), b"weights").unwrap();
+        fs::write(&context.config_path, "# preserve me\n").unwrap();
+        let register = || {
+            artifact_register(
+                &context,
+                "friendly",
+                &root,
+                &[PathBuf::from("weights.gguf")],
+                r#"{"quantization":{"bits":4}}"#,
+                r#"{"license":"apache-2.0","usage_restrictions":["research"]}"#,
+                None,
+                vec![],
+                false,
+                Some("human:test"),
+            )
+        };
+        register().unwrap();
+        register().unwrap();
+        let config = load_config(&context).unwrap();
+        assert!(config.artifacts["friendly"].routing_eligible(true));
+        assert_eq!(
+            config.artifacts["friendly"].provenance.license.as_deref(),
+            Some("apache-2.0")
+        );
+        assert!(fs::read_to_string(&context.config_path)
+            .unwrap()
+            .contains("# preserve me"));
+        let db = open_database(&context, &config).unwrap();
+        assert_eq!(
+            ConfigDecisionRepository::new(&db).list(10).unwrap().len(),
+            1
+        );
+        assert!(ModelArtifactRepository::new(&db)
+            .get(&config.artifacts["friendly"].id)
+            .unwrap()
+            .is_some());
     }
 }
