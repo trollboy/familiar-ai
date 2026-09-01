@@ -1075,11 +1075,14 @@ pub fn drive(
     let mut width_reported = false;
 
     let session_preflight = crate::preflight::run(agents, config, &repository.worktree);
+    // Persist the complete pass/fail/deduplication ledger, not only a terminal
+    // failure. This makes the once-per-session probe contract auditable after
+    // the process and its transient logs are gone.
+    DriverRepository::new(db.conn())
+        .record_session_detail(&session_id, &session_preflight.session_summary())
+        .map_err(|error| DriveError::Storage(error.to_string()))?;
     let termination = if !session_preflight.is_valid() {
         let detail = session_preflight.failure_summary();
-        DriverRepository::new(db.conn())
-            .record_session_detail(&session_id, &detail)
-            .map_err(|error| DriveError::Storage(error.to_string()))?;
         eprintln!("drive: session preflight failed: {detail}");
         DriveTermination::PreflightFailed
     } else {

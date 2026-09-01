@@ -1,11 +1,15 @@
 //! Deterministic, side-effect-free prerequisite checks for unattended work.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use familiar_ai_core::{Config, PreflightCommandConfig};
+use familiar_ai_review::contains_secret;
 
 use crate::run::AgentSet;
 
@@ -43,20 +47,48 @@ impl PreflightReport {
             .collect::<Vec<_>>()
             .join("; ")
     }
+
+    pub fn session_summary(&self) -> String {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "{} [{}]: {}",
+                    check.check_id,
+                    match check.status {
+                        PreflightStatus::Passed => "passed",
+                        PreflightStatus::Failed => "failed",
+                        PreflightStatus::EnvironmentDenied => "environment_denied",
+                    },
+                    check.detail
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> PreflightReport {
     let mut checks = Vec::new();
+    let mut probed_agents = BTreeSet::new();
     if let Some(registry) = &config.worker_registry {
         match crate::run::resolved_worker_plan(config, &crate::run::RouteContext::default()) {
             Ok((_, _, records)) => {
                 for record in records {
                     let worker = &registry.workers[&record.selected_worker];
-                    let agent = crate::run::build_agent(&worker.as_agent_entry());
-                    checks.push(agent_check(
-                        &format!("worker.{:?}", record.stage).to_ascii_lowercase(),
-                        agent.as_ref(),
-                    ));
+                    let key = format!(
+                        "executable:{}:{}:{:?}",
+                        worker.runtime_id().unwrap_or("invalid-runtime"),
+                        worker.executable.as_deref().unwrap_or("default"),
+                        worker.extra_args
+                    );
+                    let check_id = format!("worker.{:?}", record.stage).to_ascii_lowercase();
+                    if probed_agents.insert(key.clone()) {
+                        let agent = crate::run::build_agent(&worker.as_agent_entry());
+                        checks.push(agent_check(&check_id, agent.as_ref()));
+                    } else {
+                        checks.push(deduplicated_check(&check_id, &key));
+                    }
                 }
             }
             Err(detail) => checks.push(PreflightCheck {
@@ -66,25 +98,17 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
             }),
         }
     } else {
+        let implementation_key = agent_identity(agents.implementation);
+        probed_agents.insert(implementation_key.clone());
         checks.push(agent_check("agent.implementation", agents.implementation));
         if config.review.enabled {
-            checks.push(agent_check("agent.reviewer", agents.reviewer));
+            let reviewer_key = agent_identity(agents.reviewer);
+            if probed_agents.insert(reviewer_key.clone()) {
+                checks.push(agent_check("agent.reviewer", agents.reviewer));
+            } else {
+                checks.push(deduplicated_check("agent.reviewer", &reviewer_key));
+            }
         }
-    }
-    for command in &config.preflight.commands {
-        checks.push(command_check(command, repository));
-    }
-    for verification in config.review.verification.iter().filter(|v| v.required) {
-        let directory = repository.join(&verification.working_directory);
-        checks.push(writable_path_check(&verification.check_id, &directory));
-        checks.push(command_check(
-            &PreflightCommandConfig {
-                check_id: format!("verification.{}", verification.check_id),
-                argv: verification.argv.clone(),
-                working_directory: verification.working_directory.clone(),
-            },
-            repository,
-        ));
     }
     for name in &config.preflight.required_environment {
         let present = std::env::var_os(name).is_some_and(|value| !value.is_empty());
@@ -106,12 +130,16 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
     // particular, credential-store references do not depend on a login shell
     // or an environment-variable bridge inherited by the supervisor.
     let routed_providers = config.worker_registry.as_ref().map(|registry| {
-        registry
-            .workers
-            .values()
-            .map(|worker| worker.provider.as_str())
-            .collect::<BTreeSet<_>>()
+        crate::run::resolved_worker_plan(config, &crate::run::RouteContext::default())
+            .map(|(_, _, records)| {
+                records
+                    .into_iter()
+                    .map(|record| registry.workers[&record.selected_worker].provider.as_str())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default()
     });
+    let mut auth_probes = BTreeSet::new();
     for (name, provider) in &config.providers {
         if provider.kind == familiar_ai_core::EndpointProviderKind::Inference {
             if routed_providers
@@ -120,11 +148,16 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
             {
                 continue;
             }
-            checks.push(provider_auth_check_with_store(
-                name,
-                &provider.auth,
-                &crate::config_cli::SystemCredentialStore,
-            ));
+            let key = String::from(provider.auth.clone());
+            if auth_probes.insert(key.clone()) {
+                checks.push(provider_auth_check_with_store(
+                    name,
+                    &provider.auth,
+                    &crate::config_cli::SystemCredentialStore,
+                ));
+            } else {
+                checks.push(deduplicated_check(&format!("provider_auth.{name}"), &key));
+            }
         }
     }
     // Expire deploy-target authentication before an unattended claim. Only
@@ -171,7 +204,51 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
             detail: detail.to_string(),
         }),
     }
+    // Explicit prerequisite commands and potentially costly verification run
+    // only after all declared authentication/network targets above have been
+    // proven reachable.
+    let mut command_probes = BTreeSet::new();
+    for command in &config.preflight.commands {
+        let key = format!("{:?}|{}", command.argv, command.working_directory);
+        if command_probes.insert(key.clone()) {
+            checks.push(command_check(command, repository));
+        } else {
+            checks.push(deduplicated_check(&command.check_id, &key));
+        }
+    }
+    for verification in config.review.verification.iter().filter(|v| v.required) {
+        let directory = repository.join(&verification.working_directory);
+        checks.push(writable_path_check(&verification.check_id, &directory));
+        let key = format!(
+            "{:?}|{}|{:?}|{}",
+            verification.argv,
+            verification.working_directory,
+            verification.environment,
+            verification.timeout_ms
+        );
+        let check_id = format!("verification.{}", verification.check_id);
+        if command_probes.insert(key.clone()) {
+            checks.push(verification_check(verification, repository));
+        } else {
+            checks.push(deduplicated_check(&check_id, &key));
+        }
+    }
     PreflightReport { checks }
+}
+
+fn agent_identity(agent: &dyn familiar_ai_agent::CodingAgent) -> String {
+    format!(
+        "in-process:{:x}",
+        (agent as *const dyn familiar_ai_agent::CodingAgent as *const ()) as usize
+    )
+}
+
+fn deduplicated_check(check_id: &str, identity: &str) -> PreflightCheck {
+    PreflightCheck {
+        check_id: check_id.into(),
+        status: PreflightStatus::Passed,
+        detail: format!("deduplicated: reused session probe {identity}"),
+    }
 }
 
 pub fn provider_auth_check_with_store(
@@ -179,6 +256,7 @@ pub fn provider_auth_check_with_store(
     auth: &familiar_ai_core::config::AuthDescriptor,
     store: &dyn crate::config_cli::CredentialStore,
 ) -> PreflightCheck {
+    let _heartbeat = PhaseHeartbeat::start(format!("provider_auth.{name}"), "daemon".into());
     let descriptor = String::from(auth.clone());
     match crate::config_cli::check_auth_with_store(auth, store) {
         Ok(_) => PreflightCheck {
@@ -195,6 +273,7 @@ pub fn provider_auth_check_with_store(
 }
 
 fn writable_path_check(check_id: &str, path: &Path) -> PreflightCheck {
+    let _heartbeat = PhaseHeartbeat::start(format!("writable.{check_id}"), "daemon".into());
     let probe = path.join(format!(".verification-write-probe-{}", std::process::id()));
     let result = OpenOptions::new()
         .write(true)
@@ -219,6 +298,7 @@ fn writable_path_check(check_id: &str, path: &Path) -> PreflightCheck {
 }
 
 fn agent_check(check_id: &str, agent: &dyn familiar_ai_agent::CodingAgent) -> PreflightCheck {
+    let _heartbeat = PhaseHeartbeat::start(check_id.into(), "in-process-agent".into());
     match agent.preflight() {
         Ok(()) => PreflightCheck {
             check_id: check_id.into(),
@@ -234,41 +314,258 @@ fn agent_check(check_id: &str, agent: &dyn familiar_ai_agent::CodingAgent) -> Pr
 }
 
 fn command_check(config: &PreflightCommandConfig, repository: &Path) -> PreflightCheck {
-    let result = config
-        .argv
-        .split_first()
-        .ok_or_else(|| "argv is empty".to_owned())
-        .and_then(|(executable, args)| {
-            let directory = if config.working_directory.is_empty() {
-                repository.to_path_buf()
-            } else {
-                repository.join(&config.working_directory)
+    let directory = if config.working_directory.is_empty() {
+        repository.to_path_buf()
+    } else {
+        repository.join(&config.working_directory)
+    };
+    execute_command(
+        &config.check_id,
+        &config.argv,
+        &directory,
+        None,
+        Duration::from_secs(300),
+    )
+}
+
+fn verification_check(
+    config: &familiar_ai_core::config::ReviewVerificationConfig,
+    repository: &Path,
+) -> PreflightCheck {
+    execute_command(
+        &format!("verification.{}", config.check_id),
+        &config.argv,
+        &repository.join(&config.working_directory),
+        Some(&config.environment),
+        Duration::from_millis(config.timeout_ms),
+    )
+}
+
+const MAX_RETAINED_OUTPUT: usize = 16 * 1024;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+fn execute_command(
+    check_id: &str,
+    argv: &[String],
+    directory: &Path,
+    environment: Option<&BTreeMap<String, String>>,
+    timeout: Duration,
+) -> PreflightCheck {
+    let Some((executable, args)) = argv.split_first() else {
+        return PreflightCheck {
+            check_id: check_id.into(),
+            status: PreflightStatus::Failed,
+            detail: "argv is empty".into(),
+        };
+    };
+    let mut command = Command::new(executable);
+    command
+        .args(args)
+        .current_dir(directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(environment) = environment {
+        command.env_clear().envs(environment);
+    }
+    let started = Instant::now();
+    preflight_phase_heartbeat(check_id, started.elapsed(), "pending-spawn");
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let denied = matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+            );
+            return PreflightCheck {
+                check_id: check_id.into(),
+                status: if denied {
+                    PreflightStatus::EnvironmentDenied
+                } else {
+                    PreflightStatus::Failed
+                },
+                detail: if denied {
+                    format!("environment denied launching {executable:?}: {error}")
+                } else {
+                    format!("cannot launch {executable:?}: {error}")
+                },
             };
-            let output = Command::new(executable)
-                .args(args)
-                .current_dir(directory)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_err(|error| format!("cannot launch {executable:?}: {error}"))?;
-            if output.success() {
-                Ok(())
+        }
+    };
+    let child_id = child.id();
+    preflight_heartbeat(check_id, started.elapsed(), child_id);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_thread = thread::spawn(move || read_bounded(stdout));
+    let stderr_thread = thread::spawn(move || read_bounded(stderr));
+    let mut next_heartbeat = HEARTBEAT_INTERVAL;
+    let (status, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break (Ok(status), false),
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                break (child.wait(), true);
+            }
+            Ok(None) => {}
+            Err(error) => break (Err(error), false),
+        }
+        if started.elapsed() >= next_heartbeat {
+            preflight_heartbeat(check_id, started.elapsed(), child_id);
+            next_heartbeat = next_heartbeat.saturating_add(HEARTBEAT_INTERVAL);
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    preflight_heartbeat(check_id, started.elapsed(), child_id);
+    let (stdout, stdout_omitted) = stdout_thread.join().unwrap_or_default();
+    let (stderr, stderr_omitted) = stderr_thread.join().unwrap_or_default();
+    let output = retained_output(
+        &stdout,
+        &stderr,
+        stdout_omitted + stderr_omitted,
+        environment,
+    );
+    let denied = output_indicates_environment_denial(&stdout, &stderr);
+    match status {
+        Ok(status) if status.success() && !timed_out => PreflightCheck {
+            check_id: check_id.into(),
+            status: PreflightStatus::Passed,
+            detail: if output.is_empty() {
+                "passed".into()
             } else {
-                Err(format!("command exited with code {:?}", output.code()))
+                format!("passed; {output}")
+            },
+        },
+        Ok(status) => PreflightCheck {
+            check_id: check_id.into(),
+            status: if denied {
+                PreflightStatus::EnvironmentDenied
+            } else {
+                PreflightStatus::Failed
+            },
+            detail: if timed_out {
+                format!("timed out after {} ms; {output}", timeout.as_millis())
+            } else if denied {
+                format!(
+                    "environment denied check {check_id} (exit {:?}); {output}",
+                    status.code()
+                )
+            } else {
+                format!("command exited with code {:?}; {output}", status.code())
+            },
+        },
+        Err(error) => PreflightCheck {
+            check_id: check_id.into(),
+            status: PreflightStatus::Failed,
+            detail: format!("cannot wait for child {child_id}: {error}; {output}"),
+        },
+    }
+}
+
+fn output_indicates_environment_denial(stdout: &[u8], stderr: &[u8]) -> bool {
+    let mut output = String::from_utf8_lossy(stdout).to_ascii_lowercase();
+    output.push_str(&String::from_utf8_lossy(stderr).to_ascii_lowercase());
+    [
+        "operation not permitted",
+        "permission denied",
+        "network is unreachable",
+        "cannot assign requested address",
+        "read-only file system",
+    ]
+    .iter()
+    .any(|marker| output.contains(marker))
+}
+
+fn read_bounded<R: Read>(reader: Option<R>) -> (Vec<u8>, usize) {
+    let Some(mut reader) = reader else {
+        return (Vec::new(), 0);
+    };
+    let mut retained = Vec::new();
+    let mut omitted = 0usize;
+    let mut buffer = [0u8; 4096];
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        let available = MAX_RETAINED_OUTPUT.saturating_sub(retained.len());
+        let keep = count.min(available);
+        retained.extend_from_slice(&buffer[..keep]);
+        omitted = omitted.saturating_add(count - keep);
+    }
+    (retained, omitted)
+}
+
+fn retained_output(
+    stdout: &[u8],
+    stderr: &[u8],
+    omitted: usize,
+    environment: Option<&BTreeMap<String, String>>,
+) -> String {
+    let secret = contains_secret(stdout)
+        || contains_secret(stderr)
+        || environment.is_some_and(|values| {
+            values.values().any(|value| {
+                !value.is_empty()
+                    && (stdout
+                        .windows(value.len())
+                        .any(|part| part == value.as_bytes())
+                        || stderr
+                            .windows(value.len())
+                            .any(|part| part == value.as_bytes()))
+            })
+        });
+    if secret {
+        return format!("output=[REDACTED] omitted_bytes={omitted}");
+    }
+    let stdout = String::from_utf8_lossy(stdout).trim().replace('\n', "\\n");
+    let stderr = String::from_utf8_lossy(stderr).trim().replace('\n', "\\n");
+    format!("stdout={stdout:?} stderr={stderr:?} omitted_bytes={omitted}")
+}
+
+fn preflight_heartbeat(check_id: &str, elapsed: Duration, child_id: u32) {
+    preflight_phase_heartbeat(check_id, elapsed, &format!("pid:{child_id}"));
+}
+
+fn preflight_phase_heartbeat(check_id: &str, elapsed: Duration, child_identity: &str) {
+    eprintln!(
+        "preflight: heartbeat check={check_id} elapsed_ms={} child={child_identity}",
+        elapsed.as_millis()
+    );
+    let _ = std::io::stderr().flush();
+}
+
+struct PhaseHeartbeat {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl PhaseHeartbeat {
+    fn start(check_id: String, child_identity: String) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        preflight_phase_heartbeat(&check_id, Duration::ZERO, &child_identity);
+        let thread = thread::spawn(move || {
+            let started = Instant::now();
+            while !flag.load(std::sync::atomic::Ordering::Acquire) {
+                thread::park_timeout(HEARTBEAT_INTERVAL);
+                if !flag.load(std::sync::atomic::Ordering::Acquire) {
+                    preflight_phase_heartbeat(&check_id, started.elapsed(), &child_identity);
+                }
             }
         });
-    match result {
-        Ok(()) => PreflightCheck {
-            check_id: config.check_id.clone(),
-            status: PreflightStatus::Passed,
-            detail: "passed".into(),
-        },
-        Err(detail) => PreflightCheck {
-            check_id: config.check_id.clone(),
-            status: PreflightStatus::Failed,
-            detail,
-        },
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for PhaseHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
     }
 }
 

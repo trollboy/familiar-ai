@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -39,13 +39,23 @@ pub trait VerificationRunner {
 pub struct CommandVerificationRunner {
     artifact_directory: PathBuf,
     max_log_bytes: usize,
+    heartbeat_interval: Duration,
 }
 impl CommandVerificationRunner {
     pub fn new(artifact_directory: PathBuf, max_log_bytes: usize) -> Self {
         Self {
             artifact_directory,
             max_log_bytes,
+            heartbeat_interval: Duration::from_secs(30),
         }
+    }
+
+    /// Override the bounded progress interval. Primarily useful for hosts that
+    /// already have a stricter heartbeat contract (and for deterministic
+    /// contract tests).
+    pub fn with_heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval.max(Duration::from_millis(1));
+        self
     }
 }
 impl VerificationRunner for CommandVerificationRunner {
@@ -67,6 +77,7 @@ impl VerificationRunner for CommandVerificationRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        emit_phase_heartbeat(&check.check_id, timer.elapsed(), "pending-spawn");
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) if environment_denied(&error) => {
@@ -81,6 +92,8 @@ impl VerificationRunner for CommandVerificationRunner {
             }
             Err(error) => return Err(error.into()),
         };
+        let child_id = child.id();
+        emit_heartbeat(&check.check_id, timer.elapsed(), child_id);
         let mut child_stdout = child.stdout.take().ok_or(VerificationError::MissingPipe)?;
         let mut child_stderr = child.stderr.take().ok_or(VerificationError::MissingPipe)?;
         let stdout_thread = thread::spawn(move || {
@@ -92,6 +105,7 @@ impl VerificationRunner for CommandVerificationRunner {
             child_stderr.read_to_end(&mut bytes).map(|_| bytes)
         });
         let deadline = Duration::from_millis(check.timeout_ms);
+        let mut next_heartbeat = self.heartbeat_interval;
         let (exit, timed_out) = loop {
             if let Some(status) = child.try_wait()? {
                 break (status, false);
@@ -100,8 +114,13 @@ impl VerificationRunner for CommandVerificationRunner {
                 child.kill()?;
                 break (child.wait()?, true);
             }
+            if timer.elapsed() >= next_heartbeat {
+                emit_heartbeat(&check.check_id, timer.elapsed(), child_id);
+                next_heartbeat = next_heartbeat.saturating_add(self.heartbeat_interval);
+            }
             thread::sleep(Duration::from_millis(5));
         };
+        emit_heartbeat(&check.check_id, timer.elapsed(), child_id);
         let output_stdout = stdout_thread
             .join()
             .map_err(|_| VerificationError::ReaderPanicked)??;
@@ -128,6 +147,8 @@ impl VerificationRunner for CommandVerificationRunner {
         )?;
         let status = if stdout_redacted || stderr_redacted {
             VerificationStatus::Inconclusive
+        } else if output_environment_denied(&output_stdout, &output_stderr) {
+            VerificationStatus::EnvironmentDenied
         } else if timed_out {
             VerificationStatus::TimedOut
         } else if exit.success() {
@@ -165,6 +186,8 @@ impl VerificationRunner for CommandVerificationRunner {
             required: check.required,
             summary: if stdout_redacted || stderr_redacted {
                 "Inconclusive: deterministic secret marker redacted from verification output".into()
+            } else if status == VerificationStatus::EnvironmentDenied {
+                format!("environment denied check {}", check.check_id)
             } else {
                 format!("{status:?}")
             },
@@ -176,6 +199,32 @@ impl VerificationRunner for CommandVerificationRunner {
                 || stderr_redacted,
         })
     }
+}
+
+fn output_environment_denied(stdout: &[u8], stderr: &[u8]) -> bool {
+    let mut output = String::from_utf8_lossy(stdout).to_ascii_lowercase();
+    output.push_str(&String::from_utf8_lossy(stderr).to_ascii_lowercase());
+    [
+        "operation not permitted",
+        "permission denied",
+        "network is unreachable",
+        "cannot assign requested address",
+        "read-only file system",
+    ]
+    .iter()
+    .any(|marker| output.contains(marker))
+}
+
+fn emit_heartbeat(check_id: &str, elapsed: Duration, child_id: u32) {
+    emit_phase_heartbeat(check_id, elapsed, &format!("pid:{child_id}"));
+}
+
+fn emit_phase_heartbeat(check_id: &str, elapsed: Duration, child_identity: &str) {
+    eprintln!(
+        "verification: heartbeat check={check_id} elapsed_ms={} child={child_identity}",
+        elapsed.as_millis()
+    );
+    let _ = std::io::stderr().flush();
 }
 
 fn environment_denied(error: &std::io::Error) -> bool {
