@@ -43,13 +43,40 @@ impl<'a> CheckpointRepository<'a> {
     pub fn put(&self, value: &ExecutionCheckpoint) -> familiar_ai_core::Result<()> {
         let now = Utc::now().to_rfc3339();
         let transaction = self.conn.unchecked_transaction().map_err(db)?;
+        // The (repository, prd) checkpoint identity is durable: on conflict
+        // the existing checkpoint_id survives (scope_decisions reference it
+        // by foreign key), so the event below must cite the surviving id —
+        // citing the superseding attempt's fresh id violated the FK and
+        // failed every re-freeze over an existing checkpoint (FAM-BUG-037).
+        let surviving_id: Option<String> = transaction
+            .query_row(
+                "SELECT checkpoint_id FROM execution_checkpoints WHERE repository_key=?1 AND prd_id=?2",
+                params![value.repository_key, value.prd_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let effective_id = surviving_id
+            .clone()
+            .unwrap_or_else(|| value.checkpoint_id.clone());
         transaction.execute(
             "INSERT INTO execution_checkpoints(checkpoint_id,repository_key,prd_id,prd_path,execution_id,phase,base_revision,worktree_path,branch_name,diff_hash,changed_files_json,agent_identity,usage_json,test_evidence_json,invalid_reason,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16) ON CONFLICT(repository_key,prd_id) DO UPDATE SET execution_id=excluded.execution_id,phase=excluded.phase,base_revision=excluded.base_revision,worktree_path=excluded.worktree_path,branch_name=excluded.branch_name,diff_hash=excluded.diff_hash,changed_files_json=excluded.changed_files_json,agent_identity=excluded.agent_identity,usage_json=excluded.usage_json,test_evidence_json=excluded.test_evidence_json,invalid_reason=excluded.invalid_reason,updated_at=excluded.updated_at",
             params![value.checkpoint_id,value.repository_key,value.prd_id,value.prd_path,value.execution_id,value.phase,value.base_revision,value.worktree_path,value.branch_name,value.diff_hash,value.changed_files_json,value.agent_identity,value.usage_json,value.test_evidence_json,value.invalid_reason,now]
         ).map_err(db)?;
+        if surviving_id.is_some() {
+            // Undecided scope findings belong to the candidate that raised
+            // them; a superseding candidate re-derives its own. Decided rows
+            // stay — human decisions are durable audit.
+            transaction
+                .execute(
+                    "DELETE FROM scope_decisions WHERE repository_key=?1 AND prd_id=?2 AND decision IS NULL AND candidate_hash<>?3",
+                    params![value.repository_key, value.prd_id, value.diff_hash],
+                )
+                .map_err(db)?;
+        }
         transaction.execute(
             "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'checkpoint_created',NULL,?3,'implementation_checkpoint',?4)",
-            params![format!("{}:created", value.checkpoint_id), value.checkpoint_id, value.phase, now],
+            params![format!("{}:created", value.checkpoint_id), effective_id, value.phase, now],
         ).map_err(db)?;
         transaction.commit().map_err(db)?;
         Ok(())
@@ -234,6 +261,72 @@ mod tests {
             test_evidence_json: "{}".into(),
             invalid_reason: None,
         }
+    }
+
+    #[test]
+    fn refreeze_survives_scope_decisions_and_keeps_durable_identity() {
+        // FAM-BUG-037: a superseding attempt's freeze cited its fresh
+        // checkpoint_id in the created-event while the conflict-update kept
+        // the existing row's id — FK failure on every re-freeze over an
+        // existing checkpoint. Session 7's completed candidate died here.
+        let db = database();
+        let repository = CheckpointRepository::new(db.conn());
+        let mut first = checkpoint("/repo/.git", "PRD-9");
+        first.checkpoint_id = "checkpoint-attempt-1".into();
+        first.diff_hash = "sha256:candidate-one".into();
+        repository.put(&first).unwrap();
+        // One pending and one decided scope row against candidate one.
+        let orchestration = crate::OrchestrationRepository::new(db.conn());
+        orchestration
+            .record_scope_finding(
+                "/repo/.git",
+                "checkpoint-attempt-1",
+                "PRD-9",
+                "sha256:candidate-one",
+                "sha256:pending-finding",
+                "{}",
+            )
+            .unwrap();
+        orchestration
+            .record_scope_finding(
+                "/repo/.git",
+                "checkpoint-attempt-1",
+                "PRD-9",
+                "sha256:candidate-one",
+                "sha256:decided-finding",
+                "{}",
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE scope_decisions SET decision='approved',actor='human:t',reason='ok',decided_at='now' WHERE finding_hash='sha256:decided-finding'",
+                [],
+            )
+            .unwrap();
+
+        let mut second = checkpoint("/repo/.git", "PRD-9");
+        second.checkpoint_id = "checkpoint-attempt-2".into();
+        second.diff_hash = "sha256:candidate-two".into();
+        second.phase = "implemented_pending_review".into();
+        repository.put(&second).unwrap();
+
+        let stored = repository.get("/repo/.git", "PRD-9").unwrap().unwrap();
+        assert_eq!(stored.checkpoint_id, "checkpoint-attempt-1");
+        assert_eq!(stored.diff_hash, "sha256:candidate-two");
+        assert_eq!(stored.phase, "implemented_pending_review");
+        let (pending, decided): (i64, i64) = db
+            .conn()
+            .query_row(
+                "SELECT (SELECT count(*) FROM scope_decisions WHERE decision IS NULL),(SELECT count(*) FROM scope_decisions WHERE decision='approved')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (pending, decided),
+            (0, 1),
+            "stale pending retired, human decision durable"
+        );
     }
 
     #[test]

@@ -940,3 +940,27 @@ reinstall the binary, then rerun the 076 drive.
 - **Cost note:** sessions 5 and 6 together spent ~$39 on completed
   implementations voided by gate defects (034, 036). Both defects were
   in machinery, not the work; both now carry regressions.
+
+### FAM-BUG-037 — Every re-freeze over an existing checkpoint FK-fails
+
+- **Status:** Fixed (this commit)
+- **Observed:** Session 7's worker completed PRD-076 (third green
+  implementation) and died at freeze: `checkpoint_failed`,
+  `FOREIGN KEY constraint failed`. The checkpoint upsert keeps the
+  existing row's checkpoint_id on conflict (`UNIQUE(repository_key,
+  prd_id)`, id not in the update set) — but the created-event insert
+  cited the superseding attempt's fresh id, which has no parent row.
+  First trigger: session 7 was the first freeze over a live prior
+  checkpoint (session 6's blocked one).
+- **Fix:** `put` resolves the surviving checkpoint_id inside the
+  transaction and cites it in the event; the (repository, prd)
+  checkpoint identity is durable across attempts, which is also what
+  keeps scope_decisions' FK references and PRD-080's durable human
+  decisions coherent. On supersede, pending (undecided) scope rows for
+  a different candidate_hash are retired — a superseding candidate
+  re-derives its own findings — while decided rows remain as audit.
+  This also retires session 6's 45 phantom pending rows (FAM-BUG-035
+  artifacts) automatically at session 8's freeze; no manual surgery.
+- **Regression:** refreeze over a checkpoint with pending + decided
+  scope rows succeeds, keeps the durable id, updates the candidate,
+  retires the stale pending row, preserves the human decision.
