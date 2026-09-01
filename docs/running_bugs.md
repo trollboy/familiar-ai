@@ -1093,3 +1093,33 @@ reinstall the binary, then rerun the 076 drive.
 - **Fix:** tester stage configures a git identity and default branch.
   If the advisory check goes green in Docker, promoting it to required
   closes opus's acceptance-verification gap properly.
+
+### FAM-BUG-044 — Waivers key on reviewer-chosen finding ids, which rotate
+
+- **Status:** Open (workaround: manual completion override, used for
+  PRD-38); fix direction: substance-keyed waivers, like approvals
+- **Observed:** opus issued the same misinformed scope claim under a
+  different finding_id on every attempt (`scope-out-of-allowed-paths`,
+  then `scope-outside-crates`), so the durable human waiver never
+  matched the newest attempt's open finding and completion-evidence kept
+  refusing. Additionally the waiver row FK-blocked `save_cycle`'s
+  findings rewrite on the next attempt ("persistence failed: FOREIGN
+  KEY constraint failed") — waivers must survive finding replacement.
+- **Also in this class:** the review package should carry the scope
+  engine's adjudication so the reviewer stops alleging violations for
+  declared Expected Files (three attempts, three re-claims). PRD-38 was
+  completed by the designed human-only manual override with a full
+  audit reason after three clean reviews and fully green verification.
+
+### FAM-FRICTION-007 — Scope-decisions pause template is not paste-runnable
+
+- **Status:** Open
+- The drive prints `familiar-ai scope-decisions sha256:… --candidate-hash …`
+  but the CLI requires `--finding-hash`; the printed command fails with
+  an argument error.
+
+### FAM-FRICTION-008 — waive_finding has no CLI surface
+
+- **Status:** Open (interim: `operator_waive` example)
+- Completion-evidence demands durable human waivers, but no CLI can
+  create one; the examples/operator_waive tool is the stopgap.

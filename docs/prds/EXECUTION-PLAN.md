@@ -80,6 +80,7 @@ authoring-time plan validation use, not an estimate.
 |------|------|-------------|------------------|
 | bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
 | gate | 076 **complete** | 1 | 1 |
+| 5 | 038, 053, 058 **ALL LANDED 2026-09-01** | 3 | 2 (achieved: 038∥053, then 058 admitted on hold release) |
 | 5 | 038, 053, 058 | 3 | 2 — `053` and `058` both still declare `config/default.toml`; `038` is disjoint from both, so `{038, 053}` or `{038, 058}` run together |
 | 6 | 059, 060, 061, 063, 072 | 5 | 3 — `059`/`060`/`061` still share `crates/familiar-ai-core/src/config/providers.rs` (each adds its own `InferenceRuntimeKind` variant to the same closed enum; splitting that enum is a semantic change, out of this PRD's scope) and serialize pairwise; `063` (registry_workers.rs) and `072` (agent_runtime.rs) are disjoint from that trio and from each other, so `{one of 059/060/061, 063, 072}` run together |
 | 7 | 071, 073 | 2 | 2 — fully disjoint post-076 (`config/review.rs` vs `config/registry_workers.rs`, `cli/batch_review.rs` vs `cli/model_residency.rs`, distinct repo/test files) |
