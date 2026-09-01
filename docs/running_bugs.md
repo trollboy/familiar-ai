@@ -433,6 +433,13 @@ PRD-076.
   with no manual worktree edits, cherry-picks, backlog overrides, or per-PRD
   completion commands. Until then, this bug remains open regardless of whether
   the individual underlying defects are dispositioned elsewhere.
+- **PRD-078/079 reproduction (2026-08-31):** Familiar admitted both allowlisted
+  PRDs concurrently and produced complete isolated candidates, but the parent
+  process routed both reviews through the same incompatible Ollama
+  `llama3:latest` worker. Both were retained as `human_review_required`, and the
+  operator again had to audit, test, commit, cherry-pick, and complete them
+  outside Familiar. Concurrent implementation worked; autonomous delivery did
+  not.
 
 ### FAM-BUG-020 — Unused provider credential blocks every drive session
 
@@ -538,7 +545,7 @@ PRD-076.
 
 ### FAM-BUG-024 — Drive preflight drops verification configuration and hides failures
 
-- **Status:** Open; repeatedly blocked PRD-062 before claim
+- **Status:** Fixed 2026-08-31 by PRD-078; installed verification pending
 - **Observed:** Five PRD-062 drive sessions spent roughly five to ten silent
   minutes apiece running `verification.workspace-tests`, then reported only
   `command exited with code Some(101)`. `preflight::run` reconstructs each
@@ -558,10 +565,15 @@ PRD-076.
   lossy conversion, enforce its finite timeout, retain bounded redacted stdout
   and stderr as durable evidence, stream a heartbeat naming the active check,
   and classify environment denial separately from test failure.
+- **Fix:** Preflight now executes the exact configured verification argv,
+  working directory, environment, and timeout; retains bounded redacted output;
+  probes only routed providers; deduplicates session checks; emits flushed
+  heartbeats with elapsed time and PID; and distinguishes environment denial.
+  Contract tests and the complete workspace suite pass.
 
 ### FAM-BUG-025 — Reviewer capability mismatch retries and forces manual recovery
 
-- **Status:** Open; PRD-062 retained after successful implementation
+- **Status:** Fixed 2026-08-31 by PRD-079; installed verification pending
 - **Observed:** PRD-062 implementation and focused verification completed, but
   review routed to Ollama `llama3:latest`. The runtime reported that the model
   does not support tools. Familiar retried the same incompatible reviewer three
@@ -579,6 +591,12 @@ PRD-076.
   `familiar-ai drive --prd PRD-62 --max-prds 1`; (2) preflight and reviewer
   cascade; (3) PRD-062 finished individually outside Familiar. FAM-BUG-019's
   end-to-end exit criterion remains unmet.
+- **Fix:** Structured-output, native-tool, protocol, and minimum-runtime probes
+  are now persisted with age and provenance. Deterministic incompatibility is a
+  typed routing outage, quarantines the worker once, and reroutes without
+  consuming malformed-output retries. Regressions cover tool-less llama3 and
+  Ollama 0.12.3. Migration 052 is also tested from a populated pre-052 worker
+  database, not only from a fresh schema.
 
 ### FAM-BUG-026 — Fresh-database tests missed a production migration failure
 
