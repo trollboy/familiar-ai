@@ -228,16 +228,38 @@ impl CodingAgent for ClaudeCodeAgent {
             return Ok(result);
         }
         if !stream.terminal_seen {
+            let mut detail = String::from("EOF before result event");
+            if let Some(first) = &stream.first_unparseable {
+                detail.push_str(&format!(
+                    " ({} unparseable stdout line(s); first: {first:?})",
+                    stream.unparseable_lines
+                ));
+            }
             return Err(AgentExecutionError::MalformedOutput {
-                detail: "EOF before result event".into(),
+                detail,
                 result: Box::new(result),
             });
         }
-        if stream.malformed_seen {
+        if stream.duplicate_terminals > 0 {
             return Err(AgentExecutionError::MalformedOutput {
-                detail: "stream contained malformed JSON or duplicate terminal events".into(),
+                detail: format!(
+                    "stream contained {} duplicate terminal event(s); first result kept, authority ambiguous",
+                    stream.duplicate_terminals
+                ),
                 result: Box::new(result),
             });
+        }
+        // Stray non-JSON stdout lines (CLI warnings, tool noise) do not
+        // contaminate the single parsed terminal that carries every durable
+        // fact; voiding a finished run over them burned a full session
+        // (FAM-BUG-034). Surface them instead of failing.
+        if stream.unparseable_lines > 0 {
+            let sample = stream.first_unparseable.as_deref().unwrap_or_default();
+            let _ = writeln!(
+                output,
+                "stream: tolerated {} unparseable stdout line(s) alongside the terminal result; first: {sample:?}",
+                stream.unparseable_lines
+            );
         }
         match input {
             Ok(()) => {}
@@ -279,7 +301,9 @@ struct ClaudeStream {
     model_usage: Vec<ModelUsage>,
     source_hash: Option<String>,
     terminal_seen: bool,
-    malformed_seen: bool,
+    unparseable_lines: u64,
+    first_unparseable: Option<String>,
+    duplicate_terminals: u64,
     budget_stopped: bool,
 }
 
@@ -362,7 +386,10 @@ fn string(value: Option<&Value>) -> Option<String> {
 
 fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        stream.malformed_seen = true;
+        stream.unparseable_lines += 1;
+        if stream.first_unparseable.is_none() {
+            stream.first_unparseable = Some(line.chars().take(200).collect());
+        }
         return StreamAction::Forward;
     };
     let Some(event_type) = value.get("type").and_then(Value::as_str) else {
@@ -402,9 +429,10 @@ fn parse_event(line: &str, stream: &mut ClaudeStream) -> StreamAction {
         "user" => StreamAction::Silent,
         "result" => {
             if stream.terminal_seen {
-                // Malformed stream: keep the first terminal capture and
-                // forward subsequent anomalies as unclassified lines.
-                stream.malformed_seen = true;
+                // Keep the first terminal capture and forward subsequent
+                // terminals as anomalies; which result is authoritative is
+                // now ambiguous, so this stays a hard rejection.
+                stream.duplicate_terminals += 1;
                 return StreamAction::Forward;
             }
             stream.terminal_seen = true;
@@ -903,6 +931,63 @@ mod tests {
         assert_eq!(result.output_tokens, Some(40));
         assert_eq!(result.reported_cost_microusd, Some(31_415));
         assert_eq!(result.exit_code, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stray_non_json_stdout_lines_are_tolerated_with_a_valid_terminal() {
+        // FAM-BUG-034: one unparseable CLI stdout line voided a finished
+        // 19-minute run that carried a valid single terminal result.
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("claude");
+        write_executable(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Claude Code 2.1'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' 'npm warn something deprecated'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"session_id\":\"sess-1\",\"total_cost_usd\":0.1,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1}}'\nexit 0\n",
+        );
+        let mut output = Vec::new();
+        let result = agent(settings(&executable))
+            .execute(
+                request(temp.path(), None, crate::FilesystemPolicy::WorkspaceWrite),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(result.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(result.reported_cost_microusd, Some(100_000));
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.contains("npm warn something deprecated"),
+            "anomaly forwarded: {text}"
+        );
+        assert!(
+            text.contains("tolerated 1 unparseable stdout line(s)"),
+            "tolerance surfaced: {text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn duplicate_terminal_events_stay_a_hard_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("claude");
+        write_executable(
+            &executable,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Claude Code 2.1'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":1}}'\nprintf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"usage\":{\"input_tokens\":9,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":9}}'\nexit 0\n",
+        );
+        let mut output = Vec::new();
+        let error = agent(settings(&executable))
+            .execute(
+                request(temp.path(), None, crate::FilesystemPolicy::WorkspaceWrite),
+                &mut output,
+            )
+            .unwrap_err();
+        match error {
+            AgentExecutionError::MalformedOutput { detail, result } => {
+                assert!(detail.contains("1 duplicate terminal event"), "{detail}");
+                // The first terminal's facts are the ones kept.
+                assert_eq!(result.input_tokens, Some(1));
+            }
+            other => panic!("expected MalformedOutput, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]

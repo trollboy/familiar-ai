@@ -873,3 +873,30 @@ reinstall the binary, then rerun the 076 drive.
 - **Cost note:** each such flake burns an entire drive session at
   preflight. Flakes in required verification checks are session killers
   and get fixed immediately, not waived.
+
+### FAM-BUG-034 — One stray stdout line voided a finished $14 run
+
+- **Status:** Fixed (this commit)
+- **Observed:** Session 5's sonnet worker completed PRD-076 end-to-end —
+  19 minutes, 69 turns, 65/65 test blocks green, valid single terminal
+  result with full usage — and the adapter rejected it:
+  `malformed_output`, attempt retained, session's PRD budget consumed.
+  Cost: $14.16 of work discarded at the last step.
+- **Root cause (two defects):** (1) any single non-JSON stdout line set
+  a `malformed_seen` flag that voided the whole execution even when a
+  valid single terminal was parsed — the CLI emitted one stray plain
+  line during a long sub-agent session; (2) the rejection message
+  conflated that case with duplicate terminals and named neither the
+  count nor the line, and because forwarded anomalies are
+  indistinguishable from echoed narration in the session log, the
+  offending line is untraceable after the fact.
+- **Fix:** the stream now counts unparseable lines and keeps a bounded
+  sample of the first; a valid single terminal tolerates noise and
+  surfaces `stream: tolerated N unparseable stdout line(s) ... first:
+  "..."` in the output. Duplicate terminals remain a hard rejection
+  (authority between results is genuinely ambiguous) and now report
+  their count; EOF-before-result now includes the noise sample too.
+- **Class note:** this is the overzealous-gate class — fail-closed
+  belongs on ambiguity about durable facts, not on cosmetic stream
+  noise. Codex adapter reviewed: its malformed handling is
+  contract-distinct and was left untouched.
