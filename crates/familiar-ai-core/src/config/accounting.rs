@@ -54,3 +54,28 @@ pub struct SubscriptionDeclarationConfig {
     pub actor: String,
     pub declared_at: String,
 }
+
+/// PRD-053 reconciliation policy. Both fields are operator policy, not
+/// provider guarantees, and are recorded exactly on every reconciliation run
+/// for audit even as the configured default changes over time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconciliationConfig {
+    /// Exact nanoUSD variance per source-window within which an
+    /// authoritative/local mismatch classifies as `reconciled-with-variance`
+    /// rather than `mismatch`. Default: one cent (10,000,000 nanoUSD).
+    pub tolerance_nanousd: u64,
+    /// Daily buckets past a window's end after which a local estimate with
+    /// no matching provider cost stops being `pending` and becomes an
+    /// explicit `mismatch`. Default: three days.
+    pub settlement_horizon_days: u32,
+}
+
+impl Default for ReconciliationConfig {
+    fn default() -> Self {
+        Self {
+            tolerance_nanousd: 10_000_000,
+            settlement_horizon_days: 3,
+        }
+    }
+}

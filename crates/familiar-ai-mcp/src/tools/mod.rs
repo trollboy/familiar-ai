@@ -47,6 +47,7 @@ pub fn register_default_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(stewardship_reads::GetBudgetTool));
     registry.register(Arc::new(stewardship_reads::ListReviewFindingsTool));
     registry.register(Arc::new(stewardship_reads::ListPendingHumanGatesTool));
+    registry.register(Arc::new(stewardship_reads::GetReconciliationTool));
     registry.register(Arc::new(usage_series::UsageSeriesTool));
     registry.register(Arc::new(stewardship_mutations::BacklogReleaseTool));
     registry.register(Arc::new(stewardship_mutations::BacklogCompleteTool));
