@@ -28,15 +28,15 @@ use familiar_ai_core::{
 };
 use familiar_ai_review::{
     compile_scope_policy, content_hash, normalize_scope_path, parse_expected_files,
-    AgentAssignment, AgentObservation, AgentRole, BlockingPolicy, BoundedDocument,
-    CodingRemediationAdapter, CommandVerificationRunner, CoordinationRequest, ExpectedFilesError,
-    GitChangeKind, GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator,
-    ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason,
-    ReviewTask, ReviewTier, ReviewTierPolicy, ReviewTierRule, ScopeClassPolicy,
-    ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass, ScopeFileClassPolicies,
-    ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
-    StructuredReviewAdapter, VerificationCheck, VerificationPlan, VerificationStatus,
-    WorkflowLimits,
+    probe_structured_review_capability, validate_review_capability, AgentAssignment,
+    AgentObservation, AgentRole, BlockingPolicy, BoundedDocument, CodingRemediationAdapter,
+    CommandVerificationRunner, CoordinationRequest, ExpectedFilesError, GitChangeKind,
+    GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator, ReviewCycle,
+    ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason, ReviewTask,
+    ReviewTier, ReviewTierPolicy, ReviewTierRule, ScopeClassPolicy, ScopeClassificationRule,
+    ScopeDeclarationMode, ScopeFileClass, ScopeFileClassPolicies, ScopePathEntry, ScopePolicyInput,
+    ScopePolicySnapshot, ScopeRuleSource, StructuredReviewAdapter, VerificationCheck,
+    VerificationPlan, VerificationStatus, WorkflowLimits,
 };
 use familiar_ai_storage::{
     AccountingRepository, Database, ExecutionFinalization, ExecutionHistoryRepository,
@@ -2217,6 +2217,59 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         .map(|metadata| (metadata.acceptance_criteria, metadata.risk_classes));
     let (criteria, declared_risk_classes) =
         criteria.unwrap_or_else(|| (acceptance_criteria(&context.prd.content), Vec::new()));
+
+    // A registry stage claim is not capability evidence. Persist and validate
+    // the handshake before constructing the structured adapter. High-risk
+    // reviews deliberately re-verify rather than trusting historical state.
+    if let Some(registry) = &config.worker_registry {
+        if let Some(worker) = registry.workers.get(&reviewer.agent_id) {
+            let spec = worker.canonical_spec_identity().map_err(RunError::Config)?;
+            let runtime = worker.runtime_id().map_err(RunError::Config)?;
+            let probes = familiar_ai_storage::WorkerSpecRepository::new(db.conn());
+            let stored = probes
+                .review_capability_probe(&spec)
+                .map_err(|error| RunError::Storage(error.to_string()))?;
+            let high_risk = !declared_risk_classes.is_empty();
+            let stale = stored
+                .as_ref()
+                .and_then(|probe| chrono::DateTime::parse_from_rfc3339(&probe.probed_at).ok())
+                .map_or(true, |recorded| {
+                    Utc::now()
+                        .signed_duration_since(recorded.with_timezone(&Utc))
+                        .num_hours()
+                        >= 24
+                });
+            let probe = if high_risk || stale {
+                let observed = probe_structured_review_capability(
+                    reviewer_agent,
+                    &context.repository.worktree,
+                    runtime,
+                    reviewer.requested_model.as_deref(),
+                    30_000,
+                )
+                .map_err(|reason| RunError::Workflow {
+                    result: Some(Box::new(implementation_result.clone())),
+                    detail: format!(
+                        "review_capability_outage: quarantined worker {}: {reason}",
+                        reviewer.agent_id
+                    ),
+                })?;
+                probes
+                    .record_review_capability_probe(&spec, &observed)
+                    .map_err(|error| RunError::Storage(error.to_string()))?;
+                observed
+            } else {
+                stored.expect("fresh capability probe was checked above")
+            };
+            validate_review_capability(runtime, &probe).map_err(|reason| RunError::Workflow {
+                result: Some(Box::new(implementation_result.clone())),
+                detail: format!(
+                    "review_capability_outage: quarantined worker {}: {reason}",
+                    reviewer.agent_id
+                ),
+            })?;
+        }
+    }
     if criteria.is_empty() {
         return Err(RunError::Config(
             "enabled review requires an explicit PRD Acceptance Criteria section".into(),

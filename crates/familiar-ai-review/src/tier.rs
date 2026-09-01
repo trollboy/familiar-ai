@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::{ChangedFile, GitChangeKind, ScopeCheckResult, ScopeDecision, ScopeFileClass};
 
@@ -8,6 +9,144 @@ pub enum ReviewTier {
     ChecksOnly,
     Standard,
     Full,
+}
+
+/// Facts which must be established before a worker may receive the structured
+/// review wire contract. These are deliberately separate from stage claims in
+/// the worker registry: `review` is an operator intent, not proof that the
+/// runtime/model combination can satisfy the protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewCapabilityProbe {
+    pub structured_output: bool,
+    pub native_tool_calling: bool,
+    pub protocol: String,
+    pub runtime_version: String,
+    pub provenance: String,
+    pub probed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewCapabilityReason {
+    StructuredOutputUnsupported,
+    ToolCallingUnsupported,
+    ProtocolIncompatible {
+        expected: String,
+        observed: String,
+    },
+    RuntimeTooOld {
+        runtime: String,
+        minimum: String,
+        observed: String,
+    },
+    ProbeFailed {
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for ReviewCapabilityReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StructuredOutputUnsupported => f.write_str("structured_output_unsupported"),
+            Self::ToolCallingUnsupported => f.write_str("tool_calling_unsupported"),
+            Self::ProtocolIncompatible { expected, observed } => write!(
+                f,
+                "protocol_incompatible(expected={expected}, observed={observed})"
+            ),
+            Self::RuntimeTooOld {
+                runtime,
+                minimum,
+                observed,
+            } => write!(
+                f,
+                "runtime_too_old(runtime={runtime}, minimum={minimum}, observed={observed})"
+            ),
+            Self::ProbeFailed { detail } => write!(f, "capability_probe_failed({detail})"),
+        }
+    }
+}
+
+pub const STRUCTURED_REVIEW_PROTOCOL: &str = "familiar-ai-review-v1";
+pub const MINIMUM_OLLAMA_REVIEW_VERSION: &str = "0.12.4";
+
+pub fn validate_review_capability(
+    runtime: &str,
+    probe: &ReviewCapabilityProbe,
+) -> Result<(), ReviewCapabilityReason> {
+    if !probe.structured_output {
+        return Err(ReviewCapabilityReason::StructuredOutputUnsupported);
+    }
+    if !probe.native_tool_calling {
+        return Err(ReviewCapabilityReason::ToolCallingUnsupported);
+    }
+    if probe.protocol != STRUCTURED_REVIEW_PROTOCOL {
+        return Err(ReviewCapabilityReason::ProtocolIncompatible {
+            expected: STRUCTURED_REVIEW_PROTOCOL.into(),
+            observed: probe.protocol.clone(),
+        });
+    }
+    if runtime == "ollama"
+        && version_less_than(&probe.runtime_version, MINIMUM_OLLAMA_REVIEW_VERSION)
+    {
+        return Err(ReviewCapabilityReason::RuntimeTooOld {
+            runtime: runtime.into(),
+            minimum: MINIMUM_OLLAMA_REVIEW_VERSION.into(),
+            observed: probe.runtime_version.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn version_less_than(observed: &str, minimum: &str) -> bool {
+    let numbers = |value: &str| {
+        value
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|v| !v.is_empty())
+            .take(3)
+            .map(|v| v.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    let mut observed = numbers(observed);
+    let mut minimum = numbers(minimum);
+    observed.resize(3, 0);
+    minimum.resize(3, 0);
+    observed < minimum
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCapabilityOutage {
+    pub quarantined: BTreeMap<String, ReviewCapabilityReason>,
+}
+
+impl std::fmt::Display for ReviewCapabilityOutage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = self
+            .quarantined
+            .iter()
+            .map(|(worker, reason)| format!("{worker}: {reason}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(f, "review_capability_outage: no eligible structured reviewer remains; quarantined workers: {detail}")
+    }
+}
+
+/// Deterministically selects the first capability-proven worker, quarantining
+/// deterministic incompatibilities as it goes. Callers pass candidates in
+/// routing-policy order, so a failed worker is attempted once and the next
+/// eligible reviewer is selected without consuming a model-output retry.
+pub fn select_capability_proven_reviewer<'a>(
+    candidates: impl IntoIterator<Item = (&'a str, &'a str, &'a ReviewCapabilityProbe)>,
+) -> Result<&'a str, ReviewCapabilityOutage> {
+    let mut quarantined = BTreeMap::new();
+    for (worker, runtime, probe) in candidates {
+        match validate_review_capability(runtime, probe) {
+            Ok(()) => return Ok(worker),
+            Err(reason) => {
+                quarantined.insert(worker.to_owned(), reason);
+            }
+        }
+    }
+    Err(ReviewCapabilityOutage { quarantined })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

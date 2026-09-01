@@ -327,6 +327,9 @@ impl ReviewCoordinator<'_> {
             );
             let result = match self.reviewer.review(&package, output) {
                 Ok(result) => result,
+                Err(error @ ReviewExecutionError::CapabilityIncompatible { .. }) => {
+                    return Err(CoordinatorError::ReviewCapabilityOutage(error.to_string()));
+                }
                 Err(error) => {
                     eprintln!("review: reviewer agent failed: {error}");
                     let mut stage = failed_stage(
@@ -927,6 +930,11 @@ fn failed_stage(
 pub enum ReviewExecutionError {
     #[error("review agent failed: {0}")]
     Agent(String),
+    #[error("review capability incompatible for worker {worker}: {reason}")]
+    CapabilityIncompatible {
+        worker: String,
+        reason: ReviewCapabilityReason,
+    },
 }
 #[derive(Debug, Error)]
 pub enum RemediationExecutionError {
@@ -951,6 +959,8 @@ pub enum CoordinatorError {
     MalformedReview(#[from] ReviewValidationError),
     #[error("persistence failed: {0}")]
     Persistence(String),
+    #[error("review_capability_outage: {0}")]
+    ReviewCapabilityOutage(String),
     #[error("accounting overflow")]
     AccountingOverflow,
     #[error("token usage is unavailable")]

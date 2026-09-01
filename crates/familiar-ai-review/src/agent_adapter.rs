@@ -8,6 +8,75 @@ use familiar_ai_agent::{CodingAgent, ExecutionRequest, ExecutionResult};
 
 use crate::*;
 
+/// Executes the bounded, side-effect-free handshake used to prove that a
+/// runtime/model pair can accept Familiar's structured review contract.
+pub fn probe_structured_review_capability(
+    agent: &dyn CodingAgent,
+    repository: &Path,
+    runtime: &str,
+    model: Option<&str>,
+    timeout_ms: u64,
+) -> Result<ReviewCapabilityProbe, ReviewCapabilityReason> {
+    let workspace = tempfile::Builder::new()
+        .prefix("familiar-ai-review-probe-")
+        .tempdir()
+        .map_err(|error| ReviewCapabilityReason::ProbeFailed {
+            detail: error.to_string(),
+        })?;
+    let prompt = r#"FAMILIAR_AI_REVIEW_CAPABILITY_PROBE familiar-ai-review-v1
+Do not inspect files or call a tool. Return exactly one JSON object describing this runtime/model combination:
+{"structured_output":true,"native_tool_calling":true,"protocol":"familiar-ai-review-v1","runtime_version":"<runtime version>"}"#;
+    let mut captured = Vec::new();
+    let result = agent
+        .execute(
+            ExecutionRequest {
+                working_directory: workspace.path(),
+                denied_read_path: Some(repository),
+                prompt,
+                prompt_cache_key: None,
+                codex_session: None,
+                filesystem: familiar_ai_agent::FilesystemPolicy::ReadOnly,
+                model,
+                timeout_ms: Some(timeout_ms),
+                budget: familiar_ai_agent::ExecutionBudget::default(),
+            },
+            &mut captured,
+        )
+        .map_err(|error| ReviewCapabilityReason::ProbeFailed {
+            detail: error.to_string(),
+        })?;
+    #[derive(serde::Deserialize)]
+    struct WireProbe {
+        structured_output: bool,
+        native_tool_calling: bool,
+        protocol: String,
+        #[serde(default)]
+        runtime_version: String,
+    }
+    let text =
+        String::from_utf8(captured).map_err(|error| ReviewCapabilityReason::ProbeFailed {
+            detail: error.to_string(),
+        })?;
+    let wire: WireProbe =
+        serde_json::from_str(text.trim()).map_err(|error| ReviewCapabilityReason::ProbeFailed {
+            detail: format!("invalid probe response: {error}"),
+        })?;
+    let probe = ReviewCapabilityProbe {
+        structured_output: wire.structured_output,
+        native_tool_calling: wire.native_tool_calling,
+        protocol: wire.protocol,
+        runtime_version: if wire.runtime_version.is_empty() {
+            result.agent_version.unwrap_or_default()
+        } else {
+            wire.runtime_version
+        },
+        provenance: "probed".into(),
+        probed_at: Utc::now().to_rfc3339(),
+    };
+    validate_review_capability(runtime, &probe)?;
+    Ok(probe)
+}
+
 pub struct StructuredReviewAdapter<'a> {
     agent: &'a dyn CodingAgent,
     repository: PathBuf,
