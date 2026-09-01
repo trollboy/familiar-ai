@@ -1,0 +1,47 @@
+command: familiar-ai resume PRD-38
+date: Tue Sep  1 08:20:23 PM UTC 2026
+host: trollboy (Linux)
+head: 84276c3416e2c21674269abce674d4bc5c045696 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3638194
+verification: heartbeat check=format elapsed_ms=4611 child=pid:3638194
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3638791
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:3638791
+verification: heartbeat check=lint elapsed_ms=31035 child=pid:3638791
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3643077
+verification: heartbeat check=tests-green-crates elapsed_ms=30003 child=pid:3643077
+verification: heartbeat check=tests-green-crates elapsed_ms=60003 child=pid:3643077
+verification: heartbeat check=tests-green-crates elapsed_ms=61113 child=pid:3643077
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3650126
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30004 child=pid:3650126
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60003 child=pid:3650126
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=75921 child=pid:3650126
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [VerificationUnsuccessful]
+HumanReviewRequired prd=PRD-38
+stop_reasons=["verification_unsuccessful"]
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 6
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding classification:conflict: conflicting built-in classes [DependencyManifest, Test] match
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+non-interactive input: preserving checkpoint
+error: PRD-38: human review required
+---
+exit: 1
