@@ -19,7 +19,15 @@ fn next_command(repo: &tempfile::TempDir, database: &std::path::Path) -> Command
     command
         .current_dir(repo.path())
         .arg("next")
-        .env("FAMILIAR_AI_DATABASE__PATH", database);
+        .env("FAMILIAR_AI_DATABASE__PATH", database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        );
     command
 }
 
@@ -191,6 +199,14 @@ fn numbered_slug_profile_bootstraps_archived_and_selects_child_before_umbrella()
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", &xdg)
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(

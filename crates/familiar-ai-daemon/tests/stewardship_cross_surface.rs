@@ -80,6 +80,10 @@ fn cli_json(repo: &std::path::Path, database: &std::path::Path, args: &[&str]) -
         .args(args)
         .current_dir(repo)
         .env("FAMILIAR_AI_DATABASE__PATH", database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(

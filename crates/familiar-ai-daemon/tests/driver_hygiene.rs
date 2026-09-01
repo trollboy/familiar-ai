@@ -158,6 +158,7 @@ fn metadata_check_modes_name_their_exit_contract() {
             .args(["backlog", "metadata-check", mode])
             .env("HOME", temp.path())
             .env("FAMILIAR_AI_DATABASE__PATH", temp.path().join("unused.db"))
+            .env("XDG_RUNTIME_DIR", temp.path().join("xdg-runtime"))
             .output()
             .unwrap()
     };

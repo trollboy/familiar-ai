@@ -704,3 +704,30 @@ Operational note: heartbeats (078) worked as designed throughout — the
 861s run was visible the whole way, and the failure arrived classified.
 The rerun requires a FRESH BUILD on the operator machine: pull, rebuild,
 reinstall the binary, then rerun the 076 drive.
+
+### FAM-BUG-029 — Workspace verification self-collides with the orchestrator's singleton lock
+
+- **Status:** Fixed 2026-09-01
+- **Observed:** The rebuilt PRD-076 drive failed preflight again (exit 101,
+  731s) — and the fixed per-line redaction named the cause exactly:
+  `cli_run` spawned the real `familiar-ai` binary, which tried to acquire
+  the control-plane lock and found "owner pid 48485 is live" — the pid of
+  the drive session running the suite. The workspace-tests preflight can
+  NEVER pass inside a drive session while any spawned-CLI test resolves the
+  shared runtime directory. This also retro-explains wave 4's five silent
+  exit-101 preflights ("direct cargo test passed on the same revision" —
+  manually there is no live drive holding the lock) and a standing source
+  of parallel-suite flakiness: 15 of 16 spawned-CLI invocations across the
+  cli test files never isolated `XDG_RUNTIME_DIR`, so they also raced each
+  other's locks under cargo's parallel execution.
+- **Fix:** every test that spawns the CLI binary (cli_run, cli_next,
+  cli_recovery, cli_bootstrap, cli_record_complete, cli_stewardship,
+  driver_hygiene, identity_continuity, stewardship_cross_surface) now sets
+  a per-test `XDG_RUNTIME_DIR`, making the suite hermetic with respect to
+  live Familiar processes and with itself. The 078 redaction pin was
+  updated to the FAM-BUG-028 line-level contract (a failing-test line must
+  survive beside a `[REDACTED LINE]`).
+- **Credit where due:** this diagnosis was only possible because of the
+  chain landed hours earlier — the atomic lock made the collision
+  deterministic instead of racy, and per-line redaction let the evidence
+  name the pid.

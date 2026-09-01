@@ -37,6 +37,10 @@ fn first_next_applies_manifest_then_is_silent_and_idempotent() {
             .arg("next")
             .current_dir(repo.path())
             .env("FAMILIAR_AI_DATABASE__PATH", &database)
+            .env(
+                "XDG_RUNTIME_DIR",
+                database.parent().unwrap().join("xdg-runtime"),
+            )
             .output()
             .unwrap()
     };

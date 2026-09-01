@@ -63,6 +63,14 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .env("FAKE_CODEX_ARGS", &args)
         .env("FAKE_CODEX_PROMPT", &capture)
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
 
@@ -107,6 +115,14 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .args(["history", "--limit", "1", "--verbose"])
         .env("HOME", temp.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(history.status.success());
@@ -118,6 +134,14 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .arg("usage")
         .env("HOME", temp.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(usage.status.success());

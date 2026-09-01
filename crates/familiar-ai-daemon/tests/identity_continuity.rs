@@ -49,6 +49,7 @@ fn binary(home: &Path) -> Command {
     command.env_clear();
     command.env("PATH", std::env::var("PATH").unwrap_or_default());
     command.env("HOME", home);
+    command.env("XDG_RUNTIME_DIR", home.join("xdg-runtime"));
     // CoreFoundation otherwise resolves the account's real home directory on
     // macOS, escaping this test fixture despite HOME being cleared and reset.
     #[cfg(target_os = "macos")]

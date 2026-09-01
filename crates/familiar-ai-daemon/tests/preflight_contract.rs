@@ -60,7 +60,10 @@ fn exit_101_retains_the_check_and_bounded_redacted_diagnostics() {
     let mut config = Config::default();
     config.review.verification = vec![verification(
         "pinned-exit-101",
-        "printf 'failure: %s' \"$TOKEN\" >&2; exit 101",
+        // A secret-bearing line AND a diagnostic line: FAM-BUG-028 requires
+        // redaction to be per line, never evidence-erasing — the failing
+        // detail must survive next to the redacted credential.
+        "printf 'failure: %s\\n' \"$TOKEN\" >&2; printf 'test cli_run::example ... FAILED\\n' >&2; exit 101",
         [("TOKEN".into(), secret.into())].into(),
         1_000,
     )];
@@ -69,7 +72,11 @@ fn exit_101_retains_the_check_and_bounded_redacted_diagnostics() {
     let summary = report.failure_summary();
     assert!(summary.contains("verification.pinned-exit-101"));
     assert!(summary.contains("code Some(101)"));
-    assert!(summary.contains("[REDACTED]"));
+    assert!(summary.contains("[REDACTED LINE]"));
+    assert!(
+        summary.contains("test cli_run::example ... FAILED"),
+        "diagnostics must survive beside the redacted line: {summary}"
+    );
     assert!(!summary.contains(secret));
     assert!(summary.len() < 20_000);
 }

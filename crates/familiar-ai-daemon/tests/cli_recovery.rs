@@ -56,6 +56,10 @@ fn release_prints_one_line_and_preserves_claim() {
         ])
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(
@@ -95,6 +99,10 @@ fn complete_is_a_human_only_manual_override() {
         ])
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(!rejected.status.success());
@@ -112,6 +120,10 @@ fn complete_is_a_human_only_manual_override() {
         ])
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(accepted.status.success());
@@ -145,6 +157,10 @@ fn stale_persisted_identity_fails_without_reconciling_or_writing_an_event() {
         ])
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_RUNTIME_DIR",
+            database.parent().unwrap().join("xdg-runtime"),
+        )
         .output()
         .unwrap();
     assert!(!output.status.success());
