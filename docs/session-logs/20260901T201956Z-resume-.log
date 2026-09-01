@@ -1,0 +1,9 @@
+command: familiar-ai resume PRD-38
+date: Tue Sep  1 08:19:56 PM UTC 2026
+host: trollboy (Linux)
+head: ed1d671cfd45675ed191f75d7b36473d8d7572ee (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+error: PRD-38: stale_base: expected=1f1fb976829caf9c99683d95f0549f5519062e27 actual=403c3d103374e90b8d6de4745fc2cf845e3d40b1
+---
+exit: 1
