@@ -56,8 +56,16 @@ Recommendation standing with the owner: close 022; close 019 with the
   live-verified 2026-09-01. The predicted migration-052 collision happened
   and was repaired (079 → migration 053, collision ledger in
   running_bugs).
-- **PRD-080 — scope authority refinement** (bug 014; the wave-3 PRD-050
-  and wave-4 PRD-055 scope walls) follows.
+- **PRD-080 — scope authority refinement: COMPLETE 2026-09-02** (bug 014;
+  the wave-3 PRD-050 and wave-4 PRD-055 scope walls). All four acceptance
+  criteria verified against the code and proven live in wave 6: declared
+  manifests mint standing approval (`declared_expected_file`), declared
+  test surfaces are in-scope (`declared_surface_coverage`), a genuine
+  ambiguity pauses and frees the slot (PRD-60 and 61 continued while 59
+  was paused) and deciding it resumes the workflow, and all 17 recorded
+  decisions are durable with actor and reason beside a paste-runnable
+  deciding command. Archived to `docs/prds/done/`. FAM-BUG-014 stays
+  open, narrowed to the UNDECLARED manifest case.
 - Direct fixes **done 2026-08-31**: bug 017 (provider-verify TOML) and
   bug 023 (legacy disabled-delivery deserialization), commit `fcf0aef`.
 - New: **bug 027** — `worker_lock` simultaneous-fallback test flakes under
