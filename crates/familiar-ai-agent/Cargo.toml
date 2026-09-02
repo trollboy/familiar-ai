@@ -6,11 +6,13 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+familiar-ai-core = { path = "../familiar-ai-core" }
 familiar-ai-llm = { path = "../familiar-ai-llm" }
 async-trait.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 ring.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["time", "macros", "rt"] }
 
 # Review isolation is enforced by the kernel's Landlock API on Linux; other
@@ -21,5 +23,5 @@ landlock.workspace = true
 [dev-dependencies]
 familiar-ai-core = { path = "../familiar-ai-core" }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["full", "rt-multi-thread", "test-util"] }
 wiremock.workspace = true

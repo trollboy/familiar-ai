@@ -1,4 +1,5 @@
 mod agent;
+pub mod anthropic;
 mod claude_code;
 mod codex;
 mod isolation;
@@ -11,6 +12,10 @@ pub use agent::{
     redact_sensitive, AgentExecutionError, BudgetCapability, BudgetDenomination,
     CodexExecutionSession, CodingAgent, ExecutionBudget, ExecutionRequest, ExecutionResult,
     FilesystemPolicy, IsolationCapability, ModelUsage,
+};
+pub use anthropic::{
+    AnthropicAdapter, AnthropicAdapterConfig, AttemptMetadata as AnthropicAttemptMetadata,
+    RUNTIME_ID as ANTHROPIC_RUNTIME_ID,
 };
 pub use claude_code::{ClaudeCodeAgent, ClaudeCodeSettings, READ_ONLY_RESTRICTIONS};
 pub use codex::CodexAgent;

@@ -6,6 +6,7 @@
 //! OpenRouter, etc.). mistral.rs and true in-process inference are out of
 //! scope for this PRD.
 
+pub mod anthropic_api;
 pub mod attempt;
 pub mod backend;
 pub mod backends;

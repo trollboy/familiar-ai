@@ -719,6 +719,9 @@ pub struct AttemptUsage {
     /// Set when the attempt timed out with unknown completion: usage for
     /// this attempt is ambiguous/pending, never zero.
     pub ambiguous: bool,
+    /// Provider request identity, recorded as accounting provenance when the
+    /// adapter exposes one. Absent for ambiguous/timed-out attempts.
+    pub provider_request_id: Option<String>,
 }
 
 pub struct RunOutcome {
@@ -912,6 +915,7 @@ pub async fn run_loop(
                             attempt_id,
                             usage: UsageCategories::default(),
                             ambiguous: true,
+                            provider_request_id: None,
                         });
                         break StopReason::Timeout;
                     }
@@ -927,6 +931,7 @@ pub async fn run_loop(
                     attempt_id,
                     usage: UsageCategories::default(),
                     ambiguous: true,
+                    provider_request_id: None,
                 });
                 break StopReason::ProviderFailure {
                     taxonomy: ProviderFailureTaxonomy::Ambiguous,
@@ -948,6 +953,7 @@ pub async fn run_loop(
             attempt_id,
             usage: outcome.usage,
             ambiguous: false,
+            provider_request_id: outcome.provider_request_id.clone(),
         });
 
         if let Some(text) = collector.text.clone() {
@@ -971,6 +977,22 @@ pub async fn run_loop(
                 }
                 A::MaxTokens => break StopReason::TokenOrContextCeiling,
                 A::ToolUse => break StopReason::InvalidStructuredOutput,
+                // A provider-side pause with no tool calls pending: resubmit
+                // as a fresh, independent attempt rather than assuming the
+                // provider resumes the interrupted request itself. History
+                // is unchanged, so the next iteration's request reproduces
+                // the same conversation and lets the provider continue.
+                A::PauseTurn => continue,
+                // Honest terminal reason: never `Completed`, never
+                // `TokenOrContextCeiling`. The refusal category (when the
+                // provider exposes one) stays available on `outcome.stop_reason`
+                // for the adapter's own evidence; the closed loop-level
+                // vocabulary records it as a non-retryable provider failure.
+                A::Refusal { .. } => {
+                    break StopReason::ProviderFailure {
+                        taxonomy: ProviderFailureTaxonomy::NonRetryable,
+                    }
+                }
             }
         }
 

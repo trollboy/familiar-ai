@@ -170,13 +170,24 @@ impl UsageCategories {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterStopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
     StopSequence,
     ContentFilter,
+    /// A provider-side pause requiring the caller to resubmit to continue.
+    /// Familiar never assumes provider-side resumption of the interrupted
+    /// request: this is an honest "continue independently" signal, distinct
+    /// from `ToolUse` (which requires a tool round-trip first).
+    PauseTurn,
+    /// A safety/content-policy refusal, with the provider's category when
+    /// exposed. Distinct from `ContentFilter` (a generic content-filter
+    /// stop with no category) and never conflated with `MaxTokens`.
+    Refusal {
+        category: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
