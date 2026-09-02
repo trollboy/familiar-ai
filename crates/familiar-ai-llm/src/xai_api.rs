@@ -478,6 +478,28 @@ fn map_status_error(status: StatusCode, retry_after_ms: Option<u64>) -> AdapterE
     }
 }
 
+// Drains every complete line (terminated by `\n`) out of `buffer`, decoding
+// each line's bytes as a whole once fully assembled and leaving any trailing
+// incomplete line (including a multi-byte UTF-8 sequence split across two
+// transport chunks) in `buffer` for the next chunk to complete. Decoding is
+// never attempted on a partial byte sequence, so a codepoint split across a
+// `reqwest` chunk boundary is never corrupted into replacement characters.
+fn drain_complete_lines(buffer: &mut Vec<u8>) -> Result<Vec<String>, AdapterError> {
+    let mut lines = Vec::new();
+    while let Some(newline_at) = buffer.iter().position(|&byte| byte == b'\n') {
+        let line_bytes: Vec<u8> = buffer.drain(..=newline_at).collect();
+        let line_bytes = &line_bytes[..line_bytes.len().saturating_sub(1)];
+        let line = std::str::from_utf8(line_bytes)
+            .map_err(|_| AdapterError::Ambiguous {
+                reason: "xAI stream sent a non-UTF-8 SSE line".into(),
+            })?
+            .trim_end_matches('\r')
+            .to_owned();
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
 fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -520,7 +542,7 @@ impl InferenceAdapter for XaiAdapter {
             return Err(map_status_error(status, retry_after));
         }
 
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         let mut provider_request_id: Option<String> = None;
         let mut usage = UsageCategories::default();
         let mut stop_reason: Option<AdapterStopReason> = None;
@@ -550,11 +572,9 @@ impl InferenceAdapter for XaiAdapter {
                 }
                 break;
             };
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend_from_slice(&chunk);
 
-            while let Some(newline_at) = buffer.find('\n') {
-                let line = buffer[..newline_at].trim_end_matches('\r').to_owned();
-                buffer.drain(..=newline_at);
+            for line in drain_complete_lines(&mut buffer)? {
                 let Some(data) = line
                     .strip_prefix("data: ")
                     .or_else(|| line.strip_prefix("data:"))
@@ -1305,5 +1325,72 @@ mod tests {
             error,
             XaiAdapterBuildError::UnknownAuthProfile("does_not_exist".into())
         );
+    }
+
+    #[test]
+    fn drain_complete_lines_reassembles_multibyte_text_delta_split_across_chunks() {
+        let value = "café 日本語 🎉";
+        let line = format!(
+            "data: {{\"id\":\"req_x\",\"model\":\"grok-4\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{value}\"}}}}]}}\n"
+        );
+        let bytes = line.clone().into_bytes();
+
+        // Split inside the 4-byte UTF-8 sequence for the emoji, reproducing
+        // a `reqwest` transport chunk boundary that lands mid-codepoint.
+        let emoji_start = bytes
+            .windows("🎉".len())
+            .position(|window| window == "🎉".as_bytes())
+            .expect("emoji present in fixture");
+        let split_at = emoji_start + 2;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        buffer.extend_from_slice(&bytes[..split_at]);
+        assert!(
+            drain_complete_lines(&mut buffer).unwrap().is_empty(),
+            "no `\\n` has arrived yet, so no line should be decoded"
+        );
+
+        buffer.extend_from_slice(&bytes[split_at..]);
+        let lines = drain_complete_lines(&mut buffer).unwrap();
+        assert_eq!(lines, vec![line.trim_end_matches('\n').to_owned()]);
+
+        let data = lines[0].strip_prefix("data: ").unwrap();
+        let parsed: WireChunk = serde_json::from_str(data).unwrap();
+        assert_eq!(parsed.choices[0].delta.content.as_deref(), Some(value));
+    }
+
+    #[test]
+    fn drain_complete_lines_reassembles_multibyte_tool_call_arguments_split_across_chunks() {
+        let raw_arguments = r#"{"path":"café/日本語/🎉.txt"}"#;
+        let escaped_arguments = raw_arguments.replace('"', "\\\"");
+        let line = format!(
+            "data: {{\"id\":\"req_y\",\"model\":\"grok-4\",\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{{\"name\":\"read-file\",\"arguments\":\"{escaped_arguments}\"}}}}]}}}}]}}\n"
+        );
+        let bytes = line.clone().into_bytes();
+
+        let emoji_start = bytes
+            .windows("🎉".len())
+            .position(|window| window == "🎉".as_bytes())
+            .expect("emoji present in fixture");
+        let split_at = emoji_start + 3;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        buffer.extend_from_slice(&bytes[..split_at]);
+        assert!(drain_complete_lines(&mut buffer).unwrap().is_empty());
+
+        buffer.extend_from_slice(&bytes[split_at..]);
+        let lines = drain_complete_lines(&mut buffer).unwrap();
+        assert_eq!(lines, vec![line.trim_end_matches('\n').to_owned()]);
+
+        let data = lines[0].strip_prefix("data: ").unwrap();
+        let parsed: WireChunk = serde_json::from_str(data).unwrap();
+        let arguments = parsed.choices[0].delta.tool_calls[0]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref()
+            .unwrap();
+        assert_eq!(arguments, raw_arguments);
     }
 }
