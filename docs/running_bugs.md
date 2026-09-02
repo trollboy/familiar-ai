@@ -1148,3 +1148,28 @@ reinstall the binary, then rerun the 076 drive.
   the same absorption guard, which already treats
   `UndeclaredScopeExpansion` findings as absorbable when durably
   approved. Prohibited changes remain fatal on every path.
+
+### FAM-BUG-046 — Tool results carry no capability name, so wire formats synthesize invalid calls
+
+- **Status:** Fixed (this commit); found by opus reviewing PRD-61
+- **Observed:** OpenAI-compatible wire formats require the assistant's
+  originating tool call to precede each tool result. PRD-61's first
+  remediation reconstructed that entry at the serialization layer from
+  the following results — but `ToolResultPayload` carries only
+  `call_id`, so every synthesized entry had `"name": ""`, which the
+  provider rejects. The reviewer caught both the missing entry (cycle 2)
+  and the empty name its fix produced (cycle 3); no fixture caught
+  either, because every mock matched method and path only.
+- **Root cause:** the shared `MessageContent::ToolResult` contract
+  (PRD-058) omitted the capability identity that OpenAI-shaped wire
+  formats need to rebuild a transcript.
+- **Fix:** `ToolResultPayload` carries `capability_name`, populated at
+  every construction site in the raw runtime (validated capability, or
+  the model's raw requested name on the validation-refusal path).
+  PRD-060's landed `openai_api` adapter — which solved this correctly
+  with a per-call stream cache — now uses the field as its cache-miss
+  fallback instead of silently omitting the item (fresh adapter or
+  resumed transcript); regression pinned.
+- **Reviewer credit:** three independent reviews found a real protocol
+  defect, its remediation's follow-on defect, and the test blindness
+  that let both pass. This is the review loop paying for itself.

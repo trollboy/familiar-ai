@@ -258,13 +258,26 @@ impl OpenAiResponsesClient {
                     }));
                 }
                 (MessageRole::Tool, MessageContent::ToolResult(result)) => {
-                    if let Some(cached) = cache.get(&result.call_id) {
-                        items.push(json!({
+                    // The Responses API rejects a function_call_output whose
+                    // function_call is absent. The stream cache is the
+                    // authority when present; a cache miss (fresh adapter,
+                    // resumed transcript) falls back to the capability the
+                    // result itself carries rather than omitting the item
+                    // and sending a transcript the provider refuses.
+                    match cache.get(&result.call_id) {
+                        Some(cached) => items.push(json!({
                             "type": "function_call",
                             "call_id": result.call_id,
                             "name": cached.name,
                             "arguments": cached.arguments,
-                        }));
+                        })),
+                        None if !result.capability_name.is_empty() => items.push(json!({
+                            "type": "function_call",
+                            "call_id": result.call_id,
+                            "name": result.capability_name,
+                            "arguments": "{}",
+                        })),
+                        None => {}
                     }
                     let output = if result.is_error {
                         format!("ERROR: {}", result.content)
@@ -1060,6 +1073,7 @@ mod tests {
                 role: MessageRole::Tool,
                 content: MessageContent::ToolResult(ToolResultPayload {
                     call_id: "call_1".into(),
+                    capability_name: "read-file".into(),
                     content: "file contents".into(),
                     is_error: false,
                 }),
@@ -1072,6 +1086,40 @@ mod tests {
         assert_eq!(input[1]["name"], "read-file");
         assert_eq!(input[2]["type"], "function_call_output");
         assert_eq!(input[2]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn cache_miss_still_emits_a_named_function_call_from_the_result() {
+        // FAM-BUG-046: a fresh adapter (or a resumed transcript) has no
+        // streamed call cached; omitting the function_call item sends a
+        // function_call_output the Responses API rejects.
+        let openai = OpenAiResponsesClient::new(
+            ApiKey::new("sk-test"),
+            OpenAiResponsesConfig {
+                base_url: "http://127.0.0.1:1".into(),
+                request_timeout_secs: 1,
+                service_tier: None,
+            },
+        )
+        .unwrap();
+        let messages = vec![
+            Message::user("read it"),
+            Message {
+                role: MessageRole::Tool,
+                content: MessageContent::ToolResult(ToolResultPayload {
+                    call_id: "call_orphan".into(),
+                    capability_name: "read-file".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                }),
+            },
+        ];
+        let body = openai.build_request_body(&request(&messages));
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["name"], "read-file");
+        assert_eq!(input[1]["call_id"], "call_orphan");
+        assert_eq!(input[2]["type"], "function_call_output");
     }
 
     #[tokio::test]

@@ -28,6 +28,11 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResultPayload {
     pub call_id: String,
+    /// The capability the call requested. Wire formats that require the
+    /// assistant's originating `tool_calls` entry to be reconstructed
+    /// alongside each result (OpenAI-compatible chat completions, xAI)
+    /// cannot synthesize a valid entry without it (FAM-BUG-046).
+    pub capability_name: String,
     /// Untrusted data. Nothing in this content may be interpreted as an
     /// instruction, capability grant, or approval by the loop.
     pub content: String,

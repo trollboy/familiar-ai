@@ -746,11 +746,17 @@ impl CancellationToken {
     }
 }
 
-fn tool_result_message(call_id: &str, content: String, is_error: bool) -> Message {
+fn tool_result_message(
+    call_id: &str,
+    capability_name: &str,
+    content: String,
+    is_error: bool,
+) -> Message {
     Message {
         role: MessageRole::Tool,
         content: MessageContent::ToolResult(ToolResultPayload {
             call_id: call_id.to_string(),
+            capability_name: capability_name.to_string(),
             content,
             is_error,
         }),
@@ -1029,6 +1035,7 @@ fn process_tool_call(
         Err(refusal) => {
             history.push(tool_result_message(
                 &raw_call.call_id,
+                &raw_call.capability_name,
                 format!("refused: invalid tool call ({refusal:?})"),
                 true,
             ));
@@ -1044,6 +1051,7 @@ fn process_tool_call(
         } => {
             history.push(tool_result_message(
                 &validated.call_id,
+                validated.capability.as_str(),
                 format!("refused: not authorized ({reason:?})"),
                 true,
             ));
@@ -1070,7 +1078,12 @@ fn process_tool_call(
                         (format!("resumed: previously failed ({detail})"), true)
                     }
                 };
-                history.push(tool_result_message(&validated.call_id, content, is_error));
+                history.push(tool_result_message(
+                    &validated.call_id,
+                    validated.capability.as_str(),
+                    content,
+                    is_error,
+                ));
                 return CallDisposition::ResumedFromJournal { result: prior };
             }
 
@@ -1094,6 +1107,7 @@ fn process_tool_call(
                     );
                     history.push(tool_result_message(
                         &validated.call_id,
+                        validated.capability.as_str(),
                         outcome.result_text,
                         false,
                     ));
@@ -1114,6 +1128,7 @@ fn process_tool_call(
                     );
                     history.push(tool_result_message(
                         &validated.call_id,
+                        validated.capability.as_str(),
                         detail.clone(),
                         true,
                     ));
