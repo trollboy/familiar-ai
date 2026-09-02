@@ -222,6 +222,14 @@ impl ReviewCoordinator<'_> {
             .save_cycle(&cycle)
             .map_err(CoordinatorError::Persistence)?;
         match evaluation.disposition {
+            ScopeDisposition::Broadened
+                if human_review_absorbed(&evaluation, &request.approved_scope_findings) =>
+            {
+                let _ = writeln!(
+                    output,
+                    "scope: undeclared expansions covered by durable approvals; proceeding"
+                );
+            }
             ScopeDisposition::Broadened => {
                 return self.stop(cycle, ReviewStopReason::ScopeBroadened)
             }
@@ -733,6 +741,14 @@ impl ReviewCoordinator<'_> {
                 .save_cycle(&cycle)
                 .map_err(CoordinatorError::Persistence)?;
             match evaluation.disposition {
+                ScopeDisposition::Broadened
+                    if human_review_absorbed(&evaluation, &request.approved_scope_findings) =>
+                {
+                    let _ = writeln!(
+                        output,
+                        "scope: undeclared expansions covered by durable approvals; proceeding"
+                    );
+                }
                 ScopeDisposition::Broadened => {
                     return self.stop(cycle, ReviewStopReason::ScopeBroadened)
                 }

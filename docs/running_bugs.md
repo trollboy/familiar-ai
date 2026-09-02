@@ -1133,3 +1133,18 @@ reinstall the binary, then rerun the 076 drive.
 - **Original status:** Open (interim: `operator_waive` example)
 - Completion-evidence demands durable human waivers, but no CLI can
   create one; the examples/operator_waive tool is the stopgap.
+
+### FAM-BUG-045 — Durable approvals ignored on the scope-Broadened path
+
+- **Status:** Fixed (this commit)
+- **Observed:** wave 6's PRD-59 stopped `scope_broadened` after the owner
+  had approved all seven of its findings, including the two
+  `undeclared_scope_expansion` ones (`config/default.toml`,
+  `docs/contracts/providers-index.md`). The absorption added earlier
+  guarded only the `HumanReviewRequired` disposition; `Broadened` — the
+  disposition undeclared expansions produce — never consulted approvals,
+  so a fully approved candidate still halted.
+- **Fix:** both `Broadened` arms (initial and post-remediation) now take
+  the same absorption guard, which already treats
+  `UndeclaredScopeExpansion` findings as absorbable when durably
+  approved. Prohibited changes remain fatal on every path.
