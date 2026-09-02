@@ -1,0 +1,9 @@
+command: familiar-ai resume all
+date: Wed Sep  2 02:25:34 AM UTC 2026
+host: trollboy (Linux)
+head: 0e4375974ef016040fd32862f3ee7fc4836c747e (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+error: cannot acquire mutating orchestrator ownership: Familiar control-plane owner pid 730171 is live; socket state must be diagnosed and explicit recovery used
+---
+exit: 1
