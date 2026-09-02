@@ -218,6 +218,21 @@ fn wire_message(message: &Message) -> Value {
             "role": wire_role(message.role),
             "content": text,
         }),
+        MessageContent::ToolCalls(calls) => json!({
+            "role": "assistant",
+            "content": Value::Null,
+            "tool_calls": calls
+                .iter()
+                .map(|call| json!({
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.capability_name,
+                        "arguments": call.arguments,
+                    },
+                }))
+                .collect::<Vec<_>>(),
+        }),
         MessageContent::ToolResult(result) => json!({
             "role": "tool",
             "tool_call_id": result.call_id,
@@ -246,6 +261,15 @@ fn wire_messages(messages: &[Message]) -> Vec<Value> {
             continue;
         };
 
+        // A transcript that RECORDS the assistant's calls (FAM-BUG-049)
+        // already serialized them one message earlier; synthesizing a second
+        // tool_calls entry would duplicate the turn.
+        if index > 0 && matches!(messages[index - 1].content, MessageContent::ToolCalls(_)) {
+            wire.push(wire_message(message));
+            index += 1;
+            continue;
+        }
+
         let run_start = index;
         let mut run_end = index;
         while let Some(Message {
@@ -269,7 +293,7 @@ fn wire_messages(messages: &[Message]) -> Vec<Value> {
                         "arguments": "{}",
                     },
                 }),
-                MessageContent::Text(_) => unreachable!("run contains only ToolResult messages"),
+                _ => unreachable!("run contains only ToolResult messages"),
             })
             .collect();
 
@@ -1156,6 +1180,37 @@ mod tests {
                 is_error: false,
             }),
         }
+    }
+
+    #[test]
+    fn a_recorded_call_turn_is_serialized_verbatim_and_not_synthesized() {
+        // FAM-BUG-049: when the transcript records the assistant's calls,
+        // the adapter serializes them (real name AND arguments) instead of
+        // inventing a placeholder entry — and must not emit both.
+        use crate::attempt::ToolCallPayload;
+        let messages = vec![
+            Message::user("do it"),
+            Message {
+                role: MessageRole::Assistant,
+                content: MessageContent::ToolCalls(vec![ToolCallPayload {
+                    call_id: "call_abc".into(),
+                    capability_name: "read-file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                }]),
+            },
+            tool_result("call_abc", "ok"),
+        ];
+        let wire = wire_messages(&messages);
+        assert_eq!(wire.len(), 3, "no synthesized duplicate turn: {wire:?}");
+        assert_eq!(wire[1]["role"], "assistant");
+        assert_eq!(wire[1]["tool_calls"][0]["id"], "call_abc");
+        assert_eq!(wire[1]["tool_calls"][0]["function"]["name"], "read-file");
+        assert_eq!(
+            wire[1]["tool_calls"][0]["function"]["arguments"],
+            r#"{"path":"a.txt"}"#
+        );
+        assert_eq!(wire[2]["role"], "tool");
+        assert_eq!(wire[2]["tool_call_id"], "call_abc");
     }
 
     #[test]

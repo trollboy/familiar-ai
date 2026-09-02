@@ -227,6 +227,31 @@ impl AnthropicAdapter {
                     self.push_assistant_and_tool_turn(&mut wire_messages, None, &tool_results);
                     index = next;
                 }
+                // The transcript records the assistant turn that issued the
+                // calls (FAM-BUG-049). Seed the registry from it so the
+                // tool_use blocks reconstructed for the following results
+                // carry the real name AND arguments, rather than this
+                // adapter instance's empty-input fallback.
+                Message {
+                    role: MessageRole::Assistant,
+                    content: MessageContent::ToolCalls(calls),
+                } => {
+                    let mut registry = self
+                        .tool_use_registry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    for call in calls {
+                        registry
+                            .entry(call.call_id.clone())
+                            .or_insert_with(|| RememberedToolUse {
+                                name: call.capability_name.clone(),
+                                input: serde_json::from_str(&call.arguments)
+                                    .unwrap_or_else(|_| serde_json::json!({})),
+                                preceding_thinking: Vec::new(),
+                            });
+                    }
+                    index += 1;
+                }
                 // The loop core never produces a System/User message with
                 // tool_result content, or any other combination; skip
                 // defensively rather than fabricate a wire shape for it.

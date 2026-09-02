@@ -39,9 +39,24 @@ pub struct ToolResultPayload {
     pub is_error: bool,
 }
 
+/// One tool call the assistant issued, as the transcript records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallPayload {
+    pub call_id: String,
+    pub capability_name: String,
+    /// Arguments exactly as the model emitted them. Serialized verbatim so
+    /// a resent transcript is byte-faithful to what the provider saw.
+    pub arguments: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageContent {
     Text(String),
+    /// The assistant turn that ISSUED tool calls. Every wire format requires
+    /// this to accompany the results that answer it; recording it means
+    /// adapters serialize a complete transcript instead of reconstructing
+    /// one from the results and getting it wrong (FAM-BUG-049).
+    ToolCalls(Vec<ToolCallPayload>),
     ToolResult(ToolResultPayload),
 }
 

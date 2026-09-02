@@ -996,6 +996,25 @@ pub async fn run_loop(
             }
         }
 
+        // Record the assistant turn that issued these calls BEFORE their
+        // results. Every wire format requires the two to travel together;
+        // recording it means adapters serialize the real transcript instead
+        // of reconstructing one from the results (FAM-BUG-049).
+        history.push(Message {
+            role: MessageRole::Assistant,
+            content: MessageContent::ToolCalls(
+                collector
+                    .completed_calls
+                    .iter()
+                    .map(|call| familiar_ai_llm::attempt::ToolCallPayload {
+                        call_id: call.call_id.clone(),
+                        capability_name: call.capability_name.clone(),
+                        arguments: call.arguments.to_string(),
+                    })
+                    .collect(),
+            ),
+        });
+
         let mut fatal = false;
         for raw_call in collector.completed_calls {
             let disposition = process_tool_call(

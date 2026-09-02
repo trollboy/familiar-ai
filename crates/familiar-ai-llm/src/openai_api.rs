@@ -234,6 +234,7 @@ impl OpenAiResponsesClient {
     fn build_input_items(&self, messages: &[Message]) -> Vec<Value> {
         let cache = self.call_cache.lock().unwrap_or_else(|e| e.into_inner());
         let mut items = Vec::with_capacity(messages.len());
+        let mut recorded_calls: std::collections::BTreeSet<String> = Default::default();
         for message in messages {
             match (&message.role, &message.content) {
                 (MessageRole::System, MessageContent::Text(text)) => {
@@ -257,6 +258,20 @@ impl OpenAiResponsesClient {
                         "content": [{"type": "output_text", "text": text}],
                     }));
                 }
+                // A transcript that RECORDS the assistant's calls serializes
+                // them verbatim; the cache/fallback path below then has
+                // nothing to reconstruct (FAM-BUG-049).
+                (_, MessageContent::ToolCalls(calls)) => {
+                    for call in calls {
+                        items.push(json!({
+                            "type": "function_call",
+                            "call_id": call.call_id,
+                            "name": call.capability_name,
+                            "arguments": call.arguments,
+                        }));
+                        recorded_calls.insert(call.call_id.clone());
+                    }
+                }
                 (MessageRole::Tool, MessageContent::ToolResult(result)) => {
                     // The Responses API rejects a function_call_output whose
                     // function_call is absent. The stream cache is the
@@ -265,6 +280,7 @@ impl OpenAiResponsesClient {
                     // result itself carries rather than omitting the item
                     // and sending a transcript the provider refuses.
                     match cache.get(&result.call_id) {
+                        _ if recorded_calls.contains(&result.call_id) => {}
                         Some(cached) => items.push(json!({
                             "type": "function_call",
                             "call_id": result.call_id,

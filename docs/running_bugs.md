@@ -1238,7 +1238,18 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-049 — Agent-loop history omits the assistant's tool-call turn
 
-- **Status:** Open — root cause behind FAM-BUG-046 and three adapter defects
+- **Status:** FIXED 2026-09-02 — `MessageContent::ToolCalls(Vec<ToolCallPayload>)`
+  carries call_id, capability, and verbatim arguments; the raw runtime pushes
+  the assistant's call turn into history immediately before the results that
+  answer it. All three adapters consume it: xAI serializes it directly and
+  skips its synthesis path, the OpenAI Responses adapter emits the recorded
+  `function_call` items and suppresses its cache/fallback for those ids, and
+  the Anthropic adapter seeds its `tool_use_registry` from the turn so
+  reconstructed blocks carry real names AND arguments instead of the
+  empty-input fallback. Regression pins that a recorded turn is serialized
+  verbatim with no synthesized duplicate. FAM-BUG-046's `capability_name` is
+  now belt-and-braces for transcripts that predate this.
+- **Original status:** Open — root cause behind FAM-BUG-046 and three adapter defects
 - **Observed:** `Message` history records tool RESULTS
   (`MessageContent::ToolResult`) but never the assistant turn that
   ISSUED the calls. Every wire format requires the originating call to
