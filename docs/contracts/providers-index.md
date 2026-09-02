@@ -23,3 +23,5 @@ them. Unknown kinds and unknown extension fields fail validation closed.
   descriptors and the credential non-persistence boundary.
 - [Registry migration](registry-migration.md) — configuration mutation
   and migration bookkeeping.
+- [Anthropic adapter](anthropic-adapter.md) — the `anthropic-api` raw
+  runtime: PRD-058 wire mapping, stop reasons, caching, and billing mode.

@@ -1,5 +1,43 @@
 use serde::{Deserialize, Serialize};
 
+use super::{CapabilityProfileConfig, CapabilityProvenanceConfig, RuntimeCapabilityConfig};
+
+/// PRD-059's `runtime` identity for a raw hosted Anthropic Messages API
+/// worker: `[worker_registry.workers.<id>] runtime = "anthropic-api"`. No
+/// `runtime_config` extension is required for this runtime — unlike
+/// `ollama`, an `anthropic-api` worker's only settings beyond the generic
+/// spec fields (`provider`, `model`, `auth_profile`, `capability_profile`)
+/// live in the adapter's own construction config, not in operator TOML.
+pub const ANTHROPIC_API_RUNTIME: &str = "anthropic-api";
+
+/// Default declared capability profile for an `anthropic-api` worker,
+/// reflecting what the Messages API declares support for out of the box.
+/// Provenance starts `Declared`; probed/observed facts layer on top as the
+/// worker actually runs (PRD-047 discipline) — nothing here is inferred
+/// from the provider name, and an operator may still author a narrower
+/// profile explicitly.
+pub fn anthropic_api_default_capability_profile() -> CapabilityProfileConfig {
+    use CapabilityProvenanceConfig::Declared;
+    use RuntimeCapabilityConfig::*;
+    CapabilityProfileConfig {
+        capabilities: [
+            (NativeToolCalling, Declared),
+            (McpClient, Declared),
+            (StructuredOutput, Declared),
+            (Streaming, Declared),
+            (PromptCaching, Declared),
+            (ReasoningControls, Declared),
+            (ParallelToolCalls, Declared),
+            (UsageReportingCategories, Declared),
+            (CostReportingMode, Declared),
+            (RemoteOrLocal, Declared),
+            (MaxContext, Declared),
+        ]
+        .into_iter()
+        .collect(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -334,5 +372,41 @@ pub fn validate_ssh_host(value: &str) -> Result<(), String> {
         Err(format!("malformed ssh host '{value}'"))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_api_runtime_const_is_a_valid_identifier() {
+        assert!(validate_identifier(ANTHROPIC_API_RUNTIME, "runtime id").is_ok());
+    }
+
+    #[test]
+    fn anthropic_api_default_capability_profile_declares_but_never_infers() {
+        let profile = anthropic_api_default_capability_profile();
+        assert_eq!(
+            profile
+                .capabilities
+                .get(&RuntimeCapabilityConfig::NativeToolCalling),
+            Some(&CapabilityProvenanceConfig::Declared)
+        );
+        assert_eq!(
+            profile
+                .capabilities
+                .get(&RuntimeCapabilityConfig::PromptCaching),
+            Some(&CapabilityProvenanceConfig::Declared)
+        );
+        // Capabilities this document never claims for the runtime stay
+        // absent rather than defaulted — e.g. deterministic seeding is not
+        // something the Messages API declares.
+        assert_eq!(
+            profile
+                .capabilities
+                .get(&RuntimeCapabilityConfig::DeterministicSeed),
+            None
+        );
     }
 }

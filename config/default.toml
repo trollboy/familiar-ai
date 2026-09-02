@@ -33,6 +33,21 @@
 # host = "127.0.0.1:8888"
 # auth = "env: UNSLOTH_API_KEY"
 
+# Anthropic Messages API, called directly by Familiar's own raw-model agent
+# loop (PRD-058/059) rather than through a Claude Code harness subscription.
+# The API key stays an external `env:` reference; nothing here or in any
+# accounting row ever carries the credential value. Capability/limit probing
+# uses only non-billable surfaces (GET /v1/models/{id}, POST
+# /v1/messages/count_tokens) — a failed probe leaves capabilities unknown,
+# never assumed. This is a distinct worker identity from any Claude Code
+# worker of the same nominal model: see [worker_registry.workers.claude-api]
+# below, which is what actually names the "anthropic-api" runtime.
+# [providers.anthropic]
+# kind = "inference"
+# host = "api.anthropic.com:443"
+# auth = "env: ANTHROPIC_API_KEY"
+# models = ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"]
+
 # Cost-reconciliation policy (PRD-053). Both values are operator policy, not
 # provider guarantees; the exact value in effect is recorded on every
 # reconciliation run for audit even after this default changes.
@@ -111,6 +126,40 @@
 # currency = "USD", calculation_version, and per-model nanoUSD rates. Operator
 # subscription declarations are separate availability/fee facts under
 # [execution_history.subscriptions."provider/model"] and never imply spend.
+#
+# Anthropic API-key ("local-estimate") billing mode (PRD-059): the raw
+# Anthropic adapter never assumes Claude Code subscription economics — this
+# schedule is what turns its usage observations into a local nanoUSD
+# estimate, reconcilable against PRD-052 organization cost collection where
+# an Admin-key billing source is configured for the same organization.
+# Sourced from platform.claude.com/docs/en/pricing (cached 2026-06-24); a
+# changed price is a new schedule id, this one is never edited in place.
+# Cache-write uses the 5-minute-TTL multiplier (1.25x input); cache-read is
+# 0.1x input, matching the categories this adapter reports distinctly.
+# [execution_history.price_schedules.anthropic-api-2026-06-24]
+# effective_at = "2026-06-24T00:00:00Z"
+# currency = "USD"
+# calculation_version = "anthropic-sticker-v1"
+# [execution_history.price_schedules.anthropic-api-2026-06-24.models.claude-opus-4-8]
+# uncached_input_nanousd_per_million = 5000000000
+# cache_read_nanousd_per_million = 500000000
+# cache_write_nanousd_per_million = 6250000000
+# output_nanousd_per_million = 25000000000
+# [execution_history.price_schedules.anthropic-api-2026-06-24.models.claude-sonnet-5]
+# uncached_input_nanousd_per_million = 3000000000
+# cache_read_nanousd_per_million = 300000000
+# cache_write_nanousd_per_million = 3750000000
+# output_nanousd_per_million = 15000000000
+# [execution_history.price_schedules.anthropic-api-2026-06-24.models.claude-haiku-4-5]
+# uncached_input_nanousd_per_million = 1000000000
+# cache_read_nanousd_per_million = 100000000
+# cache_write_nanousd_per_million = 1250000000
+# output_nanousd_per_million = 5000000000
+# [execution_history.price_schedules.anthropic-api-2026-06-24.models.claude-fable-5]
+# uncached_input_nanousd_per_million = 10000000000
+# cache_read_nanousd_per_million = 1000000000
+# cache_write_nanousd_per_million = 12500000000
+# output_nanousd_per_million = 50000000000
 [driver]
 max_prds_per_session = 0      # 0 = unlimited
 max_session_cost_microusd = 0 # 0 = no cost ceiling; converted to canonical nanoUSD reservations
@@ -246,6 +295,38 @@ max_verification_log_bytes = 256000
 # available = true
 # Ollama uses adapter = "ollama" and model = "qwen3:8b"; Familiar invokes it
 # through the existing Codex OSS adapter path.
+#
+# A raw hosted Anthropic worker (PRD-059) — distinct for routing, accounting,
+# and empirical history from any Claude Code worker of the same model, since
+# it differs only in runtime. No runtime_config extension is needed for
+# "anthropic-api" (unlike ollama); thinking/effort defaults come from the
+# adapter's own construction, itself informed by capability_profile.
+# [worker_registry.workers.claude-api]
+# runtime = "anthropic-api"
+# provider = "anthropic"
+# model = "claude-sonnet-5"
+# auth_profile = "env-anthropic-key"
+# capability_profile = "anthropic-api-default"
+# capabilities = ["implementation", "remediation"]
+# fresh_process_isolation = true
+# context_tokens = 1000000
+# estimated_cost_microusd = 0
+# available = true
+# [worker_registry.capability_profiles.anthropic-api-default]
+# [worker_registry.capability_profiles.anthropic-api-default.capabilities]
+# native-tool-calling = "declared"
+# mcp-client = "declared"
+# structured-output = "declared"
+# streaming = "declared"
+# prompt-caching = "declared"
+# reasoning-controls = "declared"
+# parallel-tool-calls = "declared"
+# usage-reporting-categories = "declared"
+# cost-reporting-mode = "declared"
+# remote-or-local = "declared"
+# max-context = "declared"
+# [auth_profiles]
+# env-anthropic-key = "env: ANTHROPIC_API_KEY"
 
 # Local artifact aliases point to immutable canonical manifests. Registration
 # is performed with `familiar-ai config artifact register`; do not hand-author

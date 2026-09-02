@@ -496,6 +496,7 @@ pub fn persist_run_outcome(
         attempt_id,
         usage,
         ambiguous,
+        provider_request_id,
     } in &outcome.attempts
     {
         agent_runtime_repo.record_attempt(
@@ -526,7 +527,7 @@ pub fn persist_run_outcome(
             cli_version: None,
             model_identity,
             service_tier: None,
-            provider_request_id: None,
+            provider_request_id: provider_request_id.as_deref(),
             uncached_input_tokens: usage.uncached_input_tokens,
             cache_read_tokens: usage.cache_read_tokens,
             cache_write_tokens: usage.cache_write_tokens,
