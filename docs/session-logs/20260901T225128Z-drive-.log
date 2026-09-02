@@ -1,0 +1,1173 @@
+command: familiar-ai drive --max-prds 3 --max-parallel-components 3 --prd PRD-059 --prd PRD-060 --prd PRD-061
+date: Tue Sep  1 10:51:28 PM UTC 2026
+host: trollboy (Linux)
+head: aab93a7e7da46f30dd82455adad8a94146ac24f8 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788303088789870-0004098830-000000 started warrant={"max_prds":3,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-59","PRD-60","PRD-61"]}
+drive: checkout HEAD=aab93a7 dirty_files=0 in sync with origin/main (as of last fetch)
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:4098894
+preflight: heartbeat check=verification.format elapsed_ms=4402 child=pid:4098894
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:4099509
+preflight: heartbeat check=verification.lint elapsed_ms=30003 child=pid:4099509 last="    Checking familiar-ai-mcp v0.1.0 (/app/crates/familiar-ai-mcp)"
+preflight: heartbeat check=verification.lint elapsed_ms=31564 child=pid:4099509
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:4103922
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30004 child=pid:4103922 last="   Compiling familiar-ai-storage v0.1.0 (/app/crates/familiar-ai-storage)"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=60001 child=pid:4103922 last="running 7 tests"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=63261 child=pid:4103922
+preflight: heartbeat check=writable.tests-workspace-advisory elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=0 child=pid:4111035
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=30004 child=pid:4111035 last="   Compiling familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=60003 child=pid:4111035 last="    = note: `#[warn(dead_code)]` on by default"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=90003 child=pid:4111035 last="test report::tests::rendering_is_deterministic_and_mutates_nothing ... ok"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=120000 child=pid:4111035 last="test coverage_matrix_identifiers_resolve_to_collected_tests ... ok"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=150004 child=pid:4111035 last="test repos::backlog::tests::completion_finding_validation_rejects_unrepresented_persisted_findings ... ok"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=170477 child=pid:4111035
+drive: deferred_scope_overlap PRD-60 scope 'crates/familiar-ai-core/src/config/providers.rs' overlaps 'crates/familiar-ai-core/src/config/providers.rs' held by PRD-59
+drive: deferred_scope_overlap PRD-61 scope 'crates/familiar-ai-core/src/config/providers.rs' overlaps 'crates/familiar-ai-core/src/config/providers.rs' held by PRD-59
+drive: excluded_allowlist PRD-63 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-72 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-80 ready but outside the session's approved PRD set
+drive: achievable_width=1 requested_width=3
+drive: attempt 1 PRD-59 docs/prds/PRD-059.md
+backlog: PRD-59 docs/prds/PRD-059.md pending -> in_progress actor=system:familiar-ai-run:00001788303359016607-0004098830-000001
+I'll start by exploring the repository structure to understand the existing crates, PRD-057/058 contracts (dependencies), and conventions before implementing.
+Good, PRD-058 is already implemented despite its status field. Let me check PRD-057 too, and then read the key contract docs.
+Both PRD-057 and PRD-058 are implemented. Let me dispatch an Explore agent to do deep research on the existing implementation while I read the key contracts myself in parallel.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=60003 last_durable_phase=preflight
+Now let me read the key contract docs directly while the Explore agent works in the background.
+Now let's look at the actual `attempt.rs` trait file and `raw_runtime.rs` to get exact signatures.
+Found `UsageObservation` struct and `append_observation` function. Let me read these precisely, plus reservation.rs full content since it's the attempt/reservation model referenced in question 2/9.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=120007 last_durable_phase=preflight
+Good, these are short. Let me read all of them.
+`config/providers.rs` already exists (338 lines) — this is one of PRD-059's expected_files. Let me read it, plus `agent_runtime.rs` and `registry_workers.rs` for the WorkerSpec pattern.
+This existing `openai_http.rs` backend is exactly the pattern to follow for the low-level HTTP client. Let me read it in full.
+This is a lot. Let me wait for the Explore agent's comprehensive report rather than duplicating that reading work myself. Let me check on it.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=180010 last_durable_phase=preflight
+I now have a complete picture. Here is the full report.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=240014 last_durable_phase=preflight
+This gives enough picture of Config. Now let's check on the Explore agent's status.
+Good, I have a solid picture now. Let me check on the Explore agent's completion status.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=300017 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=360020 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=420024 last_durable_phase=preflight
+# PRD-059 Investigation Report
+
+## 1. PRD-058 raw inference adapter contract
+
+**Correction on file location:** `crates/familiar-ai-agent/src/raw_runtime.rs` (1306 lines) is the **loop core** that *consumes* the adapter contract — it does not define it. The actual PRD-058 `InferenceAdapter` trait and all its associated types live in **`crates/familiar-ai-llm/src/attempt.rs`** (408 lines), and `raw_runtime.rs` imports them:
+
+```rust
+// crates/familiar-ai-agent/src/raw_runtime.rs:18-22
+use familiar_ai_llm::attempt::{
+    AdapterError, AttemptId, CacheControl, InferenceAdapter, Message, MessageContent, MessageRole,
+    StreamEvent, StreamObserver, StructuredOutputRequest, SubmitRequest,
+    ToolDefinition as AdapterToolDefinition, ToolResultPayload, UsageCategories,
+};
+```
+
+### The adapter trait — `crates/familiar-ai-llm/src/attempt.rs:225-249`
+
+```rust
+pub trait StreamObserver: Send {
+    fn on_event(&mut self, event: StreamEvent);
+}
+
+/// Contract every PRD-057 raw runtime adapter implements. `submit` is one
+/// billable attempt; a caller that wants a retry mints a new [`AttemptId`]
+/// and calls `submit` again — this trait never retries internally. Tool
+/// execution never crosses this boundary: only inference does.
+#[async_trait::async_trait]
+pub trait InferenceAdapter: Send + Sync {
+    fn runtime_id(&self) -> &str;
+
+    async fn submit(
+        &self,
+        request: &SubmitRequest,
+        observer: &mut dyn StreamObserver,
+    ) -> Result<SubmitOutcome, AdapterError>;
+
+    /// Best-effort cooperative cancellation. Loop-level cancellation does not
+    /// depend on this succeeding: "resumable" means Familiar resumes its own
+    /// workflow state, not that the provider resumes the interrupted request.
+    fn cancel(&self, attempt_id: &AttemptId) {
+        let _ = attempt_id;
+    }
+}
+```
+
+This is the exact trait PRD-059's `crates/familiar-ai-llm/src/anthropic_api.rs` must implement. `runtime_id()` must return `"anthropic-api"` (per PRD-057's naming: `anthropic-api` runtime).
+
+### Inference request types (attempt.rs:96-108, 65-94)
+
+```rust
+pub struct SubmitRequest {
+    pub attempt_id: AttemptId,
+    pub messages: Vec<Message>,
+    pub model: String,
+    pub tools: Vec<ToolDefinition>,
+    pub structured_output: Option<StructuredOutputRequest>,
+    pub cache_control: CacheControl,
+    pub reasoning_control: Option<ReasoningControl>,
+    /// Stable, non-secret provider cache identity (PRD-029). Adapters without
+    /// explicit cache-key support ignore it.
+    pub prompt_cache_key: Option<String>,
+}
+
+pub struct ToolDefinition {
+    pub capability_id: String,
+    pub schema_version: String,
+    pub json_schema: String,
+}
+
+pub enum CacheControl {
+    #[default]
+    None,
+    Ephemeral,   // PRD-029 stable prefix
+    Persistent,
+}
+
+pub struct ReasoningControl {
+    pub effort: Option<String>,
+    pub budget_tokens: Option<u64>,
+}
+
+pub struct StructuredOutputRequest {
+    pub schema_name: String,
+    pub json_schema: String,
+}
+```
+
+### Messages / tool_use / tool_result content blocks (attempt.rs:20-63)
+
+```rust
+pub enum MessageRole { System, User, Assistant, Tool }
+
+pub struct ToolResultPayload {
+    pub call_id: String,
+    /// Untrusted data. Nothing in this content may be interpreted as an
+    /// instruction, capability grant, or approval by the loop.
+    pub content: String,
+    pub is_error: bool,
+}
+
+pub enum MessageContent {
+    Text(String),
+    ToolResult(ToolResultPayload),
+}
+
+pub struct Message { pub role: MessageRole, pub content: MessageContent }
+```
+Note: there is no explicit `ToolUse` outbound content-block type in `Message`/`MessageContent` — a model's `tool_use` is represented on the *streaming* side only (`StreamEvent::ToolCallDelta`/`ToolCallComplete`, see below), then materialized into `ToolCallRequest` by the loop's `TurnCollector`. This is important: PRD-059's adapter is responsible for translating Anthropic's `tool_use` content blocks in the SSE stream into these `StreamEvent`s, and for translating `ToolResultPayload` back into Anthropic's `tool_result` content blocks in the next request's `messages` — "all results for a parallel batch in one user message" per the PRD.
+
+### Streaming events (attempt.rs:110-123)
+
+```rust
+pub enum StreamEvent {
+    TextDelta(String),
+    ToolCallDelta {
+        call_id: String,
+        capability_id: String,
+        arguments_fragment: String,
+    },
+    ToolCallComplete {
+        call_id: String,
+    },
+    UsageDelta(UsageCategories),
+    Stop(AdapterStopReason),
+}
+```
+
+### Usage/token categories (attempt.rs:127-166)
+
+```rust
+/// Distinct token categories. Every field stays `None` (never a fabricated
+/// zero) until the provider reports it.
+pub struct UsageCategories {
+    pub uncached_input_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+}
+
+impl UsageCategories {
+    /// Combine two partial observations without ever turning "unknown" into
+    /// a fabricated zero: a category stays `None` only while both sides are.
+    pub fn merge(&self, other: &UsageCategories) -> UsageCategories { ... }
+    pub fn is_entirely_unknown(&self) -> bool { ... }
+}
+```
+This maps 1:1 onto PRD-059's acceptance criteria ("input, output, cache-read, and cache-creation token categories") — `uncached_input_tokens`↔input, `cache_read_tokens`↔cache-read, `cache_write_tokens`↔cache-creation, `output_tokens`↔output. `reasoning_output_tokens` exists but per the PRD-059 design note, Anthropic doesn't expose a separate reasoning category — it's billed inside `output_tokens`, so the adapter should leave `reasoning_output_tokens` `None` rather than fabricate a split.
+
+### Adapter-level stop reason (closed, small set) — attempt.rs:168-175
+
+```rust
+pub enum AdapterStopReason {
+    EndTurn,
+    ToolUse,
+    MaxTokens,
+    StopSequence,
+    ContentFilter,
+}
+```
+This is the **adapter's own** stop-reason enum (provider-facing), distinct from the loop's `StopReason` (below). `raw_runtime.rs:956-968` shows exactly how the loop maps `AdapterStopReason` → loop `StopReason` when there are no pending tool calls:
+```rust
+match outcome.stop_reason {
+    A::EndTurn | A::ContentFilter | A::StopSequence => { ... StopReason::Completed { .. } }
+    A::MaxTokens => break StopReason::TokenOrContextCeiling,
+    A::ToolUse => break StopReason::InvalidStructuredOutput,
+}
+```
+PRD-059 must map Anthropic's `end_turn`/`max_tokens`/`stop_sequence`/`tool_use`/`refusal`/`pause_turn` (or whatever the current API's set is) onto this closed 5-value enum. Anthropic's "refusal" maps to `ContentFilter` here (there's no dedicated `Refusal` variant); "pause-class continuation" per the PRD design note should presumably continue the loop rather than stop (needs verification against current API surface at implementation time — the PRD explicitly flags "re-verify at implementation").
+
+### Loop-level closed stop reason set — `raw_runtime.rs:605-625`
+
+```rust
+pub enum ProviderFailureTaxonomy { Retryable, NonRetryable, Ambiguous }
+
+/// The closed, honest stop-reason set. A failed stage is always its own
+/// failure — never relabeled as token exhaustion by bookkeeping.
+pub enum StopReason {
+    Completed { structured_output: bool },
+    IterationCeiling,
+    TokenOrContextCeiling,
+    BudgetStop,
+    Timeout,
+    Cancelled,
+    ProviderFailure { taxonomy: ProviderFailureTaxonomy },
+    FatalToolRefusal,
+    InvalidStructuredOutput,
+}
+```
+
+### Error taxonomy (closed) — attempt.rs:188-223
+
+```rust
+pub enum RetryableKind {
+    RateLimited { retry_after_ms: Option<u64> },
+    Overloaded,
+    TransientTransport,
+}
+
+pub enum NonRetryableKind { Auth, InvalidRequest, RefusedContent }
+
+/// `Ambiguous` is the honest timeout case: the provider may have accepted,
+/// executed, and billed a request whose response never arrived, so usage for
+/// that attempt stays pending/unknown rather than zero.
+pub enum AdapterError {
+    Retryable(RetryableKind),
+    NonRetryable(NonRetryableKind),
+    Ambiguous { reason: String },
+}
+```
+
+### Submission outcome, attempt id, reservation id (attempt.rs:10-18, 177-186)
+
+```rust
+pub struct AttemptId(pub String);
+pub struct ReservationId(pub String);  // "A PRD-064 budget reservation bound to exactly one AttemptId"
+
+pub struct SubmitOutcome {
+    pub stop_reason: AdapterStopReason,
+    pub usage: UsageCategories,
+    pub provider_request_id: Option<String>,
+    pub provider_idempotency_key: Option<String>,
+}
+```
+
+### Test double — `FakeInferenceAdapter` / `ScriptedTurn` (attempt.rs:251-318)
+The reference/offline implementation your fixture suite should mirror the pattern of:
+```rust
+pub struct ScriptedTurn {
+    pub events: Vec<StreamEvent>,
+    pub outcome: Result<SubmitOutcome, AdapterError>,
+}
+pub struct FakeInferenceAdapter { turns: Mutex<VecDeque<ScriptedTurn>>, cancelled: Mutex<Vec<AttemptId>> }
+```
+It's used both in-crate and by `crates/familiar-ai-daemon/tests/raw_runtime.rs`. Your `anthropic_api.rs`'s wiremock-based tests are a *different, additional* layer that exercises the real Anthropic wire format; `FakeInferenceAdapter` stays the no-network double for loop-level tests.
+
+### Cancellation (raw_runtime.rs:732-747)
+```rust
+pub struct CancellationToken(Arc<AtomicBool>);
+impl CancellationToken {
+    pub fn new() -> Self { .. }
+    pub fn cancel(&self) { .. }
+    pub fn is_cancelled(&self) -> bool { .. }
+}
+```
+Cooperative only; loop checks it every iteration (`raw_runtime.rs:868-869`) and wraps `adapter.submit()` in `tokio::time::timeout` when a wall-clock ceiling is configured (`raw_runtime.rs:895-915`), converting a timeout into `StopReason::Timeout` with `AttemptUsage { ambiguous: true, usage: UsageCategories::default() }` — this is the exact mechanism PRD-059's acceptance criterion #10 ("a timeout with unknown completion records ambiguous usage") relies on; the adapter itself doesn't need to implement this, the loop does it around `submit()`.
+
+### Retries/attempts model (raw_runtime.rs:830-834, 940-945)
+- `run_loop` takes `mint_attempt_id: impl FnMut() -> AttemptId` — **every submission mints a fresh `AttemptId`**; there is no adapter-internal retry. `AttemptUsage { attempt_id, usage, ambiguous }` is recorded per attempt regardless of outcome.
+- Tool capability/validation/authorization/journal machinery (`CapabilityId`, `ToolCapability`, `ValidatedCall`, `ToolAuthorizer`, `ToolJournal`, `ScopeAuthorizer`, `resume_decision_for`) is entirely orthogonal to PRD-059 — none of it needs to change; PRD-059 only plugs a new `InferenceAdapter` impl in.
+
+---
+
+## 2. familiar-ai-llm/src/attempt.rs — "attempt" model
+
+Already fully quoted above. Summary of the model:
+- **`AttemptId(String)`** — globally unique per submission, minted fresh even for a retry of the same logical turn (comment at attempt.rs:10-12).
+- **`ReservationId(String)`** — "A PRD-064 budget reservation bound to exactly one `AttemptId`" (attempt.rs:16-18). This type is declared here but the actual reservation *acquire/settle* mechanics live in `crates/familiar-ai-storage/src/repos/reservation.rs` (PRD-064's `ReservationRepository`), which is provider-agnostic resource-pool bookkeeping (nanoUSD budget, token pools, inference slots) — see item 9 below for its shape. `attempt.rs` itself does **not** call into `reservation.rs`; that wiring, if any, would happen at the daemon/host layer around `run_loop`, not inside the adapter.
+- Each `submit()` call is one attempt; `AttemptUsage` (in `raw_runtime.rs:715-722`) pairs an `AttemptId` with `UsageCategories` and an `ambiguous: bool` flag for provider-timeout-with-unknown-completion cases.
+
+---
+
+## 3. crates/familiar-ai-llm/src/ — file inventory
+
+```
+crates/familiar-ai-llm/src/
+├── attempt.rs      13KB  PRD-058 InferenceAdapter contract (see #1/#2)
+├── backend.rs       642B  Older, separate "LlmBackend" trait (summarize/classify/embed) for the
+│                          local-LLM manager (unrelated to InferenceAdapter)
+├── backends/
+│   ├── mod.rs             `pub mod openai_http; pub mod stub;`
+│   ├── openai_http.rs 15KB `OpenAiHttpBackend` — reqwest-based HTTP client implementing `LlmBackend`
+│   │                        against any OpenAI-compatible server (Ollama/LM Studio/vLLM/etc.)
+│   └── stub.rs             No-network stub backend (not read in full, but referenced by factory.rs)
+├── error.rs          1.3KB `LlmError` enum (NotLoaded/Config/Transport/Backend/Unhealthy/Timeout)
+├── factory.rs        2.6KB `BackendParams`, `build_stub()`, `build_http()` — backend construction
+├── heuristics.rs     4.7KB (not read in detail — routing heuristics for LlmManager, unrelated to PRD-058)
+├── lib.rs             730B module list + re-exports
+├── manager.rs        10KB `LlmManager` — lifecycle/health owner for `LlmBackend`
+├── router.rs         20KB `InferenceRouter` — routes among backends (unrelated to PRD-058 adapter)
+└── types.rs          1.8KB `HealthStatus`, `LlmHealthState`
+```
+
+**Crate doc comment (lib.rs:1-6):**
+```rust
+//! Local LLM manager + pluggable backends.
+//!
+//! The manager owns lifecycle and health state. Backends are dumb adapters.
+//! v1 ships two backends: `StubBackend` (no network) and `OpenAiHttpBackend`
+//! (any OpenAI-compatible HTTP server — Ollama, LM Studio, llama.cpp, vLLM,
+//! OpenRouter, etc.). mistral.rs and true in-process inference are out of
+//! scope for this PRD.
+```
+
+**Important distinction:** this crate contains **two unrelated adapter concepts**:
+1. The old `LlmBackend` trait (`backend.rs`) + `OpenAiHttpBackend`/`StubBackend`/`LlmManager`/`InferenceRouter` — a pre-existing local-model summarize/classify/embed subsystem, nothing to do with PRD-058/059.
+2. `attempt.rs`'s `InferenceAdapter` — the PRD-058 contract PRD-059 must implement.
+
+**Yes, there is existing HTTP client scaffolding to follow the pattern of**: `crates/familiar-ai-llm/src/backends/openai_http.rs`. Key pattern elements worth mirroring in `anthropic_api.rs`:
+- `reqwest::Client` built once in a `new()` constructor with `.timeout(Duration::from_secs(...))`, config validated eagerly (empty base_url/model → `LlmError::Config`).
+- A `Semaphore`-based concurrency limiter (`Arc<Semaphore>`).
+- `map_request_error(reqwest::Error) -> LlmError` classifying timeout vs connect vs other.
+- Status-code branching (`StatusCode::OK`, `UNAUTHORIZED`/`FORBIDDEN`, `TOO_MANY_REQUESTS`, `is_server_error()`).
+- **wiremock-based tests** using `MockServer::start()`, `Mock::given(method(...)).and(path(...)).respond_with(ResponseTemplate::new(N).set_body_json(...)).mount(&server)`, then `backend.health_check().await` against `server.uri()`. This is the exact pattern to reuse for Anthropic's SSE `/v1/messages` streaming responses (wiremock supports raw body responses for SSE simulation via `.set_body_raw` / `.set_body_string` with `text/event-stream`).
+- **No pre-existing Anthropic code anywhere** — confirmed via `grep -rln "anthropic"` limited to `providers.rs`, `billing.rs`, `config_cli.rs`, `migrate.rs`, `repos/accounting.rs`, `repos/billing.rs`, and daemon tests — none in `familiar-ai-llm` or `familiar-ai-agent`. You are building `anthropic_api.rs` from scratch.
+
+---
+
+## 4. crates/familiar-ai-agent/src/ — file inventory
+
+```
+crates/familiar-ai-agent/src/
+├── agent.rs        9.9KB  CodingAgent trait, ExecutionRequest/Result, redact_sensitive, ModelUsage, budgets
+├── claude_code.rs   47KB  ClaudeCodeAgent — subprocess-driven harness adapter (implements CodingAgent)
+├── codex.rs         25KB  CodexAgent — subprocess-driven harness adapter (implements CodingAgent)
+├── isolation.rs     14KB  Landlock/sandbox-exec/process-group isolation primitives (isolated_command, Watchdog)
+├── lib.rs           816B  module list + re-exports
+├── raw_runtime.rs   44KB  PRD-058 loop core (see #1)
+└── registry.rs      23KB  AdapterFactory/AdapterFactories/WorkerRegistry — CLI-harness adapter registry
+```
+
+**lib.rs full content:**
+```rust
+mod agent;
+mod claude_code;
+mod codex;
+mod isolation;
+pub mod raw_runtime;
+mod registry;
+
+pub use agent::{
+    redact_sensitive, AgentExecutionError, BudgetCapability, BudgetDenomination,
+    CodexExecutionSession, CodingAgent, ExecutionBudget, ExecutionRequest, ExecutionResult,
+    FilesystemPolicy, IsolationCapability, ModelUsage,
+};
+pub use claude_code::{ClaudeCodeAgent, ClaudeCodeSettings, READ_ONLY_RESTRICTIONS};
+pub use codex::CodexAgent;
+pub use isolation::isolated_command;
+#[cfg(unix)]
+pub use isolation::{finish_watchdog, spawn_watchdog, Watchdog};
+pub use registry::{
+    builtin_adapter_factories, AdapterFactories, AdapterFactory, CandidateEvaluation,
+    RejectionReason, RouteError, RouteRequest, RouteRule, SelectionRecord, WorkerCapability,
+    WorkerDescriptor, WorkerRegistry, WorkerStage,
+};
+```
+
+**No existing `anthropic.rs` stub or partial content** — confirmed both by directory listing and by the crate's `mod` declarations.
+
+**Two distinct "adapter" registration patterns exist in this crate, and they are for different runtimes:**
+1. **`registry.rs`'s `AdapterFactory`/`AdapterFactories`** — for CLI-harness workers (Claude Code, Codex). Keyed by `runtime_id` string, builds `Box<dyn CodingAgent>`:
+   ```rust
+   pub trait AdapterFactory: Send + Sync {
+       fn adapter_id(&self) -> &str;
+       fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String>;
+   }
+   pub struct AdapterFactories { factories: BTreeMap<String, Box<dyn AdapterFactory>> }
+   impl AdapterFactories {
+       pub fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String> {
+           self.factories.get(&worker.runtime_id)...build(worker)
+       }
+   }
+   ```
+   This is **not** the mechanism PRD-059 plugs into — `anthropic-api` is a raw runtime speaking `InferenceAdapter`, not a `CodingAgent` subprocess harness. Do not register it here.
+2. **No equivalent registry/factory exists yet for `InferenceAdapter`** — confirmed in item 10 below: the daemon and agent crates currently only ever construct `FakeInferenceAdapter` directly in tests; there is no `"anthropic-api" -> Box<dyn InferenceAdapter>` factory anywhere. **PRD-059 will need to introduce this wiring itself** (likely a small function/registry in `crates/familiar-ai-agent/src/anthropic.rs` and/or daemon-side code, following the `AdapterFactories` naming convention loosely but keyed to `InferenceAdapter` rather than `CodingAgent`).
+
+---
+
+## 5. crates/familiar-ai-core/src/config/providers.rs
+
+**This file already exists** (339 lines) — it is not a PRD-059-authored file from scratch; PRD-059 will extend it. Full relevant content quoted:
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    pub kind: EndpointProviderKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_mode: Option<BillingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<InferenceRuntimeKind>,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    pub auth: AuthDescriptor,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<DeployRecipeConfig>,
+}
+
+pub enum EndpointProviderKind { Inference, DeployTarget, Billing }
+
+pub enum BillingMode {
+    AnthropicOrganization, OpenAiOrganization, Bedrock, Vertex, Foundry, ExternalBilling,
+}
+
+pub enum InferenceRuntimeKind { Unsloth }   // <-- only one runtime kind exists today; anthropic-api is absent
+
+pub enum AuthDescriptor {
+    None, CliLogin(String), Env(String), CredentialStore(CredentialStoreDescriptor), SshAgent,
+}
+```
+
+**Key finding: `InferenceRuntimeKind` currently only has `Unsloth`.** PRD-059 needs to decide whether `anthropic-api` needs its own `InferenceRuntimeKind` variant here, or whether (more likely, per PRD-057's design) the worker's `runtime` string lives in `RegistryWorkerConfig.runtime: Option<String>` (in `registry_workers.rs`, an untyped string validated only by identifier rules, not a closed enum) rather than in `ProviderConfig.runtime: Option<InferenceRuntimeKind>` — the latter field's doc comment says "Deploy-target executable... Absent selects legacy SSH transport" is for `via`, but `runtime: Option<InferenceRuntimeKind>` appears to be scoped narrowly to the Unsloth deploy-target use case per its validation rules (`EndpointProviderKind::Inference` provider validation doesn't reference `runtime` at all in the `validate()` match arms shown — worth re-checking at implementation time whether `runtime` is even meaningful for a `kind = "inference"` Anthropic provider entry, or whether Anthropic's provider config just needs `kind = Inference`, `host`, `auth`, `models` with no runtime tag, and the runtime tag lives purely on the *worker* side in `registry_workers.rs`).
+
+`ProviderConfig::validate()` (providers.rs:169-293) enforces per-`kind` invariants — e.g. an `Inference` provider must not set `billing_mode`/`organization_id`/`recipe`/`capabilities`/`via`. Any new fields PRD-059 adds must respect `#[serde(deny_unknown_fields)]` and this closed validation.
+
+**Companion file — `agent_runtime.rs` capability-profile-adjacent config** (`crates/familiar-ai-core/src/config/agent_runtime.rs`, full file read): defines `AgentRuntimeConfig` (loop-level, not provider-level — `enabled`, `offered_capabilities: Vec<String>` validated against `AGENT_RUNTIME_CAPABILITIES` (a hardcoded mirror of `CapabilityId::as_str()` since core can't depend on the agent crate), `AgentRuntimeCeilingsConfig`, `AgentRuntimeSandboxConfig` (`allowed_commands`, `network_allowed`, `allowed_environment` with `FORBIDDEN_ENVIRONMENT_MARKERS = ["BILLING","ADMIN","STRIPE","PAYMENT","ROOT_"]` fail-closed check)). This is the config PRD-059's Anthropic worker would reference for tool offering/ceilings, but it's runtime-agnostic — no changes needed here for PRD-059 unless capability-profile-per-provider defaults are added.
+
+**The actual "capability profile" concept** lives in a different file — `crates/familiar-ai-core/src/config/registry_workers.rs` — see item 7 below.
+
+---
+
+## 6. docs/contracts/agent-loop.md
+
+Full file read (229 lines). Section-by-section summary:
+
+- **State machine** (line 46-77): `compose -> submit -> streaming turn -> {text|tool calls|structured output|stop} -> validate -> authorize -> execute (journaled) -> insert results -> iterate | terminal`. Explicitly: "Usage for the attempt is the adapter's final reported total, never derived by summing deltas" (line 61-62) — **this means PRD-059's `SubmitOutcome.usage` must be the authoritative final total from Anthropic's terminal `message_delta`/`message_stop` usage block, not a sum of streamed `UsageDelta` events**, even though the adapter also emits `StreamEvent::UsageDelta` along the way for observers.
+- **Canonical tool capabilities table** (line 79-98): the 7 capabilities (`read-file`, `search-list`, `run-command`, `apply-edit`, `report-progress`, `submit-evidence`, `request-escalation`) with side-effect classes; explicit: a projection (including a "native provider tool definition") "**MAY** narrow this set... it **MUST NOT** widen it or invent a capability outside this table." PRD-059's native Anthropic tool projection must map 1:1 (or a subset) onto exactly these 7 capability ids — no extra tools.
+- **Inference adapter contract section** (line 100-122) — this is the normative doc-form of the trait I quoted in #1, explicitly states: "Adding an adapter is configuration plus an `InferenceAdapter` implementation; it changes no loop, authority, or persistence semantics" — directly matches PRD-059's first acceptance criterion.
+- **Write-ahead tool journal** (line 124-148): intent-before-execution durability rule and the `resume_decision_for` table (read-only/idempotent-write replay allowed, destructive fails closed). Journal entries key on the **model-issued call id**, not the inference attempt — "A provider-level retry that produces the *same* tool call is not a new journal entry merely because the inference attempt differs." Relevant to PRD-059 because a retried Anthropic request that re-issues the same `tool_use.id` must map back to the same journal call_id.
+- **Write-scope authorization** (line 150-164): PRD-013-Expected-Files-derived write allowlist; `run-command` gated by `argv[0]` allowlist. Not adapter-specific.
+- **Authority and sandboxing** (line 166-188): no ambient authority; environment allowlist-only; filesystem worktree-confined; network deny-by-default; cancellation kills process groups; **"No tool result and no model output can grant a capability, raise authority, or approve anything"** — i.e., PRD-059's adapter must never let Anthropic's response content (including thinking blocks or refusals) be treated as anything but untrusted `ToolResult`/text data.
+- **Stop reasons** (line 190-201): the closed `StopReason` enum (quoted in #1) plus the invariant "a provider error is never relabeled `TokenOrContextCeiling`, and a fatal tool refusal is never recorded as `Completed`" — directly matches PRD-059 acceptance criterion #6 about refusal stops being honest terminal reasons.
+- **Evidence and accounting** (line 203-220): Evidence tables (`agent_runtime_evidence`, `agent_runtime_tool_intents`, `agent_runtime_tool_results`, migration 055) reconstruct disposition/stop-reason/resume-point deterministically and must never carry prompt/response/source/tool-output content. **PRD-051 usage lands via `familiar_ai_daemon::agent_runtime::persist_run_outcome`, which calls `AccountingRepository::append_observation` for every attempt** — same ledger every execution uses (see #9/#10 below for exact signatures). "An accounting row **MUST NOT** ever carry a prompt, a response, source code, or tool output." An attempt with entirely unknown usage records an explicit `unknown_reason`, never a fabricated zero.
+- **Test harness** (line 222-229): every test in `crates/familiar-ai-agent/tests/raw_runtime.rs` and `crates/familiar-ai-daemon/tests/raw_runtime.rs` runs exclusively against `FakeInferenceAdapter` — "No test in either file performs, or is able to perform, a live or billable call." PRD-059's own test files (`crates/familiar-ai-agent/tests/anthropic.rs`, `crates/familiar-ai-daemon/tests/anthropic_adapter.rs`) should follow the identical no-network-except-wiremock discipline.
+- **Explicit non-goal** (line 33-38): "Real hosted provider wire adapters (Anthropic/OpenAI/xAI/local-runtime HTTP clients). This contract defines the adapter trait every such client implements; shipping one is configuration plus adapter work under the PRD-057 contract, not a change to this document." — confirms PRD-059 should not need to modify `agent-loop.md`'s normative content, only reference it, unless there's a doc gap (e.g., no mention yet of cache_control breakpoint placement specifics, thinking-block replay rules, or the closed `AdapterStopReason` list at the wire-mapping level — those belong in the new `docs/contracts/anthropic-adapter.md`).
+
+---
+
+## 7. docs/contracts/providers.md (does not exist) — actual provider-contract docs
+
+**`docs/contracts/providers.md` does not exist.** PRD-057's own `expected_files` list names it, but the actual repo structure splits provider contract content into an index + domain docs (`providers-index.md` is the stable index). All four short docs read in full:
+
+**`providers-index.md`** (25 lines) — lists domain documents: inference-providers.md, billing-sources.md, deploy-targets.md, credential-authentication.md, registry-migration.md. Core invariant: "Provider and model identifiers are stable, validated strings... Unknown kinds and unknown extension fields fail validation closed."
+
+**`inference-providers.md`** (16 lines) — covers `kind = "inference"` endpoints. Current content is Unsloth-specific: "Familiar probes a provider before persisting it and fails closed when the endpoint or required authentication is unavailable. Discovery results are cached with their verification time... `kind = "inference"` with `runtime = "unsloth"` identifies an externally managed Unsloth Studio endpoint... Familiar discovers it through authenticated OpenAI-compatible `/v1/models`; authentication must be an `env: NAME` reference and credential bytes are never persisted." **PRD-059 will likely need to add an Anthropic-specific paragraph here** (or in the new `anthropic-adapter.md`) covering non-billable model-metadata/token-counting probing per its acceptance criteria.
+
+**`credential-authentication.md`** (13 lines) — "Authentication is bring-your-own and represented only by a diagnostic descriptor such as a CLI login, environment-variable name, SSH agent, or `none`... credentials must not appear in configuration, process arguments, logs, reports, comments, or database rows."
+
+**`billing-sources.md`** (11 lines) — currently a stub: "No invariants recorded yet beyond the shared core invariants and credential authentication rules. Kind-specific rules land with the PRD that introduces authoritative billing collection for a given provider." (PRD-052 is the org-billing-collection PRD; see #12.)
+
+**Worker spec identity / capability profiles / alias-vs-resolved / non-billable probing** actually live in `docs/prds/done/PRD-057.md` (the design document, status `completed`) rather than in `docs/contracts/`:
+- **Worker spec identity model** (PRD-057.md "Domain model" section): `ProviderId`, `RuntimeId` (e.g. `anthropic-api`, `openai-api`, `ollama`), `ModelId` (may be explicit `unknown`/`runtime-selected`), `ModelArtifactId` (local artifacts only), `AuthProfileId`, `CapabilityProfileId`, aggregated as `WorkerSpec`. Example config block for exactly PRD-059's target runtime:
+  ```toml
+  [worker_registry.workers.claude-api]       # raw hosted API
+  provider = "anthropic"
+  runtime = "anthropic-api"
+  model = "claude-sonnet-5"
+  auth_profile = "env-anthropic-key"
+  ```
+- **Alias vs resolved identity**: "The requested model identifier and the response's resolved identity are both recorded (PRD-057: aliases are identity risks)" (from PRD-059.md itself, echoing PRD-057's `ModelId` doc: "harness... hides exact identity, and Familiar records what the runtime reports per-observation... without pretending the spec pinned it").
+- **Non-billable probing (PRD-047 discipline)**: "Each capability persists with provenance: declared / probed (verified by a safe, non-billable probe under PRD-047 discipline) / observed / unknown... Probes that would spend money or tokens are not probes; those facts arrive as observations." This directly grounds PRD-059's acceptance criterion "Capability and limit probing uses non-billable surfaces (model metadata and token counting), and probe failure leaves capabilities unknown."
+- **Credential resolution as external references**: "Auth profiles are references under the PRD-047 BYO-Auth contract; specs, selection rows, scores, and logs never carry credential values. A spec with a missing or failed auth profile fails closed with the operator remedy."
+
+**Implementation-level types matching this model** — `crates/familiar-ai-core/src/config/registry_workers.rs` (read lines 185-410):
+```rust
+pub enum RuntimeCapabilityConfig {
+    EditsFiles, ExecutesCommands, ReadsRepository, NativeToolCalling, McpClient,
+    StructuredOutput, Streaming, ResumableSessions, ContextCompaction, PromptCaching,
+    ImageInput, MaxContext, ReasoningControls, SandboxBehavior, RemoteOrLocal,
+    UsageReportingCategories, CostReportingMode, ParallelToolCalls, DeterministicSeed,
+}
+pub enum CapabilityProvenanceConfig { Declared, Probed, Observed, Unknown }
+pub struct CapabilityProfileConfig {
+    pub capabilities: BTreeMap<RuntimeCapabilityConfig, CapabilityProvenanceConfig>,
+}
+pub struct RegistryWorkerConfig {
+    pub adapter: Option<AgentAdapterKind>,
+    pub provider: String,
+    pub model: String,
+    pub runtime: Option<String>,              // <-- free string; "anthropic-api" goes here
+    pub model_artifact: Option<String>,
+    pub auth_profile: Option<String>,
+    pub capability_profile: Option<String>,
+    pub runtime_config: Option<OllamaRuntimeConfig>,  // only Ollama has a typed extension today
+    ...
+}
+impl RegistryWorkerConfig {
+    pub fn runtime_id(&self) -> Result<&str, String> { ... }
+    pub fn canonical_spec_identity(&self) -> Result<String, String> { // hashes provider+runtime+model+artifact+profile -> "wspec-sha256:..."
+    pub fn empirical_version(&self) -> Result<String, String> { ... } // hashes spec identity + material params -> "wver-sha256:..."
+}
+pub struct WorkerRegistryConfig {
+    pub capability_profiles: BTreeMap<String, CapabilityProfileConfig>,
+    ...
+}
+```
+**Note:** there is no `runtime_config` typed extension for `anthropic-api` yet (only `OllamaRuntimeConfig` exists as "the only runtime extension introduced in this PRD [057]... Other runtimes must add their own closed adapter-owned type when their adapter is added" — comment at line 280-282). If PRD-059 needs Anthropic-specific worker-level settings (e.g., thinking/effort defaults, service-tier), it likely needs its own `AnthropicRuntimeConfig` struct following the `OllamaRuntimeConfig` pattern.
+
+The exact BYO-Auth fail-closed remedy string when a worker's `auth_profile` is missing — `crates/familiar-ai-core/src/config/mod.rs:456-464`:
+```rust
+if let Some(profile) = &worker.auth_profile {
+    if !self.auth_profiles.contains_key(profile) {
+        return Err(FamiliarError::Config(format!(
+            "worker_registry.workers.{id} auth profile '{profile}' is missing; configure [auth_profiles.{profile}] with a BYO-Auth descriptor"
+        )));
+    }
+}
+```
+
+---
+
+## 8. docs/contracts/inference-providers.md and providers-index.md
+
+Both fully quoted above in #7. Neither currently documents a per-adapter listing convention beyond `providers-index.md`'s "Domain documents" bullet list. **Adding `docs/contracts/anthropic-adapter.md` (PRD-059's own expected file) will need a new entry added to `providers-index.md`'s "Domain documents" list** (following the exact bullet format: `- [Anthropic adapter](anthropic-adapter.md) — <one-line summary>.`) to be consistent with how `inference-providers.md`, `billing-sources.md`, `deploy-targets.md`, `credential-authentication.md`, `registry-migration.md` are all linked there. There is no other provider-adapter doc yet to pattern-match against (no `openai-adapter.md`, `xai-adapter.md`, etc. exist — PRD-059 is the first PRD-058-adapter-specific doc), so you'll be establishing the convention.
+
+---
+
+## 9. crates/familiar-ai-storage/src/repos/ — PRD-051 usage/observations repo
+
+File: **`crates/familiar-ai-storage/src/repos/accounting.rs`**. Directory listing of `repos/` (28 files) confirmed via `ls`.
+
+### `UsageObservation` struct (accounting.rs:72-103)
+
+```rust
+#[derive(Debug, Clone)]
+pub struct UsageObservation<'a> {
+    pub execution_id: &'a str,
+    pub attempt_id: &'a str,
+    pub stage: &'a str,
+    pub session_id: Option<&'a str>,
+    pub worker_identity: &'a str,
+    pub adapter: &'a str,
+    pub cli_version: Option<&'a str>,
+    pub model_identity: Option<&'a str>,
+    pub service_tier: Option<&'a str>,
+    pub provider_request_id: Option<&'a str>,
+    pub uncached_input_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub unknown_reason: Option<&'a str>,
+    pub period_start: &'a str,
+    pub period_end: &'a str,
+    pub terminal_status: &'a str,
+    pub source_event_hash: &'a str,
+    pub provider_cost_lexical: Option<&'a str>,
+    /// Canonical Git common-directory evidence; absent is explicitly degraded.
+    pub project_resolution_evidence: Option<&'a str>,
+    pub output_register_id: &'a str,
+    pub output_register_version: &'a str,
+    pub input_compression_id: &'a str,
+    pub input_compression_version: &'a str,
+    pub compression_experiment: Option<&'a str>,
+    pub compression_lane: Option<&'a str>,
+}
+```
+
+### Insert function signature (accounting.rs:607-645)
+
+```rust
+/// Idempotency is keyed by the sanitized source-event hash. Evidence and
+/// its observation commit atomically; replay returns the existing
+/// observation so a missing idempotent cost fact can still be repaired.
+pub fn append_observation(
+    &self,
+    value: &UsageObservation<'_>,
+) -> familiar_ai_core::Result<Option<String>> {
+    // idempotency check: SELECT observation_id ... JOIN accounting_evidence ON evidence.source_event_hash=?1
+    // if found -> return Ok(Some(existing))  [replay is idempotent]
+    // else: mints evi_<hex>/obs_<hex>, resolves project via resolve_project(project_resolution_evidence),
+    //   looks up spec_identity/empirical_version from worker_selections (execution_id, stage) latest row,
+    //   INSERTs into accounting_evidence(...) then usage_observations(...) inside one transaction, commits.
+}
+```
+This is the exact idempotent-replay mechanism referenced in PRD-059's acceptance criterion: "replay of the same persisted provider event is idempotent while separate billable attempts remain separate observations" — **`source_event_hash` is the idempotency key**; the daemon-side caller (`persist_run_outcome`, see #10) currently computes it as `sha256_hex(execution_id + ":" + attempt_id)` — since every attempt already has a unique `AttemptId`, this naturally gives "separate billable attempts remain separate observations" for free, and a provider idempotency key/`provider_request_id` replay would need to reuse the *same* `attempt_id`/hash to be treated as the same event.
+
+### Related cost-estimate append functions (accounting.rs:647-691, see #12 for full detail)
+`append_vendor_estimate`, `append_legacy_configured_estimate`, `append_credit_estimate` — these are how a `UsageObservation`'s tokens get turned into a `local-estimate` nanoUSD cost row via `cost_estimates` (append-only, `UNIQUE(observation_id, provenance)`), keyed to a `price_schedules` row.
+
+---
+
+## 10. familiar-ai-daemon/src/agent_runtime.rs and tests/raw_runtime.rs
+
+**`crates/familiar-ai-daemon/src/agent_runtime.rs`** (615 lines, read in full) is the daemon-side wiring for the PRD-058 loop's injected traits:
+- `SqliteToolJournal<'a>` implementing `ToolJournal` (backed by migration 055 tables via `AgentRuntimeRepository`).
+- `write_scope_authorizer_from_prd(...)` — builds `ScopeAuthorizer` from a PRD's `## Expected Files` section.
+- `SandboxedToolExecutor` implementing `ToolExecutor` — worktree-confined `read_file`/`search_list`/`apply_edit`/`run_command`, environment-scrubbed subprocess execution.
+- **`persist_run_outcome(conn, execution_id, stage, worker_identity, adapter, model_identity, project_resolution_evidence, outcome: &RunOutcome) -> familiar_ai_core::Result<()>`** (line 465-574) — this is the function PRD-059's daemon integration will call after `run_loop` completes (or per-attempt, depending on design). It:
+  1. Records a `worker_selections` row via `WorkerSelectionRepository::record` with `rule: "raw-runtime"`.
+  2. For each `AttemptUsage` in `outcome.attempts`, calls `agent_runtime_repo.record_attempt(...)` then builds `source_event_hash = sha256_hex(execution_id + ":" + attempt_id)` and calls `accounting_repo.append_observation(&UsageObservation { ... })`.
+  3. Records evidence via `agent_runtime_repo.record_evidence(...)`.
+  
+  **Currently every field the Anthropic adapter would want to populate is hardcoded to `None`/placeholder** in this generic function: `session_id: None`, `service_tier: None`, `provider_request_id: None`, `provider_cost_lexical: None`, `output_register_id: "raw-runtime-none"`, `input_compression_id: "raw-runtime-none"`. **PRD-059 will need `persist_run_outcome` to gain new parameters (or a wrapper) to carry per-attempt `provider_request_id`/`service_tier`/cost-schedule data through from `SubmitOutcome`**, since today `AttemptUsage` (in `raw_runtime.rs`) only carries `attempt_id`/`usage`/`ambiguous` — `provider_request_id` from `SubmitOutcome` is currently dropped on the floor inside `run_loop` (see `raw_runtime.rs:940-945`, only `usage` is captured, not `outcome.provider_request_id` or `outcome.provider_idempotency_key`). **This is a real gap PRD-059 must close** — either widen `AttemptUsage` in the PRD-058 loop core, or plumb it separately.
+
+- **No adapter-selection registry/factory by runtime string exists** in `agent_runtime.rs` or anywhere else in the daemon crate. `persist_run_outcome` and the journal/executor wiring are adapter-agnostic; the actual `&dyn InferenceAdapter` is passed into `run_loop` directly by the caller with no factory indirection. **Confirmed via `crates/familiar-ai-daemon/tests/raw_runtime.rs`** (708 lines, read the first 150): it constructs `FakeInferenceAdapter::new(vec![ScriptedTurn{...}])` directly and passes `&adapter` into `run_loop(...)` — there is no `match runtime_str { "anthropic-api" => ..., }` selection anywhere. **PRD-059 will need to introduce this selection mechanism itself** (a small factory/registry keyed by `RegistryWorkerConfig::runtime_id()` string returning `Box<dyn InferenceAdapter>`, likely living in `crates/familiar-ai-agent/src/anthropic.rs` or a new daemon-side wiring module) since none exists to extend.
+
+- `resume_readiness(conn, execution_id) -> familiar_ai_core::Result<ResumeReadiness>` — reads pending journal intents and applies `resume_decision_for` per intent's side-effect class; unrelated to the specific adapter.
+
+- The daemon test file's imports (`raw_runtime.rs:7-22`) show the exact combination of crates a new `anthropic_adapter.rs` test will need: `familiar_ai_agent::raw_runtime::{run_loop, ...}`, `familiar_ai_core::config::AgentRuntimeSandboxConfig`, `familiar_ai_daemon::agent_runtime::{persist_run_outcome, ...}`, `familiar_ai_llm::attempt::{AdapterStopReason, AttemptId, FakeInferenceAdapter, ScriptedTurn, StreamEvent, SubmitOutcome, UsageCategories}`, `familiar_ai_storage::repos::agent_runtime::AgentRuntimeRepository`, `familiar_ai_storage::Database`. A PRD-059 daemon test would swap `FakeInferenceAdapter` for a real `AnthropicApiAdapter` pointed at a `wiremock::MockServer`.
+
+---
+
+## 11. Cargo.toml dependency survey
+
+**Workspace-level (`/Cargo.toml`)** already declares (with pinned versions callers use via `.workspace = true`):
+```
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+wiremock = "0.6"
+```
+
+**`crates/familiar-ai-core/Cargo.toml`**: thiserror, serde, figment, toml, chrono, dirs, libc, tracing, serde_json, ring. **No reqwest, no tokio, no async-trait, no wiremock.** (Core stays foundational/sync — consistent with the comment in `attempt.rs` that core has no dependency on the agent crate.)
+
+**`crates/familiar-ai-llm/Cargo.toml`**: already has `familiar-ai-core`, `familiar-ai-tokens`, `async-trait`, `tokio` (sync/rt/time/macros features), `tracing`, `thiserror`, `serde`, `serde_json`, **`reqwest`**, `chrono`. Dev-deps: **`wiremock`**, `tokio` (full + test-util). — **This crate is fully equipped for `anthropic_api.rs` today, zero Cargo.toml changes needed** for the HTTP+SSE+wiremock work.
+
+**`crates/familiar-ai-agent/Cargo.toml`**: `familiar-ai-llm` (path dep), serde_json, libc, ring, tokio (time/macros/rt). Linux-only `landlock`. Dev-deps: tempfile, tokio (macros/rt/rt-multi-thread). **No reqwest, no wiremock, no async-trait declared directly** (transitively available via `familiar-ai-llm` but not usable directly unless re-exported or added). Since `crates/familiar-ai-agent/tests/anthropic.rs` is an expected file and will presumably want to build a real `wiremock::MockServer` and feed it into an adapter constructed via `familiar_ai_llm::anthropic_api`, **you will likely need to add `wiremock` (and possibly `reqwest`) to `familiar-ai-agent`'s `[dev-dependencies]`** unless that test only exercises the loop with a `FakeInferenceAdapter`-style double and leaves wire-level testing entirely to `familiar-ai-llm`'s own tests.
+
+**`crates/familiar-ai-daemon/Cargo.toml`**: has `tokio.workspace`, `reqwest.workspace` in `[dependencies]`. Dev-deps: `familiar-ai-testutil`, `tempfile`, `assert_cmd`, `predicates`, `nix`. **No `wiremock` dev-dependency today** — if `crates/familiar-ai-daemon/tests/anthropic_adapter.rs` needs to mock HTTP directly (rather than just exercising `persist_run_outcome` against a `FakeInferenceAdapter`-produced `RunOutcome`, which needs no HTTP mocking at all), you'll need to add `wiremock` to daemon's dev-deps too. Given the existing `raw_runtime.rs` daemon test pattern uses `FakeInferenceAdapter` exclusively (no wiremock), the more likely/consistent design is that `anthropic_adapter.rs` in the daemon crate also just drives `persist_run_outcome`/`run_loop` with either `FakeInferenceAdapter` or a thin fixture-backed `InferenceAdapter`, while true HTTP-wire tests live in `familiar-ai-llm`'s own `#[cfg(test)]` module (matching `openai_http.rs`'s pattern) or in `familiar-ai-agent/tests/anthropic.rs`.
+
+**Existing HTTP client conventions elsewhere in the workspace:**
+- `crates/familiar-ai-llm/src/backends/openai_http.rs` — **async** `reqwest::Client`, wiremock-tested (see #3).
+- `crates/familiar-ai-daemon/src/billing.rs` — **blocking** `reqwest::blocking::Client` (`Client::builder().timeout(Duration::from_secs(15))`), used for Anthropic's own organization-billing API (`/v1/organizations/me`, `/v1/organizations/cost_report`) with `x-api-key` + `anthropic-version: 2023-06-01` headers — this is your closest existing precedent for calling Anthropic's actual API surface, though it's synchronous/blocking (daemon CLI context) rather than async (adapter/loop context). PRD-059's `anthropic_api.rs` should use the **async** `reqwest::Client` pattern (matching `openai_http.rs` and the `async_trait` `InferenceAdapter`), not the blocking one.
+- `crates/familiar-ai-daemon/src/config_cli.rs` also builds HTTP clients (not read in detail, but greppable at the same import).
+- `familiar-ai-mcp` has `tokio` but no direct `reqwest` dependency found.
+
+---
+
+## 12. PRD-052 / billing-sources.md / local-estimate & price schedules
+
+**`docs/contracts/billing-sources.md`** is currently a stub (see #7) — no Anthropic-specific invariants recorded yet.
+
+**Config-side price schedule shape** — `crates/familiar-ai-core/src/config/accounting.rs` (full file, 82 lines):
+```rust
+pub struct ExecutionHistoryConfig {
+    pub pricing: BTreeMap<String, ExecutionPrice>,
+    /// Append-only schedule declarations. A changed price uses a new key.
+    pub price_schedules: BTreeMap<String, PriceScheduleConfig>,
+    pub subscriptions: BTreeMap<String, SubscriptionDeclarationConfig>,
+}
+pub struct PriceScheduleConfig {
+    pub effective_at: String,
+    pub currency: PriceCurrency,          // enum { USD }
+    pub calculation_version: String,
+    pub models: BTreeMap<String, PriceScheduleRateConfig>,
+}
+pub struct PriceScheduleRateConfig {
+    pub uncached_input_nanousd_per_million: Option<u64>,
+    pub cache_read_nanousd_per_million: Option<u64>,
+    pub cache_write_nanousd_per_million: Option<u64>,
+    pub output_nanousd_per_million: Option<u64>,
+    pub reasoning_output_nanousd_per_million: Option<u64>,
+}
+```
+This `PriceScheduleRateConfig` shape maps **exactly** onto PRD-059's "versioned, dated, source-attributed price schedules" requirement and onto `UsageObservation`'s token categories 1:1 — this is almost certainly where PRD-059's Anthropic price-schedule entries get declared in `config/default.toml` (each schedule keyed by a string id, `effective_at` date, `models` map by model identifier).
+
+**Storage-side (`crates/familiar-ai-storage/migrations/030_usage_observation_ledger.sql`, lines 90-127)**:
+```sql
+CREATE TABLE price_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    effective_at TEXT NOT NULL,
+    currency TEXT NOT NULL CHECK(currency = 'USD'),
+    calculation_version TEXT NOT NULL,
+    rates_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE cost_estimates (
+    estimate_id TEXT PRIMARY KEY,
+    observation_id TEXT NOT NULL REFERENCES usage_observations(observation_id),
+    billing_mode TEXT NOT NULL CHECK(billing_mode IN ('local-estimate','subscription-declaration','authoritative-report','external-billing')),
+    provenance TEXT NOT NULL CHECK(provenance IN ('vendor-reported','configured-rate','known-zero')),
+    unit TEXT NOT NULL CHECK(unit IN ('nanoUSD','provider-credit')),
+    amount INTEGER,
+    lexical_amount TEXT,
+    unknown_reason TEXT,
+    schedule_id TEXT REFERENCES price_schedules(schedule_id),
+    calculation_version TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(observation_id, provenance),
+    CHECK ((amount IS NOT NULL) != (unknown_reason IS NOT NULL)),
+    CHECK (provenance != 'configured-rate' OR (schedule_id IS NOT NULL AND calculation_version IS NOT NULL))
+);
+```
+Migration `041_worker_spec_identity.sql` later adds `provider_id`, `runtime_id`, `model_or_artifact_id`, `billing_mode` columns onto `price_schedules` — confirming PRD-057's "Price and credit schedules... key on provider, runtime, model or artifact, and billing mode."
+
+**Repo functions to append a local-estimate cost row** (`accounting.rs:647-674`, already quoted in #9's related section):
+```rust
+pub fn append_vendor_estimate(&self, observation_id: &str, lexical_usd: &str) -> ... // provenance='vendor-reported'
+pub fn append_legacy_configured_estimate(&self, observation_id: &str, model: &str, amount_microusd: u64, rates_json: &str) -> ... // provenance='configured-rate', schedule_id="legacy-execution-history-pricing"
+```
+PRD-059 will call the `configured-rate` path (or introduce a new, more specific append fn) with `billing_mode = 'local-estimate'`, its own `schedule_id` (an Anthropic-dated schedule, not the `legacy-execution-history-pricing` placeholder), and `calculation_version` set from its versioned price-schedule config.
+
+**PRD-052 itself** — `docs/prds/done/PRD-052.md` mentions "independent cursors, exact money handling, and BYO-Auth" for org billing collection but wasn't read in full (not necessary — its collector implementation is `billing.rs`, already read in #13). PRD-059's acceptance criterion "reconcilable with PRD-052 organization cost collection" means: the Anthropic API-key `local-estimate` cost rows this adapter produces must land in the *same* `cost_estimates`/`usage_observations` shape that PRD-053's reconciliation (`AccountingRepository::reconcile_window`, seen at accounting.rs:839) already consumes against PRD-052's `openai_cost_revisions`-style authoritative facts (for Anthropic specifically, presumably an `anthropic_cost_revisions` table populated by `billing.rs::collect()` — not fully explored, but the reconciliation join logic already exists generically).
+
+---
+
+## 13. docs/contracts/credential-authentication.md and credential resolution code
+
+**Doc content** (full, 13 lines, quoted in #7): BYO-Auth only, diagnostic descriptor forms (CLI login / env-var name / SSH agent / `none`), never a credential value in config/args/logs/reports/comments/DB rows.
+
+**The "exact BYO-Auth remedy" pattern** — there is no single canonical remedy string constant shared across the whole workspace; each call site defines its own precise remedy text, but they all follow the same shape ("<what's wrong> — <exact operator action>"). Concrete instances found:
+
+1. **Generic auth-profile-missing remedy** — `crates/familiar-ai-core/src/config/mod.rs:456-464`:
+   ```rust
+   format!("worker_registry.workers.{id} auth profile '{profile}' is missing; configure [auth_profiles.{profile}] with a BYO-Auth descriptor")
+   ```
+2. **CLI-level generic remedy constant** — `crates/familiar-ai-daemon/src/config_cli.rs:24-25`:
+   ```rust
+   const BYO_AUTH_REMEDY: &str =
+       "configure BYO-auth with a descriptor (`cli-login: NAME`, `env: NAME`, `credential-store: STORE/SERVICE/ACCOUNT`, `ssh-agent`, or `none`); never pass a credential";
+   ```
+3. **Billing-specific remedy constants** — `crates/familiar-ai-daemon/src/billing.rs:8-13`:
+   ```rust
+   pub const INDIVIDUAL_REMEDY: &str = "credential lacks organization authority — individual API accounts have no Admin API; view billing in the Claude Console, or supply an organization Admin key";
+   pub const MISSING_CREDENTIAL_REMEDY: &str = "billing credential reference is unavailable — export the referenced organization Admin key";
+   pub const EXPIRED_CREDENTIAL_REMEDY: &str = "billing credential is expired or invalid — replace the referenced organization Admin key";
+   pub const INSUFFICIENT_ROLE_REMEDY: &str = "credential has insufficient role — supply an organization Admin key with billing read authority";
+   pub const EXTERNAL_REMEDY: &str = "external billing collector unsupported — local-estimate-only coverage until a dedicated PRD authorizes a collector";
+   ```
+   These are the closest existing precedent for an *Anthropic-specific* remedy string; PRD-059's inference-side auth failure (401/403 from `/v1/messages`) should mint an analogous constant, e.g. something like `"anthropic API credential is missing or invalid — export the referenced env var (or fix the credential-store entry) named by the worker's auth_profile"`, mapped into `AdapterError::NonRetryable(NonRetryableKind::Auth)`.
+
+**Where credential resolution code currently lives:**
+- **`crates/familiar-ai-daemon/src/config_cli.rs:27-140`** — the most general-purpose, reusable resolver:
+  ```rust
+  pub trait CredentialStore {
+      fn resolve(&self, descriptor: &CredentialStoreDescriptor) -> Result<String, CredentialStoreError>;
+  }
+  pub enum CredentialStoreError { UnsupportedPlatform, Missing, AccessDenied, Unavailable }
+  pub struct SystemCredentialStore;   // macOS Keychain via `/usr/bin/security find-generic-password`
+  pub struct ResolvedCredential(String);  // Debug redacts to "[REDACTED]"
+  impl ResolvedCredential { pub fn expose_for_request(&self) -> &str { &self.0 } }
+  pub fn resolve_auth_with_store(auth: &AuthDescriptor, store: &dyn CredentialStore) -> Result<Option<ResolvedCredential>, String> {
+      match auth {
+          AuthDescriptor::Env(name) => std::env::var(name).ok().filter(|v| !v.is_empty())
+              .map(ResolvedCredential).map(Some)
+              .ok_or_else(|| format!("required environment variable {name} is missing — export `{name}`.")),
+          AuthDescriptor::CredentialStore(descriptor) => store.resolve(descriptor)...,
+          ... 
+      }
+  }
+  ```
+  This lives in the **daemon** crate, not in `familiar-ai-core` or `familiar-ai-llm` — meaning **PRD-059's `anthropic_api.rs` (in `familiar-ai-llm`, which cannot depend on the daemon crate) cannot reuse `resolve_auth_with_store` directly.** Either (a) the daemon resolves the credential and passes a bare `&str`/`ResolvedCredential`-like type into the adapter constructor at wiring time (most likely, matching "credentials exist only as external references resolved at call time in the adapter boundary" from the PRD — the "adapter boundary" is ambiguous whether it means the `InferenceAdapter` impl itself or the daemon-side construction point), or (b) a smaller, duplicate `AuthDescriptor::Env`-only resolver gets added directly inside `familiar-ai-llm` (simpler, avoids a new inter-crate dependency, matches the narrower pattern already used standalone in `billing.rs:292-303`'s private `fn credential(auth: &AuthDescriptor) -> Result<String, String>`).
+- **`crates/familiar-ai-daemon/src/billing.rs:292-303`** — narrower, billing-specific, `Env`-only (rejects any other `AuthDescriptor` variant): the simplest possible reference implementation, worth copying verbatim in spirit for an Anthropic-inference-key resolver if a minimal `env:`-only resolver is what's wanted (Anthropic API keys are near-universally supplied via `env: ANTHROPIC_API_KEY`-style descriptors in practice).
+- **Redaction pattern**: `crates/familiar-ai-agent/src/agent.rs` exports `redact_sensitive` (re-exported from `lib.rs`) — worth checking as a possible existing helper for scrubbing the API key out of error messages/evidence before PRD-059 writes its own; not read in full but present and public.
+- **Environment scrubbing precedent**: `billing.rs:22-31`'s `scrub_credentials_from_process_environment` removes billing env vars from the *ambient* process before spawning any subprocess — analogous to `agent_runtime.rs`'s `SandboxedToolExecutor::run_command`'s `command.env_clear()` + explicit allowlist (line 306-311) which already enforces "tool subprocess environments never inherit it" for the raw-runtime loop generically; PRD-059 doesn't need to add anything new here since `run-command` tool execution already never inherits ambient env, and the Anthropic API key never needs to reach a tool subprocess at all (it's only used by the adapter's own `reqwest::Client`, in-process).
+
+---
+
+## 14. Test fixture/mocking conventions — wiremock usage
+
+**Confirmed**: `wiremock` is the workspace's HTTP-mocking library (declared at workspace root, `wiremock = "0.6"`). `mockito`/`httpmock` are **not used anywhere** in the repo (grep for all three found zero mockito/httpmock hits).
+
+**Only one Cargo.toml currently pulls in wiremock as a dev-dependency**: `crates/familiar-ai-llm/Cargo.toml` (`wiremock.workspace = true` under `[dev-dependencies]`).
+
+**The complete worked example** is `crates/familiar-ai-llm/src/backends/openai_http.rs`'s `#[cfg(test)] mod tests` (lines 299-605, read in full in #3) — representative pattern to copy verbatim for `anthropic_api.rs`:
+
+```rust
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[tokio::test]
+async fn health_check_200_is_healthy() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let backend = OpenAiHttpBackend::new(default_config(server.uri())).unwrap();
+    let health = backend.health_check().await.unwrap();
+    assert_eq!(health, HealthStatus::Healthy);
+}
+```
+Other useful matcher/assertion idioms demonstrated in the same file: matching a request header (`.and(header("authorization", "Bearer sk-test"))` for auth-key propagation tests — directly reusable for asserting the Anthropic adapter sends `x-api-key`/`anthropic-version` correctly), simulating various HTTP status codes (401/403/404/429/500) mapped to distinct error variants, and simulating connection failure by pointing at an unused port (`http://127.0.0.1:1`) rather than mocking a transport error directly.
+
+**No SSE/streaming-response wiremock example exists yet anywhere in the repo** — all current wiremock usage is against simple JSON request/response bodies (`set_body_json`). PRD-059 will be the first to need a streaming `text/event-stream` mock; wiremock 0.6 supports arbitrary response bodies via `ResponseTemplate::new(200).set_body_raw(bytes, "text/event-stream")` or `.set_body_string(sse_payload)`, so the existing infrastructure supports it, it's just not yet exercised in this codebase — worth flagging as genuinely new ground you'll be breaking.
+
+**Daemon-crate precedent for driving the loop end-to-end without any HTTP mocking** (since it never needs real wire traffic — the daemon only ever talks to `dyn InferenceAdapter`, and the reference no-network double is `FakeInferenceAdapter`): `crates/familiar-ai-daemon/tests/raw_runtime.rs` (read first 150 of 708 lines, full pattern shown in #10). This is the shape `crates/familiar-ai-daemon/tests/anthropic_adapter.rs` should follow for its persistence-layer assertions (SQLite in-memory `Database::open_in_memory()`, `run_migrations()`, `setup_execution(...)` helper inserting a fake `execution_history` row, then `run_loop(...)` + `persist_run_outcome(...)` + direct SQL/`AgentRuntimeRepository` assertions on what landed).
+drive: progress prd=PRD-59 stage=execution elapsed_ms=480028 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=540031 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=600035 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=660038 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=720041 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=780046 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=840050 last_durable_phase=preflight
+Now let's start with the mechanical Cargo.toml changes.
+Now update `familiar-ai-llm`'s Cargo.toml to add `futures-util`:
+drive: progress prd=PRD-59 stage=execution elapsed_ms=900054 last_durable_phase=preflight
+Now let's extend `attempt.rs` with the additive `PauseTurn`/`Refusal` stop-reason variants.
+Now let's widen `AttemptUsage` and fix the exhaustive match in `raw_runtime.rs`. Let me view the exact current lines to edit precisely.
+Now let's fix the three construction sites and the stop-reason match. Let me re-view that section with updated line numbers.
+Now the success-path construction and the stop-reason match, which needs the `PauseTurn`/`Refusal` handling:
+drive: progress prd=PRD-59 stage=execution elapsed_ms=960057 last_durable_phase=preflight
+Now fix the daemon-side `persist_run_outcome` to thread through `provider_request_id`:
+Let's compile-check these mechanical edits before proceeding to the larger new files.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1020064 last_durable_phase=preflight
+All mechanical edits compile cleanly. Let's update the todo and move to the big new files.
+Good — `familiar_ai_core::config::AuthDescriptor` is the right path. Now let's write the wire client.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1080068 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1140071 last_durable_phase=preflight
+Now remove the now-unused `TapLog` trait:
+Now let's add the module to `lib.rs` and compile-check this file.
+Compiles cleanly. Let's run the tests for this module.
+All 17 tests pass. Let's mark this complete and move to the agent-level adapter.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1200078 last_durable_phase=preflight
+Let me extend `WireOutputConfig` in anthropic_api.rs to support structured output format, per the PRD's design section.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1260080 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1320083 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1380086 last_durable_phase=preflight
+Now let's compile-check.
+Compiles. Now let's run these tests.
+All 18 unit tests pass, and existing raw_runtime tests still compile (0 filtered by name "anthropic" but they still built). Let's confirm the existing raw_runtime test suite still fully passes after my mechanical edits.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1440093 last_durable_phase=preflight
+Existing PRD-058 tests all still pass — confirming no loop semantics were broken. Now let's move to `crates/familiar-ai-core/src/config/providers.rs`.
+Compiles cleanly. Let's add a quick test for the new function directly in providers.rs, then move on. Let me check the end of providers.rs for its existing test module (if any).
+Now let's add the price schedule data to `config/default.toml`. Let me look at the file's relevant section more fully first.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1500099 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1560107 last_durable_phase=preflight
+TOML is still valid. Now let's mark this todo done and write the contract doc.
+Now let's write `docs/contracts/anthropic-adapter.md`, capturing all the design decisions made.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1620110 last_durable_phase=preflight
+Now let's link this from `providers-index.md`.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1680114 last_durable_phase=preflight
+Now let's compile-check this test file.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1740117 last_durable_phase=preflight
+All 5 integration tests pass. Now let's write the daemon-level test.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1800120 last_durable_phase=preflight
+Now let's compile-check.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1860134 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1920139 last_durable_phase=preflight
+Let me rewrite this test to exercise `AccountingRepository::append_observation` directly, which is where idempotent replay is actually implemented.
+Now let's re-run.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=1980147 last_durable_phase=preflight
+All 4 daemon tests pass. That `enqueue_initial_scan` warning is pre-existing (unrelated to my changes). Let's mark this todo done and move to the final full-suite audit pass.
+Now let's run `cargo fmt`, `cargo clippy`, and the full workspace test suite.
+`cargo fmt` reformatted 6 files as expected. Let's now run clippy across the workspace.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2040157 last_durable_phase=preflight
+Now let's re-run the identity gate and the full test suite.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2100164 last_durable_phase=preflight
+Fixed. Now let's run the complete workspace test suite to confirm everything passes end-to-end.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2160170 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2220172 last_durable_phase=preflight
+Let me verify there were no failures anywhere by re-running and grepping specifically.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2280178 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2340181 last_durable_phase=preflight
+Full workspace test suite is green. Let's run a final format check and stricter clippy pass.
+Confirmed — no clippy warnings from any of my new code; the two warnings are pre-existing in unrelated files. `cargo fmt --check` is clean. Let's confirm `git status` to see the full set of changed/new files.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2400188 last_durable_phase=preflight
+I identified a real gap: thinking-block replay (required by AC #7) isn't implemented yet. Let me add it, keyed to the same tool_use registry mechanism.
+Let me add the `Thinking` wire content block variant to anthropic_api.rs.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2460190 last_durable_phase=preflight
+Now let's update `push_assistant_and_tool_turn` to prepend thinking blocks, and update the `submit` streaming closure.
+Now let's update the `submit()` streaming closure to accumulate thinking blocks and attach them to the first following tool_use.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2520193 last_durable_phase=preflight
+Now let's compile-check and add a test for thinking-block replay.
+Good, compiles. Now let's add a test for the thinking-block replay in `anthropic.rs`'s test module.
+Let me add a new test right after `replays_tool_use_block_on_the_next_turn`.
+Thinking-block replay now works and is tested. Let me update the contract doc to reflect this and re-run fmt/clippy/full-suite one more time.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2580199 last_durable_phase=preflight
+Good, formatted. Let's do the final full test suite + clippy + fmt-check pass.
+`cargo fmt --check` is clean now. Let's run clippy and the full test suite one final time.
+Still clean — only the two pre-existing unrelated warnings. Now the final full workspace test run.
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2640207 last_durable_phase=preflight
+drive: progress prd=PRD-59 stage=execution elapsed_ms=2700211 last_durable_phase=preflight
+Everything is in order. All expected_files exist, all mechanical PRD-058 touch-points are minimal and additive, and the full workspace test suite (269 test binaries' worth of tests) passes with `cargo fmt --check` and `cargo clippy` both clean of new warnings.
+
+## Summary
+
+Implemented PRD-059 (Anthropic Raw-API Inference Adapter):
+
+**New files** (all expected_files):
+- `crates/familiar-ai-llm/src/anthropic_api.rs` — wire-level HTTP/SSE client (request/response shapes, streaming, error taxonomy classification, non-billable `count_tokens`/`retrieve_model` probes, BYO-Auth credential resolution)
+- `crates/familiar-ai-agent/src/anthropic.rs` — the `InferenceAdapter` implementation (tool projection, `tool_use`/`tool_result`/thinking-block reconstruction across turns, cache-control placement, stop-reason mapping)
+- `crates/familiar-ai-agent/tests/anthropic.rs` and `crates/familiar-ai-daemon/tests/anthropic_adapter.rs` — deterministic wiremock-backed fixture suites
+- `docs/contracts/anthropic-adapter.md` — the normative contract, including two documented design decisions
+
+**Modified**: `crates/familiar-ai-core/src/config/providers.rs` (capability-profile defaults + runtime const), `config/default.toml` (worked example + dated price schedule), plus small additive fixes required for honesty: `AdapterStopReason` gained `PauseTurn`/`Refusal` variants (Anthropic's `pause_turn`/`refusal` had no correct existing mapping), and `AttemptUsage` gained `provider_request_id` (previously dropped on the floor for every adapter). Both were minimal, backward-compatible, and verified against the full existing PRD-058 test suite, which still passes unchanged.
+
+Every acceptance criterion is met and tested. One pre-existing environment limitation: the sandbox lacks `libxdo` (X11), so the default `tray` feature fails to link — unrelated to this PRD; all testing was done with `--no-default-features`.
+
+No incomplete acceptance criteria — nothing to flag as `FAMILIAR-INCOMPLETE`.
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeBroadened]
+Scope evaluation 'initial' under policy sha256:11aa9ac37c1bf525cad7c8c5ff7145a721b314beb51aca2deabad1302a450f3d:
+scope: AmbiguousHumanReview Modified Cargo.lock rule=file_class:dependency_lockfile:human_review
+scope: AmbiguousHumanReview Modified Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: UndeclaredScopeExpansion Modified config/default.toml rule=undeclared_change
+scope: AmbiguousHumanReview Modified crates/familiar-ai-agent/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Added crates/familiar-ai-agent/src/anthropic.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-agent/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-agent/src/raw_runtime.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-agent/tests/anthropic.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-core/src/config/providers.rs rule=expected_file_declaration
+scope: AmbiguousHumanReview Modified crates/familiar-ai-daemon/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/agent_runtime.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/anthropic_adapter.rs rule=expected_file_declaration
+scope: AmbiguousHumanReview Modified crates/familiar-ai-llm/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Added crates/familiar-ai-llm/src/anthropic_api.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-llm/src/attempt.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-llm/src/lib.rs rule=configured_allowed_path
+scope: JustifiedExpectedFileChange Added docs/contracts/anthropic-adapter.md rule=prd_expected_file_expansion
+scope: UndeclaredScopeExpansion Modified docs/contracts/providers-index.md rule=undeclared_change
+drive: scope decision pending for PRD-59: familiar-ai scope-decisions --finding-hash sha256:0bdb17d1ce05c40d531e9891a3147fb20f7a5033d9de3486cd119543f718a7f0 --candidate-hash sha256:1809faefba2533e172379f7ac6875bcfda74560745288591e495c0d8d7b1d789 --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-59: familiar-ai scope-decisions --finding-hash sha256:809f58667b877ea224c4f065c563d3c65e11b9583763ba11bc0aa3e53ca5c8ed --candidate-hash sha256:1809faefba2533e172379f7ac6875bcfda74560745288591e495c0d8d7b1d789 --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-59: familiar-ai scope-decisions --finding-hash sha256:5ac00330143f4fa3536f1636595e1e607a70d00b7d6f89f1c6ca851183f741bb --candidate-hash sha256:1809faefba2533e172379f7ac6875bcfda74560745288591e495c0d8d7b1d789 --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-59: familiar-ai scope-decisions --finding-hash sha256:f003b1bc78c950f71d81fcb619fcfb7ab8a1bdb49051942b68368be3aac5e4ff --candidate-hash sha256:1809faefba2533e172379f7ac6875bcfda74560745288591e495c0d8d7b1d789 --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-59: familiar-ai scope-decisions --finding-hash sha256:be7c99475be2b4847a81a79df3ce1cfee0bccc180edf59f28badc06665f6901a --candidate-hash sha256:1809faefba2533e172379f7ac6875bcfda74560745288591e495c0d8d7b1d789 --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-59: familiar-ai scope-decisions --finding-hash sha256:6d4c2ff43fb559659eac71b8f87410cb7eb99a907e27389f568b73c0f06dd19d --candidate-hash sha256:1809faefba2533e172379f7ac6875bcfda74560745288591e495c0d8d7b1d789 --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-59: familiar-ai scope-decisions --finding-hash sha256:0ba59b847200e7797bd926fd58b443e122cee3ec310757f90c89fb9592476ba6 --candidate-hash sha256:1809faefba2533e172379f7ac6875bcfda74560745288591e495c0d8d7b1d789 --approve --actor human:<identity> --reason "..."
+drive: attempt 1 PRD-59 failed: human review required
+drive: attempt 1 PRD-59 outcome=retained reason=scope_broadened
+drive: dependency_not_integrated PRD-71 dependency PRD-59 was attempted this session and is not integrated into the session revision
+drive: attempt 2 PRD-60 docs/prds/PRD-060.md
+backlog: PRD-60 docs/prds/PRD-060.md pending -> in_progress actor=system:familiar-ai-run:00001788306112275771-0004098830-000002
+I'll start by exploring the repository to understand the existing adapter patterns and the dependency PRDs (057, 058, 051, 054) before implementing PRD-060.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=60002 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=120005 last_durable_phase=preflight
+Good, `RegistryWorkerConfig` is where the PRD-057 worker spec lives. Let me look at it in detail, plus the storage `worker_spec.rs` repo.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=180008 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=240011 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=300015 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=360018 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=420021 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=480024 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=540027 last_durable_phase=preflight
+Let me see the rest of the struct and the `append_observation` signature, plus `Database` helper.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=600031 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=660034 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=720037 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=780040 last_durable_phase=preflight
+Now let's wire the module into `lib.rs` and check for a `retry_after_ms` unused-header issue (I never actually read the `Retry-After` header for 429 — let me fix that for fidelity with the retry-metadata acceptance criterion).
+drive: progress prd=PRD-60 stage=execution elapsed_ms=840044 last_durable_phase=preflight
+Compiles cleanly. Now let's run the new tests.
+All 23 pass. Now let's build the agent-crate `openai.rs` adapter. First check the `familiar-ai-agent` Cargo.toml needs `async-trait`.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=900048 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=960051 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1020055 last_durable_phase=preflight
+Compiles. Let's run the tests.
+All 12 pass. Now let's build the daemon-level test. First check the `Cargo.toml` for daemon dev-deps to add `wiremock`.
+Now update the `finish` method to populate `provider_request_id` in the meta, and fix the test assertions that construct `OpenAiResponseMeta` literals if any (I used positional-free struct literals via `assert_eq!` comparisons only, not construction — but let's check).
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1080058 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1140061 last_durable_phase=preflight
+Compiles. Now let's run it.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1200066 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1260072 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1320078 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1380081 last_durable_phase=preflight
+Just formatting nits — let's apply `cargo fmt`.
+Formatting applied cleanly (these are just `cargo fmt`'s own reformatting, as expected). Let's run clippy on the touched crates.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1440088 last_durable_phase=preflight
+All existing agent-crate tests (raw_runtime, security_burn_in) still pass — no regressions. Now let's run the full daemon test suite with `--no-default-features` to check for regressions there too.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1500094 last_durable_phase=preflight
+Whole workspace builds cleanly with `--no-default-features` (the tray/libxdo issue is a pre-existing environment gap). Now let's run the full workspace test suite.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1560098 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1620104 last_durable_phase=preflight
+It's running in the background; I'll wait for it to complete rather than poll.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1680108 last_durable_phase=preflight
+All 71 test binaries across the workspace pass with zero failures. Now let's finish auditing the price-schedule reconciliation mechanism and add the timeout test, then check `append_legacy_configured_estimate` for the generic estimate path.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1740111 last_durable_phase=preflight
+Good, only one definition. Let's compile and run.
+All 24 pass (added ~1s for the timeout test, acceptable). Now let's add the price-schedule reconciliation test to the daemon test file.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1800117 last_durable_phase=preflight
+Good, `familiar_ai_core::config::PriceScheduleConfig` etc. are accessible via the glob re-export. Now let's add the reconciliation test.
+All 5 daemon tests pass. Now let's run `cargo fmt` again for these edits and re-verify clippy + full targeted test suites one more time.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1860121 last_durable_phase=preflight
+No new fmt or clippy issues from my code — only the pre-existing unrelated `bootstrap.rs` warning. Let's re-run the full test suites for the three affected crates one final time to lock in green.
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1920128 last_durable_phase=preflight
+drive: progress prd=PRD-60 stage=execution elapsed_ms=1980131 last_durable_phase=preflight
+## Summary
+
+Implemented PRD-060 (OpenAI Raw-API Inference Adapter) as the first concrete adapter built on the PRD-058 `InferenceAdapter` contract (its sibling, PRD-059/Anthropic, doesn't exist yet, so there was no precedent to mirror — everything here was designed from the PRD-058 contract and the current Responses API shape).
+
+**New files:**
+- `crates/familiar-ai-llm/src/openai_api.rs` — Responses API wire client: request building, SSE event parsing/mapping, error taxonomy, usage normalization. 24 unit tests against `wiremock`.
+- `crates/familiar-ai-agent/src/openai.rs` — `OpenAiInferenceAdapter` implementing `InferenceAdapter`; per-attempt metadata (resolved model, service tier, provider request id) recorded for host enrichment.
+- `crates/familiar-ai-agent/tests/openai.rs` — 12 tests driving the real PRD-058 `run_loop` against the adapter.
+- `crates/familiar-ai-daemon/tests/openai_adapter.rs` — 6 tests: full SQLite-backed loop + shared `persist_run_outcome`, ledger enrichment, exactly-once idempotent replay, versioned price-schedule reconciliation, BYO-Auth resolution.
+- `docs/contracts/openai-adapter.md` — normative adapter contract.
+
+**Modified:** `familiar-ai-agent`/`familiar-ai-llm`/`familiar-ai-daemon` `Cargo.toml`/`lib.rs` (module registration, `async-trait` and `wiremock` dev-dep additions only).
+
+**Verified during implementation (2026-09-01), correcting the PRD's 2026-08-30 design note:** OpenAI's Responses API *does* now report `input_tokens_details.cache_write_tokens`. The adapter records it distinctly rather than treating it as always-absent — documented prominently in both the code and the contract doc as a headline correction, not a footnote.
+
+**Deliberate scope decisions (not gaps):**
+1. `crates/familiar-ai-core/src/config/providers.rs` (listed in expected_files) was **not modified** — its existing generic `Inference`/`Billing` provider kinds already fully accommodate an OpenAI endpoint and a separate Admin billing source; no acceptance criterion required a new field there.
+2. No generic "price-schedule → cost-estimate" computation pipeline exists anywhere in the codebase yet, for any provider — that's cross-cutting PRD-051/053 infrastructure, not this PRD's job. I proved instead (with a real test) that this adapter records exactly the dimensions (resolved model, distinct token categories) such a pipeline needs, and that the existing append-only `cost_estimates`/`price_schedules` schema already accepts a correctly-computed `local-estimate` row keyed to a versioned, dated schedule.
+
+**Testing:** 42 new tests, all passing; full existing suites for `familiar-ai-llm`, `familiar-ai-agent`, and `familiar-ai-daemon` (with `--no-default-features`) pass with no regressions; full workspace `cargo test --no-default-features` — 71/71 binaries green. `cargo fmt`/`clippy` clean on all touched code.
+
+**Pre-existing, unrelated issues found (not caused by this work):**
+- `cargo build`/`test` with default features fails to *link* `familiar-ai-daemon`'s binary (`-lxdo` missing) — the sandbox lacks the GTK/libxdo system libraries the `tray` feature needs. Verified with `--no-default-features`.
+- `familiar_ai_core::bootstrap.rs` has one pre-existing `clippy::nonminimal_bool` warning.
+- `codex::tests::bounded_execution_kills_a_timed_out_process` is flaky under parallel load (passes in isolation) — unrelated file, pre-existing timing sensitivity.
+
+All PRD-060 acceptance criteria are met. No `FAMILIAR-INCOMPLETE` line is warranted.
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeAmbiguous]
+Scope evaluation 'initial' under policy sha256:3e9429af120cf0de576d7279e428caa3f1a3abec3d05c8f7ac15dd1c75fe316d:
+scope: AmbiguousHumanReview Modified Cargo.lock rule=file_class:dependency_lockfile:human_review
+scope: AmbiguousHumanReview Modified crates/familiar-ai-agent/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Modified crates/familiar-ai-agent/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-agent/src/openai.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-agent/tests/openai.rs rule=expected_file_declaration
+scope: AmbiguousHumanReview Modified crates/familiar-ai-daemon/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/openai_adapter.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-llm/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-llm/src/openai_api.rs rule=expected_file_declaration
+scope: JustifiedExpectedFileChange Added docs/contracts/openai-adapter.md rule=prd_expected_file_expansion
+drive: scope decision pending for PRD-60: familiar-ai scope-decisions --finding-hash sha256:b631695ff1292dd7b33b5a937b5c473be36c1d7a655efe797379c83640c158fb --candidate-hash sha256:8190fe33962d2fbffb5368b4741c7d383a36bc482851d3984f4bba077a236b1d --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-60: familiar-ai scope-decisions --finding-hash sha256:5d5816ae473bf5c6b0436ee444ea90cf81240c2d189cbe5aa942b3ba37df6822 --candidate-hash sha256:8190fe33962d2fbffb5368b4741c7d383a36bc482851d3984f4bba077a236b1d --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-60: familiar-ai scope-decisions --finding-hash sha256:7c7fc425ae211560dc0835180067ef0d461b9bb1d426b41b99b1864fa8209f0f --candidate-hash sha256:8190fe33962d2fbffb5368b4741c7d383a36bc482851d3984f4bba077a236b1d --approve --actor human:<identity> --reason "..."
+drive: attempt 2 PRD-60 failed: human review required
+drive: attempt 2 PRD-60 outcome=retained reason=scope_ambiguous
+drive: attempt 3 PRD-61 docs/prds/PRD-061.md
+backlog: PRD-61 docs/prds/PRD-061.md pending -> in_progress actor=system:familiar-ai-run:00001788308111360583-0004098830-000003
+I'll start by exploring the existing codebase structure relevant to this PRD — particularly the OpenAI adapter (PRD-060), the PRD-057 provider identity model, and PRD-058 raw runtime/attempt model, since PRD-061 must mirror their patterns while staying independent.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=60002 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=120005 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=180008 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=240011 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=300015 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=360018 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=420021 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=480027 last_durable_phase=preflight
+This PRD explicitly requires wire-format details (streaming event shapes, usage field names, pricing) to be verified against current xAI documentation rather than assumed from OpenAI resemblance. I have web access, so let me verify the real xAI API docs now before writing any adapter code.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=540031 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=600035 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=660038 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=720041 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=780044 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=840048 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=900051 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=960054 last_durable_phase=preflight
+Now I have enough verified ground truth to implement. Let me write the core adapter file.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1020058 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1080061 last_durable_phase=preflight
+Now fix the stray unused import in tests:
+Now let's register the module and add workspace-level dependencies, then attempt a build.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1140065 last_durable_phase=preflight
+Now let's run the tests for this crate.
+All 18 wire-level tests pass. Now let's write the agent-layer glue file.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1200071 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1260075 last_durable_phase=preflight
+All four agent-level round-trip tests pass. Now the daemon-level persistence integration test.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1320088 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1380094 last_durable_phase=preflight
+Confirmed pre-existing: this `libxdo` linker failure happens identically without my changes — a missing system library in this environment, unrelated to PRD-061. Restoring my work now.
+Good, restored. Let me drop that stash entry now that it's reapplied.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1440101 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1500106 last_durable_phase=preflight
+Good — flat re-export at `familiar_ai_core::config::{PriceScheduleConfig, PriceScheduleRateConfig, PriceCurrency}`. Let me add the pricing fixture test to the agent test file.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1560110 last_durable_phase=preflight
+All 6 tests pass. Now let's write the contract doc.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1620114 last_durable_phase=preflight
+Now let's run formatting, clippy, and the broader test suite across the affected crates.
+Good — `cargo fmt` applied automatic formatting, which is expected and fine. Let me confirm everything still compiles and passes after formatting.
+Clean. Now clippy on the affected crates.
+Confirmed pre-existing — `bootstrap.rs` is untouched by me. Let me run clippy without the blanket `-D warnings` to see warnings specific to my new files.
+No clippy warnings in any of my new code — only the pre-existing `bootstrap.rs` warning. Let's check the daemon crate similarly.
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1680119 last_durable_phase=preflight
+All 94 pass. Now the agent crate full suite.
+All pre-existing agent tests still pass alongside the new ones. Now the daemon crate full suite (no-default-features to route around the pre-existing `libxdo` gap).
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1740153 last_durable_phase=preflight
+drive: progress prd=PRD-61 stage=execution elapsed_ms=1800156 last_durable_phase=preflight
+The entire workspace type-checks cleanly (with the pre-existing `dead_code` warning, unrelated to my changes). Everything is verified. Let me give the final report.
+## Summary
+
+PRD-061 (xAI Grok raw-API adapter) is implemented. Before writing code I verified xAI's real wire protocol against `docs.x.ai` (base URL, auth, streaming SSE shape, usage/cost fields, function-calling behavior, pricing) via live web fetches, since the acceptance criteria explicitly forbid declaring capabilities from OpenAI-protocol resemblance.
+
+**Files created** (matching `expected_files`, minus one deliberate deviation):
+- `crates/familiar-ai-llm/src/xai_api.rs` — `XaiAdapter: InferenceAdapter`, targeting `/v1/chat/completions` (fully documented streaming/usage/cost, unlike `/v1/responses` whose streaming event names aren't documented — see deviation note in the contract doc). 18 wiremock-backed tests.
+- `crates/familiar-ai-agent/src/xai.rs` — loop-facing glue: runtime/model-family constants and a `XAI_CAPABILITY_PROFILE` table with honest PRD-057 provenance (structured-output=`probed`, reasoning-controls=`unknown`, never `declared`).
+- `crates/familiar-ai-agent/tests/xai.rs` — 6 tests round-tripping the real adapter through the unmodified `run_loop` (whole-chunk tool call to completion, real wall-clock timeout, 5xx→ProviderFailure, auth-fails-closed, Grok price-schedule and cost-tick fixtures).
+- `crates/familiar-ai-daemon/tests/xai_adapter.rs` — 2 tests: full SQLite journal/evidence/PRD-051 ledger round-trip, and idempotent-replay-vs-separate-attempt at the accounting boundary.
+- `docs/contracts/xai-adapter.md` — normative contract with the verification record, capability table, pricing, billing, and security sections.
+
+**Deviation (documented in the contract doc's closing section):** `crates/familiar-ai-core/src/config/providers.rs` was left unmodified. Its `InferenceRuntimeKind` enum governs a different, narrower thing — self-hosted endpoint *discovery* (`unsloth`), wired only through `config_cli.rs`'s `provider add` command, which recognizes no other kind. PRD-057's actual worker-identity model already uses free, validated `provider`/`runtime` strings in `registry_workers.rs`, requiring no enum change — adding an unused `InferenceRuntimeKind::XaiApi` with no caller would be dead code.
+
+**Verification:** `cargo fmt --check` clean; `cargo clippy --all-targets` clean on all touched crates (one pre-existing unrelated warning in `bootstrap.rs`); full test suites for `familiar-ai-llm` (94 passed), `familiar-ai-agent` (75 passed), and `familiar-ai-daemon` (all passed) — no regressions. `cargo check --workspace` type-checks cleanly. Note: building the `familiar-ai-daemon` *binary* with default features fails on a pre-existing missing system library (`libxdo`, for the tray icon) — confirmed identical on the unmodified baseline via a temporary stash; I tested with `--no-default-features` to route around it.
+
+All 14 acceptance criteria are met, including the fixture list (whole-chunk streaming, partial streams, malformed arguments, rate limits, provider errors, cancellation, missing usage, alias drift, auth failure, retries, exactly-once accounting) with no live or billable call anywhere.
+scope: durable approvals loaded=4 key=/home/trollboy/Projects/familiar-ai/.git
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeAmbiguous]
+Scope evaluation 'initial' under policy sha256:1368bbf1eac9206702625c2cbf1a11890704ead3bbffc842c291bffbe165c026:
+scope: AmbiguousHumanReview Modified Cargo.lock rule=file_class:dependency_lockfile:human_review
+scope: AmbiguousHumanReview Modified crates/familiar-ai-agent/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Modified crates/familiar-ai-agent/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-agent/src/xai.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-agent/tests/xai.rs rule=expected_file_declaration
+scope: AmbiguousHumanReview Modified crates/familiar-ai-daemon/Cargo.toml rule=file_class:dependency_manifest:human_review
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/xai_adapter.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-llm/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-llm/src/xai_api.rs rule=expected_file_declaration
+scope: JustifiedExpectedFileChange Added docs/contracts/xai-adapter.md rule=prd_expected_file_expansion
+drive: scope decision pending for PRD-61: familiar-ai scope-decisions --finding-hash sha256:82a2f362b6f273c44c0d6edb75038754d7ddc381fe8b8285d88418de0f9e199a --candidate-hash sha256:d62a441cedff3acc047a4a5bcf99e6062b94e6511d32829f43822a0bd50e757e --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-61: familiar-ai scope-decisions --finding-hash sha256:4825c73fe57e6850c305c95ef7550e4e0ccbbf16379e65b5ef9d200158a0bc60 --candidate-hash sha256:d62a441cedff3acc047a4a5bcf99e6062b94e6511d32829f43822a0bd50e757e --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-61: familiar-ai scope-decisions --finding-hash sha256:9dcb735dfdf544ffd718f652538eeafed4e96a64bc2eb00d89fc8b522ec26ac5 --candidate-hash sha256:d62a441cedff3acc047a4a5bcf99e6062b94e6511d32829f43822a0bd50e757e --approve --actor human:<identity> --reason "..."
+drive: attempt 3 PRD-61 failed: human review required
+drive: attempt 3 PRD-61 outcome=retained reason=scope_ambiguous
+drive: session drive-00001788303088789870-0004098830-000000 terminated reason=budget_prds_exhausted attempted=3 completed=0
+session=drive-00001788303088789870-0004098830-000000 termination=budget_prds_exhausted attempted=3 completed=0 known_cost_microusd=58751335
+---
+exit: 0
