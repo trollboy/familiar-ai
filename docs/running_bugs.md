@@ -1208,7 +1208,17 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-047 — Intermittent workspace test failure
 
-- **Status:** Open — needs identification
+- **Status:** CLOSED 2026-09-02 — not reproducible; the original sighting
+  was operator measurement error. Sixteen clean consecutive runs (three
+  ad-hoc plus a 10-run hunt with nothing else touching `target/`), zero
+  failures. Two causes for the false alarm, both worth remembering:
+  (1) the suite legitimately PRINTS `FAILED` and `panicked at` as
+  fake-agent fixture content, so `grep -c FAILED` is a meaningless check
+  — only the exit code is authoritative; (2) the failing observations
+  happened while a second `cargo test` ran concurrently against the same
+  `target/`, which is a build-contention artifact, not a test defect.
+  Reopen with a captured failing test name if it recurs.
+- **Original status:** Open — needs identification
 - **Observed:** during wave 6, `cargo test --workspace --no-default-features`
   reported one failure, then passed twice on identical trees (both on main
   and in the PRD-59 worktree). The failing test was not captured.
