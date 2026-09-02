@@ -1,0 +1,328 @@
+command: familiar-ai resume all
+date: Wed Sep  2 02:11:03 AM UTC 2026
+host: trollboy (Linux)
+head: 0e4375974ef016040fd32862f3ee7fc4836c747e (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=9 key=/home/trollboy/Projects/familiar-ai/.git
+scope: undeclared expansions covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:730314
+verification: heartbeat check=format elapsed_ms=8672 child=pid:730314
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:730986
+verification: heartbeat check=lint elapsed_ms=30003 child=pid:730986
+verification: heartbeat check=lint elapsed_ms=33181 child=pid:730986
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:735040
+verification: heartbeat check=tests-green-crates elapsed_ms=30000 child=pid:735040
+verification: heartbeat check=tests-green-crates elapsed_ms=31581 child=pid:735040
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:740673
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30002 child=pid:740673
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=36515 child=pid:740673
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [VerificationUnsuccessful]
+HumanReviewRequired prd=PRD-59
+stop_reasons=["verification_unsuccessful"]
+scope_finding file_class:dependency_lockfile:human_review: class policy requires human review for dependency_lockfile files
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding undeclared_change: matches no Expected Files entry and no configured allowed path
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding file_class:dependency_manifest:human_review: class policy requires human review for dependency_manifest files
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+scope_finding undeclared_change: matches no Expected Files entry and no configured allowed path
+non-interactive input: preserving checkpoint
+scope: durable approvals loaded=9 key=/home/trollboy/Projects/familiar-ai/.git
+scope: human-review findings covered by durable approvals; proceeding
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:748157
+verification: heartbeat check=format elapsed_ms=4458 child=pid:748157
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:748704
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:748704
+verification: heartbeat check=lint elapsed_ms=33322 child=pid:748704
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:753133
+verification: heartbeat check=tests-green-crates elapsed_ms=30001 child=pid:753133
+verification: heartbeat check=tests-green-crates elapsed_ms=60004 child=pid:753133
+verification: heartbeat check=tests-green-crates elapsed_ms=76017 child=pid:753133
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:772147
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30004 child=pid:772147
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60001 child=pid:772147
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90000 child=pid:772147
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:772147
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150004 child=pid:772147
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180004 child=pid:772147
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=203251 child=pid:772147
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788308111360583-0004098830-000003-cycle-review-1","reviewed_manifest_hash":"sha256:1065cb63075fef1ed70ac3e8cbe75a8c12b8bef1910f0ca30162741b252ef21f","findings":[{"finding_id":"xai-sse-utf8-chunk-boundary-corruption","category":"correctness_defect","severity":"high","blocking":false,"title":"SSE buffer decodes each transport chunk with from_utf8_lossy, corrupting any multi-byte character split across a chunk boundary","claim":"`submit` accumulates the SSE stream with `buffer.push_str(&String::from_utf8_lossy(&chunk))`, converting every `reqwest` transport chunk to UTF-8 independently. `response.chunk()` yields bytes at arbitrary network boundaries, not at codepoint or SSE-frame boundaries, so a multi-byte UTF-8 sequence straddling two chunks is decoded as U+FFFD replacement characters on both sides and the original bytes are lost before the line is ever parsed. Because U+FFFD is itself valid UTF-8 and valid inside a JSON string, `serde_json::from_str` still succeeds and the corruption is silent: assistant text deltas and, more seriously, tool-call `arguments` JSON strings are delivered to the loop with mangled content rather than being rejected or repaired. The correct handling is to buffer raw bytes and decode only complete lines (or hold the trailing incomplete sequence for the next chunk). None of the wire tests exercise this: every fixture body in `xai_api.rs`, `tests/xai.rs`, and `tests/xai_adapter.rs` is pure ASCII delivered by wiremock in one piece, so the passing suite provides no evidence against this path.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":542,"end":567}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:681f43323dc39e7c7cb777b0ddc39cdf2e882a6475c286035e16ba9f05fadb99","media_type":"text/plain","byte_size":34586,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:17509570806bbdc7395db3096bb30eeddb0313748438b7ca07065f8f6a280c86","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-681f43323dc39e7c7cb777b0ddc39cdf2e882a6475c286035e16ba9f05fadb99-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Buffer the stream as bytes (e.g. a `Vec<u8>`/`BytesMut`), split complete lines on `b'\\n'` from that byte buffer, and decode only each complete line with `str::from_utf8`, leaving any trailing partial sequence in the buffer for the next chunk. Add a fixture that splits a non-ASCII text delta and a non-ASCII tool-call `arguments` value across two transport chunks and asserts the reassembled value is byte-identical to the source.","status":"open","supersedes":null},{"finding_id":"xai-per-attempt-cost-and-model-last-write-wins","category":"correctness_defect","severity":"medium","blocking":false,"title":"Vendor cost ticks and resolved model identity are adapter-global last-write-wins state, so all but the final attempt's billing evidence is discarded","claim":"`last_cost_usd_ticks` and `last_resolved_model` are single-slot `Mutex` fields on the shared `XaiAdapter` that each `submit` overwrites, with no association back to the `AttemptId` that produced them. In any multi-attempt run — which is the normal agent-loop case — only the last attempt's values survive, and there is no way for a caller to recover the earlier ones. The package's own loop test demonstrates the loss concretely: the two turns report `cost_in_usd_ticks` of 9000 and 1500 respectively, the loop records `outcome.attempts.len() == 2`, and after the run only 1500 is retrievable. The same slot is also shared across concurrent `submit` calls on one adapter instance (`submit` takes `&self` and the trait is used through a shared reference), so with any concurrency a caller can read another attempt's cost. This contradicts the contract's claim that `XaiAdapter` 'captures it losslessly via `last_cost_usd_ticks()`' as the hook a later PRD plumbs into `provider_cost_lexical`: a later stage wiring this into accounting would attribute one attempt's vendor cost to a different attempt, or silently drop the rest.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":128,"end":140}},{"kind":"file_range","path":"crates/familiar-ai-agent/tests/xai.rs","range":{"start":152,"end":161}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:681f43323dc39e7c7cb777b0ddc39cdf2e882a6475c286035e16ba9f05fadb99","media_type":"text/plain","byte_size":34586,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:17509570806bbdc7395db3096bb30eeddb0313748438b7ca07065f8f6a280c86","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-681f43323dc39e7c7cb777b0ddc39cdf2e882a6475c286035e16ba9f05fadb99-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Return the per-attempt vendor cost and provider-resolved model on the value the call already produces (extend `SubmitOutcome`, or return them alongside it), rather than through adapter-global mutable slots. If the shared-slot accessors are kept for diagnostics, key them by `AttemptId` and document that they are not a billing-evidence source. Add a test asserting that both attempts of a two-turn run expose their own distinct `cost_in_usd_ticks`.","status":"open","supersedes":null},{"finding_id":"xai-reconstructed-tool-calls-fabricate-empty-arguments","category":"correctness_defect","severity":"medium","blocking":false,"title":"Reconstructed assistant tool_calls entries send a fabricated \"{}\" arguments string, falsifying every multi-turn transcript","claim":"`wire_messages` synthesizes the assistant `tool_calls` message that must precede each `role: \"tool\"` run, but because `MessageContent::ToolResult` does not carry the original call arguments, each reconstructed entry is emitted with a hard-coded `\"arguments\": \"{}\"`. On every second-and-later turn the model is therefore shown a transcript in which it called `apply-edit` (or any other capability) with no arguments, immediately followed by a tool result that only makes sense for the arguments it actually sent. This is not a wire-acceptance requirement — the code comment correctly notes that only matching ids are required — it is fabricated conversation history that misrepresents the model's own prior actions, and it degrades exactly the multi-turn tool loops this adapter exists to run. The unit tests pin the fabrication rather than catching it: `tool_result_run_gets_a_preceding_assistant_tool_calls_message` and its siblings assert only `id`, `type`, and `name`, never `arguments`, and the wiremock matcher `ToolCallPrecedesEachToolResult` in `tests/xai.rs` likewise checks ids only.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":259,"end":275}},{"kind":"file_range","path":"crates/familiar-ai-agent/tests/xai.rs","range":{"start":107,"end":137}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:51b849b76d9c99ba53bb8c44cb2e4b0ffac8a8ec82000222b58c9687fbf013de","media_type":"text/plain","byte_size":92983,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:17509570806bbdc7395db3096bb30eeddb0313748438b7ca07065f8f6a280c86","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-51b849b76d9c99ba53bb8c44cb2e4b0ffac8a8ec82000222b58c9687fbf013de-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Carry the issuing call's `arguments` (and name) through the transcript type so the reconstructed assistant `tool_calls` entry reproduces what the model actually sent — either by extending `ToolResultPayload` with the originating arguments, or by having the loop retain the assistant tool-call message itself. Until then, state the fabrication explicitly in the contract document rather than describing the reconstruction as 'what the wire format actually requires', and add a test asserting arguments round-trip.","status":"open","supersedes":null},{"finding_id":"xai-price-schedule-only-exists-inside-a-tautological-test","category":"test_gap","severity":"medium","blocking":false,"title":"The Grok price schedule is a test-local literal asserted against itself; no production code or configuration ships or applies it","claim":"`grok_price_schedule_matches_official_xai_pricing_in_nanousd` builds a `PriceScheduleConfig` from inline literals and then asserts those same literals back (`uncached_input == Some(2_000_000_000)` immediately after constructing it with `Some(2_000_000_000)`), so it cannot fail for any reason related to the product. `grok_estimate_covers_reasoning_tokens_not_just_output_tokens` reimplements the pricing formula in a local `category_cost` closure instead of calling the accounting repository it claims to mirror, and its main assertion is a tautology because the reasoning rate is set equal to the output rate on both sides. `cost_in_usd_ticks_conversion_is_documented_and_exact` asserts arithmetic on two integer literals. No non-test file in the change set registers, ships, or consumes an xAI price schedule — the only other appearance is a TOML snippet inside the contract document. The acceptance criterion that Grok price schedules are versioned, dated, sourced from official xAI pricing 'and estimates record them' therefore has no executing implementation behind it, and the passing suite gives no evidence that any xAI worker's estimate would use these rates.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-agent/tests/xai.rs","range":{"start":347,"end":412}},{"kind":"file_range","path":"crates/familiar-ai-agent/tests/xai.rs","range":{"start":413,"end":479}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:681f43323dc39e7c7cb777b0ddc39cdf2e882a6475c286035e16ba9f05fadb99","media_type":"text/plain","byte_size":34586,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:17509570806bbdc7395db3096bb30eeddb0313748438b7ca07065f8f6a280c86","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-681f43323dc39e7c7cb777b0ddc39cdf2e882a6475c286035e16ba9f05fadb99-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Ship the Grok schedule as real data the product loads (a default price-schedule entry or a shipped configuration fragment), then test that an xAI attempt's estimate computed by the actual accounting/estimation code path lands on the expected nanoUSD figure for known token counts — including a case where reasoning tokens are non-zero. Delete or rewrite the assertions that only restate their own inputs.","status":"open","supersedes":null},{"finding_id":"xai-tests-mutate-process-env-under-parallel-execution","category":"maintainability_issue","severity":"low","blocking":false,"title":"Tests call std::env::set_var/remove_var while other concurrently running tests read the environment inside resolve_api_key","claim":"`xai_adapter` in both integration test files and `adapter_for` in the `xai_api.rs` unit tests mutate process-global environment variables (`std::env::set_var`), and two tests call `std::env::remove_var`, while `XaiAdapter::resolve_api_key` reads the environment with `std::env::var` from inside `submit`. cargo's default harness runs these test functions concurrently on multiple threads, so a `setenv`/`getenv` overlap is a data race on the process environment — the reason these functions are `unsafe` from the 2024 edition. The unit tests in `xai_api.rs` are the sharpest case: several tests share the single name `XAI_TEST_KEY` and one removes a variable, all while other tests are inside `submit` reading env. Nothing here is deterministic by construction; the current green run is not evidence that it stays green.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-agent/tests/xai.rs","range":{"start":89,"end":97}},{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":187,"end":198}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:51b849b76d9c99ba53bb8c44cb2e4b0ffac8a8ec82000222b58c9687fbf013de","media_type":"text/plain","byte_size":92983,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:17509570806bbdc7395db3096bb30eeddb0313748438b7ca07065f8f6a280c86","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-51b849b76d9c99ba53bb8c44cb2e4b0ffac8a8ec82000222b58c9687fbf013de-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Remove environment mutation from the tests: make the credential source injectable at the adapter boundary (an `AuthDescriptor` variant or resolver closure the tests can supply directly), so `resolve_api_key`'s env path is exercised by one isolated test rather than by every adapter construction. If env mutation must stay, serialize those tests behind a shared mutex and give each a unique variable name.","status":"open","supersedes":null},{"finding_id":"xai-runtime-not-shown-wired-into-any-dispatch-path","category":"unverifiable_claim","severity":"medium","blocking":false,"title":"No change set evidence that a configured runtime = \"xai-api\" worker is actually dispatched to XaiAdapter at runtime","claim":"The contract document and `build_xai_adapter_from_config`'s doc comment both assert this is 'the link that makes a configured Grok worker reachable', but within the disclosed change set `build_xai_adapter_from_config` has no caller outside `#[cfg(test)]` code, and no file that selects or constructs an adapter for a worker's runtime id is modified — the only non-test, non-doc changes are two `mod`/`pub mod` declarations, a dev-dependency line, and `Cargo.lock`. I cannot confirm or refute the existence of a dispatch site because I am scoped to the disclosed package and must not inspect unrelated repository files, and the lint check was run with `-A dead-code`, so an unreachable constructor would not have been surfaced by verification either. As presented, the acceptance criterion that xAI is 'its own ProviderId with runtime xai-api' across routing and accounting paths is not demonstrated by anything in this change or its checks.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":92,"end":119}},{"kind":"verification","check_id":"lint","output":{"content_hash":"sha256:b650a1002da5713fc2dce30ba93cfa354ac6a5045f8498beb69841f9485a0c80","media_type":"text/plain","byte_size":1268,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:17509570806bbdc7395db3096bb30eeddb0313748438b7ca07065f8f6a280c86","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-b650a1002da5713fc2dce30ba93cfa354ac6a5045f8498beb69841f9485a0c80-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Either point to (or add) the production dispatch site that maps `runtime = \"xai-api\"` to `build_xai_adapter_from_config`, and cover it with a test that starts from a registry configuration and reaches a running `XaiAdapter` through the daemon's normal worker-construction path; or amend the contract document to state plainly that the constructor is not yet reachable from any runtime dispatch and name the PRD that will wire it.","status":"open","supersedes":null}]}
+Good, this looks correct. Now let's add the fixture test described in the remediation: split a non-ASCII text delta and non-ASCII tool-call arguments across two transport chunks.
+While that research runs, let me check whether wiremock in this codebase can deliver a chunked/streamed body at all — this determines whether the fixture test is even feasible with wiremock alone.
+I'll extract the line-buffering logic into a small pure helper so it can be unit-tested deterministically with exact byte-chunk boundaries — testing this through wiremock's HTTP layer wouldn't reliably reproduce a specific transport chunk split.
+Now let me view the current state of the `submit` loop to confirm it's coherent, then check the test module structure to add a unit test for `drain_complete_lines`.
+This looks correct. Now let's check the test module setup to write a proper unit test for `drain_complete_lines`.
+Good, this gives me the patterns I need. Now let me find the end of the test module to append a new unit test for `drain_complete_lines`.
+Good, I have what I need. Now let me write the test.
+Good, that matches. Now let's compile and run the tests.
+All 29 tests pass, including the two new regression tests. Now let's run the full configured verification suite as evidence.
+Format check passes. Now the broader test suite for the affected crates.
+Clippy is clean. Now the targeted crate test suite.
+All green, 0 failures across the configured `tests-green-crates` scope. Now let's check git status/diff to confirm scope stayed within `crates/` and matches allowed paths.
+Only the one in-scope file changed, matching `crates/familiar-ai-llm/src/xai_api.rs` from the finding's evidence and staying within the `crates/` allowed path. No commits, no other file changes.
+Fixed the SSE UTF-8 chunk-boundary corruption in `crates/familiar-ai-llm/src/xai_api.rs`: the stream now buffers raw bytes and decodes only complete lines (extracted into a `drain_complete_lines` helper), so a multi-byte codepoint split across a transport chunk boundary is never corrupted. Added two regression tests that split a non-ASCII text delta and non-ASCII tool-call `arguments` value across a chunk boundary and assert byte-identical reassembly.
+
+Verified: `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets --no-default-features -D warnings` clean, and `cargo test -p familiar-ai-core -p familiar-ai-review -p familiar-ai-agent -p familiar-ai-storage --no-default-features` all green (including the new tests). Only `crates/familiar-ai-llm/src/xai_api.rs` was touched — no commits made, no scope expansion.
+I now have everything needed. Here is the detailed report.
+
+## 1. How SSE bodies are set up in wiremock, and the crux finding on multi-chunk delivery
+
+Every existing test in `xai_api.rs` uses `wiremock::ResponseTemplate::new(200).set_body_raw(body, "text/event-stream")`, which buffers the **entire** SSE body as one `Full<Bytes>` HTTP body — wiremock gives you no control over how that buffer gets split into wire-level chunks, and no `Respond` trait impl or chunk-delay mechanism is used anywhere in this codebase (confirmed by grep — zero hits for `impl Respond`, `delay(`, `StreamBody`, `Body::wrap_stream`).
+
+Critically, this fact is already documented **in this codebase** as a comment in `crates/familiar-ai-llm/src/openai_api.rs` (lines 933-963), where a raw `tokio::net::TcpListener` is used instead of wiremock specifically because wiremock can't do partial/chunked delivery:
+
+```rust
+// crates/familiar-ai-llm/src/openai_api.rs:933-963
+#[tokio::test]
+async fn truncated_body_after_status_is_ambiguous_never_a_free_retry() {
+    // A raw server (not wiremock, whose `Full<Bytes>` responses cannot
+    // express an in-flight cutoff) sends valid status and headers —
+    // the provider has accepted, executed, and billed the request —
+    // then drops the connection with the declared `Content-Length`
+    // unmet. The failure must surface from `response.text()`, not
+    // `send()`, and must never be a free retry.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        // Drain the request so the client isn't blocked writing it.
+        let _ = socket.read(&mut buf).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Content-Length: 999999\r\n\
+                  \r\n\
+                  data: {\"type\":\"response.completed\"",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        drop(socket);
+    });
+
+    let openai = OpenAiResponsesClient::new(
+        ApiKey::new("sk-test"),
+        OpenAiResponsesConfig {
+            base_url: format!("http://{addr}"),
+            request_timeout_secs: 5,
+            service_tier: None,
+        },
+    )
+    .unwrap();
+    ...
+```
+
+**This is the pattern to reuse for a true two-chunk delivery test**: bind a raw `TcpListener`, write correct headers, then do two separate `write_all` + `flush` calls with the body split at whatever byte offset you want (e.g. mid-UTF-8-codepoint), instead of dropping the connection. wiremock cannot express this.
+
+Given `set_body_raw` is buffered whole, all existing "fixture bytes" are just plain SSE frame strings built via the `sse_body` helper (see below) — that's the raw material to split manually into two `write_all` calls if you go the TCP-listener route, or simply accept that a single `set_body_raw` mock cannot be relied upon to prove chunk-boundary behavior at all.
+
+## 2. Full existing successful tool-call streaming test
+
+```rust
+// crates/familiar-ai-llm/src/xai_api.rs:776-814
+#[tokio::test]
+async fn tool_call_arrives_whole_in_a_single_chunk() {
+    let server = MockServer::start().await;
+    let body = sse_body(&[
+        r#"{"id":"req_2","model":"grok-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read-file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        "[DONE]",
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let adapter = adapter_for(&server);
+    let mut collector = Collector(Vec::new());
+    let outcome = adapter
+        .submit(&base_request("att_1"), &mut collector)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.stop_reason, AdapterStopReason::ToolUse);
+    // Whole-chunk delivery: the delta and its completion arrive
+    // together, never split across separate submit() turns.
+    assert_eq!(collector.0.len(), 2);
+    assert_eq!(
+        collector.0[0],
+        StreamEvent::ToolCallDelta {
+            call_id: "call_abc".into(),
+            capability_id: "read-file".into(),
+            arguments_fragment: "{\"path\":\"a.txt\"}".into(),
+        }
+    );
+    assert_eq!(
+        collector.0[1],
+        StreamEvent::ToolCallComplete {
+            call_id: "call_abc".into(),
+        }
+    );
+}
+```
+
+## 3. Helper functions (adapter construction, mock server, observer)
+
+```rust
+// crates/familiar-ai-llm/src/xai_api.rs:694-732
+fn adapter_for(server: &MockServer) -> XaiAdapter {
+    std::env::set_var("XAI_TEST_KEY", "sk-test-key");
+    XaiAdapter::new(XaiAdapterConfig {
+        base_url: server.uri(),
+        auth: AuthDescriptor::Env("XAI_TEST_KEY".into()),
+        request_timeout_secs: 5,
+    })
+    .unwrap()
+}
+
+fn base_request(attempt: &str) -> SubmitRequest {
+    SubmitRequest {
+        attempt_id: AttemptId(attempt.into()),
+        messages: vec![Message::user("hi")],
+        model: "grok-4".into(),
+        tools: vec![],
+        structured_output: None,
+        cache_control: CacheControl::None,
+        reasoning_control: None,
+        prompt_cache_key: None,
+    }
+}
+
+struct Collector(Vec<StreamEvent>);
+impl StreamObserver for Collector {
+    fn on_event(&mut self, event: StreamEvent) {
+        self.0.push(event);
+    }
+}
+
+fn sse_body(lines: &[&str]) -> String {
+    let mut body = String::new();
+    for line in lines {
+        body.push_str("data: ");
+        body.push_str(line);
+        body.push_str("\n\n");
+    }
+    body
+}
+```
+
+Invocation pattern used everywhere: `adapter.submit(&base_request("att_1"), &mut collector).await` returning `Result<SubmitOutcome, AdapterError>` (or the `(outcome, _)` tuple form is only in `openai_api.rs`, not xai — xai's `submit` returns `Result<SubmitOutcome, AdapterError>` directly, per line 495-499 of `xai_api.rs`).
+
+## 4. Imports, `StreamEvent` variants, and non-ASCII byte-splitting guidance
+
+Test-module imports (`xai_api.rs:689-692`):
+```rust
+use super::*;
+use crate::attempt::{CacheControl, ToolDefinition};
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+```
+`wiremock = "0.6"` (workspace root `Cargo.toml:58`; lockfile pins `0.6.5`).
+
+`StreamEvent` (defined in `crates/familiar-ai-llm/src/attempt.rs:116-128`):
+```rust
+pub enum StreamEvent {
+    TextDelta(String),
+    ToolCallDelta {
+        call_id: String,
+        capability_id: String,
+        arguments_fragment: String,
+    },
+    ToolCallComplete {
+        call_id: String,
+    },
+    UsageDelta(UsageCategories),
+    Stop(AdapterStopReason),
+}
+```
+`AdapterStopReason` (`attempt.rs:174-180`): `EndTurn`, `ToolUse`, `MaxTokens`, `StopSequence`, `ContentFilter`.
+`StreamObserver` trait (`attempt.rs:230-232`): `fn on_event(&mut self, event: StreamEvent);`.
+
+All of these, plus `AdapterError`, `NonRetryableKind`, `RetryableKind`, `AttemptId`, `Message`, `MessageContent`, `MessageRole`, `SubmitOutcome`, `SubmitRequest`, `UsageCategories` are already imported at the top of `xai_api.rs` (lines 25-29) and thus visible in `mod tests` via `use super::*;`.
+
+**Non-ASCII byte-splitting**: build the fixture with `serde_json::json!` (already imported at file top) so escaping is correct, e.g. a delta containing `"日本語é🙂"`. Once you have the full SSE frame as a `String`, get its raw bytes with `.into_bytes()` (or `.as_bytes()`), then split at an arbitrary byte index — the actual code under test (`xai_api.rs:555-570`) explicitly buffers partial lines across `response.chunk()` calls and only calls `std::str::from_utf8` once a full line (up to `\n`) has been reassembled, so it is safe to split a multi-byte UTF-8 character's bytes across the boundary. Example construction:
+
+```rust
+let text = "日本語é🙂";
+let frame = format!(
+    r#"{{"id":"req_u","model":"grok-4","choices":[{{"index":0,"delta":{{"content":{}}}}}]}}"#,
+    serde_json::to_string(text).unwrap() // safely JSON-escapes/quotes the UTF-8 string
+);
+let full_body = sse_body(&[&frame, "[DONE]"]);
+let bytes = full_body.into_bytes();
+let split_at = /* choose an index that lands inside a multi-byte char, e.g. */
+    bytes.iter().position(|&b| b == 0xE6 /* first byte of 日 */).unwrap() + 1;
+let (first_chunk, second_chunk) = bytes.split_at(split_at);
+```
+
+## 5. Confirmed: wiremock in this codebase cannot force multi-chunk wire delivery
+
+Confirmed — `set_body_raw` (and all `ResponseTemplate` body setters used here) produce one buffered `Full<Bytes>` hyper body; wiremock 0.6.5 gives no API in this codebase for controlling how/when that buffer is split into transport-level chunks, and there is no custom `Respond` impl or delay-based chunking helper anywhere in the repo (`grep -rn "impl Respond" .` → no hits; `grep -rn "delay(" ` on wiremock templates → no hits).
+
+The codebase's own established workaround, already in production test code, is a **raw `tokio::net::TcpListener`-based mock server** that writes the HTTP response by hand with separate `write_all`/`flush` calls — see `crates/familiar-ai-llm/src/openai_api.rs:933-963` (`truncated_body_after_status_is_ambiguous_never_a_free_retry`), whose own comment states the reason: *"a raw server (not wiremock, whose `Full<Bytes>` responses cannot express an in-flight cutoff)"*. To force delivery of a body in two distinct chunks split at an exact byte offset, follow that same pattern: bind `TcpListener::bind("127.0.0.1:0")`, spawn a task that reads/drains the request, writes valid `HTTP/1.1 200 OK` headers (with correct `Content-Length` or `Transfer-Encoding: chunked`), then issues `socket.write_all(first_chunk).await; socket.flush().await;` followed by a second `socket.write_all(second_chunk).await; socket.flush().await;` (a short `tokio::time::sleep`/yield between the two writes can help guarantee the client observes them as separate `response.chunk()` reads rather than being coalesced by the kernel, though on loopback even back-to-back flushed writes are almost always delivered as separate reads). Then build the `XaiAdapter` with `base_url: format!("http://{addr}")` directly (bypassing `MockServer`/`adapter_for`, mirroring how the openai test constructs `OpenAiResponsesClient::new(...)` directly instead of using the wiremock helper).
+That background research (launched earlier to inform test design) has now confirmed the approach I already took was correct: wiremock in this codebase can't force a response to be delivered as two distinct wire chunks (`set_body_raw` buffers the whole body), and the codebase's own precedent for true chunk-boundary control is a hand-rolled `TcpListener` mock (used in `openai_api.rs` for a similar reason). That's why I tested the fix by unit-testing the extracted `drain_complete_lines` helper directly with byte buffers split mid-codepoint, rather than trying to force it through wiremock — it's deterministic and exercises the exact code path that was broken.
+
+No further action needed — the remediation (buffer raw bytes, decode only complete lines, plus two regression tests proving byte-identical reassembly of a non-ASCII text delta and non-ASCII tool-call arguments split mid-codepoint) is already complete and verified per my last report.
+stream: 1 interim terminal event(s) superseded by the final result
+scope: human-review findings covered by durable approvals; proceeding
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:879317
+verification: heartbeat check=format elapsed_ms=4844 child=pid:879317
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:879955
+verification: heartbeat check=lint elapsed_ms=30004 child=pid:879955
+verification: heartbeat check=lint elapsed_ms=32311 child=pid:879955
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:884270
+verification: heartbeat check=tests-green-crates elapsed_ms=30002 child=pid:884270
+verification: heartbeat check=tests-green-crates elapsed_ms=60001 child=pid:884270
+verification: heartbeat check=tests-green-crates elapsed_ms=68048 child=pid:884270
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:892525
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30003 child=pid:892525
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60002 child=pid:892525
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:892525
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120001 child=pid:892525
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150003 child=pid:892525
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180004 child=pid:892525
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180659 child=pid:892525
+review: independent reviewer analyzing (attempt 2, typically 2-3 minutes)...
+{"review_id":"00001788308111360583-0004098830-000003-cycle-review-2","reviewed_manifest_hash":"sha256:97ad5dbe0908ac13e1ff5baa945da0e2fe3d7da6ea37497baaa2ace71733c151","findings":[{"finding_id":"xai-sse-utf8-chunk-boundary-corruption","category":"correctness_defect","severity":"high","blocking":false,"title":"SSE UTF-8 chunk-boundary corruption is fixed by byte-buffered line draining","claim":"The candidate replaces the lossy per-chunk `String::from_utf8_lossy` accumulation with a raw `Vec<u8>` buffer and `drain_complete_lines`, which decodes only fully assembled lines and leaves any trailing incomplete byte sequence in the buffer for the next transport chunk, returning `AdapterError::Ambiguous` on genuinely invalid UTF-8 rather than silently substituting U+FFFD. Two new unit tests (`drain_complete_lines_reassembles_multibyte_text_delta_split_across_chunks` and `..._tool_call_arguments_split_across_chunks`) split a 4-byte emoji mid-sequence and assert both the reassembled line and the decoded `content`/`arguments` payloads round-trip exactly. The defect described in the prior finding is no longer present.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":481,"end":501}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125","media_type":"text/plain","byte_size":34586,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:4e09f050613c1addb12549b3757f0d3ffb55009a00b5536f52ba4ae417f4963a","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"No further action; the byte-buffered line drain and its two split-codepoint regression tests close this finding.","status":"resolved","supersedes":null},{"finding_id":"xai-send-timeout-classified-as-unbilled-transport","category":"correctness_defect","severity":"medium","blocking":false,"title":"A request timeout awaiting response headers is classified as unbilled TransientTransport, not Ambiguous","claim":"`submit` maps every error from `.send()` to `AdapterError::Retryable(RetryableKind::TransientTransport)` with the comment asserting \"Nothing has been billed if the request never reached the provider\". That assertion does not hold for the timeout case: the client is built with `Client::builder().timeout(request_timeout_secs)`, a total request deadline that also elapses after the request body has been fully transmitted and xAI has begun generating (and billing) a response whose headers simply have not arrived yet. `reqwest` reports that case as an error from `.send()` with `is_timeout() == true`, indistinguishable here from a DNS/connect/TLS failure because the closure discards the error. The mid-stream path correctly distinguishes it (`error.is_timeout()` -> `Ambiguous`), so the two halves of the same adapter disagree. The result is an attempt whose completion state is genuinely unknown being recorded as a clean, nothing-billed retryable transport failure with zero/unknown usage, contradicting the acceptance criterion that a timeout with unknown completion records ambiguous usage.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":526,"end":537}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125","media_type":"text/plain","byte_size":34586,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:4e09f050613c1addb12549b3757f0d3ffb55009a00b5536f52ba4ae417f4963a","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Inspect the `reqwest::Error` in the `.send()` mapping instead of discarding it: map `error.is_connect()` / `error.is_request()` (pre-transmission failures) to `Retryable(TransientTransport)` as today, and map `error.is_timeout()` to `AdapterError::Ambiguous { reason: \"xAI request timed out before any response headers arrived; completion status unknown\" }` so the attempt records ambiguous usage. Add a wiremock test that delays the response past `request_timeout_secs` and asserts `Ambiguous`, and update the error table in `docs/contracts/xai-adapter.md`, which currently states the same incorrect \"nothing was billed\" claim for all pre-response transport failures.","status":"open","supersedes":null},{"finding_id":"xai-per-attempt-telemetry-in-adapter-global-state","category":"correctness_defect","severity":"medium","blocking":false,"title":"Provider-resolved model and vendor cost are adapter-global last-writer-wins state, so they can be stale or misattributed","claim":"`last_resolved_model` and `last_cost_usd_ticks` are `Mutex` fields on `XaiAdapter` itself, written during whatever `submit` happens to run last and read afterwards through `last_resolved_model()` / `last_cost_usd_ticks()`. Neither is keyed by `AttemptId`, and neither is cleared at the start of a `submit`. Sequentially: attempt 1 completes and stores `cost_in_usd_ticks = 8000` and `model = grok-4-0709`; attempt 2 fails or times out before its usage chunk arrives; a caller that reads `last_cost_usd_ticks()` after attempt 2 receives 8000 and attributes attempt 1's vendor cost and resolved identity to attempt 2. Concurrently, `InferenceAdapter` takes `&self`, so one adapter shared across two in-flight executions of the same worker interleaves writes and returns the other attempt's resolved identity or cost. `SubmitOutcome` already carries per-attempt `provider_request_id`, so the per-attempt channel exists; these two values are the only observations routed around it. No test covers a second submit after a failed one, nor concurrent submits, so the green suite does not exercise either path.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":129,"end":139}},{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":164,"end":185}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125","media_type":"text/plain","byte_size":34586,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:4e09f050613c1addb12549b3757f0d3ffb55009a00b5536f52ba4ae417f4963a","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Carry both values per attempt rather than per adapter: either key the maps on `AttemptId` (`Mutex<BTreeMap<AttemptId, ...>>`, written under the submitting attempt's id and read by id), or reset both to `None` at the top of each `submit` so a failed attempt cannot inherit the previous one's values. Preferably, return the resolved model and vendor cost ticks on `SubmitOutcome` alongside `provider_request_id`, which is the channel the loop already attributes per attempt. Add a regression test asserting that a submit that ends before any usage chunk reports `None` cost rather than the prior attempt's ticks.","status":"open","supersedes":null},{"finding_id":"xai-unparseable-schema-silently-degrades-to-any-object","category":"correctness_defect","severity":"low","blocking":false,"title":"An unparseable tool or structured-output JSON schema is silently replaced with an unconstrained `{\"type\":\"object\"}`","claim":"`build_request_body` parses `structured_output.json_schema` with `serde_json::from_str(...).unwrap_or_else(|_| json!({\"type\": \"object\"}))`, and `wire_tool` does the same for `tool.json_schema`. When the schema string does not parse, the adapter sends a schema that constrains nothing and the failure is invisible: xAI accepts the request, the model returns arbitrary JSON or arbitrary tool arguments, and the loop reports a normal completion — for the structured-output path, a `StopReason::Completed { structured_output: true }` whose payload was never constrained by the requested schema. The in-file comment claims the opposite behavior for this branch (\"If this shape is wrong for a given deployment, xAI returns 400, which this adapter reports as `NonRetryable(InvalidRequest)` rather than silently degrading to unstructured text\"); that reasoning covers a rejected wire shape, not a schema the adapter itself discarded before sending. A caller-configured malformed schema is a configuration error an operator can fix, so it should surface as one.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":321,"end":336}},{"kind":"file_range","path":"crates/familiar-ai-llm/src/xai_api.rs","range":{"start":299,"end":309}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125","media_type":"text/plain","byte_size":34586,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788303088789870-0004098830-000000/PRD-61","revision":"sha256:4e09f050613c1addb12549b3757f0d3ffb55009a00b5536f52ba4ae417f4963a","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e1c124d0d05c05980974a9208558ec74e42000bd82b7bbac672f675e30bc4125-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Make `build_request_body` fallible and return `AdapterError::NonRetryable(NonRetryableKind::InvalidRequest)` when either a tool's `json_schema` or `structured_output.json_schema` fails to parse, so the operator sees the malformed schema instead of an unconstrained request. Add unit tests asserting that a malformed structured-output schema and a malformed tool schema each fail closed rather than being sent as `{\"type\":\"object\"}`.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+backlog: PRD-61 docs/prds/PRD-061.md in_progress -> completed actor=system:familiar-ai-run:00001788308111360583-0004098830-000003
+error: PRD-59: human review required
+---
+exit: 1
