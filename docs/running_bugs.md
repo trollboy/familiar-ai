@@ -241,7 +241,7 @@ instead of deleting the history.
 
 ### FAM-BUG-014 — Standing batch approval still stops dependency changes as ambiguous scope
 
-- **Status:** Open — narrowed 2026-09-02 (audit)
+- **Status:** FIXED 2026-09-02 — bounded allowance implemented
 - **Audit evidence:** PRD-080 fixed the DECLARED case: a manifest path listed in a PRD's `expected_files` now carries standing batch approval (`file_class:<class>:declared_expected_file`). The case still open is the UNDECLARED-but-necessary one: wave 6's adapter PRDs each legitimately touched `Cargo.toml`/`Cargo.lock` without declaring them, and each paused for a human scope decision. Either PRDs must declare their manifests (authoring rule) or the policy needs a bounded allowance for lockfile/manifest edits that add no new external crate. Owner decision pending.
 - **Original status:** Open; PRD-050 retained
 - **Observed:** PRD-050 legitimately added one dependency and changed

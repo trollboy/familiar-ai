@@ -401,11 +401,45 @@ pub enum EvidenceError {
 }
 
 /// Collect deterministic filesystem metadata required for scope evaluation.
+/// External crate names a candidate ADDS to `Cargo.lock`, read from the
+/// unified diff. Cargo.lock lists every resolved package, so a name that
+/// appears only on the added side is third-party code that was not in the
+/// build before. A name on both sides is a version bump or a re-ordering,
+/// not new code (FAM-BUG-014).
+fn lockfile_additions(diff: &[u8]) -> std::collections::BTreeSet<String> {
+    let text = String::from_utf8_lossy(diff);
+    let mut in_lockfile = false;
+    let mut added = std::collections::BTreeSet::new();
+    let mut removed = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        if line.starts_with("diff --git ") {
+            in_lockfile = line.ends_with("Cargo.lock") || line.contains("/Cargo.lock ");
+            continue;
+        }
+        if !in_lockfile {
+            continue;
+        }
+        let (sink, rest) = match line.as_bytes().first() {
+            Some(b'+') if !line.starts_with("+++") => (&mut added, &line[1..]),
+            Some(b'-') if !line.starts_with("---") => (&mut removed, &line[1..]),
+            _ => continue,
+        };
+        if let Some(value) = rest.trim().strip_prefix("name = ") {
+            sink.insert(value.trim().trim_matches('"').to_owned());
+        }
+    }
+    added.difference(&removed).cloned().collect()
+}
+
 pub fn collect_scope_evidence(
     repository: &Path,
     files: &[ChangedFile],
+    diff: &[u8],
 ) -> Result<ScopeEvidence, EvidenceError> {
-    let mut evidence = ScopeEvidence::default();
+    let mut evidence = ScopeEvidence {
+        new_external_crates: lockfile_additions(diff),
+        ..ScopeEvidence::default()
+    };
     for file in files {
         if file.kind == GitChangeKind::Deleted {
             continue;
@@ -424,6 +458,23 @@ pub fn collect_scope_evidence(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lockfile_additions_name_only_new_external_crates() {
+        // FAM-BUG-014: Cargo.lock is the resolved truth. A name present only
+        // on the added side is third-party code entering the build; a name on
+        // both sides is a version bump, not new code.
+        let diff = b"diff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n-name = \"serde\"\n+name = \"serde\"\n+name = \"brand-new-crate\"\n" as &[u8];
+        let added = super::lockfile_additions(diff);
+        assert_eq!(
+            added.into_iter().collect::<Vec<_>>(),
+            vec!["brand-new-crate".to_string()]
+        );
+        // Manifest-only churn outside Cargo.lock never counts.
+        let manifest_only =
+            b"diff --git a/Cargo.toml b/Cargo.toml\n+name = \"not-a-lock-entry\"\n" as &[u8];
+        assert!(super::lockfile_additions(manifest_only).is_empty());
+    }
+
     #[test]
     fn a_waiver_covers_the_same_claim_under_a_new_id_and_narrower_citations() {
         // FAM-BUG-044: reviewers re-issue one claim with fresh ids, re-worded
@@ -598,6 +649,7 @@ mod tests {
                 file("gone.rs", GitChangeKind::Deleted),
                 file("never-existed.rs", GitChangeKind::Modified),
             ],
+            b"",
         )
         .unwrap();
         assert_eq!(

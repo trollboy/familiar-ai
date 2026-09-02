@@ -190,13 +190,14 @@ impl ReviewCoordinator<'_> {
                 return self.stop(cycle, ReviewStopReason::EvidenceFailure);
             }
         };
-        let scope_evidence = match collect_scope_evidence(repository, &captured.changed_files) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("review: scope evidence collection failed: {error}");
-                return self.stop(cycle, ReviewStopReason::EvidenceFailure);
-            }
-        };
+        let scope_evidence =
+            match collect_scope_evidence(repository, &captured.changed_files, &captured.bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("review: scope evidence collection failed: {error}");
+                    return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+                }
+            };
         let evaluation = evaluate_scope(
             &request.scope_policy,
             &captured.changed_files,
@@ -688,7 +689,11 @@ impl ReviewCoordinator<'_> {
                     return self.stop(cycle, ReviewStopReason::EvidenceFailure);
                 }
             };
-            let scope_evidence = match collect_scope_evidence(repository, &captured.changed_files) {
+            let scope_evidence = match collect_scope_evidence(
+                repository,
+                &captured.changed_files,
+                &captured.bytes,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     eprintln!("review: scope evidence re-collection failed: {error}");

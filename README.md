@@ -235,6 +235,7 @@ From [`docs/philosophy.md`](docs/philosophy.md):
 8. **Agents Are Replaceable** — no vendor is load-bearing
 9. **Memory Must Be Durable**
 10. **Stewardship Over Control**
+11. **Cost Is Never Fine Print** — spend increases are stated in dollars up front, never buried; utilization and latency decide serverless vs always-on, and unknown numbers get asked about
 
 ---
 

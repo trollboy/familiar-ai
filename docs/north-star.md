@@ -61,6 +61,15 @@ Autonomy does not mean the system never needs a human. It means the system
 but fail cheap and fail informative. A retained `in_progress` entry with an
 exact reason at 3 a.m. is success; a $40 hallucinated feature is failure.
 
+**Cheap has two ledgers.** One is Familiar's own orchestration spend — tokens,
+models, retries — measured by cost per accepted PRD. The other is the bill for
+the systems Familiar builds: instances, managed services, storage, egress. The
+second ledger is the owner's money too, and the same discipline applies to it —
+state the dollar delta up front, ask for the utilization and latency numbers
+that decide serverless vs. always-on, and never let a spend increase reach the
+human as fine print. See Core Principle #11, *Cost Is Never Fine Print*, in
+[`docs/philosophy.md`](philosophy.md).
+
 ## North-Star Metrics
 
 Both are computable from state Familiar already records (execution history,

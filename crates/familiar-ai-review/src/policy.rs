@@ -170,6 +170,12 @@ pub fn compile_scope_policy(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScopeEvidence {
     pub symlink_paths: BTreeSet<String>,
+    /// External crate names the candidate ADDS to `Cargo.lock` — the
+    /// complete resolved truth of what new third-party code would enter the
+    /// build. Empty means the manifest/lockfile edits rewire only what was
+    /// already vetted (internal path deps, workspace deps, feature changes),
+    /// which the plan's standing approval covers (FAM-BUG-014).
+    pub new_external_crates: BTreeSet<String>,
 }
 
 struct Classified {
@@ -592,11 +598,54 @@ fn evaluate_subject(
                         None,
                     );
                 }
+                // A manifest or lockfile edit that introduces no new
+                // external crate adds no unvetted third-party code: it is
+                // rewiring internal path deps, workspace deps, or features.
+                // The plan's standing batch approval covers that; a genuine
+                // new dependency still stops, naming the crates
+                // (FAM-BUG-014).
+                if matches!(
+                    classified.class,
+                    ScopeFileClass::DependencyManifest | ScopeFileClass::DependencyLockfile
+                ) && evidence.new_external_crates.is_empty()
+                {
+                    return finding(
+                        ScopeDecision::AllowedChange,
+                        format!("file_class:{class_label}:no_new_external_crate"),
+                        ScopeRuleSource::BuiltIn,
+                        format!(
+                            "{class_label} change introduces no new external crate into Cargo.lock"
+                        ),
+                        None,
+                    );
+                }
+                let (gate_rule, gate_detail) = if matches!(
+                    classified.class,
+                    ScopeFileClass::DependencyManifest | ScopeFileClass::DependencyLockfile
+                ) {
+                    (
+                        format!("file_class:{class_label}:new_external_crate"),
+                        format!(
+                            "{class_label} change introduces new external crate(s): {}",
+                            evidence
+                                .new_external_crates
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    )
+                } else {
+                    (
+                        format!("file_class:{class_label}:human_review"),
+                        format!("class policy requires human review for {class_label} files"),
+                    )
+                };
                 return finding(
                     ScopeDecision::AmbiguousHumanReview,
-                    format!("file_class:{class_label}:human_review"),
+                    gate_rule,
                     ScopeRuleSource::Configuration,
-                    format!("class policy requires human review for {class_label} files"),
+                    gate_detail,
                     None,
                 );
             }
@@ -1120,7 +1169,25 @@ mod tests {
         snapshot: &ScopePolicySnapshot,
         files: &[ChangedFile],
     ) -> Vec<(String, ScopeDecision, String)> {
-        evaluate_scope(snapshot, files, &ScopeEvidence::default())
+        decide_with(snapshot, files, &ScopeEvidence::default())
+    }
+
+    /// Evidence stating the candidate pulls in a genuinely new third-party
+    /// crate — what makes a manifest change require human authority
+    /// (FAM-BUG-014).
+    fn new_crate_evidence() -> ScopeEvidence {
+        ScopeEvidence {
+            new_external_crates: ["brand-new-crate".to_string()].into_iter().collect(),
+            ..ScopeEvidence::default()
+        }
+    }
+
+    fn decide_with(
+        snapshot: &ScopePolicySnapshot,
+        files: &[ChangedFile],
+        evidence: &ScopeEvidence,
+    ) -> Vec<(String, ScopeDecision, String)> {
+        evaluate_scope(snapshot, files, evidence)
             .findings
             .iter()
             .map(|f| (f.finding_id.clone(), f.decision, f.rule_id.clone()))
@@ -1168,9 +1235,10 @@ mod tests {
                 .prohibited_rules
                 .retain(|rule| rule.rule_id != "no_manifests");
         });
-        let decisions = decide(
+        let decisions = decide_with(
             &undeclared,
             &[file("Cargo.toml", GitChangeKind::Modified, None)],
+            &new_crate_evidence(),
         );
         assert_eq!(decisions[0].1, ScopeDecision::AmbiguousHumanReview);
         // A directory declaration covering the manifest path grants nothing.
@@ -1180,13 +1248,14 @@ mod tests {
                 .retain(|rule| rule.rule_id != "no_manifests");
             input.contract = vec![contract_entry("crates/extra/")];
         });
-        let decisions = decide(
+        let decisions = decide_with(
             &directory_only,
             &[file(
                 "crates/extra/Cargo.toml",
                 GitChangeKind::Modified,
                 None,
             )],
+            &new_crate_evidence(),
         );
         assert_eq!(decisions[0].1, ScopeDecision::AmbiguousHumanReview);
     }
@@ -1335,12 +1404,16 @@ mod tests {
         let policy = snapshot(|input| {
             input.allowed_paths = vec!["src/".into(), "migrations/".into(), "Cargo.lock".into()];
         });
-        let lockfile = decide(
+        let lockfile = decide_with(
             &policy,
             &[file("Cargo.lock", GitChangeKind::Modified, None)],
+            &new_crate_evidence(),
         );
         assert_eq!(lockfile[0].1, ScopeDecision::AmbiguousHumanReview);
-        assert_eq!(lockfile[0].2, "file_class:dependency_lockfile:human_review");
+        assert_eq!(
+            lockfile[0].2,
+            "file_class:dependency_lockfile:new_external_crate"
+        );
         let migration = decide(
             &policy,
             &[file("migrations/010_x.sql", GitChangeKind::Added, None)],
@@ -1542,9 +1615,10 @@ mod tests {
                 precedence: None,
             }];
         });
-        let findings = decide(
+        let findings = decide_with(
             &policy,
             &[file("vendored/Cargo.toml", GitChangeKind::Modified, None)],
+            &new_crate_evidence(),
         );
         assert_eq!(findings[0].2, "file_class:generated_artifact:human_review");
         let conflicted = decide(
