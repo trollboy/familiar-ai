@@ -13,6 +13,7 @@ pub mod error;
 pub mod factory;
 pub mod heuristics;
 pub mod manager;
+pub mod openai_api;
 pub mod router;
 pub mod types;
 
