@@ -1096,12 +1096,20 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-044 — Waivers key on reviewer-chosen finding ids, which rotate
 
-- **Status:** FIXED 2026-09-01 evening — waivers store the finding's claim
-  substance (category + evidenced paths/checks, hash-stable across id and
-  prose rotation; migration 056 also drops the FK that blocked
-  save_cycle's findings rewrite), completion matches by id OR substance,
-  and the coordinator carries durable waivers forward into each fresh
-  attempt's cycle snapshot. Regression pins substance stability.
+- **Status:** FIXED 2026-09-01 evening; **strengthened 2026-09-02** —
+  waivers store the claim substance (migration 056 also drops the FK that
+  blocked save_cycle's findings rewrite), completion matches by id or
+  substance, and the coordinator carries durable waivers forward into each
+  fresh attempt's snapshot.
+  **Second iteration (wave 6, PRD-59):** an exact-set substance hash was
+  still too strict — the reviewer re-issued the same scope claim as
+  `F9-…` then `F5-…` citing a DIFFERENT SUBSET of paths each time, so the
+  hashes differed and completion refused a waiver the owner had granted.
+  Substance is now stored as data (category + cited paths/checks) and a
+  waiver covers a later finding when the category matches and its
+  citations are a subset of what the human actually saw. A claim citing
+  anything new still blocks. Regression pins covered/subset/superset/
+  wrong-category.
 - **Original status:** Open (workaround: manual completion override, used
   for PRD-38)
 - **Observed:** opus issued the same misinformed scope claim under a

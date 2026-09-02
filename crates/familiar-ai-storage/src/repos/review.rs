@@ -71,7 +71,7 @@ impl<'a> ReviewRepository<'a> {
             .optional()
             .map_err(db)?
             .and_then(|json| serde_json::from_str::<familiar_ai_review::ReviewFinding>(&json).ok())
-            .map(|finding| familiar_ai_review::review_finding_substance_hash(&finding))
+            .map(|finding| familiar_ai_review::review_finding_substance_json(&finding))
             .unwrap_or_default();
         let waiver = ReviewWaiver {
             waiver_id: format!("{cycle_id}:{finding_id}"),

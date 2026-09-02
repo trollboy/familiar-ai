@@ -736,15 +736,37 @@ fn validate_completion_cycle(
         // between attempts while the waived claim stays the same
         // (FAM-BUG-044). Legacy rows carry the empty substance and match
         // by id only.
-        let substance = familiar_ai_review::review_finding_substance_hash(finding);
-        let durable: Option<(String, String, String, String, String, String)> = tx
-            .query_row(
-                "SELECT waiver_id,cycle_id,finding_id,actor,reason,created_at FROM review_finding_waivers WHERE cycle_id=?1 AND (finding_id=?2 OR (finding_substance<>'' AND finding_substance=?3)) LIMIT 1",
-                params![cycle.cycle_id, finding.finding_id, substance],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        // A waiver matches by exact id, or when the human's waived claim
+        // covers this one: same category, and every citation here was
+        // already visible in what they waived (FAM-BUG-044 — reviewers
+        // re-issue one claim under fresh ids with varying citations).
+        let mut waivers = tx
+            .prepare(
+                "SELECT waiver_id,cycle_id,finding_id,finding_substance,actor,reason,created_at FROM review_finding_waivers WHERE cycle_id=?1",
             )
-            .optional()
             .map_err(storage)?;
+        let durable = waivers
+            .query_map(params![cycle.cycle_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?
+            .into_iter()
+            .find(|row| {
+                row.2 == finding.finding_id
+                    || (!row.3.is_empty() && familiar_ai_review::waiver_covers(&row.3, finding))
+            })
+            .map(|row| (row.0, row.1, row.2, row.4, row.5, row.6));
+        drop(waivers);
         let waiver = durable.map(|row| familiar_ai_review::ReviewWaiver {
             waiver_id: row.0,
             cycle_id: row.1,

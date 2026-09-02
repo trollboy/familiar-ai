@@ -227,15 +227,17 @@ pub fn scope_finding_substance_hash(finding: &crate::ScopeFinding) -> String {
     )
 }
 
-/// Identity of a review finding's claim substance: its category plus the
-/// sorted set of evidenced paths and verification check ids. Reviewer-chosen
-/// finding ids and prose rotate between attempts (FAM-BUG-044); the claim a
-/// human waives is "this category of finding about these files/checks".
-pub fn review_finding_substance_hash(finding: &crate::ReviewFinding) -> String {
-    let mut parts: Vec<String> = vec![serde_json::to_string(&finding.category)
+/// The waivable substance of a review finding: its category and the sorted
+/// set of evidenced paths and verification checks. Reviewers re-issue the
+/// same claim under fresh ids, re-worded prose, AND a varying subset of
+/// citations (FAM-BUG-044), so this is stored as data rather than a hash:
+/// a waiver covers a later finding of the same category whose citations are
+/// a subset of the ones the human saw.
+pub fn review_finding_substance(finding: &crate::ReviewFinding) -> (String, Vec<String>) {
+    let category = serde_json::to_string(&finding.category)
         .unwrap_or_default()
         .trim_matches('"')
-        .to_owned()];
+        .to_owned();
     let mut cited: Vec<String> = finding
         .evidence
         .iter()
@@ -255,8 +257,32 @@ pub fn review_finding_substance_hash(finding: &crate::ReviewFinding) -> String {
         .collect();
     cited.sort();
     cited.dedup();
-    parts.extend(cited);
-    content_hash(parts.join("\n").as_bytes())
+    (category, cited)
+}
+
+/// Serialized substance for durable storage.
+pub fn review_finding_substance_json(finding: &crate::ReviewFinding) -> String {
+    let (category, cited) = review_finding_substance(finding);
+    serde_json::json!({"category": category, "cited": cited}).to_string()
+}
+
+/// Whether a durable waiver recorded against `waived` covers `finding`.
+/// Same category, and everything the new finding cites was already visible
+/// in what the human waived.
+pub fn waiver_covers(waived_substance_json: &str, finding: &crate::ReviewFinding) -> bool {
+    let Ok(waived) = serde_json::from_str::<serde_json::Value>(waived_substance_json) else {
+        return false;
+    };
+    let (category, cited) = review_finding_substance(finding);
+    if waived.get("category").and_then(|v| v.as_str()) != Some(category.as_str()) {
+        return false;
+    }
+    let Some(waived_cited) = waived.get("cited").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let waived_set: std::collections::BTreeSet<&str> =
+        waived_cited.iter().filter_map(|v| v.as_str()).collect();
+    !cited.is_empty() && cited.iter().all(|item| waived_set.contains(item.as_str()))
 }
 
 pub fn content_hash(bytes: &[u8]) -> String {
@@ -399,44 +425,52 @@ pub fn collect_scope_evidence(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn finding_substance_survives_id_and_prose_rotation() {
-        // FAM-BUG-044: reviewers re-issue the same claim under fresh ids and
-        // re-worded prose every attempt; the substance (category + evidenced
-        // paths/checks) is what a human actually waives.
-        let make = |id: &str, title: &str| crate::ReviewFinding {
+    fn a_waiver_covers_the_same_claim_under_a_new_id_and_narrower_citations() {
+        // FAM-BUG-044: reviewers re-issue one claim with fresh ids, re-worded
+        // prose, and a varying subset of citations. A human waived the claim
+        // they saw; a later, narrower restatement of it is covered.
+        let make = |id: &str, paths: &[&str]| crate::ReviewFinding {
             finding_id: id.into(),
             category: crate::FindingCategory::ScopeViolation,
             severity: crate::FindingSeverity::Medium,
             blocking: true,
-            title: title.into(),
-            claim: title.into(),
-            evidence: vec![
-                crate::FindingEvidence::FileRange {
-                    path: "tests/fixtures/repo-rust-cli/Cargo.toml".into(),
-                    range: crate::LineRange { start: 1, end: 7 },
-                },
-                crate::FindingEvidence::DiffHunk {
-                    path: "docs/acceptance/PRD-038.md".into(),
-                    hunk: "@@ -0,0 +1 @@".into(),
-                },
-            ],
+            title: format!("title for {id}"),
+            claim: "outside allowed paths".into(),
+            evidence: paths
+                .iter()
+                .map(|path| crate::FindingEvidence::FileRange {
+                    path: (*path).into(),
+                    range: crate::LineRange { start: 1, end: 2 },
+                })
+                .collect(),
             remediation: "relocate".into(),
             status: crate::FindingStatus::Open,
             supersedes: None,
             acceptance_criterion_id: None,
         };
-        let first = make("scope-out-of-allowed-paths", "Nine of eleven files...");
-        let second = make("scope-outside-crates", "Change adds files outside...");
-        assert_eq!(
-            super::review_finding_substance_hash(&first),
-            super::review_finding_substance_hash(&second)
-        );
-        let mut different = make("x", "y");
-        different.category = crate::FindingCategory::TestGap;
-        assert_ne!(
-            super::review_finding_substance_hash(&first),
-            super::review_finding_substance_hash(&different)
-        );
+        let waived = super::review_finding_substance_json(&make(
+            "F9-changes-outside-allowed-paths",
+            &["Cargo.toml", "Cargo.lock", "config/default.toml"],
+        ));
+        // Same claim, new id, subset of citations: covered.
+        assert!(super::waiver_covers(
+            &waived,
+            &make("F5-changes-outside-allowed-paths", &["Cargo.toml"])
+        ));
+        // Identical set: covered.
+        assert!(super::waiver_covers(
+            &waived,
+            &make("F1", &["Cargo.lock", "Cargo.toml", "config/default.toml"])
+        ));
+        // Cites something the human never saw: NOT covered.
+        assert!(!super::waiver_covers(
+            &waived,
+            &make("F2", &["Cargo.toml", "crates/secret/src/lib.rs"])
+        ));
+        // Different category with the same paths: NOT covered.
+        let mut other = make("F3", &["Cargo.toml"]);
+        other.category = crate::FindingCategory::SecurityIssue;
+        assert!(!super::waiver_covers(&waived, &other));
     }
 
     use super::*;
