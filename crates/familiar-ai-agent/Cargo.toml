@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["time", "macros", "rt"] }
 landlock.workspace = true
 
 [dev-dependencies]
+familiar-ai-core = { path = "../familiar-ai-core" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 wiremock.workspace = true
