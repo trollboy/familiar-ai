@@ -128,7 +128,9 @@ instead of deleting the history.
 
 ### FAM-BUG-009 — Synthetic Claude discovery identity passed admission and failed every Wave 3 attempt
 
-- **Status:** Open; unsafe worker disabled and claims recovered
+- **Status:** Open — needs re-verification 2026-09-02 (audit)
+- **Audit evidence:** Preflight now probes and dedups agent identities per session, but no evidence was found that a discovery-synthesized worker identity is refused at admission. Re-verify with a deliberately synthetic registry entry before closing.
+- **Original status:** Open; unsafe worker disabled and claims recovered
 - **Observed:** The CLI-login probe recorded the command label `claude` as a
   discovered model. The registry admitted `claude/claude`, routing selected it
   for every stage, and Claude Code rejected `--model claude` as
@@ -152,7 +154,9 @@ instead of deleting the history.
 
 ### FAM-BUG-010 — Authored Wave 3 achievable width disagrees with scheduler
 
-- **Status:** Open
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** PRD-076 replaced authored widths with `achievable_width()` — the same computation the scheduler uses — and regenerated EXECUTION-PLAN.md as computed rounds. Live confirmation: wave 6 printed `achievable_width=1 requested_width=3` and wave 5 achieved its computed width 2 exactly.
+- **Original status:** Open
 - **Observed:** The execution plan claims Wave 3 achievable width `~3–4`, but
   the real scheduler computed width 1. PRD-050's declared
   `docs/contracts/providers.md` and configuration scope overlaps every other
@@ -170,7 +174,9 @@ instead of deleting the history.
 
 ### FAM-BUG-011 — Preflight is silent, duplicated per stage, and looks hung
 
-- **Status:** Open
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** PRD-078: per-check heartbeats naming check id and child pid, per-session probe dedup (`probed_agents`), and last-output-line activity. Every session tonight showed live preflight progress.
+- **Original status:** Open
 - **Observed:** Drive emitted only `session started` for several minutes while
   preflight repeatedly probed the same routed Claude executable across stages
   and ran required `cargo test --workspace` with output suppressed. An operator
@@ -187,7 +193,9 @@ instead of deleting the history.
 
 ### FAM-BUG-012 — Dependent PRD admitted after its dependency retained without integration
 
-- **Status:** Open; observed during Wave 3
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** PRD-077 `dependency_not_integrated` decision. Fired live in wave 6: PRDs 59/60/61/63/72 were all refused while PRD-58 was attempted-but-unintegrated.
+- **Original status:** Open; observed during Wave 3
 - **Observed:** PRD-052 retained with `human_review_required` and never landed,
   but the same session immediately admitted PRD-054, which declares PRD-052 as
   a dependency. PRD-054's worker correctly observed that the collector and
@@ -211,7 +219,9 @@ instead of deleting the history.
 
 ### FAM-BUG-013 — Reviewer preflight admitted an incompatible Ollama runtime
 
-- **Status:** Open; review blocked for PRD-052 and PRD-054
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** PRD-079 capability-probed review routing: `record_review_capability_probe` + `review_capability_probes` (migration 053) bind structured-output/tool-calling/protocol per spec identity before a reviewer is admitted.
+- **Original status:** Open; review blocked for PRD-052 and PRD-054
 - **Observed:** Independent review routed to Ollama. Each of three review
   attempts then failed identically because installed Ollama 0.12.3 is below
   Codex's required 0.13.4. The failure was reported as malformed structured
@@ -231,7 +241,9 @@ instead of deleting the history.
 
 ### FAM-BUG-014 — Standing batch approval still stops dependency changes as ambiguous scope
 
-- **Status:** Open; PRD-050 retained
+- **Status:** Open — narrowed 2026-09-02 (audit)
+- **Audit evidence:** PRD-080 fixed the DECLARED case: a manifest path listed in a PRD's `expected_files` now carries standing batch approval (`file_class:<class>:declared_expected_file`). The case still open is the UNDECLARED-but-necessary one: wave 6's adapter PRDs each legitimately touched `Cargo.toml`/`Cargo.lock` without declaring them, and each paused for a human scope decision. Either PRDs must declare their manifests (authoring rule) or the policy needs a bounded allowance for lockfile/manifest edits that add no new external crate. Owner decision pending.
+- **Original status:** Open; PRD-050 retained
 - **Observed:** PRD-050 legitimately added one dependency and changed
   `Cargo.toml`/`Cargo.lock` within the approved implementation, but global scope
   policy classified both files as `human_review`. The execution plan's standing
@@ -271,7 +283,9 @@ instead of deleting the history.
 
 ### FAM-BUG-016 — Recovery blocks current work on stale checkpoints for already-integrated PRDs
 
-- **Status:** Open; Wave 3 recovery requires manual integration
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** Root cause was the canonical-vs-zero-padded PrdId spelling; `terminal_prds` records both. Recovery ran cleanly across every session in waves 5 and 6.
+- **Original status:** Open; Wave 3 recovery requires manual integration
 - **Observed:** After the Wave 3 drive retained all nine candidates,
   `familiar-ai resume all --dry-run` classified old Wave 2 PRD-048 and PRD-051
   worktrees as `stale_base`, then reported PRD-050 blocked on PRD-048 and
@@ -319,7 +333,9 @@ instead of deleting the history.
 
 ### FAM-BUG-018 — Recovery commit invalidates the checkpoint it is meant to integrate
 
-- **Status:** Open; PRD-050 required an audited manual completion override
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** `rebind_operator_commit` rebinds a stale-base checkpoint whose HEAD parent is the base and whose tree is clean. Used successfully to land PRD-59 on 2026-09-02.
+- **Original status:** Open; PRD-050 required an audited manual completion override
 - **Observed:** The preserved PRD-050 candidate was reviewed, tested, committed
   in its owned worktree as `f8e55a6`, and cherry-picked to main as `016f641`.
   `backlog approve-and-complete` then rejected the checkpoint as `stale_base`
@@ -383,7 +399,9 @@ instead of deleting the history.
 
 ### FAM-FRICTION-004 — Capability display is not canonical
 
-- **Status:** Open
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** Canonical `as_str()` accessors on the worker capability/config enums in `config/registry_workers.rs`.
+- **Original status:** Open
 - **Observed:** `config model list` renders `narrow-task` as `narrowtask`.
 - **Impact:** Display output does not round-trip to the accepted CLI value and
   invites invalid copy/paste commands.
@@ -410,7 +428,9 @@ PRD-076.
 
 ### FAM-BUG-019 — Dogfood workflow repeatedly collapses into manual per-PRD delivery
 
-- **Status:** Open; systemic release-blocking dogfood failure
+- **Status:** CLOSED 2026-09-02 — waves 5 and 6 delivered autonomously
+- **Audit evidence:** Wave 5 (038/053/058) and wave 6 (059/060/061) ran claim → implement → verify → independent review → merge-queue integration without manual git operations. Remaining human touchpoints are DESIGNED gates (scope decisions on undeclared dependency changes, waivers for reviewer claims), not delivery collapse. The operator role is now approval, not integration.
+- **Original status:** Open; systemic release-blocking dogfood failure
 - **Observed:** The repeated delivery workflow is: (1) launch an allowlisted
   `familiar-ai drive` wave, (2) encounter a cascade of retained or failed
   attempts, and (3) finish, reconcile, test, integrate, and complete each PRD
@@ -462,7 +482,9 @@ PRD-076.
 
 ### FAM-BUG-021 — Familiar invalidates its own checkpoint after remediation
 
-- **Status:** Open; blocks autonomous Wave 4 recovery
+- **Status:** CLOSED 2026-09-02 (audit)
+- **Audit evidence:** PRD-077 refreezes the candidate after remediation (`candidate_snapshot` + checkpoint put). Live proof: PRD-59 was remediated twice on 2026-09-02 and still landed.
+- **Original status:** Open; blocks autonomous Wave 4 recovery
 - **Observed:** PRD-032 completed implementation, verification, two independent
   review/remediation cycles, and a third review that found one new actionable
   defect. After increasing the bounded remediation allowance and invoking
@@ -482,7 +504,9 @@ PRD-076.
 
 ### FAM-BUG-022 — Wave 4 reproduces cascade-then-manual delivery
 
-- **Status:** Open; concrete second reproduction of FAM-BUG-019
+- **Status:** CLOSED 2026-09-02 — see FAM-BUG-019
+- **Audit evidence:** Same closure evidence: two consecutive waves integrated through the merge queue.
+- **Original status:** Open; concrete second reproduction of FAM-BUG-019
 - **Observed:** Wave 4 first spent roughly eleven silent minutes before an
   unused Unsloth credential aborted the whole session. After that was fixed,
   PRD-032 implemented successfully but the routed Qwen reviewer emitted prose
@@ -1181,3 +1205,54 @@ reinstall the binary, then rerun the 076 drive.
 - **Reviewer credit:** three independent reviews found a real protocol
   defect, its remediation's follow-on defect, and the test blindness
   that let both pass. This is the review loop paying for itself.
+
+### FAM-BUG-047 — Intermittent workspace test failure
+
+- **Status:** Open — needs identification
+- **Observed:** during wave 6, `cargo test --workspace --no-default-features`
+  reported one failure, then passed twice on identical trees (both on main
+  and in the PRD-59 worktree). The failing test was not captured.
+- **Why it matters:** `tests-workspace-advisory` is now a REQUIRED check.
+  A flake in a required gate kills a whole unattended session, exactly as
+  FAM-BUG-033 did. Priority is disproportionate to its apparent size.
+- **Next action:** run the suite in a loop capturing failures
+  (`for i in $(seq 20); do cargo test --workspace --no-default-features
+  2>&1 | grep -A3 'FAILED'; done`), then fix or serialize the offender.
+
+### FAM-BUG-048 — Operator tools bypass the control-plane lock
+
+- **Status:** Open
+- **Observed:** on 2026-09-02 the operator wrote checkpoint rows
+  (`operator_rebind`, `operator_set_phase`) and rebased candidate
+  worktrees while a `resume all` session held the control-plane claim.
+  The lock refused the second *session* launch — correctly — but the
+  example tools write to SQLite directly and are subject to no such
+  check, so nothing prevented mutation underneath live work.
+- **Impact:** none confirmed this time (the session finished and both
+  candidates landed), but the class is checkpoint/worktree corruption
+  under a running driver.
+- **Fix direction:** the `operator_*` examples should acquire (or at
+  minimum assert absence of) the repository control-plane claim before
+  mutating, and refuse with the owning pid when it is live — the same
+  courtesy the drive extends to itself.
+
+### FAM-BUG-049 — Agent-loop history omits the assistant's tool-call turn
+
+- **Status:** Open — root cause behind FAM-BUG-046 and three adapter defects
+- **Observed:** `Message` history records tool RESULTS
+  (`MessageContent::ToolResult`) but never the assistant turn that
+  ISSUED the calls. Every wire format requires the originating call to
+  accompany its result, so each adapter reconstructs that turn on its
+  own — and each got it wrong differently: `openai_api` silently omits
+  the item when its stream cache misses, `xai_api` emitted an empty
+  `function.name`, `anthropic` emits an orphan `tool_result` on the
+  refusal path. All three were caught by independent review, none by a
+  fixture.
+- **Fix direction (proposed by PRD-61's reviewer):** add
+  `MessageContent::ToolCalls(Vec<ToolCallPayload>)` carrying call_id,
+  capability, and arguments, and have the raw runtime push the
+  assistant's call turn into history. Adapters then SERIALIZE a complete
+  transcript instead of inventing one; FAM-BUG-046's `capability_name`
+  becomes belt-and-braces rather than the only signal.
+- **Urgency:** PRD-072 adds another runtime; every future provider hits
+  the same wall. Fix before it lands.
