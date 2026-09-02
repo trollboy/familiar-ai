@@ -602,6 +602,7 @@ name = "familiar-ai-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "familiar-ai-core",
  "familiar-ai-llm",
  "landlock",
  "libc",

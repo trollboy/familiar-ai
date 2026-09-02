@@ -5,6 +5,7 @@ mod isolation;
 pub mod openai;
 pub mod raw_runtime;
 mod registry;
+pub mod xai;
 
 pub use agent::{
     redact_sensitive, AgentExecutionError, BudgetCapability, BudgetDenomination,

@@ -16,6 +16,7 @@ pub mod manager;
 pub mod openai_api;
 pub mod router;
 pub mod types;
+pub mod xai_api;
 
 pub use backend::LlmBackend;
 pub use error::LlmError;
