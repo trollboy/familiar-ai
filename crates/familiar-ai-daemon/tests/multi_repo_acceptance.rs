@@ -824,6 +824,7 @@ fn worker_routing_selects_a_cheap_local_worker_and_an_independent_strong_reviewe
         auth_profile: None,
         capability_profile: None,
         runtime_config: None,
+        local: None,
         executable: None,
         capabilities: vec![
             WorkerCapabilityConfig::Implementation,
@@ -847,6 +848,7 @@ fn worker_routing_selects_a_cheap_local_worker_and_an_independent_strong_reviewe
         auth_profile: None,
         capability_profile: None,
         runtime_config: None,
+        local: None,
         executable: None,
         capabilities: vec![WorkerCapabilityConfig::Review],
         fresh_process_isolation: true,

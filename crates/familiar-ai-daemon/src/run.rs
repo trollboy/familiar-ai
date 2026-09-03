@@ -492,6 +492,30 @@ pub fn resolved_worker_plan(
     if let Some(record) = &review {
         records.push(record.clone());
     }
+    // A worker declaring a PRD-063 `local` profile is meant to run through
+    // `familiar_ai_agent::local_worker::LocalInferenceAdapter` and the
+    // PRD-064 reservation/telemetry glue in `local_worker_runtime` — not
+    // through this crate's CLI-driven `AgentAdapterKind` dispatch, which
+    // has no way to represent it (its `runtime`, e.g. `"ollama"`, can
+    // collide with an unrelated pre-existing CLI-driven adapter id) and
+    // would otherwise silently execute it through the wrong, unverified,
+    // unreserved, untelemetered path. Production dispatch for local
+    // workers is not wired yet (`docs/contracts/local-worker-runtime.md`),
+    // so a selection landing on one must fail closed here, before any
+    // `CodingAgent` is built, rather than silently misdispatching.
+    for record in &records {
+        let selected = &configured.workers[&record.selected_worker];
+        if selected.local.is_some() {
+            return Err(format!(
+                "worker_registry.workers.{} is a provider=\"local\" worker selected for {:?}; \
+                 production dispatch for local workers is not yet wired through \
+                 familiar_ai_daemon::run (see docs/contracts/local-worker-runtime.md) — until \
+                 that follow-up lands, exclude it from routing (set available = false, or \
+                 repoint any pin/rule that selects it)",
+                record.selected_worker, record.stage
+            ));
+        }
+    }
     let reviewer_id = review
         .as_ref()
         .map(|r| r.selected_worker.as_str())

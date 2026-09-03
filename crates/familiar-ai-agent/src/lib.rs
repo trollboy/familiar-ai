@@ -3,6 +3,7 @@ pub mod anthropic;
 mod claude_code;
 mod codex;
 mod isolation;
+pub mod local_worker;
 pub mod openai;
 pub mod raw_runtime;
 mod registry;

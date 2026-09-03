@@ -49,6 +49,29 @@ impl<'a> ReservationRepository<'a> {
         Self { conn }
     }
 
+    /// Whether a pool row exists for `(pool_id, resource_type)` — i.e.
+    /// whether `define_pool` has ever been called for it. `acquire`'s
+    /// `Refused` outcome cannot itself distinguish "no pool defined" from
+    /// "pool defined but insufficient for this request"; callers that need
+    /// that distinction (e.g. an unknown-capacity bootstrap policy) must
+    /// check this first rather than assuming a refusal means "never
+    /// observed".
+    pub fn pool_is_defined(
+        &mut self,
+        pool_id: &str,
+        resource_type: &ResourceType,
+    ) -> familiar_ai_core::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM resource_pools WHERE pool_id=?1 AND resource_type=?2",
+                params![pool_id, resource_type.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(db)
+            .map(|row| row.is_some())
+    }
+
     pub fn define_pool(
         &mut self,
         pool_id: &str,

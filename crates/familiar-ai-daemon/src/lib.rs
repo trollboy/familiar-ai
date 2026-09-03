@@ -10,6 +10,7 @@ pub mod delivery;
 pub mod drive;
 pub mod launchd;
 pub mod local_transport;
+pub mod local_worker_runtime;
 pub mod openai_billing;
 pub mod plan;
 pub mod preflight;

@@ -1323,6 +1323,7 @@ mod tests {
             auth_profile: auth_profile.map(str::to_owned),
             capability_profile: None,
             runtime_config: None,
+            local: None,
             executable: None,
             capabilities: vec![],
             fresh_process_isolation: false,
