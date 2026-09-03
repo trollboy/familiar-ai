@@ -1,0 +1,646 @@
+command: familiar-ai drive --max-prds 3 --max-parallel-components 3 --prd PRD-063 --prd PRD-071 --prd PRD-072
+date: Thu Sep  3 04:54:13 PM UTC 2026
+host: trollboy (Linux)
+head: e82f8851d731c610e6c3c057572c6a07eb05cff9 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788454454062745-0001485283-000000 started warrant={"max_prds":3,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-63","PRD-71","PRD-72"]}
+drive: checkout HEAD=e82f885 dirty_files=0 in sync with origin/main (as of last fetch)
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:1485314
+preflight: heartbeat check=verification.format elapsed_ms=6398 child=pid:1485314
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:1485937
+preflight: heartbeat check=verification.lint elapsed_ms=30002 child=pid:1485937 last="    Checking familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.lint elapsed_ms=35798 child=pid:1485937
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:1490369
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30003 child=pid:1490369 last="   Compiling familiar-ai-storage v0.1.0 (/app/crates/familiar-ai-storage)"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=60004 child=pid:1490369 last="test repos::file_summary::tests::injected_failure_rolls_back_preservation_and_active_mutation ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=73127 child=pid:1490369
+preflight: heartbeat check=writable.tests-workspace-advisory elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=0 child=pid:1499003
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=30000 child=pid:1499003 last="   Compiling familiar-ai-storage v0.1.0 (/app/crates/familiar-ai-storage)"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=60004 child=pid:1499003 last="   Compiling familiar-ai-mcp v0.1.0 (/app/crates/familiar-ai-mcp)"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=90004 child=pid:1499003 last="    = note: `#[warn(dead_code)]` on by default"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=120001 child=pid:1499003 last="running 2 tests"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=150002 child=pid:1499003 last="test tools::get_module_summary::tests::applies_default_limit_and_truncates ... ok"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=180004 child=pid:1499003 last="test repos::file_summary::tests::reconciliation_converts_preserves_conflicts_and_reports_unresolved ... ok"
+preflight: heartbeat check=verification.tests-workspace-advisory elapsed_ms=194290 child=pid:1499003
+drive: attempt 1 PRD-63 docs/prds/PRD-063.md
+drive: attempt 2 PRD-71 docs/prds/PRD-071.md
+drive: attempt 3 PRD-72 docs/prds/PRD-072.md
+backlog: PRD-71 docs/prds/PRD-071.md pending -> in_progress actor=system:familiar-ai-run:00001788454764715784-0001485283-000001
+backlog: PRD-72 docs/prds/PRD-072.md pending -> in_progress actor=system:familiar-ai-run:00001788454764715786-0001485283-000002
+backlog: PRD-63 docs/prds/PRD-063.md pending -> in_progress actor=system:familiar-ai-run:00001788454764715789-0001485283-000003
+I'll start by exploring the relevant existing code — the agent-loop runtime, tool definitions, journal, and config — to understand what PRD-058 already built before implementing PRD-072's token-discipline features.
+I'll start by exploring the repository to understand the existing architecture this PRD builds on (PRD-028, PRD-045, PRD-056, PRD-059, and the ledger from PRD-051) before making changes.
+I'll start by exploring the repository to understand the existing implementation of the dependency PRDs (051, 056, 057, 058, 062, 064) before making any changes.
+All dependencies are done. This is a large PRD — I'll invoke the `next-prd` skill to drive bounded discovery, planning, and implementation given the non-interactive execution context.
+All dependencies are done. Let me read them along with the current review, storage, and daemon crates.
+Now let me look at the config, storage repo, and expected_files parsing to understand the full picture.
+Now let's look at the current implementation of the review crate, tier policy, and daemon structure.
+drive: progress prd=PRD-63 stage=execution elapsed_ms=60014 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=60013 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=60013 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=120023 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=120024 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=120024 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=180033 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=180034 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=180034 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=240042 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=240044 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=240046 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=300050 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=300052 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=300053 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=360057 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=360060 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=360060 last_durable_phase=preflight
+Now I have enough context to implement. Let me start with the config layer.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=420061 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=420069 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=420069 last_durable_phase=preflight
+Now add the `local` field to `RegistryWorkerConfig` and its validation:
+I'll add a commented `[agent_runtime.token_discipline]` section there too. Now let's start implementing. First, the pure edit-form module in familiar-ai-agent.
+Now let me write the two token_discipline modules.
+Good, every literal site has exactly one `runtime_config: None,` line I can append after. Let me patch all of them.
+All 8 call sites patched. Let's compile the core crate now to catch remaining issues early.
+Core compiles. Now let's run its tests for registry_workers to check the new validation logic.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=480067 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=480079 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=480079 last_durable_phase=preflight
+All existing tests pass. Now let's add tests for the new local-worker config logic, then move on to the LLM crate transport.
+Now register the module in lib.rs:
+Now the familiar-ai-llm token_discipline module (bounded tool-result windowing).
+This is the true end of file (AgentsConfig::validate). Let me append using line offset instead.
+Now the config surface in familiar-ai-core:
+Now add validation for the new sub-config, inside `AgentRuntimeConfig::validate`:
+drive: progress prd=PRD-72 stage=execution elapsed_ms=540071 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=540087 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=540088 last_durable_phase=preflight
+I'll use Write with the exact line range appended instead, to avoid ambiguous matches.
+Now let's add tests for the new validation and check `config/mod.rs` for re-exports:
+Good, `pub use agent_runtime::*` already re-exports `TokenDisciplineConfig`. Now add tests to agent_runtime.rs config tests:
+Now let's build familiar-ai-core to check for compile errors before moving on.
+All 125 tests pass (up from 117 → 8 new tests). Now let's build the LLM crate's local runtime transport.
+Compiles clean. Now let's run the new unit tests for these two modules and the config tests.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=600079 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=600093 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=600094 last_durable_phase=preflight
+All green. Now let's update `raw_runtime.rs`: extend `ReadFile` schema and add `edit_form` to `CallDisposition::Executed`.
+Good, no test depends on that literal. Now let's add `edit_form` to `CallDisposition::Executed` and wire it through `process_tool_call`.
+Now find and update the construction site inside `process_tool_call`:
+Now add the `edit_form_for` helper function near `process_tool_call`:
+Now let's build the familiar-ai-agent crate to check for compile errors from this change:
+All good. Now let's move to the daemon's `SandboxedToolExecutor` and `persist_run_outcome`.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=660086 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=660100 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=660100 last_durable_phase=preflight
+Now register the module and run tests.
+Good. Now let's update the `SandboxedToolExecutor` struct to add a `token_discipline` field, and rewrite `read_file`, `apply_edit`, and `run_command`.
+Now let's rewrite `read_file`:
+Now `apply_edit`:
+All 16 tests pass. Let me fix the unused import warning.
+Now `run_command`'s output-bounding tail:
+Now let's build the agent-layer adapter that wires this transport into the PRD-058 loop.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=720089 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=720106 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=720106 last_durable_phase=preflight
+Good, only the struct definition. Now let's build to catch remaining issues, then fix test call sites.
+Now let's write the integration test that drives the real `run_loop` against a wiremock local server, mirroring `tests/openai.rs`.
+Now let's update `persist_run_outcome` to accept a `TokenDisciplineConfig` and record the new ledger fields.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=780093 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=780114 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=780114 last_durable_phase=preflight
+Now let's find the `UsageObservation` construction inside this function and add the new fields:
+Now let's update the storage layer: `UsageObservation` struct, migration, and `append_observation` SQL.
+Now update the INSERT statement in `append_observation`:
+All 10 integration tests pass. Now let's write the storage migration and telemetry repository.
+Good pattern. Now let's write the migration.
+Now let's build the storage crate to check migration/params correctness.
+Now register migration 057 in migrate.rs and update the expected-count tests.
+Good, exactly the 4 test sites, none touched yet. Let's use replace_all safely since the pattern is consistent.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=840100 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=840122 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=840123 last_durable_phase=preflight
+Now let's run the storage crate tests to make sure everything passes.
+Now let's run the storage migration tests to verify counts and that the new migration applies cleanly.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=900107 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=900130 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=900131 last_durable_phase=preflight
+All migration tests pass. Now let's write the `local_telemetry.rs` repository.
+Now let's find and fix the other migration-count tests (48/47, 45, 7/6 mismatches, etc.):
+Now I have enough context to start implementing. Let me begin with the review-tier policy layer.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=960112 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=960139 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=960139 last_durable_phase=preflight
+That's my own edit reflected correctly. Now let's rerun storage tests.
+All 5 tests pass. Let's run the full storage crate suite to make sure nothing else broke, then move to the daemon layer.
+All storage tests pass. Now let's fix all the other call sites: daemon tests, mcp test, run.rs.
+Now update the three literal construction sites plus add `ReviewExecutionError::Parked` and coordinator handling.
+Now `run.rs` production call site:
+Now let's fix the `persist_run_outcome` call sites and `SandboxedToolExecutor` construction sites (need the new `token_discipline` field).
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1020116 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1020143 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1020143 last_durable_phase=preflight
+Now the match arm at the reviewer call site:
+Good, that inserted correctly. Now add the `TokenDisciplineConfig` import to anthropic_adapter.rs:
+Good, one test module. Let me check the tail of the file to see where to append new tests, and confirm `base_request()` is reachable there.
+Now let's build the whole workspace to catch remaining errors.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1080119 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1080152 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1080151 last_durable_phase=preflight
+Now let me add batch-park tests at the end of this test module.
+Now let's write the daemon-side local worker runtime module.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1140128 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1140155 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1140155 last_durable_phase=preflight
+Now register the module in daemon lib.rs.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1200134 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1200160 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1200163 last_durable_phase=preflight
+All 67 tests pass. Now let's move to `familiar-ai-core` config surface. Let's view the full config/mod.rs top section for context on how `ReviewConfig` per-repository fields interplay, and validate.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1260144 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1260165 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1260167 last_durable_phase=preflight
+Good, `ConfigContext` is already public. Let me bump visibility of `mutate`, `root_table`, `load_config`, `open_database`, `sha256` to `pub(crate)`.
+All 10 tests pass. Now let's write the daemon integration test file `tests/local_worker_runtime.rs` (expected_files) that exercises the full loop end-to-end against a wiremock fake and the real reservation/telemetry pipeline together.
+Now let's check for other `ReviewTierPolicyConfig {` literal constructions elsewhere in the workspace (e.g. run.rs's `configured_tier_policy` reads it but doesn't construct it — but let's confirm no other construction sites break).
+Now let's run the core config tests to confirm correctness before moving on.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1320151 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1320170 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1320172 last_durable_phase=preflight
+Now let's move to the storage layer: the migration and the `BatchReviewRepository`.
+Now let's write the migration for `batch_reviews`.
+Good — the pre-existing GTK linker issue is an environment limitation unrelated to my changes; using `--no-default-features` (matching the project's own docker test recipe) works fine. All 3 daemon integration tests pass. Now let's run the full daemon lib test suite to check for regressions.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1380157 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1380174 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1380175 last_durable_phase=preflight
+All lib tests pass. Now let's write the contract document.
+Now register the module and re-export it.
+Now let's run these tests.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1440161 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1440178 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1440179 last_durable_phase=preflight
+All good. Now the mcp stewardship test:
+Now let's run formatting, clippy, and a full workspace check.
+Let's just apply `cargo fmt` to fix all these formatting issues automatically.
+`cargo fmt` applied cleanly and `--check` now passes with exit 0. Let's re-run the full test suites to confirm formatting changes didn't break anything, then run clippy.
+Good. Now let's write the dedicated test file.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1500165 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1500181 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1500182 last_durable_phase=preflight
+All green across the board. Now let's run daemon tests and clippy.
+Good, `WireRequestBody` and `WireUsage` derive what I need. Now let's add the batch types and client methods.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1560170 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1560184 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1560185 last_durable_phase=preflight
+Now let's add wiremock-based tests for the batch methods, mirroring the existing test style.
+All 5 tests pass. Now let's update `config/default.toml` and the contract doc `docs/contracts/agent-loop.md`.
+Good, already derives Debug. Let's build and run the tests.
+Now let's add a new normative section after "Write-scope authorization" describing PRD-072's targeted edits and bounded results, plus update the capability table notes and evidence/accounting section.
+All pass. Let's check that the full `familiar-ai-llm` and `familiar-ai-agent` test suites still pass (no regressions from these additions).
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1620177 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1620190 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1620191 last_durable_phase=preflight
+Good, `cargo fmt` reformatted those files as expected. Now let's run clippy across the affected crates.
+Now update/remove the corresponding test that asserted the reverse requirement, since that behavior no longer exists.
+Confirmed untouched by me — pre-existing clippy debt. Let's run clippy without `-D warnings` to see genuine warnings from my new code specifically.
+Now update the contract doc's validation description to match this corrected behavior.
+Good — only the pre-existing unrelated warning. Now let's check clippy for the daemon crate (no-default-features to avoid the tray link issue):
+Now let's rerun tests to confirm the fix.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1680183 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1680196 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1680197 last_durable_phase=preflight
+Now add the `batch_reviewer` field and `active_reviewer` helper to `ReviewCoordinator`.
+Now update all 18 struct-literal call sites to add `batch_reviewer: None,`.
+Clean. Now let's run the full set of affected test suites once more to confirm everything is green after `cargo fmt` reformatting.
+All green. Now let's run the daemon and storage full test suites (excluding tray) and the mcp tests once more as a final check.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1740187 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1740204 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1740204 last_durable_phase=preflight
+All green (the "EOF before turn.completed" line is an expected error message printed within a test asserting that exact failure path, not an actual test failure). Now let's format again and run clippy across the whole workspace.
+Now let's add a helper function and wire it into both validation sites.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1800190 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1800210 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1800210 last_durable_phase=preflight
+Now let's find and update the per-repository validation block:
+No new warnings from my code in these crates — only the pre-existing `bootstrap.rs` warning (dependency crate). Let's check the daemon crate too.
+Good — `pub use review::*` and `pub use registry_workers::*` are already glob-imported into this module's namespace, so `ReviewTierPolicyConfig` and `WorkerRegistryConfig` are directly accessible. Let's add the helper function.
+Good, it's re-exported. Now let's fix the config/mod.rs test literals that need `batch_worker` when they configure `batch_risk_classes` non-empty (only the "requires positive max wait" test — but that one fails before reaching batch_worker check, so fine). Let's build.
+All passing. Let's add a couple of tests for the batch_worker validation, and also add a positive-path test proving a valid config passes.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1860197 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1860217 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1860217 last_durable_phase=preflight
+Whole workspace builds cleanly. Now the full test suite.
+All pass. Now let's write the `familiar-ai-daemon/src/batch_review.rs` module — the core `BatchReviewAgent` and daemon worker.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1920205 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1920221 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1920225 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=1980212 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=1980224 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=1980228 last_durable_phase=preflight
+Every test file in the daemon crate passes (0 failures across all). Now let's run the whole workspace test suite (library tests + other crates) to be thorough, and also verify the tray/mcp/storage crates once more together.
+Full workspace test run is running in the background — I'll wait for it to complete rather than poll.
+This matches exactly the expected_files from the PRD plus the mechanical `local: None,` additions to existing call sites. All new files present. Let's check on the background test run.
+All these are clean, minimal, mechanical additions — exactly the pattern needed, no unrelated changes. Now let's wait for the background full workspace test run.
+I'll continue reviewing while the background test suite runs. Let me check the CLI has no other references I need to update (e.g., `cli/backlog.rs`, `daemon_cli.rs`) and verify `familiar-ai backlog metadata-check` doesn't choke on the new expected_files declarations.
+Let me prepare the requirements ledger while the background suite runs, mapping each acceptance criterion to its implementation and test.
+I'll wait for the background test to complete.
+I've kicked off a watcher for the original background test run and will wait for the notification rather than poll further.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=2040217 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=2040228 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2040231 last_durable_phase=preflight
+I made an unnecessary stash — let me restore it immediately.
+All my changes are restored. Now let me drop the stash entry since it's no longer needed.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=2100222 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2100237 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=2100237 last_durable_phase=preflight
+Stash dropped cleanly, stash list is empty. Now let's verify the `paths::tests::tmp_fallback_uses_new_identity` failure is pre-existing/environment-flaky rather than caused by my changes, without stashing this time — just by running it in isolation.
+The full workspace suite passes cleanly except one confirmed pre-existing, isolation-order flake (`paths::tests::tmp_fallback_uses_new_identity`, unrelated to my changes — mutates global env vars without serialization, passes in isolation). Let's move the completed PRD to `docs/prds/done/` per repo convention, then do a final verification pass.
+Now let's build the final requirements ledger, verifying each acceptance criterion against implementation and tests.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=2160229 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2160242 last_durable_phase=preflight
+drive: progress prd=PRD-63 stage=execution elapsed_ms=2160243 last_durable_phase=preflight
+Everything passes across the whole workspace (except the daemon crate's default `tray` feature, which fails to link due to a missing pre-existing system library `libxdo`, unrelated to this PRD). Now let's do a final audit against each acceptance criterion.
+Everything is clean and builds. Let me present the final summary.
+
+## Requirements Ledger
+
+| # | Acceptance Criterion | Implementation | Verification | Status |
+|---|---|---|---|---|
+| 1 | Local worker = full PRD-057 spec (provider, runtime, artifact, capability/endpoint/hardware profile); same artifact under two runtimes is two workers | `registry_workers.rs`: `LOCAL_PROVIDER`, `LocalRuntimeKind`, `LocalEndpointConfig`, `LocalResourceProfileConfig`, `LocalWorkerConfig`; runtime is part of existing `canonical_spec_identity()` hash | `local_worker_tests` module (8 tests) | Complete |
+| 2 | Runtime contract covers probes, load/cold-start, streaming, tool calls, structured output, context limits, cancellation, concurrency/queue depth, memory pressure, crashes/disappearance, usage, optional auth, behind PRD-058 | `local_runtime.rs` (`LocalChatClient`: probe, submit/streaming/tool-calls/structured-output/errors), `local_worker.rs` (`LocalInferenceAdapter` implements `InferenceAdapter`), `local_worker_runtime.rs` (reservations for concurrency/slots/model-loading, crash/disappearance resolution) | `local_runtime` 16 tests, `local_worker` agent 10 tests + 1 unit, `local_worker_runtime` daemon 10 unit + 3 integration | Complete |
+| 3 | Endpoint model verified against registered artifact where possible; unverifiable → degraded worker routing can refuse | `LocalChatClient::verify_artifact` (Ollama digest match/mismatch/unverifiable; Unsloth always unverifiable); `LocalArtifactVerificationState` in storage | `artifact_digest_*` tests in `local_runtime.rs`, `artifact_verification_degrades_honestly_*` in agent tests | Complete |
+| 4 | OpenAI-compatible endpoint = transport reuse only; each backend keeps own RuntimeId/capability profile/empirical identity | `local_runtime.rs` module doc + contract doc "OpenAI-compatible transport is reuse only"; `LocalRuntimeKind::{Ollama,Unsloth}` distinct `RUNTIME_ID`s | `runtime_id_reflects_the_configured_backend`, `unsloth_runtime_reports_its_own_runtime_id` | Complete |
+| 5 | Local telemetry: typed timestamped observations incl. token categories/wall time/TTFT/tok-per-sec/load time/peak memory/utilization/retries/failures into PRD-051 ledger with full spec identity; no invented USD cost | Migration 057 `local_worker_telemetry` table (separate from `usage_observations`/`cost_estimates`, no cost column); `local_telemetry.rs` repo; `local_worker_runtime::persist_local_telemetry` | `local_telemetry` 5 tests; `telemetry_records_no_invented_cost_*`; `full_pipeline_*` daemon integration test | Complete |
+| 6 | Energy recorded only when measurable; operator-allocation policies produce local-estimate amounts w/ policy id/version, measurements, assumptions, currency, period, provenance, estimated-authority label; never implicit, never mixed with invoices | Migration 057 `local_allocation_policies`/`local_allocation_estimates` (disabled by default, `CHECK` constraints for closed cost category/authority label); `record_allocation_estimate` fails closed unless explicitly enabled | `allocation_estimate_requires_an_explicitly_enabled_policy`, `allocation_estimates_never_mix_with_provider_cost_estimates_table` | Complete |
+| 7 | Local execution consumes PRD-064 typed reservations (accelerator/system memory, inference slots, model-loading slots, exclusive-runtime, thermal/power where available); never knowingly exceed observed capacity | `local_worker_runtime.rs`: `execution_resource_requests`, `acquire_model_load_reservation`, reuses `ReservationRepository` unchanged | `unknown_capacity_refuses_by_default_*`, reservation tests, daemon integration tests | Complete |
+| 8 | Managed vs. externally-shared capacity distinct; freshness/confidence; contention/pressure/revocation detected and recorded honestly, never masked; coexistence never guaranteed over non-exclusive capacity | `LocalCapacityClass`, `CapacityObservation`, `capacity_is_fresh`; `resolve_reservation` commits observed consumption (honest overrun) | `capacity_freshness_rejects_stale_observations`, `managed_and_externally_shared_capacity_are_distinct_classes`, `mid_run_memory_pressure_is_recorded_as_honest_overrun` | Complete |
+| 9 | Unknown capacity fails per explicit policy, never invented; acquire/commit/release/expiry/crash-recovery follow PRD-064 lifecycle | `UnknownCapacityPolicy::{Refuse,SerializeConservatively}`; all resolution delegates to unmodified `ReservationRepository` | `unknown_capacity_*` tests; crash/cancellation/completion resolution tests | Complete |
+| 10 | Endpoint trust explicit (loopback/LAN/remote, optional TLS/auth by external reference); local model gains no extra capability beyond PRD-058 sandbox | `classify_local_endpoint_trust`; non-loopback requires `auth_profile`; adapter has no tool-execution surface at all (only HTTP) | `endpoint_trust_classifies_loopback_lan_and_remote`, `non_loopback_endpoint_requires_auth_profile` | Complete |
+| 11 | Weights/templates untrusted; template injection can't change tool authority; telemetry has no prompts/outputs/credentials | Contract doc "Security"; `LocalTelemetryRow` carries no text/prompt fields; loop's `validate_tool_call`/`ToolAuthorizer` unmodified and still gates everything | Schema (no text columns) + reused PRD-058 authorization tests (unchanged) | Complete |
+| 12 | PRD-032 can compare local workers with other workers; unknown $ never ranks as zero/cheap; local-resource consumption is its own metric class | No cost field anywhere in local telemetry; existing `estimated_cost_microusd: Option` discipline untouched | Contract doc "Comparability"; schema separation itself is the enforcement | Complete |
+| 13 | Deterministic fake-runtime tests: probes, load/cold-start, streaming, tool calls, structured output, concurrency/queue limits, memory-pressure refusals, crash/disappearance, artifact verification+degraded, reservation races, telemetry — no real execution, no network beyond loopback fakes | `wiremock`-backed tests in `local_runtime.rs`/`tests/local_worker.rs`; in-memory/file-SQLite reservation races and pressure/crash tests in `local_worker_runtime.rs` (daemon) and its integration tests | 16+10+1+10+3 = 40 new tests, all passing, all loopback-only | Complete |
+
+No `FAMILIAR-INCOMPLETE` — all 13 acceptance criteria are implemented and verified.
+
+## Summary
+
+**Files changed:**
+- New: `docs/contracts/local-worker-runtime.md`, `crates/familiar-ai-core/src/config/registry_workers.rs` (additions), `crates/familiar-ai-llm/src/local_runtime.rs`, `crates/familiar-ai-agent/src/local_worker.rs` + `tests/local_worker.rs`, `crates/familiar-ai-daemon/src/local_worker_runtime.rs` + `tests/local_worker_runtime.rs`, `crates/familiar-ai-storage/migrations/057_local_worker_telemetry.sql`, `crates/familiar-ai-storage/src/repos/local_telemetry.rs` — every file the PRD's `expected_files` named was created.
+- Modified: module registration (`lib.rs` × 3), migration registry + updated test counts (`migrate.rs`), `repos/mod.rs`, and 8 pre-existing `RegistryWorkerConfig` struct-literal call sites mechanically updated for the new `local` field.
+- Migration: version 057 (the reserved slot), owns two new table pairs — `local_worker_telemetry` and the disabled-by-default `local_allocation_policies`/`local_allocation_estimates` — entirely separate from the PRD-051 ledger.
+
+**Deviation found and fixed mid-implementation:** my first validation pass required any `provider = "local"` worker to declare a PRD-063 `local` profile, but a pre-existing test used `provider = "local"` as a plain descriptive label for an unrelated Codex-harness worker. I narrowed the rule to be one-directional (declaring `local` requires `provider = "local"`; the reverse is not required) and documented why in both the code and the contract.
+
+**Tests:** 40 new tests across 5 crates, all passing. Full workspace suite (`cargo test --workspace --no-default-features`, matching the project's own Docker test recipe) is green except one pre-existing, confirmed-unrelated flake (`familiar-ai-core::paths::tests::tmp_fallback_uses_new_identity`, an env-var-mutating test with no thread isolation — passes cleanly alone; I never touched `paths.rs`). `cargo fmt --check` and `cargo clippy -D warnings` are clean on every file I touched; the one clippy warning in the workspace (`bootstrap.rs`) is pre-existing and untouched by me.
+
+**Note on scope:** per the PRD's own Phasing section, this delivers Phase 1 (externally managed `ollama`/`unsloth` endpoints) plus the Phase 2 scheduling mechanism (reservations, capacity classes). Process-managed lifecycle and additional backends are explicitly out of scope, matching the PRD.
+
+`git status` is clean aside from the tracked changes above; `docs/prds/PRD-063.md` has been moved to `docs/prds/done/` per repo convention.
+scope: durable approvals loaded=9 key=/home/trollboy/Projects/familiar-ai/.git
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeBroadened]
+Scope evaluation 'initial' under policy sha256:5e8a664f2060a50dd1d96e9bdcb77959ea75635a009160eb0a48e4c5f23fe028:
+scope: AllowedChange Modified crates/familiar-ai-agent/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-agent/src/local_worker.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-agent/tests/local_worker.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-core/src/config/mod.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-core/src/config/registry_workers.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/cli/workers.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/config_cli.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-daemon/src/local_worker_runtime.rs rule=expected_file_declaration
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/agents.rs rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/drive_loop.rs rule=file_class:test:declared_surface_coverage
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/local_worker_runtime.rs rule=expected_file_declaration
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/multi_repo_acceptance.rs rule=file_class:test:declared_surface_coverage
+scope: AllowedChange Modified crates/familiar-ai-llm/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-llm/src/local_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-llm/src/xai_api.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-storage/migrations/057_local_worker_telemetry.sql rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-storage/src/migrate.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-storage/src/repos/local_telemetry.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-storage/src/repos/mod.rs rule=configured_allowed_path
+scope: JustifiedExpectedFileChange Added docs/contracts/local-worker-runtime.md rule=prd_expected_file_expansion
+scope: UndeclaredScopeExpansion Renamed docs/prds/PRD-063.md (from docs/prds/PRD-063.md) rule=undeclared_change
+scope: UndeclaredScopeExpansion Renamed docs/prds/done/PRD-063.md (from docs/prds/PRD-063.md) rule=undeclared_change
+drive: scope decision pending for PRD-63: familiar-ai scope-decisions --finding-hash sha256:16fd2597904a2725295eb5d39eddd6b40b35d60caa8140dbabd2d8ee4af22463 --candidate-hash sha256:fcad9f748dd48346230b386647ae212895201d042869a66dcfed78ed3f6a691f --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-63: familiar-ai scope-decisions --finding-hash sha256:df99a866b3b7902af6f3d6e725a10bfa5b75a0edfd906b31b8296f516e0fa118 --candidate-hash sha256:fcad9f748dd48346230b386647ae212895201d042869a66dcfed78ed3f6a691f --approve --actor human:<identity> --reason "..."
+drive: attempt 1 PRD-63 failed: human review required
+drive: attempt 1 PRD-63 outcome=retained reason=scope_broadened
+drive: dependency_not_integrated PRD-73 dependency PRD-63 was attempted this session and is not integrated into the session revision
+drive: progress prd=PRD-72 stage=execution elapsed_ms=2220233 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2220246 last_durable_phase=preflight
+All 5 tests pass with the new "retrieve through handle" assertion. Let's run `cargo fmt` once more and a final full check.
+Now register the module in `lib.rs` and try building.
+Only the two pre-existing, unrelated warnings remain. Let's do one final complete test pass to be safe, then wrap up.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=2280240 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2280249 last_durable_phase=preflight
+drive: progress prd=PRD-72 stage=execution elapsed_ms=2340244 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2340253 last_durable_phase=preflight
+Now let's add the `build_batch_reviewer` function to `batch_review.rs` and fix `batch_auth` accordingly.
+Let me find and update the `batch_auth` function location to add `build_batch_reviewer` next to it.
+Now let's add `build_batch_reviewer` right after `batch_auth`.
+Now let's fix run.rs's construction call site and the `ReviewTierPolicy` literal missing field.
+drive: progress prd=PRD-72 stage=execution elapsed_ms=2400249 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2400256 last_durable_phase=preflight
+Good. Let's wait for the background test task to finish.
+Now let's build again.
+This looks clean. Let's check on the background test task.
+It compiles. Let's check for warnings and then run existing daemon tests to check for regressions.
+The first check already confirmed **33/33 test result lines all "ok"** — full daemon test suite green. I have enough confidence to finalize now.
+All acceptance criteria are implemented and tested. Let me do one last check of the full workspace `cargo check` to make sure everything's still consistent after the final `cargo fmt` pass.
+Clean, no warnings. Now let's wire the CLI verb and `main.rs` daemon spawn. First, let's check `main.rs`'s spawn section a bit more to add the batch worker spawn.
+Now let's add the batch review worker spawn, following the summary worker pattern, and join it at shutdown.
+## Summary
+
+Implemented PRD-072 (Raw-Runtime Token Discipline) in full.
+
+**New files:**
+- `crates/familiar-ai-agent/src/token_discipline.rs` — pure edit-form logic: `EditForm` (whole-file/search-replace/unified-diff), atomic anchor-based apply with named `AnchorDivergence`/`MalformedEdit` errors, idempotent-replay detection (anchor gone but replacement already present → no-op, not an error), and the targeted-edit worker-instruction text generator.
+- `crates/familiar-ai-llm/src/token_discipline.rs` — pure bounded-result windowing: `bound_tool_result` (head+tail+elided-count+paging-handle), `file_read_requirement`, `slice_lines`.
+- `crates/familiar-ai-storage/migrations/057_token_discipline.sql` — adds `edit_form_id`/`edit_form_version`/`truncation_config_id`/`truncation_config_version` to `usage_observations`, mirroring migration 043's compression-attribution pattern.
+- `crates/familiar-ai-daemon/tests/runtime_token_discipline.rs` — 6 tests: anchor-divergence rejection (file untouched), crash-replay identity, bounded command results with lossless worktree retention, retrieval through the paging handle via `read-file`, byte-for-byte defaults when disabled, and explicit-range requirement on oversized reads.
+
+**Modified:** `raw_runtime.rs` (ReadFile schema gains optional `start_line`/`end_line`; `CallDisposition::Executed` gains `edit_form`), `daemon/agent_runtime.rs` (`SandboxedToolExecutor` wires targeted edits, bounded read/command results, `.familiar/tool-output/<call_id>.txt` lossless retention; `persist_run_outcome` takes `&TokenDisciplineConfig`), `core/config/agent_runtime.rs` (`TokenDisciplineConfig`, disabled by default, validated), `storage/repos/accounting.rs` + `migrate.rs` (new ledger columns, wired through), `docs/contracts/agent-loop.md` (new normative section), `config/default.toml`, plus mechanical updates to every existing `UsageObservation`/`SandboxedToolExecutor`/`persist_run_outcome` call site across daemon/mcp tests and `run.rs`.
+
+**Acceptance criteria:** all six are met and covered by tests. One deliberate interpretation: the worker-instruction text (`targeted_edit_worker_instruction`) is implemented and tested but not wired into a live prompt-assembly call site — no such site exists yet in this codebase, since prompt/context construction is PRD-070, explicitly out of scope for PRD-072.
+
+**Verification:** `cargo fmt`, `cargo clippy` (no new warnings — two pre-existing ones in untouched files), and `cargo test` across every affected crate all pass. Full workspace `cargo check --all-targets` is clean. The only failure encountered was `cargo build`/`test` for the `familiar-ai-daemon` binary's default `tray` feature, which fails to link against a missing system library `libxdo` — pre-existing and unrelated to this PRD; worked around with `--no-default-features` for daemon test runs, per standard practice for this environment.
+scope: durable approvals loaded=9 key=/home/trollboy/Projects/familiar-ai/.git
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeBroadened]
+Scope evaluation 'initial' under policy sha256:39e8e42ee9a00cd44652167d76f990d8fc35c2772e398b76bfd08f21d44fd343:
+scope: UndeclaredScopeExpansion Modified config/default.toml rule=undeclared_change
+scope: AllowedChange Modified crates/familiar-ai-agent/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-agent/src/raw_runtime.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-agent/src/token_discipline.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-core/src/config/agent_runtime.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/agent_runtime.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/run.rs rule=configured_allowed_path
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/anthropic_adapter.rs rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/cost_reconciliation.rs rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/openai_adapter.rs rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/raw_runtime.rs rule=file_class:test:declared_surface_coverage
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/runtime_token_discipline.rs rule=expected_file_declaration
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/token_compression.rs rule=file_class:test:declared_surface_coverage
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/tests/xai_adapter.rs rule=file_class:test:declared_surface_coverage
+scope: AllowedChange Modified crates/familiar-ai-llm/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-llm/src/token_discipline.rs rule=expected_file_declaration
+scope: UndeclaredScopeExpansion Modified crates/familiar-ai-mcp/tests/stewardship.rs rule=file_class:test:allow_when_expected
+scope: AllowedChange Added crates/familiar-ai-storage/migrations/057_token_discipline.sql rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-storage/src/migrate.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-storage/src/repos/accounting.rs rule=configured_allowed_path
+scope: JustifiedExpectedFileChange Modified docs/contracts/agent-loop.md rule=prd_expected_file_expansion
+drive: scope decision pending for PRD-72: familiar-ai scope-decisions --finding-hash sha256:e162a8d15250cbd0179a87fcdb7d01c35337d0045b87921968ffe6781296044f --candidate-hash sha256:6ad43921d89e29961266eac477a5c76150da3a785a89e1067a63692c8abf0d4e --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-72: familiar-ai scope-decisions --finding-hash sha256:edaae52c82df85fb7219cb4befc752e820a40132772b4fae0bd2c9fdeaf9148c --candidate-hash sha256:6ad43921d89e29961266eac477a5c76150da3a785a89e1067a63692c8abf0d4e --approve --actor human:<identity> --reason "..."
+drive: attempt 3 PRD-72 failed: human review required
+drive: attempt 3 PRD-72 outcome=retained reason=scope_broadened
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2460260 last_durable_phase=preflight
+Confirmed: this linker failure (`unable to find library -lxdo`) is pre-existing and unrelated to my changes. Let me restore my stashed work now.
+Restored successfully. Now let's drop the stash entry since it's been reapplied.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2520264 last_durable_phase=preflight
+Good, `stash@{0}` matches the SHA I applied. Safe to drop.
+Good, confirmed pre-existing linker failure unrelated to this PRD (the daemon binary needs system GTK/libxdo not installed in this sandbox); this will be noted in my final report. Let's continue building the `familiar-ai` CLI target and add the `cli/batch_review.rs` module.
+Now let's look at `bin/familiar-ai.rs` to wire in the `Command::BatchReview` variant, using the `Accounting` command as a template.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2580267 last_durable_phase=preflight
+Let me add the `BatchReview` variant right after `Accounting`, and the import.
+Now let's find and update the match arm for dispatch.
+Now let's build the CLI target.
+No warnings. Now let's run the daemon crate's existing test suite to check for regressions from the run.rs changes.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2640272 last_durable_phase=preflight
+All 130 pre-existing daemon tests pass. Let's also run storage, review, llm, core, and agent test suites in full to check for regressions there.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2700279 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2760283 last_durable_phase=preflight
+All fixed. Now let's re-run the full set of touched crates' test suites.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2820286 last_durable_phase=preflight
+All green. Now let's write the dedicated test file `crates/familiar-ai-daemon/tests/batch_review.rs`. Let's check an existing daemon integration test for conventions.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2880289 last_durable_phase=preflight
+Now update `build_batch_reviewer` to construct the client itself (production path) and pass it in.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=2940293 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3000296 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3060303 last_durable_phase=preflight
+Let me parameterize the env var name per test instead of using a shared constant.
+Now let's update each call site of `with_env_key` and `agent(...)`.
+Good, all 9 call sites updated. Let's run the tests again.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3120308 last_durable_phase=preflight
+Now let's view the destructuring at the top of `run_review` to add `prd_id` there too.
+Now update the `build_batch_reviewer` call site to use `prd_id` instead of `execution_id`, and add `execution_id` field to `BatchReviewContext`.
+Now update the two `run_review(ReviewRunInput {...})` call sites to pass `prd_id`.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3180312 last_durable_phase=preflight
+Now let's fix the test call site at line ~3756.
+Let me check and fix the remaining three.
+Now let's fix `build_batch_reviewer` and `BatchReviewContext` in `batch_review.rs` to add the `execution_id` field.
+Now update `record_accounting` to use `execution_id` instead of `prd_id`, and `build_batch_reviewer`'s signature.
+Now let's update `build_batch_reviewer`'s signature to add `execution_id`.
+Now let's update my test file's `BatchReviewContext` construction to add `execution_id`, and build everything.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3240316 last_durable_phase=preflight
+Now update `BatchReviewContext` construction in the test file to add `execution_id: "exec-1".into()`.
+Now let's rebuild and rerun everything.
+All 5 tests pass. Let's fix the pre-existing `enqueue_initial_scan` dead-code warning check — actually that's pre-existing, unrelated to my changes. Let's confirm and then run the full daemon test suite once more plus the whole workspace.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3300376 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3360378 last_durable_phase=preflight
+Let me check the full summary for any failures across the whole run.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3420382 last_durable_phase=preflight
+All 33 test binaries pass with zero failures. Now let's run the full workspace test suite (all crates) to check for any other regressions, plus formatting and clippy.
+Let me apply `cargo fmt` to fix formatting across the whole workspace, then re-check.
+Formatting applied cleanly. Let's confirm `cargo fmt --check` is now clean and rerun the tests to make sure formatting didn't break anything.
+Clean. Let's rebuild and rerun all touched test suites to confirm formatting didn't introduce regressions.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3480387 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3540390 last_durable_phase=preflight
+All green. Now let's run clippy on the touched crates to catch lint issues.
+My fix worked; the only remaining clippy error is pre-existing (`bootstrap.rs:225`, untouched by me). Let me confirm this is pre-existing via git blame.
+Confirmed — `bootstrap.rs` has no diff from me and wasn't touched by this PRD; it's a pre-existing clippy finding unrelated to my work. Let's run clippy on the daemon, review, storage, and llm crates for my own changes (excluding pre-existing findings).
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3600394 last_durable_phase=preflight
+My review/storage/llm changes are clippy-clean (only the pre-existing core warning appears). Let's check the daemon crate similarly.
+Clean — only the pre-existing unrelated warning remains. Let's run `cargo fmt --check` again and rerun the full test suites to confirm everything's still green after the clippy fixes.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3660397 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3720401 last_durable_phase=preflight
+Let's now attempt the full workspace test suite for completeness.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3780405 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3840414 last_durable_phase=preflight
+Let's grep the full output for any failures across the whole workspace run (excluding daemon).
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3900421 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=3960425 last_durable_phase=preflight
+Everything is clean across the entire workspace (except the daemon binary linking, which is a pre-existing sandbox limitation confirmed unrelated to this PRD). Now let's do a final self-audit against each acceptance criterion.
+Now let's add a regression test specifically proving this run.rs-level integration (a batch-parked cycle produces a deferred `RunWorkflowResult::Ok`, not `HumanReviewRequired`/blocked), and rerun the full daemon test suite.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4020432 last_durable_phase=preflight
+Both binaries build cleanly under `--no-default-features` (the tray feature is the only thing blocked by the sandbox's missing system library). Let's run `cargo fmt --check` one final time and do a final full test sweep.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4080436 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4140438 last_durable_phase=preflight
+Clean now. Let's do a final full verification pass.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4200443 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4260451 last_durable_phase=preflight
+I'll let this run in the background and wait for completion rather than polling.
+Complete — all test suites across the entire workspace pass with zero failures after the final formatting fix. Let's do a final summary of changed files.
+Confirmed: exit code 0, all tests green. The implementation is complete. Let me do a final quick check of the git diff summary and confirm the storage/mod.rs formatting.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4320455 last_durable_phase=preflight
+## Summary
+
+Implemented PRD-071 (Batch-Tier Independent Review) in full.
+
+**What changed:**
+- **`familiar-ai-review`**: `ReviewTier::Batch` + `ReviewTierPolicy.batch_risk_classes` (tier.rs); `ReviewCoordinator` gained an optional `batch_reviewer` field and dispatches to it only when tier selection picks Batch, falling back to the interactive reviewer otherwise (coordinator.rs); a new `ReviewExecutionError::Parked` signal lets a batch-tier `ReviewAgent` submit and return immediately — the coordinator marks `ReviewCycle.batch_pending` and returns without consuming a retry attempt or entering `stop()`; the structured-review JSON parser used by the interactive transport was extracted into a shared `parse_structured_review_text` so batch and interactive results go through identical parsing.
+- **`familiar-ai-core`**: `ReviewTierPolicyConfig` gained `batch_risk_classes`, `max_batch_wait_ms`, `batch_worker`, validated at config load (risk vocabulary, positive wait bound, and cross-referenced against a `worker_registry` entry running the `anthropic-api` runtime) — batch tiering defaults off.
+- **`familiar-ai-llm`**: Added the Anthropic Message Batches API wire client (`submit_message_batch`, `retrieve_message_batch`, `fetch_message_batch_results`) with wiremock tests.
+- **`familiar-ai-storage`**: New `batch_reviews` table (migration 058) and `BatchReviewRepository` — idempotent submission by `review_id`, atomic exactly-once result consumption, durable expiry-fallback recording.
+- **`familiar-ai-daemon`**: New `batch_review.rs` module with `BatchReviewAgent` (the `ReviewAgent` that submits/polls/parses/records accounting for the batch tier, with a synchronous interactive fallback on expiry) and a background poller (`batch_review::run`) that resumes pending batches across restarts and re-drives disposition via the existing `resume_implemented_checkpoint` path; wired into `main.rs`, `run.rs` (including the critical `cycle.batch_pending` early-return that frees the PRD's slot instead of marking it blocked), and a new `familiar-ai batch-review enable/disable/pending` CLI surface using the existing audited-config-mutation sink.
+- Dedicated test file `crates/familiar-ai-daemon/tests/batch_review.rs` covers park-and-free, crash-resume idempotence, expiry fallback, single-disposition-path, and tier-partitioned accounting — all against `wiremock`, no live calls.
+
+**Verification:** full workspace `cargo test` (all crates, all pre-existing suites) passes with zero failures; `cargo fmt --check` and `cargo clippy -D warnings` are clean except one pre-existing, unrelated `nonminimal_bool` finding in `bootstrap.rs` (confirmed via git-stash bisection, not touched by this PRD). The daemon *binary* (tray-enabled) fails to link in this sandbox only because system library `libxdo` isn't installed — confirmed pre-existing via the same stash bisection; the library and the non-tray `familiar-ai`/`familiar-ai-daemon` binaries build and test cleanly under `--no-default-features`.
+
+One disclosed interpretation: the raw Anthropic Messages/Batches API never returns a dollar cost field (only token counts) for API-key billing, so "provider-reported cost" is recorded as a `configured-rate` local estimate (via `[execution_history.pricing]`, reusing existing PRD-051 plumbing) when a rate is configured, and left honestly unknown otherwise — never fabricated, consistent with PRD-059's established design for this exact runtime.
+scope: durable approvals loaded=9 key=/home/trollboy/Projects/familiar-ai/.git
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:1999469
+verification: heartbeat check=format elapsed_ms=11929 child=pid:1999469
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2000359
+verification: heartbeat check=lint elapsed_ms=30002 child=pid:2000359
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4380461 last_durable_phase=preflight
+verification: heartbeat check=lint elapsed_ms=58908 child=pid:2000359
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2005737
+verification: heartbeat check=tests-green-crates elapsed_ms=30004 child=pid:2005737
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4440467 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=60000 child=pid:2005737
+verification: heartbeat check=tests-green-crates elapsed_ms=74372 child=pid:2005737
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2014443
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4500472 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30003 child=pid:2014443
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60002 child=pid:2014443
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4560477 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90002 child=pid:2014443
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120004 child=pid:2014443
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4620481 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150002 child=pid:2014443
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180002 child=pid:2014443
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4680483 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=202850 child=pid:2014443
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4740487 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4800491 last_durable_phase=preflight
+{"review_id":"00001788454764715784-0001485283-000001-cycle-review-1","reviewed_manifest_hash":"sha256:44d0b40222d4946e5c5efe3f9c059eb1f802e1bdc23e178e30a3e86532ffa2a3","findings":[{"finding_id":"batch-config-scope-mismatch","category":"correctness_defect","severity":"high","blocking":false,"title":"Batch enablement is written per-repository but read from the global tier policy","claim":"`familiar-ai batch-review enable` mutates `repositories.<key>.review.tier_policy.{batch_risk_classes,batch_worker,max_batch_wait_ms}`, while `batch_auth` and `build_batch_reviewer` read only the top-level `config.review.tier_policy`. A repository enabled through the shipped CLI therefore never resolves a batch worker or credential, so `build_batch_reviewer` returns `None` and the coordinator silently runs the interactive reviewer even when the tier selection is `Batch` — the documented audited enablement path does not actually turn the feature on.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/cli/batch_review.rs","range":{"start":148,"end":176}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":560,"end":600}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77","media_type":"text/plain","byte_size":99927,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:477363d7733bc7795bec4ab633947af5c1870efe121f976b7121b63c84cf1bf0","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Resolve the batch policy from the same repository-scoped `ReviewConfig` that `configured_tier_policy` and tier selection use (falling back to the global policy only when no repository override exists), and add a test that enables batch for a repository key and asserts `build_batch_reviewer` returns `Some`. Alternatively, have the CLI write the global policy and document that scoping explicitly.","remediation_note":null,"status":"open","supersedes":null},{"finding_id":"poller-exits-when-batch-initially-disabled","category":"correctness_defect","severity":"medium","blocking":false,"title":"Batch poller exits permanently at daemon start when batch tiering is off, so later enablement has no lifecycle owner","claim":"`batch_review::run` calls `batch_auth(&config)` once and `return`s for the whole daemon lifetime when it is `None`. Because batch tiering defaults off, the poller task always exits at startup on a fresh install; if an operator then runs `batch-review enable`, submissions can be created by subsequent executions but nothing polls them, applies completions, or enforces the `max_batch_wait_ms` bound until the daemon is restarted — contradicting the requirement that the daemon owns batch lifecycle and that a PRD never sits in review-pending past the bound.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":636,"end":676}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/main.rs","range":{"start":358,"end":367}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77","media_type":"text/plain","byte_size":99927,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:477363d7733bc7795bec4ab633947af5c1870efe121f976b7121b63c84cf1bf0","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Keep the poller task alive regardless of current configuration: tick unconditionally, re-evaluate `batch_auth` (and per-repository policy) on each tick, and no-op when nothing is configured — or re-spawn the poller when a config mutation enables batch tiering.","status":"open","supersedes":null},{"finding_id":"submit-before-durable-record","category":"correctness_defect","severity":"medium","blocking":false,"title":"Provider batch is submitted before the durable row is written, so a crash in that window orphans and re-bills a batch","claim":"`BatchReviewAgent::submit` performs the provider `submit_message_batch` POST first and only then writes the `batch_reviews` row. A daemon crash (or a `BatchReviewRepository::submit` failure, which is mapped to `ReviewExecutionError::Agent` and drives a retry with a new `review_id`) between those two steps leaves a batch that the provider is processing and billing but that no durable state references; the re-driven attempt submits a second batch. This violates 'never loses a submitted batch' for exactly the crash window the acceptance criterion names.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":196,"end":236}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77","media_type":"text/plain","byte_size":99927,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:477363d7733bc7795bec4ab633947af5c1870efe121f976b7121b63c84cf1bf0","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Write an intent row (e.g. state `submitting`, keyed by `review_id`, with the deterministic `custom_id`) before the POST and promote it to `submitted` with the returned `provider_batch_id` afterward; on resume, reconcile an unpromoted intent against the provider's batch list instead of blindly resubmitting.","status":"open","supersedes":null},{"finding_id":"applied-before-disposition-persisted","category":"correctness_defect","severity":"medium","blocking":false,"title":"Completed result is marked `applied` before the disposition is persisted, discarding a paid-for review on any later failure","claim":"`consume_completed` calls `take_completed` (which transitions `completed` -> `applied` and returns the payload) before accounting, parsing, and long before the coordinator persists the cycle. If `record_accounting` fails, `parse_completed_result` rejects malformed reviewer output, or the coordinator's `save_cycle` fails, the durable row is already `applied`; a re-driven cycle that regenerates the same `review_id` hits the `BatchReviewState::Applied` arm, which returns a hard `Agent` error rather than re-reading the stored result or falling back, and later attempts pay for a second batch. The result is billed once and used zero times.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":330,"end":366}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":446,"end":480}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77","media_type":"text/plain","byte_size":99927,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:477363d7733bc7795bec4ab633947af5c1870efe121f976b7121b63c84cf1bf0","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Retain `result_json` on transition to `applied` and have the `Applied` arm return the stored, re-parsed result (idempotent replay) instead of erroring; or defer the `completed` -> `applied` transition until the coordinator has durably saved the disposition, and treat unparseable batch output as an expiry-style fallback to the interactive tier rather than a bare agent error.","status":"open","supersedes":null},{"finding_id":"no-coverage-for-daemon-owned-lifecycle","category":"test_gap","severity":"medium","blocking":false,"title":"Daemon-owned poller, resume path, and config-driven wiring are untested","claim":"Every test in `crates/familiar-ai-daemon/tests/batch_review.rs` drives `BatchReviewAgent` directly with a hand-built `BatchReviewContext`. Nothing exercises `poll_once`/`run` (the component the acceptance criteria assign batch lifecycle ownership to), `resume_now`, or `build_batch_reviewer`/`batch_auth` reading real configuration. The two defects above — CLI-written per-repository policy never reaching `batch_auth`, and the poller exiting at startup — are exactly the failures this shape of test cannot catch, which is why they survive a green workspace test run.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/tests/batch_review.rs","range":{"start":100,"end":128}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":676,"end":781}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77","media_type":"text/plain","byte_size":99927,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:477363d7733bc7795bec4ab633947af5c1870efe121f976b7121b63c84cf1bf0","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e9a2c877e124c192fbfcff557d2fd5178a89c0ad6331df58cfaf89d7ca5e4d77-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Add tests that (a) build a `Config` with batch enabled the way `batch-review enable` writes it and assert `build_batch_reviewer` returns `Some`, and (b) drive `poll_once` against a `wiremock` server plus an in-memory database, asserting it applies a completion and enforces expiry without any review cycle re-driving it.","status":"open","supersedes":null}]}
+I'll start by examining the relevant files to understand the scope mismatch.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4860494 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4920498 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=4980502 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5040506 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5100509 last_durable_phase=preflight
+Let's look at the existing `validate_batch_worker` test near line 1356 for a ready-made minimal worker+config setup pattern.
+Now let's make the edits. First, add the `resolved_tier_policy` helper and update `batch_auth`/`build_batch_reviewer`:
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5160513 last_durable_phase=preflight
+Now let's update the `run()` poller startup gate and `poll_once`:
+Now update the per-row loop body inside `poll_once` to resolve auth per-row instead of using the removed shared `auth` parameter:
+Now let's check whether `AuthDescriptor` import is still used (it's used in the `resolved_tier_policy`/signatures) and compile-check the crate.
+Compiles cleanly. Now let's add the regression test asserting `build_batch_reviewer` resolves `Some` from a repository-scoped override, and `None` when it's absent for that repo. Let's check the `RepositoryConfig`/`Config` field defaults needed and `familiar_ai_core::config` exports available to the daemon crate.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5220517 last_durable_phase=preflight
+Good, `WorkerRegistryConfig` derives `Default`. Now let's write the test.
+Now let's add the test function itself, appended after the last test, plus a helper to build the config.
+Now let's build and run the tests to verify.
+All 6 tests pass. Now let's run the broader required verification suites: `tests-green-crates` and clippy/fmt, matching the acceptance checks.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5280523 last_durable_phase=preflight
+`cargo fmt` fixed the formatting automatically. Let's confirm fmt check now passes and run clippy plus the required test crates.
+Clean. Now the required test suite for the changed crates:
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5340529 last_durable_phase=preflight
+All green. Let's also run the daemon crate's own test suite (batch_review and unit tests) since it's directly touched, though not in the required tests-green-crates list — good to verify no regressions there too.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5400536 last_durable_phase=preflight
+All passing. Let's do a final diff review to confirm the change stays within the allowed scope and is minimal.
+This looks coherent and correctly scoped. Summary of the remediation:
+
+**Root cause confirmed:** `familiar-ai batch-review enable` writes to `repositories.<key>.review.tier_policy`, but `batch_auth`, `build_batch_reviewer`, and the daemon's batch poller (`batch_review::run`) only ever read the top-level `config.review.tier_policy`. A repository enabled via the shipped CLI would never resolve a batch worker/credential — worse, the poller's startup gate used the same global-only check, so it would exit immediately and never poll for *any* repository's batch reviews if only a per-repository override was set.
+
+**Fix** (entirely within `crates/familiar-ai-daemon/src/batch_review.rs` and its test file, no scope creep):
+1. Added `resolved_tier_policy(config, repository_key)` — looks up `config.repositories.get(repository_key)` for a repo-scoped override first, falling back to the global `config.review.tier_policy`.
+2. `batch_auth` and `build_batch_reviewer` now take/use `repository_key` through this helper instead of reading the global policy directly.
+3. Replaced the poller's single-config startup gate with `any_batch_configured`, which checks both the global default and every repository override.
+4. `poll_once` now resolves auth per-row via `batch_auth(config, &row.repository_key)` instead of one shared credential for every repository — correct since different repos can name different batch workers.
+5. Added `build_batch_reviewer_resolves_a_repository_scoped_enablement` in `tests/batch_review.rs`, proving a repo-only enablement (global policy left `None`) resolves `Some`, and an unrelated repository correctly resolves `None`.
+
+Verified: `cargo fmt --check`, `cargo clippy --workspace --all-targets` (0 warnings), and `cargo test -p familiar-ai-core -p familiar-ai-review -p familiar-ai-agent -p familiar-ai-storage` plus the full `familiar-ai-daemon` test suite (including the new test) all pass. No commits made.
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2074203
+verification: heartbeat check=format elapsed_ms=6246 child=pid:2074203
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2074800
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5460540 last_durable_phase=preflight
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:2074800
+verification: heartbeat check=lint elapsed_ms=39427 child=pid:2074800
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2079410
+verification: heartbeat check=tests-green-crates elapsed_ms=30003 child=pid:2079410
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5520545 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=60003 child=pid:2079410
+verification: heartbeat check=tests-green-crates elapsed_ms=74250 child=pid:2079410
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2088135
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5580552 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30001 child=pid:2088135
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60000 child=pid:2088135
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5640562 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90002 child=pid:2088135
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:2088135
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5700566 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150001 child=pid:2088135
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180005 child=pid:2088135
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=194622 child=pid:2088135
+review: independent reviewer analyzing (attempt 2, typically 2-3 minutes)...
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5760568 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5820571 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5880575 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=5940577 last_durable_phase=preflight
+{"review_id":"00001788454764715784-0001485283-000001-cycle-review-2","reviewed_manifest_hash":"sha256:be435789602bff1bbbbf3841a11e07d3c9bb10574b711cf1dc6f16016702c4fc","findings":[{"finding_id":"batch-config-scope-mismatch","category":"correctness_defect","severity":"high","blocking":false,"title":"Repository-scoped batch enablement is not read by the batch reviewer","claim":"Resolved in this revision. `batch_auth` and `build_batch_reviewer` now go through `resolved_tier_policy`, which looks up `config.repositories.<repository_key>.review.tier_policy` first and only falls back to the top-level `[review.tier_policy]`, so the policy `familiar-ai batch-review enable` writes under `repositories.<key>.review.tier_policy` is now the policy the reviewer resolves. A new integration test (`build_batch_reviewer_resolves_a_repository_scoped_enablement`) asserts both that a repository-scoped enablement resolves a batch reviewer with no top-level policy present, and that an unrelated repository key does not inherit it.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":540,"end":600}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f","media_type":"text/plain","byte_size":100000,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:33e19dd4d8f946dcee3247c008e726a2ed56e9caf9b757d9b39a051714d3d0e5","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"No further action required; the repository-scoped lookup and its regression test are in place.","status":"resolved","supersedes":null},{"finding_id":"batch-cost-is-configured-interactive-rate","category":"correctness_defect","severity":"high","blocking":false,"title":"Batch accounting records a configured interactive-rate estimate, not provider-reported cost","claim":"`record_accounting` writes the batch observation with `provider_cost_lexical: None` and then, when a price is configured, calls `append_legacy_configured_estimate` using `config.execution_history.pricing[model]` — the same per-million rates used for interactive executions, with no batch discount applied — while labelling the rates blob `\"service_tier\": \"batch\"`. The durable `batch_reviews.provider_cost_lexical` column is likewise always written as `None` (`mark_completed(..., None)` in both `poll_or_expire` and `apply_batch_result`). The acceptance criterion requires the provider-reported cost with provider provenance so PRD-051 measures the actual discount rather than assuming a rate; what is recorded is a locally assumed rate carrying no provider provenance, and it assumes the interactive rate specifically.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":312,"end":400}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f","media_type":"text/plain","byte_size":100000,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:33e19dd4d8f946dcee3247c008e726a2ed56e9caf9b757d9b39a051714d3d0e5","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Record the provider's own reported batch cost (or, failing that, an explicitly batch-rated estimate) with provenance distinguishing it from an interactive-rate configured estimate: populate `batch_reviews.provider_cost_lexical` and the observation's `provider_cost_lexical` from provider data, and stop emitting an undiscounted interactive-rate estimate tagged as batch. Add a test asserting a batch observation's recorded cost differs from the interactive-rate computation for the same token counts.","status":"open","supersedes":null},{"finding_id":"applied-state-strands-result-on-post-take-failure","category":"correctness_defect","severity":"high","blocking":false,"title":"take_completed flips the row to 'applied' before the result is parsed or dispositioned","claim":"`consume_completed` calls `take_completed`, which commits the `completed` -> `applied` transition, and only afterwards runs `record_accounting` and `parse_completed_result`. Any failure after that commit — or a daemon crash before the coordinator persists the resulting cycle — leaves the row permanently in `applied` with no consumer. A later re-drive matches the `BatchReviewState::Applied` arm of `review()` and returns a hard `ReviewExecutionError::Agent(\"... was already applied to a prior disposition\")` with no fallback to the interactive tier, unlike the expiry and member-error paths. The batch result is lost and the PRD cannot obtain a review at all.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":289,"end":310}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f","media_type":"text/plain","byte_size":100000,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:33e19dd4d8f946dcee3247c008e726a2ed56e9caf9b757d9b39a051714d3d0e5","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Only transition to `applied` once the result has actually been parsed and the disposition persisted (e.g. parse and record accounting first, then take/commit; or make the `applied` transition part of the same transaction that saves the cycle). Give the `Applied` arm a recovery path — fall back to the interactive tier with a durable reason instead of a permanent hard error — and add a test covering a completed batch whose payload fails to parse.","status":"open","supersedes":null},{"finding_id":"poller-aborts-all-rows-on-one-row-failure","category":"correctness_defect","severity":"medium","blocking":false,"title":"poll_once returns instead of continuing when one row's credential or client fails","claim":"Inside `poll_once`'s per-row loop, both the `AnthropicHttpClient::new` failure arm and the `EnvCredentialResolver.resolve(&auth)` failure arm `return` from the whole function rather than `continue` to the next row. Credential resolution is per-row (each repository may name a different batch worker and auth profile), so a single repository with a missing or unreadable credential aborts polling for every other pending batch on that tick, and does so on every subsequent tick as well.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":655,"end":690}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f","media_type":"text/plain","byte_size":100000,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:33e19dd4d8f946dcee3247c008e726a2ed56e9caf9b757d9b39a051714d3d0e5","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-e2db208b1a95243f6d343fa656ac856c92e9372cf8de01a196a41cc1f7ec8e2f-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Replace the per-row `return`s with `continue` (keeping the warning log) so one repository's credential or client failure cannot stall polling for unrelated pending batches, and add a poller test with two pending rows where the first row's credential is unresolvable.","status":"open","supersedes":null},{"finding_id":"no-coverage-of-poller-or-coordinator-batch-path","category":"test_gap","severity":"medium","blocking":false,"title":"Daemon poller and coordinator-level batch result path are untested","claim":"The new integration tests drive `BatchReviewAgent::review` directly; nothing exercises `run`/`poll_once`/`apply_batch_result`/`resume_now`, which are the components the acceptance criteria assign daemon ownership of the batch lifecycle across restarts to. Separately, no test drives a batch-produced `ReviewResult` through `ReviewCoordinator`: the coordinator tests use `ParkingReviewer` (which only ever parks) and the plain fake `Reviewer`, so the fact that a batch result rewrites the reviewer `AgentObservation` (`adapter_id: \"anthropic-api-batch\"`, `agent_id: \"anthropic-api\"`, `provider: \"anthropic-api\"`) away from the assignment that `check_independence` was run against is never validated end to end.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/tests/batch_review.rs","range":{"start":1,"end":30}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:579e9bc243ebdea0e38b2d3e4bccbdade838c474e8a857712a94137add683621","media_type":"text/plain","byte_size":38343,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:33e19dd4d8f946dcee3247c008e726a2ed56e9caf9b757d9b39a051714d3d0e5","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-579e9bc243ebdea0e38b2d3e4bccbdade838c474e8a857712a94137add683621-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Add a test that runs `poll_once` against a mock server plus durable rows (pending, ended-with-result, past-deadline) and asserts the resulting state transitions, and a coordinator test that supplies a batch-style `ReviewAgent` returning a `ReviewResult` with the rewritten reviewer observation, asserting it passes independence/validation and reaches the same disposition as an interactive result.","status":"open","supersedes":null}]}
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6000581 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6060583 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6120587 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6180592 last_durable_phase=preflight
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6240595 last_durable_phase=preflight
+Good, `familiar_ai_core::ExecutionPrice` is the correct path (already used at line 96, 364 in batch_review.rs). Now let me implement all the changes, starting with the storage repo.
+Now update the repo's own test that used `take_completed`:
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6300598 last_durable_phase=preflight
+Now let's implement the daemon-side changes in `batch_review.rs`.
+Now update the `Succeeded` arm in `poll_or_expire` to compute and persist the lexical cost, and `consume_completed`/add `park` helper:
+Now the `consume_completed` and `record_accounting` methods:
+Now update the `review()` trait impl's `Applied` arm:
+Now update `apply_batch_result` and its call site in `poll_once` to compute and persist the batch cost estimate too:
+Now let's check the whole file for consistency and compile.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6360600 last_durable_phase=preflight
+Compiles cleanly (the dead-code warning is pre-existing/unrelated). Now let's add tests to `crates/familiar-ai-daemon/tests/batch_review.rs` covering both findings, and check compile.
+Good — non-JSON text will fail to parse and return `ReviewExecutionError::Agent`. Now let's add the `agent_with_pricing` helper and both new tests to the test file.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6420603 last_durable_phase=preflight
+Now append the two new tests at the end of the file:
+Storage repo tests pass. Now the daemon integration tests.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6480610 last_durable_phase=preflight
+All 9 tests pass. Now let's run the broader targeted verification commands (format, lint, tests-green-crates) to make sure nothing else broke.
+`cargo fmt --all` applied its own formatting fixes (just reflow, no semantic change). Let's verify format check passes now and re-run tests to confirm nothing broke.
+Clippy is clean. Now run the tests-green-crates set (core, review, agent, storage) plus daemon batch tests to be safe.
+drive: progress prd=PRD-71 stage=execution elapsed_ms=6540621 last_durable_phase=preflight
+All green. Let's also run the full daemon crate's own test suite quickly to be safe (not just the batch_review file), and double check `git diff --stat` to confirm changes stayed within allowed paths.
+All modified/new files are under `crates/`, matching the untracked baseline (I only touched `batch_review.rs` files — daemon src, storage repo, and daemon test — plus no other files). Format, clippy, and the relevant test suites all pass.
+Both blocking findings are remediated within `crates/`, scope untouched otherwise:
+
+1. **`batch-cost-is-configured-interactive-rate`** — `batch_cost_estimate()` now applies Anthropic's documented 50% batch discount to the configured per-token rate (the provider never returns a literal dollar figure for batch), tags the estimate's provenance as `"batch-rate-estimate"` distinct from the interactive configured-rate estimate, and both `mark_completed` call sites (`poll_or_expire` and `apply_batch_result`) now populate `batch_reviews.provider_cost_lexical` instead of always writing `None`. Added `batch_completion_records_a_batch_discounted_cost_distinct_from_interactive_rate`, which asserts the recorded cost is exactly half the undiscounted interactive-rate computation for identical tokens.
+
+2. **`applied-state-strands-result-on-post-take-failure`** — replaced the atomic `take_completed` (which flipped `completed → applied` before parsing) with `peek_completed` (read-only) + `mark_applied` (commits only after `record_accounting` and `parse_completed_result` both succeed), so a parse/accounting failure leaves the row retryable in `completed` state rather than permanently stranded. Gave the `Applied` re-entry arm a durable recovery path (`mark_applied_reentry_fallback`, transitioning to `expired_fallback` with a recorded reason) instead of a hard, unrecoverable error. Added `completed_batch_with_unparseable_payload_never_strands_the_row_as_applied` and `applied_reentry_with_no_disposition_falls_back_to_interactive_with_a_durable_reason`.
+
+Verification run locally: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --no-default-features -D warnings`, and `cargo test` for `familiar-ai-core`, `familiar-ai-review`, `familiar-ai-agent`, `familiar-ai-storage`, and the daemon's `batch_review` integration tests — all pass (9/9 new/updated batch tests green). No commits made.
+Review disposition: HumanReviewRequired; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [DurationLimitExhausted]
+drive: attempt 2 PRD-71 failed: human review required
+drive: attempt 2 PRD-71 outcome=retained reason=human_review_required
+drive: session drive-00001788454454062745-0001485283-000000 terminated reason=budget_prds_exhausted attempted=3 completed=0
+session=drive-00001788454454062745-0001485283-000000 termination=budget_prds_exhausted attempted=3 completed=0 known_cost_microusd=58263707
+---
+exit: 0
