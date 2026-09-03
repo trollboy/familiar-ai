@@ -32,7 +32,7 @@ use crate::command::daemon_command_from_tray;
 use crate::command::{handle_commands, CommandState, DaemonCommand};
 use crate::daemon_cli::Cli;
 use crate::pid::{remove_pid_file, write_pid_file};
-use crate::shutdown::shutdown_signal;
+use crate::shutdown::{shutdown_signal, TerminationSignals};
 
 /// State assembled at startup, shared between daemon work and (optionally) tray.
 #[allow(dead_code)]
@@ -262,6 +262,7 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
 /// Spawn the watcher, heartbeat, and command handler. Returns when shutdown_rx fires.
 async fn daemon_run(
     state: &DaemonState,
+    termination: &mut TerminationSignals,
     command_rx: mpsc::Receiver<DaemonCommand>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -410,7 +411,7 @@ async fn daemon_run(
     // Wait for shutdown
     let mut shutdown_rx_local = shutdown_rx;
     tokio::select! {
-        _ = shutdown_signal() => {
+        _ = shutdown_signal(termination) => {
             tracing::info!("os shutdown signal received");
         }
         _ = shutdown_rx_local.changed() => {
@@ -419,18 +420,34 @@ async fn daemon_run(
     }
 
     let _ = shutdown_tx.send(true);
-    let _ = tokio::time::timeout(Duration::from_secs(5), control_worker).await;
     heartbeat_handle.abort();
     command_handle.abort();
 
-    if let Some((watcher_task, handler_task)) = watcher_handle {
-        let _ = tokio::time::timeout(Duration::from_secs(5), watcher_task).await;
-        handler_task.abort();
-    }
-
-    if let Some(handle) = summary_handle {
-        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-    }
+    // Drain the independent subsystems CONCURRENTLY. Awaiting three
+    // five-second timeouts in sequence made worst-case graceful shutdown
+    // fifteen seconds, which overruns a supervisor's TERM budget (and the
+    // integration test's ten) even though nothing here depends on anything
+    // else finishing first (FAM-BUG-050). Concurrent draining bounds the
+    // whole shutdown at one timeout.
+    const DRAIN: Duration = Duration::from_secs(5);
+    let watcher_drain = async {
+        if let Some((watcher_task, handler_task)) = watcher_handle {
+            let _ = tokio::time::timeout(DRAIN, watcher_task).await;
+            handler_task.abort();
+        }
+    };
+    let summary_drain = async {
+        if let Some(handle) = summary_handle {
+            let _ = tokio::time::timeout(DRAIN, handle).await;
+        }
+    };
+    tokio::join!(
+        async {
+            let _ = tokio::time::timeout(DRAIN, control_worker).await;
+        },
+        watcher_drain,
+        summary_drain,
+    );
     drop(summary_tx);
 }
 
@@ -451,7 +468,7 @@ fn main() -> ExitCode {
         }
     };
 
-    runtime.block_on(async {
+    let code = runtime.block_on(async {
         match run_headless().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -459,16 +476,34 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-    })
+    });
+    // Dropping a multi-thread runtime waits for blocking tasks with no
+    // bound, so a parked `spawn_blocking` (a watcher read, a SQLite call)
+    // keeps the process alive after every graceful step has finished — the
+    // daemon looked hung to any supervisor timing its shutdown
+    // (FAM-BUG-050). Bound the teardown; the work is already signalled.
+    runtime.shutdown_timeout(Duration::from_secs(2));
+    code
 }
 
 #[cfg(not(feature = "tray"))]
 async fn run_headless() -> familiar_ai_core::Result<()> {
+    // Register termination handling BEFORE bootstrap writes the PID file:
+    // that file is how a supervisor learns it may signal us, and until the
+    // handler exists SIGTERM kills us outright (FAM-BUG-050).
+    let mut termination = TerminationSignals::register()?;
     let (state, _log_guard) = bootstrap()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (_command_tx, command_rx) = mpsc::channel::<DaemonCommand>(64);
 
-    daemon_run(&state, command_rx, shutdown_tx, shutdown_rx).await;
+    daemon_run(
+        &state,
+        &mut termination,
+        command_rx,
+        shutdown_tx,
+        shutdown_rx,
+    )
+    .await;
 
     remove_pid_file(&state.pid_path)?;
     tracing::info!("familiar-ai-daemon stopped");
@@ -514,8 +549,15 @@ fn main() -> ExitCode {
     let runtime_for_daemon = runtime.clone();
     let daemon_handle = std::thread::spawn(move || {
         runtime_for_daemon.block_on(async move {
+            // Tray build: bootstrap ran on the main thread before any runtime
+            // existed, so registration happens here, first thing on the
+            // daemon runtime — the narrow window is inherent to that build
+            // shape and is documented in FAM-BUG-050.
+            let mut termination =
+                TerminationSignals::register().expect("register termination signals");
             daemon_run(
                 &state_for_daemon,
+                &mut termination,
                 command_rx,
                 shutdown_tx_for_daemon,
                 shutdown_rx_for_daemon,

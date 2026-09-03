@@ -1307,3 +1307,38 @@ reinstall the binary, then rerun the 076 drive.
   becomes belt-and-braces rather than the only signal.
 - **Urgency:** PRD-072 adds another runtime; every future provider hits
   the same wall. Fix before it lands.
+
+### FAM-BUG-050 — Daemon shutdown is unbounded and unsignalled before readiness
+
+- **Status:** Open — three layers fixed, one remaining
+- **Found:** while diagnosing PRD-063's verification failure, which turned
+  out to be innocent: `daemon_starts_and_stops_on_sigterm` fails in Docker
+  on `main` too. Each fix revealed the next layer, and each is a real
+  product defect, not a test artifact:
+  1. **FIXED — SIGTERM had default disposition during startup.** The
+     handler was registered inside `shutdown_signal()`, which is not
+     awaited until the runtime is fully assembled — long after the PID
+     file is written. A supervisor that read the PID file and signalled
+     (systemd, launchd, an operator) killed the daemon outright: no
+     graceful shutdown, no PID cleanup, no in-flight work finished.
+     `TerminationSignals::register()` now runs BEFORE bootstrap writes the
+     PID file, so that file means "ready, including to stop".
+  2. **FIXED — worst-case graceful shutdown was 15s.** Three independent
+     subsystems were drained sequentially at 5s each, overrunning any
+     supervisor TERM budget for no reason; nothing depended on anything
+     else finishing. They now drain concurrently, bounding shutdown at one
+     timeout.
+  3. **FIXED — runtime teardown was unbounded.** Dropping a multi-thread
+     tokio runtime waits for blocking tasks with no limit, so a parked
+     `spawn_blocking` kept the process alive after every graceful step had
+     completed. Teardown is now bounded.
+  4. **OPEN — the daemon still does not exit within 10s of SIGTERM in
+     Docker.** It starts correctly (PID file appears) and then does not
+     stop. Both failure paths in the integration test now dump the
+     daemon's own stderr, so the next investigation starts with evidence
+     rather than "PID file was not created".
+- **Gate impact (my error, recorded):** I promoted
+  `tests-workspace-advisory` to REQUIRED on 2026-09-01 while it contained
+  this Docker-failing test. A required gate that is red on main blocks
+  every landing, so it is demoted to advisory until this test is green,
+  then re-promoted. The bug stays open; the demotion is not a waiver.

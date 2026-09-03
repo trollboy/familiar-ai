@@ -85,7 +85,19 @@ format = "json"
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(pid_path.exists(), "PID file was not created");
+    if !pid_path.exists() {
+        // "PID file was not created" names the symptom, never the cause, and
+        // the daemon's own explanation was being piped straight into the
+        // void. Kill it (closing the pipe) and report what it actually said.
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+        let _ = child.wait();
+        let mut reason = String::new();
+        use std::io::Read as _;
+        let _ = stderr_handle.read_to_string(&mut reason);
+        panic!("PID file was not created; daemon stderr:\n{reason}");
+    }
 
     // Verify PID file contains the child's PID
     let pid_contents = std::fs::read_to_string(&pid_path).unwrap();
@@ -112,7 +124,10 @@ format = "json"
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
             let _ = child.wait();
-            panic!("daemon did not exit within 10 seconds of SIGTERM");
+            let mut reason = String::new();
+            use std::io::Read as _;
+            let _ = stderr_handle.read_to_string(&mut reason);
+            panic!("daemon did not exit within 10 seconds of SIGTERM; daemon stderr:\n{reason}");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
