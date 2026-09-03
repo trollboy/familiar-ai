@@ -1,0 +1,60 @@
+command: familiar-ai resume PRD-63
+date: Thu Sep  3 10:18:00 PM UTC 2026
+host: trollboy (Linux)
+head: 3b4a842c5122a6635581ab62db1438a7651bc459 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=9 key=/home/trollboy/Projects/familiar-ai/.git
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2557425
+verification: heartbeat check=format elapsed_ms=7770 child=pid:2557425
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2558184
+verification: heartbeat check=lint elapsed_ms=30002 child=pid:2558184
+verification: heartbeat check=lint elapsed_ms=44491 child=pid:2558184
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2562878
+verification: heartbeat check=tests-green-crates elapsed_ms=30001 child=pid:2562878
+verification: heartbeat check=tests-green-crates elapsed_ms=60003 child=pid:2562878
+verification: heartbeat check=tests-green-crates elapsed_ms=76756 child=pid:2562878
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2572151
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30002 child=pid:2572151
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60001 child=pid:2572151
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90004 child=pid:2572151
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120004 child=pid:2572151
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150002 child=pid:2572151
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180004 child=pid:2572151
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=206622 child=pid:2572151
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [VerificationUnsuccessful]
+HumanReviewRequired prd=PRD-63
+stop_reasons=["verification_unsuccessful"]
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/src/local_worker_runtime.rs'; required coverage is within scope authority
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/src/local_worker_runtime.rs'; required coverage is within scope authority
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding file_class:test:declared_surface_coverage: test exercises the declared surface 'crates/familiar-ai-daemon/src/local_worker_runtime.rs'; required coverage is within scope authority
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding prd_expected_file_expansion: outside static allowed paths but declared at Expected Files line 3
+non-interactive input: preserving checkpoint
+error: PRD-63: human review required
+---
+exit: 1
