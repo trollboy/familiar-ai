@@ -72,8 +72,14 @@ format = "json"
     // Take stderr handle immediately to avoid holding child borrow
     let mut stderr_handle = child.stderr.take().expect("stderr not piped");
 
-    // Wait for PID file to appear
-    for _ in 0..50 {
+    // Wait for PID file to appear. The budget must cover a COLD start under
+    // a loaded container: this test runs alongside the whole workspace suite
+    // in the Docker verification gate, and startup opens SQLite and applies
+    // every migration (48 and growing). Five seconds passed for years and
+    // then began failing PRD-063's verification for no product reason
+    // (FAM-BUG-047) — a flake in a required gate costs an entire session, so
+    // the budget is deliberately generous rather than tight.
+    for _ in 0..300 {
         if pid_path.exists() {
             break;
         }

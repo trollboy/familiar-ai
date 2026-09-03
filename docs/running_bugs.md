@@ -1227,7 +1227,17 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-047 — Intermittent workspace test failure
 
-- **Status:** CLOSED 2026-09-02 — not reproducible; the original sighting
+- **Status:** REOPENED then FIXED 2026-09-03 — I closed this wrongly. My
+  sixteen "clean" runs were all standalone; the failure only appears under
+  the Docker gate's contended parallel load, which I never reproduced. It
+  then failed PRD-063's verification for real. The offender is
+  `daemon_starts_and_stops_on_sigterm`: it allowed 5 seconds for a COLD
+  daemon start that opens SQLite and applies every migration (48 and
+  growing) while the whole workspace suite runs beside it. Budget raised to
+  30s with the reasoning recorded in the test. **Lesson:** "not
+  reproducible" needs the conditions that produced it — standalone runs do
+  not falsify a load-dependent flake, and closing on them cost a session.
+- **Prior (incorrect) closure:** CLOSED 2026-09-02 — not reproducible; the original sighting
   was operator measurement error. Sixteen clean consecutive runs (three
   ad-hoc plus a 10-run hunt with nothing else touching `target/`), zero
   failures. Two causes for the false alarm, both worth remembering:
