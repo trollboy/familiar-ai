@@ -67,6 +67,10 @@ pub enum StewardshipCommand {
     /// Show current-effective cost reconciliation (PRD-053) for this
     /// repository's durable project over a UTC range.
     Reconciliation { start: String, end: String },
+    /// Report every configured worker with its typed discovery, enablement,
+    /// capability-provenance, and routing-readiness states, plus the exact
+    /// command that advances each unavailable transition (FAM-BUG-001).
+    Workers,
 }
 
 /// Read-only: shares its query implementation with the dashboard's
@@ -77,6 +81,15 @@ pub fn stewardship_command(command: StewardshipCommand) -> Result<(), String> {
     let repository = FilesystemBacklogDiscovery
         .resolve(&cwd)
         .map_err(|e| e.to_string())?;
+    // The worker inventory reads configuration, not durable state — it must
+    // work before any session has ever run.
+    if matches!(command, StewardshipCommand::Workers) {
+        let config = crate::cli::shared::effective_repository_config(
+            &familiar_ai_core::AppPaths::resolve().map_err(|e| e.to_string())?,
+            &cwd,
+        )?;
+        return crate::cli::workers::workers(&config);
+    }
     let db = database()?;
     let value = match command {
         StewardshipCommand::Backlog {
@@ -116,6 +129,8 @@ pub fn stewardship_command(command: StewardshipCommand) -> Result<(), String> {
         StewardshipCommand::Gates { limit } => {
             crate::stewardship::list_pending_human_gates(&db, &repository, limit)
         }
+        // Handled before the database is opened.
+        StewardshipCommand::Workers => unreachable!("worker inventory returns early"),
         StewardshipCommand::Reconciliation { start, end } => {
             crate::stewardship::get_reconciliation(&db, &repository, &start, &end)
         }

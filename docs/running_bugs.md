@@ -8,7 +8,8 @@ instead of deleting the history.
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable
 
-- **Status:** Open
+- **Status:** FIXED 2026-09-03 — `familiar-ai stewardship workers` reports every configured worker with its states typed separately (enabled, capability provenance per capability, model identity, measured cost) and the exact command that advances each unavailable transition. PRD-057 built the provenance vocabulary but never surfaced it; this is the diagnostic the entry asked for.
+- **Original status:** Open
 - **Observed:** `config provider list` and `config model list` were empty even
   though Codex, Claude, Ollama, and Unsloth were installed or running. The
   operator had to ask repeatedly what Familiar could actually use.
@@ -140,7 +141,8 @@ instead of deleting the history.
 
 ### FAM-BUG-009 — Synthetic Claude discovery identity passed admission and failed every Wave 3 attempt
 
-- **Status:** Open — needs re-verification 2026-09-02 (audit)
+- **Status:** FIXED 2026-09-03 — a synthetic identity is now REFUSED at registry admission, not merely reported: a model equal to the executable's basename or the provider's own name is rejected with an explicit message, so `claude/claude` costs one error instead of a nine-PRD wave. The inventory surfaces the same condition as a blocker with remediation.
+- **Original status:** Open — needs re-verification 2026-09-02 (audit)
 - **Audit evidence:** Preflight now probes and dedups agent identities per session, but no evidence was found that a discovery-synthesized worker identity is refused at admission. Re-verify with a deliberately synthetic registry entry before closing.
 - **Original status:** Open; unsafe worker disabled and claims recovered
 - **Observed:** The CLI-login probe recorded the command label `claude` as a
@@ -364,7 +366,8 @@ instead of deleting the history.
 
 ### FAM-FRICTION-001 — Provider registration does not imply execution readiness
 
-- **Status:** Open design/UX gap
+- **Status:** FIXED 2026-09-03 — the worker inventory surfaces the blocked transition and its remediation, so a worker that is authenticated and discovered but not routable says so and says why.
+- **Original status:** Open design/UX gap
 - **Observed:** Unsloth can be authenticated and discovered, but its model
   cannot be enabled until the local raw-inference agent runtime is implemented.
 - **Impact:** `provider list` looks successful while the model remains unusable
@@ -378,7 +381,8 @@ instead of deleting the history.
 
 ### FAM-FRICTION-002 — Provider CLI discovery for subscription CLIs is not real model discovery
 
-- **Status:** Open
+- **Status:** FIXED 2026-09-03 — CLI-default/synthetic model identity is now explicit: refused at admission and reported as `synthetic_model_identity` in the inventory rather than silently routed as a real model.
+- **Original status:** Open
 - **Observed:** Codex and Claude provider probes return synthetic model IDs
   (`codex`, `claude`) derived from the login command rather than identifying the
   selected or available model.
@@ -396,7 +400,8 @@ instead of deleting the history.
 
 ### FAM-FRICTION-003 — Capability declarations are manual and unverified
 
-- **Status:** Open
+- **Status:** FIXED 2026-09-03 — declared capability is distinguished from verified: the inventory reports provenance per capability and a worker whose capabilities are all `declared`/`unknown` is reported NOT routable, with `familiar-ai preflight` named as the remedy. Declared is a claim; probed/observed is evidence.
+- **Original status:** Open
 - **Observed:** `config model enable` requires the operator to assert planning,
   implementation, review, remediation, or narrow-task capabilities without a
   qualification probe or evidence record.

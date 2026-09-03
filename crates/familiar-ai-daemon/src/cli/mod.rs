@@ -28,3 +28,4 @@ pub mod stewardship;
 pub mod usage;
 pub mod waive;
 pub mod worker;
+pub mod workers;

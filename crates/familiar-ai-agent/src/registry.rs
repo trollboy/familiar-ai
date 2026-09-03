@@ -252,6 +252,32 @@ impl WorkerRegistry {
                     .into(),
             );
         }
+        // A CLI-login probe records the command's own label as a "model".
+        // Admitting `claude/claude` let routing select it for every stage
+        // and Claude Code then rejected `--model claude` on each attempt,
+        // burning a whole nine-PRD wave (FAM-BUG-009). A label is not a
+        // model identity: refuse it here, where the cost is one error
+        // instead of a session.
+        let executable_label = worker
+            .executable
+            .rsplit('/')
+            .next()
+            .unwrap_or(&worker.executable)
+            .trim()
+            .to_ascii_lowercase();
+        let model = worker.model.trim().to_ascii_lowercase();
+        if model == executable_label || model == worker.provider.trim().to_ascii_lowercase() {
+            return Err(format!(
+                "worker {:?} declares model {:?}, which is the {} label, not a model identity; set an explicit model",
+                worker.id,
+                worker.model,
+                if model == executable_label {
+                    "executable's"
+                } else {
+                    "provider's"
+                }
+            ));
+        }
         if self.workers.insert(worker.id.clone(), worker).is_some() {
             return Err("duplicate worker id".into());
         }
@@ -499,6 +525,33 @@ mod tests {
             expected_file_count: 0,
         }
     }
+    #[test]
+    fn a_cli_label_masquerading_as_a_model_is_refused_at_admission() {
+        // FAM-BUG-009: `claude/claude` was admitted, routed to every stage,
+        // and rejected by the CLI on each attempt.
+        let mut registry = WorkerRegistry::default();
+        let mut synthetic = worker("claude-cli", 0);
+        synthetic.provider = "anthropic".into();
+        synthetic.model = "claude".into();
+        synthetic.executable = "/usr/local/bin/claude".into();
+        let error = registry.register(synthetic).unwrap_err();
+        assert!(error.contains("not a model identity"), "{error}");
+
+        // The provider's own name is equally not a model.
+        let mut provider_named = worker("provider-named", 0);
+        provider_named.provider = "anthropic".into();
+        provider_named.model = "Anthropic".into();
+        provider_named.executable = "claude".into();
+        assert!(registry.register(provider_named).is_err());
+
+        // A real model identity is admitted.
+        let mut real = worker("real", 0);
+        real.provider = "anthropic".into();
+        real.model = "claude-sonnet-4-5".into();
+        real.executable = "claude".into();
+        assert!(registry.register(real).is_ok());
+    }
+
     #[test]
     fn unmeasured_cost_never_wins_as_if_free_and_the_rule_says_so() {
         // FAM-BUG-007: unmeasured workers all defaulted to 0 and the
