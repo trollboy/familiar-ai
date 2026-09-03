@@ -8,7 +8,19 @@
 
 use familiar_ai_storage::{Database, ReviewRepository};
 
+const ACTION: &str = "record a waiver";
+
 fn main() {
+    // FAM-BUG-048: this writes durable state directly, bypassing the claim
+    // the drive respects. Refuse while a driver owns the control plane.
+    let paths = familiar_ai_core::AppPaths::resolve().expect("resolve app paths");
+    if let Err(refusal) =
+        familiar_ai_daemon::worker_lock::refuse_while_driver_owns(&paths.runtime_dir, ACTION)
+    {
+        eprintln!("{refusal}");
+        std::process::exit(2);
+    }
+
     let mut args = std::env::args().skip(1);
     let (Some(database), Some(cycle_id), Some(finding_id), Some(actor), Some(reason)) = (
         args.next(),

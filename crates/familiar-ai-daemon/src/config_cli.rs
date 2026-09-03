@@ -2188,10 +2188,35 @@ mod tests {
         assert!(!context.config_path.exists());
     }
 
+    /// See FAM-BUG-015: the sandbox forbids loopback binds, and a fixture
+    /// that needs one must report the environment condition instead of
+    /// failing as a product defect.
+    fn loopback_listener_or_skip(test: &str) -> Option<TcpListener> {
+        match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => Some(listener),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrNotAvailable
+                ) =>
+            {
+                eprintln!(
+                    "{test}: skipped — environment denied loopback bind (Operation not permitted): {error}"
+                );
+                None
+            }
+            Err(error) => panic!("unexpected loopback bind failure: {error}"),
+        }
+    }
+
     #[test]
     fn unsloth_probe_uses_bearer_auth_and_discovers_openai_models() {
         const ENV_NAME: &str = "FAMILIAR_AI_TEST_UNSLOTH_KEY";
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) =
+            loopback_listener_or_skip("unsloth_probe_uses_bearer_auth_and_discovers_openai_models")
+        else {
+            return;
+        };
         let address = listener.local_addr().unwrap();
         std::env::set_var(ENV_NAME, "test-only-secret");
         let server = thread::spawn(move || {

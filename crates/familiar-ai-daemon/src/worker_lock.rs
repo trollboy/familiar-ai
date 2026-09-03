@@ -21,6 +21,28 @@ pub enum ClaimState {
     Invalid(String),
 }
 
+/// Refuse a direct state mutation while a driver owns the control plane.
+///
+/// Operator tools write checkpoint rows and worktrees straight through the
+/// storage API, bypassing the claim the drive respects. Doing that under a
+/// live session risks mutating candidates the driver is actively working
+/// (FAM-BUG-048) — this is the courtesy the drive already extends itself.
+pub fn refuse_while_driver_owns(runtime_dir: &Path, action: &str) -> Result<(), String> {
+    match WorkerLock::inspect(runtime_dir) {
+        Ok(ClaimState::Live(claim)) => Err(format!(
+            "refusing to {action}: Familiar control-plane owner pid {} is live. \
+             Wait for it to finish, or stop it first.",
+            claim.owner_pid
+        )),
+        Ok(_) => Ok(()),
+        // An unreadable claim is not proof of absence; say so rather than
+        // proceeding on a guess.
+        Err(error) => Err(format!(
+            "refusing to {action}: cannot read the control-plane claim ({error})"
+        )),
+    }
+}
+
 impl WorkerLock {
     pub fn inspect(runtime_dir: &Path) -> io::Result<ClaimState> {
         let path = runtime_dir.join("control-plane.claim");

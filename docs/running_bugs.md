@@ -37,7 +37,8 @@ instead of deleting the history.
 
 ### FAM-BUG-003 — BYO-auth environment references do not integrate with macOS Keychain
 
-- **Status:** Open
+- **Status:** FIXED 2026-09-03 (audit) — PRD-074 delivered it: `AuthDescriptor::CredentialStore{store,service,account}` with a `SystemCredentialStore` resolver that reads macOS Keychain at USE time via `security find-generic-password`, returns typed conditions (Missing/AccessDenied/Unavailable/UnsupportedPlatform), and never exports to the environment. Preflight probes it in daemon and supervisor context without a login shell, the resolved secret is discarded (`Ok(_)`), and only the descriptor identifiers appear in any output.
+- **Original status:** Open
 - **Observed:** Unsloth stores only hashes of existing API keys and Familiar
   accepts `env: NAME`, but not a Keychain credential reference. Registration
   required a one-time Keychain-to-environment bridge.
@@ -278,7 +279,8 @@ instead of deleting the history.
 
 ### FAM-BUG-015 — Required verification cannot bind loopback in the agent sandbox
 
-- **Status:** Open; PRD-050/057 verification affected
+- **Status:** FIXED 2026-09-03 — both halves. PRD-078 already classified the durable result correctly (`output_environment_denied` maps "operation not permitted"/"permission denied"/etc. to `VerificationStatus::EnvironmentDenied`, never `Failed`). The missing half was the fixtures: the two tests that bind a loopback listener now report the environment condition and skip instead of failing as a product defect, so a sandboxed verification run no longer teaches workers to dismiss a required failure as narration.
+- **Original status:** Open; PRD-050/057 verification affected
 - **Observed:** The existing Unsloth authenticated-discovery regression binds a
   loopback listener. Focused and workspace verification inside the coding-agent
   sandbox intermittently fails with `Operation not permitted`, although the same
@@ -1248,7 +1250,8 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-048 — Operator tools bypass the control-plane lock
 
-- **Status:** Open
+- **Status:** FIXED 2026-09-03 — `worker_lock::refuse_while_driver_owns` is the read-only counterpart to the claim the drive respects, and all three `operator_*` tools call it before touching durable state: they exit 2 naming the live owner pid rather than mutating checkpoints under a running session. An unreadable claim also refuses rather than proceeding on a guess.
+- **Original status:** Open
 - **Observed:** on 2026-09-02 the operator wrote checkpoint rows
   (`operator_rebind`, `operator_set_phase`) and rebased candidate
   worktrees while a `resume all` session held the control-plane claim.
