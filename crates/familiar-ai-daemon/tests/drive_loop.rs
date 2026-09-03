@@ -337,7 +337,7 @@ fn legacy_prd_document_scope_routes_and_persists_the_derived_file_count() {
         ],
         fresh_process_isolation: true,
         context_tokens: 100_000,
-        estimated_cost_microusd: 1,
+        estimated_cost_microusd: Some(1),
         available: true,
         effort: None,
         permission_mode: None,

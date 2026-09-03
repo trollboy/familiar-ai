@@ -47,7 +47,11 @@ pub struct WorkerDescriptor {
     pub capabilities: BTreeSet<WorkerCapability>,
     pub fresh_process_isolation: bool,
     pub context_tokens: u64,
-    pub estimated_cost_microusd: u64,
+    /// Known marginal cost per stage, or `None` when it has never been
+    /// measured. Unknown is NOT zero: treating it as free made every
+    /// unmeasured worker tie at the cheapest price and handed the whole
+    /// registry to the lexicographically first id (FAM-BUG-007).
+    pub estimated_cost_microusd: Option<u64>,
     pub available: bool,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
@@ -322,8 +326,13 @@ impl WorkerRegistry {
             if !worker.capabilities.contains(&request.stage.into()) {
                 rejected.push(RejectionReason::Incapable);
             }
+            // A ceiling can only reject a cost it knows. An unmeasured
+            // worker is not silently assumed to fit, nor assumed to bust:
+            // the ceiling simply does not discriminate on it.
             if request.max_cost_microusd > 0
-                && worker.estimated_cost_microusd > request.max_cost_microusd
+                && worker
+                    .estimated_cost_microusd
+                    .is_some_and(|cost| cost > request.max_cost_microusd)
             {
                 rejected.push(RejectionReason::OverBudget);
             }
@@ -365,7 +374,16 @@ impl WorkerRegistry {
                 .iter()
                 .filter(|c| c.rejected.is_empty())
                 .map(|c| self.workers.get(&c.worker_id).unwrap())
-                .min_by_key(|w| (w.estimated_cost_microusd, w.id.as_str()))
+                // Known costs are comparable and sort first; unmeasured
+                // workers follow deterministically by id. Cost is only a
+                // discriminator where it is actually known.
+                .min_by_key(|w| {
+                    (
+                        w.estimated_cost_microusd.is_none(),
+                        w.estimated_cost_microusd.unwrap_or(0),
+                        w.id.as_str(),
+                    )
+                })
         };
         let Some(selected) = selected else {
             if let Some(pin) = &request.pinned_worker {
@@ -394,6 +412,20 @@ impl WorkerRegistry {
             }
         }
 
+        // Name the rule that actually decided the selection.
+        let else_rule: String = {
+            let eligible_known = candidates
+                .iter()
+                .filter(|c| c.rejected.is_empty())
+                .filter_map(|c| self.workers.get(&c.worker_id))
+                .filter(|w| w.estimated_cost_microusd.is_some())
+                .count();
+            if eligible_known == 0 {
+                "unmeasured-cost-then-id".into()
+            } else {
+                "lowest-cost-then-id".into()
+            }
+        };
         Ok(SelectionRecord {
             stage: request.stage,
             rule: if request.pinned_worker.is_some() {
@@ -401,7 +433,10 @@ impl WorkerRegistry {
             } else if let Some(rule) = matched_rule {
                 rule.id.clone()
             } else {
-                "lowest-cost-then-id".into()
+                // Say which rule actually decided: claiming a cost tiebreak
+                // when no candidate has a known cost is a lie the operator
+                // then acts on (FAM-BUG-007).
+                else_rule
             },
             selected_worker: selected.id.clone(),
             selected_spec_identity: selected.spec_identity.clone(),
@@ -425,6 +460,15 @@ mod tests {
         }
     }
     fn worker(id: &str, cost: u64) -> WorkerDescriptor {
+        worker_with_cost(id, Some(cost))
+    }
+
+    /// A worker whose cost has never been measured (FAM-BUG-007).
+    fn unmeasured_worker(id: &str) -> WorkerDescriptor {
+        worker_with_cost(id, None)
+    }
+
+    fn worker_with_cost(id: &str, cost: Option<u64>) -> WorkerDescriptor {
         WorkerDescriptor {
             id: id.into(),
             spec_identity: format!("spec-{id}"),
@@ -455,6 +499,33 @@ mod tests {
             expected_file_count: 0,
         }
     }
+    #[test]
+    fn unmeasured_cost_never_wins_as_if_free_and_the_rule_says_so() {
+        // FAM-BUG-007: unmeasured workers all defaulted to 0 and the
+        // lexicographically first id took every stage while the record
+        // claimed a cost tiebreak.
+        let mut registry = WorkerRegistry::default();
+        registry
+            .register(unmeasured_worker("aaa-unmeasured"))
+            .unwrap();
+        registry.register(worker("zzz-measured", 500)).unwrap();
+        let record = registry.select(&base_request()).unwrap();
+        assert_eq!(
+            record.selected_worker, "zzz-measured",
+            "a known cost beats an unmeasured one"
+        );
+        assert_eq!(record.rule, "lowest-cost-then-id");
+
+        // With nothing measured, selection stays deterministic but the
+        // record must not claim cost decided it.
+        let mut unmeasured = WorkerRegistry::default();
+        unmeasured.register(unmeasured_worker("aaa")).unwrap();
+        unmeasured.register(unmeasured_worker("bbb")).unwrap();
+        let record = unmeasured.select(&base_request()).unwrap();
+        assert_eq!(record.selected_worker, "aaa");
+        assert_eq!(record.rule, "unmeasured-cost-then-id");
+    }
+
     #[test]
     fn selection_is_cost_then_id_deterministic() {
         let mut r = WorkerRegistry::default();

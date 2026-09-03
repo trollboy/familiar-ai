@@ -97,7 +97,19 @@ instead of deleting the history.
 
 ### FAM-BUG-007 — Equal unknown costs collapse automatic routing onto one worker
 
-- **Status:** Open
+- **Status:** FIXED 2026-09-03 — unknown cost is now `Option<u64>`, never 0.
+  The audit found PRD-032 had NOT delivered this: `WorkerDescriptor` and the
+  worker-registry config both stored `estimated_cost_microusd: u64`, so an
+  unmeasured worker was indistinguishable from a free one and
+  `min_by_key((cost, id))` handed every stage to the lexicographically first
+  id while the selection record claimed `lowest-cost-then-id`. Now: cost is
+  `Option`, absent means never measured; a known cost sorts ahead of an
+  unmeasured one; budget ceilings only reject costs they know; cost-based
+  escalation requires BOTH the incumbent and the candidate to have known
+  costs (an unmeasured worker is not provably an upgrade); and the record
+  says `unmeasured-cost-then-id` when cost genuinely did not decide, instead
+  of asserting a tiebreak that never happened. Regression pins all three.
+- **Original status:** Open
 - **Observed:** Newly enabled local and subscription workers all default to
   `estimated_cost_microusd = 0`. The deterministic cost-then-ID fallback treats
   this as known zero and selects the lexicographically first eligible worker.

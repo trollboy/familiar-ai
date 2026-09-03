@@ -210,7 +210,7 @@ fn ollama_registry_entry_uses_existing_codex_oss_adapter() {
         capabilities: vec![familiar_ai_core::config::WorkerCapabilityConfig::Implementation],
         fresh_process_isolation: true,
         context_tokens: 1,
-        estimated_cost_microusd: 0,
+        estimated_cost_microusd: Some(0),
         available: true,
         effort: None,
         permission_mode: None,

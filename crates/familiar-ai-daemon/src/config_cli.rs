@@ -1395,7 +1395,7 @@ fn model_enable(
         capabilities: parsed,
         fresh_process_isolation: true,
         context_tokens: 0,
-        estimated_cost_microusd: 0,
+        estimated_cost_microusd: None,
         available: true,
         effort: None,
         permission_mode: None,

@@ -1327,7 +1327,7 @@ mod tests {
             capabilities: vec![],
             fresh_process_isolation: false,
             context_tokens: 0,
-            estimated_cost_microusd: 0,
+            estimated_cost_microusd: None,
             available: true,
             effort: None,
             permission_mode: None,

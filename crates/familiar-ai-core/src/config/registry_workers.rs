@@ -289,8 +289,11 @@ pub struct RegistryWorkerConfig {
     pub fresh_process_isolation: bool,
     #[serde(default)]
     pub context_tokens: u64,
+    /// Absent means never measured. An operator who has not measured a
+    /// worker's cost must not have it silently treated as free
+    /// (FAM-BUG-007).
     #[serde(default)]
-    pub estimated_cost_microusd: u64,
+    pub estimated_cost_microusd: Option<u64>,
     #[serde(default = "default_worker_available")]
     pub available: bool,
     #[serde(default)]
@@ -459,7 +462,7 @@ impl WorkerRegistryConfig {
             capabilities,
             fresh_process_isolation: true,
             context_tokens: 0,
-            estimated_cost_microusd: 0,
+            estimated_cost_microusd: None,
             available: true,
             effort: entry.effort,
             permission_mode: entry.permission_mode,

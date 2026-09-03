@@ -1276,7 +1276,7 @@ output_microusd_per_million = 300
             capabilities: vec![WorkerCapabilityConfig::Implementation],
             fresh_process_isolation: true,
             context_tokens: 100,
-            estimated_cost_microusd: 1,
+            estimated_cost_microusd: Some(1),
             available: true,
             effort: None,
             permission_mode: None,

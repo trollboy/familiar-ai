@@ -519,7 +519,14 @@ pub fn next_implementation_worker(
         .iter()
         .find(|record| record.stage == WorkerStage::Implementation)
         .ok_or_else(|| "implementation worker was not selected".to_owned())?;
-    let current_cost = registry.workers[&selected.selected_worker].estimated_cost_microusd;
+    // Escalation means "deliberately spend more for a better shot". That
+    // claim requires BOTH costs to be known: an unmeasured worker is not
+    // provably an upgrade, and an unmeasured incumbent has no baseline to
+    // beat (FAM-BUG-007).
+    let Some(current_cost) = registry.workers[&selected.selected_worker].estimated_cost_microusd
+    else {
+        return Ok(None);
+    };
     let next = registry
         .workers
         .iter()
@@ -529,9 +536,11 @@ pub fn next_implementation_worker(
                     .capabilities
                     .contains(&WorkerCapabilityConfig::Implementation)
                 && worker.context_tokens >= registry.routing.required_context_tokens
-                && (registry.routing.max_stage_cost_microusd == 0
-                    || worker.estimated_cost_microusd <= registry.routing.max_stage_cost_microusd)
-                && worker.estimated_cost_microusd > current_cost
+                && worker.estimated_cost_microusd.is_some_and(|cost| {
+                    (registry.routing.max_stage_cost_microusd == 0
+                        || cost <= registry.routing.max_stage_cost_microusd)
+                        && cost > current_cost
+                })
         })
         .min_by_key(|(id, worker)| (worker.estimated_cost_microusd, id.as_str()));
     Ok(next.map(|(id, worker)| (id.clone(), worker.as_agent_entry())))
@@ -555,7 +564,7 @@ pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
         capabilities: Default::default(),
         fresh_process_isolation: true,
         context_tokens: 0,
-        estimated_cost_microusd: 0,
+        estimated_cost_microusd: None,
         available: true,
         effort: entry.effort.map(|value| value.as_str().into()),
         permission_mode: entry.permission_mode.map(|value| value.as_str().into()),

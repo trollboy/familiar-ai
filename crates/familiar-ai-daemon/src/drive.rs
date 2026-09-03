@@ -2096,7 +2096,10 @@ pub fn drive(
                                 .worker_registry
                                 .as_ref()
                                 .and_then(|registry| registry.workers.get(&stronger_id))
-                                .map_or(0, |worker| worker.estimated_cost_microusd);
+                                // Unknown cost reserves nothing rather
+                                // than reserving zero (FAM-BUG-007).
+                                .and_then(|worker| worker.estimated_cost_microusd)
+                                .unwrap_or(0);
                             let elapsed = timer.elapsed().as_millis().min(u64::MAX as u128) as u64;
                             let duration_reservation = remaining_duration_ms(&warrant, elapsed)
                                 .unwrap_or(stronger_entry.max_execution_duration_ms)
