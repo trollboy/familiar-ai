@@ -1,0 +1,170 @@
+command: familiar-ai drive --max-prds 1 --max-parallel-components 1 --prd PRD-081
+date: Fri Sep  4 09:59:05 PM UTC 2026
+host: trollboy (Linux)
+head: 1210bab65328dfdcca3eef9cb4f942e801166b9c (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788559145717011-0001981761-000000 started warrant={"max_prds":1,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-81"]}
+drive: checkout HEAD=1210bab dirty_files=0 ahead of origin/main by 1
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:1981787
+preflight: heartbeat check=verification.format elapsed_ms=5420 child=pid:1981787
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:1982447
+preflight: heartbeat check=verification.lint elapsed_ms=30003 child=pid:1982447 last="    Checking familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.lint elapsed_ms=34795 child=pid:1982447
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:1987081
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30003 child=pid:1987081 last="   Compiling familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=60002 child=pid:1987081 last="   Compiling familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=90004 child=pid:1987081 last="    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 28s"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=120002 child=pid:1987081 last="test next_reports_categorized_backlog_failures_on_stderr_only ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=150001 child=pid:1987081 last="test repos::accounting::tests::unresolved_identity_is_explicit_and_series_is_dense_and_bucketed_by_covered_time ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=174547 child=pid:1987081
+drive: excluded_allowlist PRD-82 ready but outside the session's approved PRD set
+drive: attempt 1 PRD-81 docs/prds/PRD-081.md
+backlog: PRD-81 docs/prds/PRD-081.md pending -> in_progress actor=system:familiar-ai-run:00001788559361226278-0001981761-000001
+I'll start by examining the current implementation and the test oracle to understand what needs to change.
+Note: the test file also contains PRD-082 tests (retention/permissions) which are separately `#[ignore]`d and out of scope for PRD-081. I need to only fix the containment tests. Let me read the full source file.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=60004 last_durable_phase=preflight
+Now I understand the code. Let me check the docs/contracts/agent-loop.md file location for editing, then implement the fix.
+Now let's implement the fix in `agent_runtime.rs`:
+Now let's add the `canonicalize_partial` helper function:
+Now let's remove the `#[ignore]` attributes from the three PRD-081 containment tests (leaving PRD-082 tests ignored, as those are out of scope):
+drive: progress prd=PRD-81 stage=execution elapsed_ms=120007 last_durable_phase=preflight
+Now let's update the contract doc to state that containment is resolved-path containment, and note the TOCTOU residual:
+Now let's build and run the tests.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=180013 last_durable_phase=preflight
+Confirmed: that's a pre-existing failure in `main.rs`, unrelated to this PRD, and not in my scope (the bin target, not the lib). Let's build the lib and run the test target specifically, which don't require the binary to compile.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=240017 last_durable_phase=preflight
+Lib compiles and all lib tests pass. Now let's run the target oracle test file specifically.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=300024 last_durable_phase=preflight
+drive: progress prd=PRD-81 stage=execution elapsed_ms=360030 last_durable_phase=preflight
+That path is correct. Let's try building/testing with `--no-default-features` to bypass the pre-existing broken tray-feature path.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=420035 last_durable_phase=preflight
+All 4 PRD-081 containment tests pass (the 2 remaining ignored tests are PRD-082 scope, correctly left untouched). Now let's run formatting and clippy checks.
+Formatting is clean. Now clippy:
+Let's attempt the full workspace test suite to confirm scope of pre-existing issues.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=480042 last_durable_phase=preflight
+drive: progress prd=PRD-81 stage=execution elapsed_ms=540068 last_durable_phase=preflight
+drive: progress prd=PRD-81 stage=execution elapsed_ms=600077 last_durable_phase=preflight
+I'll let this run in the background and check back once it's done.
+Let's review the full diff while the background test runs.
+This diff looks clean and matches the PRD's approach exactly. Let's wait for the background workspace test suite to finish.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=660081 last_durable_phase=preflight
+Clean, minimal diff — exactly the three `#[ignore]` attributes removed, no assertions touched. I'll wait for the background workspace test suite to finish before finalizing the report.
+I'll wait for the background test task to complete before producing the final report.
+I've completed the implementation and am now waiting for the background workspace test run to finish before finalizing the report. I'll stop issuing further calls this turn and pick back up when the task notification arrives.
+scope: durable approvals loaded=10 key=/home/trollboy/Projects/familiar-ai/.git
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2078626
+verification: heartbeat check=format elapsed_ms=7788 child=pid:2078626
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2079326
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:2079326
+drive: progress prd=PRD-81 stage=execution elapsed_ms=720087 last_durable_phase=preflight
+verification: heartbeat check=lint elapsed_ms=43297 child=pid:2079326
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2084058
+verification: heartbeat check=tests-green-crates elapsed_ms=30001 child=pid:2084058
+drive: progress prd=PRD-81 stage=execution elapsed_ms=780092 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=60000 child=pid:2084058
+verification: heartbeat check=tests-green-crates elapsed_ms=90001 child=pid:2084058
+drive: progress prd=PRD-81 stage=execution elapsed_ms=840096 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=120004 child=pid:2084058
+verification: heartbeat check=tests-green-crates elapsed_ms=150000 child=pid:2084058
+drive: progress prd=PRD-81 stage=execution elapsed_ms=900102 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=169446 child=pid:2084058
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2103449
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30001 child=pid:2103449
+drive: progress prd=PRD-81 stage=execution elapsed_ms=960110 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60003 child=pid:2103449
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:2103449
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1020118 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120000 child=pid:2103449
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150003 child=pid:2103449
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1080122 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180002 child=pid:2103449
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=210002 child=pid:2103449
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=227240 child=pid:2103449
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1140127 last_durable_phase=preflight
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1200130 last_durable_phase=preflight
+{"review_id":"00001788559361226278-0001981761-000001-cycle-review-1","reviewed_manifest_hash":"sha256:67d81b26772e06d230dd9540a704908020d8212df256dd320f9dfd5627989b2a","findings":[{"finding_id":"F1-dangling-symlink-escape","category":"security_issue","severity":"high","blocking":false,"title":"canonicalize_partial treats every canonicalize error as \"does not exist\", so a dangling symlink component still escapes the worktree","claim":"`canonicalize_partial` discards the error returned by `Path::canonicalize` and unconditionally walks up to the deepest ancestor that canonicalizes, re-appending the remaining components literally. It never distinguishes ENOENT (the intended not-yet-created-leaf case) from a component that failed to resolve for another reason, and — decisively — a symlink whose target does not exist fails `canonicalize` with ENOENT exactly like a missing file. So for `apply-edit` with `path: \"victim.txt\"` where `victim.txt` is a symlink inside the worktree pointing at a non-existent path outside it (a worker can create one with `run-command`: `ln -s ~/.config/autostart/x.desktop victim.txt`), the canonicalization of `<root>/victim.txt` fails, the loop falls back to canonicalizing `<root>` and re-appending `victim.txt` literally, the resulting path starts with the canonical root, and the write is authorized. `fs::write` then follows the symlink and creates the file outside the worktree. The same fallback admits an intermediate dangling-symlink component (`link/new.txt` with `link -> /outside/dir-created-later`), and the equivalent hole exists for any other non-ENOENT failure (EACCES, ELOOP) where the fallback silently degrades back to the lexical-only check this change set out to replace. The three tests un-ignored in `runtime_path_containment.rs` all point their symlinks at targets that already exist, so none of them exercise this path. This leaves acceptance criterion \"Containment holds for a path whose intermediate component is a symlink and for a final component that is itself a symlink, including a link created during the same session by a worker using run-command\" only partially satisfied: the resolvable case is closed, the dangling case is not, and the dangling case is the one that creates a new file (autostart entry, shell rc fragment) rather than merely overwriting one.","evidence":[{"kind":"diff_hunk","path":"crates/familiar-ai-daemon/src/agent_runtime.rs","hunk":"@@ -488,6 +518,34 @@ impl ToolExecutor for SandboxedToolExecutor {\n     }\n }\n \n+/// Canonicalizes `path`, following every symlink, even when its leaf (and\n+/// possibly several of its trailing components) does not exist yet: it\n+/// walks up to the deepest ancestor that does exist, canonicalizes that\n+/// ancestor, and re-appends the non-existent tail literally. A path that\n+/// exists in full is simply canonicalized outright.\n+fn canonicalize_partial(path: &Path) -> std::io::Result<PathBuf> {\n+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();\n+    let mut current = path;\n+    loop {\n+        match current.canonicalize() {\n+            Ok(mut canonical) => {\n+                for part in trailing.into_iter().rev() {\n+                    canonical.push(part);\n+                }\n+                return Ok(canonical);\n+            }\n+            Err(error) => {\n+                let (Some(file_name), Some(parent)) = (current.file_name(), current.parent())\n+                else {\n+                    return Err(error);\n+                };\n+                trailing.push(file_name.to_os_string());\n+                current = parent;\n+            }\n+        }\n+    }\n+}\n+\n fn collect_matches(\n     dir: &Path,\n     worktree_root: &Path,"},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/agent_runtime.rs","range":{"start":521,"end":548}},{"kind":"diff_hunk","path":"crates/familiar-ai-daemon/src/agent_runtime.rs","hunk":"@@ -202,7 +217,22 @@ impl SandboxedToolExecutor {\n                 \"path {relative:?} is not a safe worktree-relative path\"\n             )));\n         }\n-        Ok(self.worktree_root.join(relative))\n+        let canonical_root = self.worktree_root.canonicalize().map_err(|error| {\n+            ExecutionError::Failed(format!(\n+                \"worktree root {:?} could not be resolved: {error}\",\n+                self.worktree_root\n+            ))\n+        })?;\n+        let joined = self.worktree_root.join(relative);\n+        let resolved = canonicalize_partial(&joined).map_err(|error| {\n+            ExecutionError::Failed(format!(\"path {relative:?} could not be resolved: {error}\"))\n+        })?;\n+        if !resolved.starts_with(&canonical_root) {\n+            return Err(ExecutionError::Failed(format!(\n+                \"path {relative:?} escapes the worktree root\"\n+            )));\n+        }\n+        Ok(resolved)\n     }\n \n     fn read_file(&self, call: &ValidatedCall) -> Result<ExecutionOutcome, ExecutionError> {"}],"remediation":"Make the fallback narrow and symlink-aware. (1) In `canonicalize_partial`, only walk up when the error is `ErrorKind::NotFound`; return any other error (EACCES, ELOOP, ENOTDIR) to the caller so `resolve_within_worktree` refuses rather than degrading to a lexical check. (2) Before re-appending a non-existent component, check it with `symlink_metadata` — a path that has symlink metadata but fails `canonicalize` is a dangling symlink and must be refused outright, not treated as a to-be-created leaf. Equivalently, after resolving the parent, refuse when `parent.join(leaf).symlink_metadata()` reports a symlink. Add tests to `runtime_path_containment.rs` covering (a) `apply-edit` on a leaf that is a dangling symlink pointing outside the worktree, asserting the outside target is not created, and (b) a path whose intermediate component is a dangling symlink pointing outside.","status":"open","supersedes":null},{"finding_id":"F2-advisory-suite-failure-unexplained","category":"unverifiable_claim","severity":"informational","blocking":false,"title":"Workspace test check failed (exit 101) and its output is not disclosed, so no relation to this change can be established either way","claim":"The `tests-workspace-advisory` check ran `cargo test --workspace --no-default-features --no-fail-fast` and exited 101 with status \"failed\". The package discloses only the stdout artifact's hash and storage reference, not its content, so from the package alone it cannot be determined which tests failed, whether the failures are pre-existing at base revision `2bc5ad81a6e267269e293d07bc9af553d029e3c8`, or whether any of them touch the paths this change modifies. The required `tests-green-crates` check does cover `-p familiar-ai-daemon` and passed, which is the evidence supporting the `runtime_path_containment.rs` acceptance criterion; but the workspace-wide failure remains an unresolved signal that this review cannot adjudicate on the disclosed material. Recorded so the disposition is not read as an affirmative statement that the full workspace suite is green.","evidence":[{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:64eb2a87e011a4cd49aa79540c8281aa8c23e70ae3f8edc7e073e76d42f955ea","media_type":"text/plain","byte_size":111785,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788559145717011-0001981761-000000/PRD-81","revision":"sha256:cc7a993082b189532f4e1573e8ee98f62906b00444e722c0ad0e5e2794cfb151","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-64eb2a87e011a4cd49aa79540c8281aa8c23e70ae3f8edc7e073e76d42f955ea-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Disclose the failing-test names from the `tests-workspace-advisory` stdout artifact (or a baseline comparison against `2bc5ad81a6e267269e293d07bc9af553d029e3c8`) so the failures can be confirmed pre-existing and unrelated to resolved-path containment; if any failure is caused by `resolve_within_worktree` now returning a canonicalized path where callers previously received `worktree_root.join(relative)`, fix it before merge.","status":"open","supersedes":null}]}
+I'll start by reading the current state of the relevant files to understand the existing implementation.
+Now let me apply the fix to `canonicalize_partial`:
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1260134 last_durable_phase=preflight
+Now let's add the two tests specified in the remediation to the test file:
+Now let's build and run the specific tests to verify the fix works correctly.
+All 6 active tests pass (the 2 ignored ones are PRD-082 scope, not this finding). Now let's run clippy and fmt to match the configured verification checks.
+Formatting is clean. Now clippy:
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1320142 last_durable_phase=preflight
+Clippy is clean too. Let's run the broader `tests-green-crates` check to confirm nothing else broke.
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1380147 last_durable_phase=preflight
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1440152 last_durable_phase=preflight
+All checks pass. Let's confirm the full test run had no failures earlier in the output (daemon tests specifically) and check git diff summary.
+Both changes are within `crates/`, the allowed path. Only `docs/contracts/agent-loop.md` remains as an untouched pre-existing change from the prior cycle — I didn't need to modify it further since it already documents resolved-path containment generally.
+
+Summary of the remediation for finding **F1-dangling-symlink-escape**:
+
+1. **`crates/familiar-ai-daemon/src/agent_runtime.rs`** — `canonicalize_partial` now:
+   - Only walks up to a parent when the error is `ErrorKind::NotFound`; any other error (EACCES, ELOOP, etc.) propagates instead of silently falling back to a lexical re-append.
+   - Before treating a not-yet-existing component as a to-be-created leaf, checks `symlink_metadata()` on it — if that succeeds, the component exists as a dangling symlink and the whole resolution is refused, rather than being re-appended literally and authorized.
+
+2. **`crates/familiar-ai-daemon/tests/runtime_path_containment.rs`** — added two tests per the remediation's acceptance guidance:
+   - `apply_edit_refuses_a_dangling_symlink_leaf_pointing_outside` — leaf is a dangling symlink to a non-existent outside path; asserts the write is refused and the outside target is never created.
+   - `apply_edit_refuses_a_dangling_symlink_intermediate_component` — an intermediate path component is a dangling symlink; asserts the same.
+
+All 6 active tests in the file pass (the 2 pre-existing `#[ignore]` tests belong to PRD-082 and are out of scope here), `cargo fmt --check` is clean, `cargo clippy` is clean, and the full `tests-green-crates` suite passes. No commits were made, per instructions.
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:2160648
+verification: heartbeat check=format elapsed_ms=4489 child=pid:2160648
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:2161202
+verification: heartbeat check=lint elapsed_ms=30002 child=pid:2161202
+verification: heartbeat check=lint elapsed_ms=33896 child=pid:2161202
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:2165601
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1500156 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=30004 child=pid:2165601
+verification: heartbeat check=tests-green-crates elapsed_ms=60000 child=pid:2165601
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1560166 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=90001 child=pid:2165601
+verification: heartbeat check=tests-green-crates elapsed_ms=120003 child=pid:2165601
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1620171 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=150003 child=pid:2165601
+verification: heartbeat check=tests-green-crates elapsed_ms=163313 child=pid:2165601
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:2185069
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1680177 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30005 child=pid:2185069
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60003 child=pid:2185069
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1740184 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90001 child=pid:2185069
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120000 child=pid:2185069
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1800191 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150003 child=pid:2185069
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180001 child=pid:2185069
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1860193 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=210002 child=pid:2185069
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=225162 child=pid:2185069
+review: independent reviewer analyzing (attempt 2, typically 2-3 minutes)...
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1920197 last_durable_phase=preflight
+drive: progress prd=PRD-81 stage=execution elapsed_ms=1980200 last_durable_phase=preflight
+{"review_id":"00001788559361226278-0001981761-000001-cycle-review-2","reviewed_manifest_hash":"sha256:9906d49f7eecac04622f2f00f72cb8d9231666b55baf25b2cb4e1177cc3793fe","findings":[{"finding_id":"F1-dangling-symlink-escape","category":"security_issue","severity":"high","blocking":false,"title":"Dangling-symlink escape through the not-yet-created-leaf fallback","claim":"Resolved. `canonicalize_partial` no longer swallows every `canonicalize` error: the walk-up arm is now guarded by `error.kind() == std::io::ErrorKind::NotFound`, and any other failure (EACCES, ELOOP, ENOTDIR) is returned to the caller instead of silently degrading to a literal re-append. The ENOENT ambiguity the finding turned on is resolved explicitly — before walking past a component that failed with `NotFound`, `current.symlink_metadata()` is consulted, and a component that has symlink metadata but no resolvable target is refused outright as a dangling symlink rather than treated as a to-be-created leaf. This closes both shapes named in the finding: the dangling leaf (`victim.txt -> /outside/autostart.desktop`) is caught on the first iteration, and a dangling intermediate component (`link -> /outside/dir-created-later`, path `link/new.txt`) is caught after the walk-up reaches `link` itself, because `symlink_metadata` on the deeper path resolves through the dangling link and reports `NotFound` while `symlink_metadata` on the link reports `Ok`. Both cases now have dedicated tests in `crates/familiar-ai-daemon/tests/runtime_path_containment.rs` asserting the refusal and asserting the outside target was not created, and `tests-green-crates` passes with them.","evidence":[{"kind":"diff_hunk","path":"crates/familiar-ai-daemon/src/agent_runtime.rs","hunk":"@@ -488,6 +518,56 @@ impl ToolExecutor for SandboxedToolExecutor {\n     }\n }\n \n+/// Canonicalizes `path`, following every symlink, even when its leaf (and\n+/// possibly several of its trailing components) does not exist yet: it\n+/// walks up to the deepest ancestor that does exist, canonicalizes that\n+/// ancestor, and re-appends the non-existent tail literally. A path that\n+/// exists in full is simply canonicalized outright.\n+///\n+/// The walk-up only ever fires for `NotFound` — a genuinely absent\n+/// component. Any other error (permission denied, too many levels of\n+/// symlinks, not a directory) is returned to the caller rather than\n+/// silently degrading to a lexical re-append, because that fallback is\n+/// exactly the lexical-only check this function exists to replace.\n+///\n+/// `NotFound` alone is not enough to treat a component as \"not created\n+/// yet\", though: a symlink whose target does not exist also fails\n+/// `canonicalize` with `NotFound`, indistinguishable by error kind alone\n+/// from a missing file. Before walking past such a component, its\n+/// `symlink_metadata` is checked — a component with symlink metadata but\n+/// no resolvable target is a dangling symlink, refused outright, since\n+/// re-appending it literally would authorize a write straight through it\n+/// to wherever it points.\n+fn canonicalize_partial(path: &Path) -> std::io::Result<PathBuf> {\n+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();\n+    let mut current = path;\n+    loop {\n+        match current.canonicalize() {\n+            Ok(mut canonical) => {\n+                for part in trailing.into_iter().rev() {\n+                    canonical.push(part);\n+                }\n+                return Ok(canonical);\n+            }\n+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {\n+                if current.symlink_metadata().is_ok() {\n+                    return Err(std::io::Error::new(\n+                        std::io::ErrorKind::InvalidInput,\n+                        format!(\"{} is a dangling symlink\", current.display()),\n+                    ));\n+                }\n+                let (Some(file_name), Some(parent)) = (current.file_name(), current.parent())\n+                else {\n+                    return Err(error);\n+                };\n+                trailing.push(file_name.to_os_string());\n+                current = parent;\n+            }\n+            Err(error) => return Err(error),\n+        }\n+    }\n+}\n+\n fn collect_matches(\n     dir: &Path,\n     worktree_root: &Path,"},{"kind":"file_range","path":"crates/familiar-ai-daemon/tests/runtime_path_containment.rs","range":{"start":170,"end":238}}],"remediation":"No further action required for this finding; the residual TOCTOU window that remains (a component replaced by a symlink between the check and the subsequent filesystem call) is explicitly disclosed in both the function's doc comment and docs/contracts/agent-loop.md, and closing it needs openat2/O_NOFOLLOW-style syscalls outside this change.","status":"resolved","supersedes":null},{"finding_id":"F2-canonical-root-divergence","category":"maintainability_issue","severity":"low","blocking":false,"title":"Resolved paths are now canonical while the executor's stored worktree_root is not","claim":"`resolve_within_worktree` canonicalizes the worktree root into a local `canonical_root` for the containment comparison and returns the canonicalized `resolved` path, but the executor's own `self.worktree_root` is left in whatever form it was configured with. Helpers that relate a path back to the root still receive that stored value separately — `collect_matches(dir: &Path, worktree_root: &Path, ...)` takes the resolved directory and the worktree root as two independent parameters. When the configured worktree root contains a symlinked component (a symlinked home or state directory, or a macOS TMPDIR under `/var` -> `/private/var`), a resolved path no longer shares a textual prefix with `self.worktree_root`, so any prefix-relative computation performed against the stored root disagrees with the path the capability actually opened. The containment decision itself is unaffected — it compares against `canonical_root`, not the stored root — and `tests-green-crates` passes, since Linux `tempfile` roots canonicalize to themselves and never exercise the divergence, so this is a latent consistency hazard introduced by the change rather than an observed failure.","evidence":[{"kind":"diff_hunk","path":"crates/familiar-ai-daemon/src/agent_runtime.rs","hunk":"@@ -202,7 +217,22 @@ impl SandboxedToolExecutor {\n                 \"path {relative:?} is not a safe worktree-relative path\"\n             )));\n         }\n-        Ok(self.worktree_root.join(relative))\n+        let canonical_root = self.worktree_root.canonicalize().map_err(|error| {\n+            ExecutionError::Failed(format!(\n+                \"worktree root {:?} could not be resolved: {error}\",\n+                self.worktree_root\n+            ))\n+        })?;\n+        let joined = self.worktree_root.join(relative);\n+        let resolved = canonicalize_partial(&joined).map_err(|error| {\n+            ExecutionError::Failed(format!(\"path {relative:?} could not be resolved: {error}\"))\n+        })?;\n+        if !resolved.starts_with(&canonical_root) {\n+            return Err(ExecutionError::Failed(format!(\n+                \"path {relative:?} escapes the worktree root\"\n+            )));\n+        }\n+        Ok(resolved)\n     }\n \n     fn read_file(&self, call: &ValidatedCall) -> Result<ExecutionOutcome, ExecutionError> {"},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:1959893af052986e242572b2f27074281ab47ab46073dfbc035705b416d2e516","media_type":"text/plain","byte_size":76041,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788559145717011-0001981761-000000/PRD-81","revision":"sha256:704117522e19a2abec31071845f764f58ed37613f72861e0fa4e683de3c8b789","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-1959893af052986e242572b2f27074281ab47ab46073dfbc035705b416d2e516-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Canonicalize the worktree root once when the executor is constructed (or store the canonical root alongside the configured one) and use that single canonical form everywhere a path is compared against, or made relative to, the worktree root — including the `worktree_root` argument handed to `collect_matches` — so that a resolved path and the root it is measured against are always in the same form. Re-canonicalizing the root on every call also does redundant filesystem work per tool call.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+drive: attempt 1 PRD-81 outcome=completed
+drive: session drive-00001788559145717011-0001981761-000000 terminated reason=budget_prds_exhausted attempted=1 completed=1
+session=drive-00001788559145717011-0001981761-000000 termination=budget_prds_exhausted attempted=1 completed=1 known_cost_microusd=1216899
+---
+exit: 0
