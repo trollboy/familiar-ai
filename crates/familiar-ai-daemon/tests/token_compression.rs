@@ -101,6 +101,10 @@ fn ledger_partitions_compression_lanes_and_records_explicit_none() {
             input_compression_version: "none",
             compression_experiment: Some("paired"),
             compression_lane: Some(lane),
+            edit_form_id: "none",
+            edit_form_version: "none",
+            truncation_config_id: "none",
+            truncation_config_version: "none",
         })
         .unwrap();
     }

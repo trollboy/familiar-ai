@@ -94,6 +94,10 @@ fn repo_fixture() -> (tempfile::TempDir, std::path::PathBuf, String) {
             input_compression_version: "none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id: "none",
+            edit_form_version: "none",
+            truncation_config_id: "none",
+            truncation_config_version: "none",
         })
         .unwrap()
         .unwrap();

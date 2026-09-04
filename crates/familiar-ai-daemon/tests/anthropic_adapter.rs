@@ -10,7 +10,7 @@ use familiar_ai_agent::raw_runtime::{
     run_loop, AuthorityContext, CancellationToken, InMemoryToolJournal, LoopCeilings, LoopConfig,
     StablePrefix, StopReason, VolatileTask,
 };
-use familiar_ai_core::config::AuthDescriptor;
+use familiar_ai_core::config::{AuthDescriptor, TokenDisciplineConfig};
 use familiar_ai_daemon::agent_runtime::persist_run_outcome;
 use familiar_ai_llm::anthropic_api::{AnthropicHttpConfig, StaticCredentialResolver};
 use familiar_ai_llm::attempt::AttemptId;
@@ -149,6 +149,7 @@ async fn usage_ledger_carries_provider_request_id_and_cache_categories() {
         "anthropic-api",
         Some("claude-test-model"),
         None,
+        &TokenDisciplineConfig::default(),
         &outcome,
     )
     .unwrap();
@@ -243,6 +244,7 @@ async fn replaying_the_same_attempt_is_idempotent_separate_attempts_are_not() {
         "anthropic-api",
         Some("claude-test-model"),
         None,
+        &TokenDisciplineConfig::default(),
         &outcome,
     )
     .unwrap();
@@ -299,6 +301,10 @@ async fn replaying_the_same_attempt_is_idempotent_separate_attempts_are_not() {
             input_compression_version: "raw-runtime-none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id: "raw-runtime-none",
+            edit_form_version: "raw-runtime-none",
+            truncation_config_id: "raw-runtime-none",
+            truncation_config_version: "raw-runtime-none",
         })
         .unwrap();
     assert!(
@@ -357,6 +363,7 @@ async fn replaying_the_same_attempt_is_idempotent_separate_attempts_are_not() {
         "anthropic-api",
         Some("claude-test-model"),
         None,
+        &TokenDisciplineConfig::default(),
         &outcome2,
     )
     .unwrap();
@@ -427,6 +434,7 @@ async fn missing_usage_records_an_explicit_unknown_reason_never_a_fabricated_zer
         "anthropic-api",
         Some("claude-test-model"),
         None,
+        &TokenDisciplineConfig::default(),
         &outcome,
     )
     .unwrap();
@@ -511,6 +519,7 @@ async fn auth_failure_stops_closed_without_ever_sending_a_request() {
         "anthropic-api",
         None,
         None,
+        &TokenDisciplineConfig::default(),
         &outcome,
     )
     .unwrap();

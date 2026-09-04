@@ -467,3 +467,14 @@ generated_artifact = "human_review"
 # allowed_commands = ["cargo", "git"]
 # network_allowed = false
 # allowed_environment = []
+
+[agent_runtime.token_discipline]
+# PRD-072. Disabled reproduces pre-PRD-072 behavior byte-for-byte: whole-
+# file apply-edit writes, no stated edit-form preference, and command/file
+# results bounded only by the raw byte caps above.
+# enabled = false
+# targeted_edit_threshold_bytes = 4096
+# tool_result_max_lines = 200
+# tool_result_head_lines = 100
+# tool_result_tail_lines = 100
+# file_read_max_lines = 2000

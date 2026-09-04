@@ -2899,6 +2899,13 @@ fn persist_accounting_observations(
                 input_compression_version: "none",
                 compression_experiment: config.compression.experiment_label.as_deref(),
                 compression_lane: config.compression.experiment_lane.as_deref(),
+                // PRD-072 token discipline governs only the Familiar-owned
+                // raw runtime; this harness-driven execution path records
+                // no discipline state, matching input_compression_id above.
+                edit_form_id: "none",
+                edit_form_version: "none",
+                truncation_config_id: "none",
+                truncation_config_version: "none",
             })
             .map_err(|e| RunError::Storage(e.to_string()))?;
         if let Some(observation_id) = observation_id {

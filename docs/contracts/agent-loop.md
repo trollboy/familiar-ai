@@ -85,7 +85,7 @@ The initial closed vocabulary (`familiar_ai_agent::raw_runtime::CapabilityId`):
 | `read-file` | read-only | worktree-confined |
 | `search-list` | read-only | worktree-confined |
 | `run-command` | destructive | policy-gated: allowlisted commands only, network deny-by-default |
-| `apply-edit` | idempotent-write | bounded by the write-scope authorization contract |
+| `apply-edit` | idempotent-write | bounded by the write-scope authorization contract; PRD-072 write forms below |
 | `report-progress` | idempotent-write | acknowledged, journaled; grants nothing |
 | `submit-evidence` | idempotent-write | acknowledged, journaled; grants nothing |
 | `request-escalation` | idempotent-write | creates a pending human gate; grants nothing |
@@ -163,6 +163,76 @@ executor is never invoked.
 (`agent_runtime.sandbox.allowed_commands`); an unlisted command is refused
 before any process launches.
 
+## Targeted edits and bounded tool results (PRD-072)
+
+Attacking output and tool-echo volume at the source is a runtime-contract
+concern, not a model decision: whole-file rewrites make the model re-emit
+every unchanged line, and unbounded tool output makes it re-read content it
+never needed. Both are governed by `agent_runtime.token_discipline`
+(`familiar_ai_core::config::TokenDisciplineConfig`), disabled by default so
+existing configuration reproduces pre-PRD-072 behavior byte-for-byte.
+
+**Targeted-edit write forms.** `apply-edit`'s optional `change_kind`
+argument selects how its `content` argument is interpreted:
+
+- `"whole-file"` (the default when `change_kind` is absent) — `content` is
+  the new file's full bytes, written verbatim. Byte-for-byte identical to
+  pre-PRD-072 behavior.
+- `"search-replace"` — `content` is a JSON array of `{"search": ...,
+  "replace": ...}` blocks.
+- `"unified-diff"` — `content` is unified-diff hunks; each hunk's
+  context+removed lines are the anchor, its context+added lines the
+  replacement.
+
+Both targeted forms resolve to the same primitive
+(`familiar_ai_agent::token_discipline::apply_targeted_edit`): each block's
+anchor is located in the file's current content and swapped for its
+replacement, atomically across every block in the call — if any anchor is
+missing (and its replacement is not already present) or matches more than
+once, the whole call is refused with a named `AnchorDivergence` diagnostic
+and the file is left untouched. **Never a silent misapply.** If an anchor
+is absent but the replacement is already present, the edit is treated as
+already applied: a resumed loop replaying an identical call after a crash
+between the write landing on disk and its journal result being recorded
+reproduces the identical file state instead of failing closed on its own
+prior write. Whole-file replacement remains available for new files and
+genuine full rewrites and is not gated behind `change_kind`; it is only
+*labeled* as such in the tool's own evidence record, so a ledger query can
+attribute output volume to edit form. Targeted edits create no path around
+write-scope authorization, the write-ahead journal, or verification — they
+are a shape of `apply-edit`'s existing write, not a new tool.
+
+Worker instructions state the targeted-edit preference for files at or
+above `agent_runtime.token_discipline.targeted_edit_threshold_bytes`
+(`familiar_ai_agent::token_discipline::targeted_edit_worker_instruction`).
+This is a nudge, not an enforcement mechanism — the tool always accepts
+both forms regardless of file size.
+
+**Bounded tool results.** When `agent_runtime.token_discipline.enabled`,
+`run-command` output beyond `tool_result_max_lines` is bounded to
+`tool_result_head_lines` plus `tool_result_tail_lines` with an elided-line
+count (`familiar_ai_llm::token_discipline::bound_tool_result`), and
+`read-file` beyond `file_read_max_lines` refuses with a diagnostic
+requiring an explicit `start_line`/`end_line` range rather than silently
+truncating. Bounding is lossless: before a command result is windowed, its
+full untruncated output is written to a worktree-scoped path
+(`.familiar/tool-output/<call_id>.txt`) — the same durable artifact class
+`apply-edit`'s own writes live in, never the PRD-051 accounting ledger —
+and that path is named in the bounded result as a paging handle a worker
+retrieves through `read-file` with an explicit range. Disabled reproduces
+pre-PRD-072 behavior exactly: `run-command` output is truncated only by
+the raw `max_output_bytes` safety cap, and `read-file` returns the whole
+file unconditionally.
+
+**Ledger attribution.** PRD-051 usage observations carry
+`edit_form_id`/`edit_form_version` and
+`truncation_config_id`/`truncation_config_version`, mirroring migration
+043's compression attribution: `"raw-runtime-none"` when token discipline
+is disabled, an identity/version pair when enabled. This partitions output
+and input token volume by discipline state without ever placing a prompt,
+response, or tool output inside an accounting row — the same PRD-051
+sanitization every other observation follows.
+
 ## Authority and sandboxing
 
 - A raw model receives no ambient authority. Every tool call is
@@ -227,3 +297,9 @@ Every test in `crates/familiar-ai-agent/tests/raw_runtime.rs` and
 turns, tool-call sequences, usage categories, stop reasons, and the
 retryable/non-retryable/ambiguous error taxonomy. No test in either file
 performs, or is able to perform, a live or billable call.
+
+`crates/familiar-ai-daemon/tests/runtime_token_discipline.rs` covers PRD-072
+directly against `SandboxedToolExecutor`: anchor-divergence rejection,
+crash-replay identity for a targeted edit, bounded command results with
+lossless worktree retention, an explicit-range requirement on oversized
+file reads, and byte-for-byte defaults when token discipline is disabled.

@@ -145,10 +145,13 @@ pub fn canonical_capabilities() -> Vec<ToolCapability> {
     vec![
         ToolCapability {
             id: CapabilityId::ReadFile,
-            schema_version: "read-file/1",
+            schema_version: "read-file/2",
             args_schema: ArgSchema {
                 required: &["path"],
-                optional: &[],
+                // PRD-072: a file beyond the configured span must supply an
+                // explicit range; both are required together or omitted
+                // together (enforced by the executor, not this schema).
+                optional: &["start_line", "end_line"],
             },
             side_effect_class: SideEffectClass::ReadOnly,
             timeout_ms: 5_000,
@@ -585,6 +588,11 @@ pub enum CallDisposition {
     },
     Executed {
         result_hash: String,
+        /// PRD-072: for `apply-edit`, which write form this call used
+        /// (`"whole-file"`, `"search-replace"`, or `"unified-diff"`) — so
+        /// per-write evidence, not just the aggregate ledger, can attribute
+        /// output volume to edit form. `None` for every other capability.
+        edit_form: Option<String>,
     },
     ExecutionFailed {
         detail: String,
@@ -1061,6 +1069,22 @@ pub async fn run_loop(
     }
 }
 
+/// PRD-072: the `change_kind` an `apply-edit` call requested, defaulting to
+/// `"whole-file"` (the PRD-058 default) when absent. `None` for every other
+/// capability — evidence only attributes edit form to writes.
+fn edit_form_for(call: &ValidatedCall) -> Option<String> {
+    if call.capability != CapabilityId::ApplyEdit {
+        return None;
+    }
+    Some(
+        call.arguments
+            .get("change_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("whole-file")
+            .to_string(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_tool_call(
     raw_call: &ToolCallRequest,
@@ -1154,6 +1178,7 @@ fn process_tool_call(
                     ));
                     CallDisposition::Executed {
                         result_hash: outcome.result_hash,
+                        edit_form: edit_form_for(&validated),
                     }
                 }
                 Err(error) => {

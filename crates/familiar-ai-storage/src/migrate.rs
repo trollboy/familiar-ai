@@ -197,6 +197,10 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/056_substance_keyed_waivers.sql"),
     },
     Migration {
+        version: 57,
+        sql: include_str!("../migrations/057_token_discipline.sql"),
+    },
+    Migration {
         version: 58,
         sql: include_str!("../migrations/058_batch_reviews.sql"),
     },
@@ -315,7 +319,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 48);
+        assert_eq!(first, 49);
         assert_eq!(second, 0);
     }
 
@@ -337,7 +341,7 @@ mod tests {
             vec![
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
                 24, 25, 26, 27, 28, 29, 30, 31, 32, 39, 40, 41, 42, 43, 44, 45, 47, 49, 51, 52, 53,
-                54, 55, 56, 58
+                54, 55, 56, 57, 58
             ]
         );
     }
@@ -432,7 +436,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 5);
+        assert_eq!(db.run_migrations().unwrap(), 6);
         let selection_schema: String = db
             .conn()
             .query_row(
@@ -485,7 +489,7 @@ mod tests {
             [&spec],
         ).unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 7);
+        assert_eq!(db.run_migrations().unwrap(), 8);
         let artifact_id = format!("sha256:{}", "a".repeat(64));
         let migrated: (String, String) = db
             .conn()
@@ -553,7 +557,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 46);
+        assert_eq!(db.run_migrations().unwrap(), 47);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -609,7 +613,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 42);
+        assert_eq!(db.run_migrations().unwrap(), 43);
         let project: (String, String) = db
             .conn()
             .query_row(
@@ -640,7 +644,7 @@ mod tests {
                 .unwrap();
         }
         db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
-        assert_eq!(db.run_migrations().unwrap(), 41);
+        assert_eq!(db.run_migrations().unwrap(), 42);
         let preserved: String = db
             .conn()
             .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
@@ -674,7 +678,7 @@ mod tests {
         db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(3,'repo','docs/prds/PRD-009.md','pending','completed','human:alice','before')",[]).unwrap();
         db.conn().execute("INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(3,'manual_complete_override','accepted outside normal review')",[]).unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 38);
+        assert_eq!(db.run_migrations().unwrap(), 39);
 
         let rows: Vec<(i64, String, String)> = {
             let mut stmt = db

@@ -12,6 +12,7 @@ use familiar_ai_agent::raw_runtime::{
 };
 use familiar_ai_core::config::AgentRuntimeSandboxConfig;
 use familiar_ai_core::config::AuthDescriptor;
+use familiar_ai_core::config::TokenDisciplineConfig;
 use familiar_ai_daemon::agent_runtime::{
     persist_run_outcome, write_scope_authorizer_from_prd, SandboxedToolExecutor, SqliteToolJournal,
 };
@@ -117,6 +118,7 @@ async fn xai_wire_round_trip_persists_journal_evidence_and_usage_ledger() {
         sandbox: no_sandbox(),
         command_timeout_ms: 2_000,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
     let adapter = xai_adapter(&server, "XAI_DAEMON_TEST_KEY_1").await;
@@ -169,6 +171,7 @@ async fn xai_wire_round_trip_persists_journal_evidence_and_usage_ledger() {
         "xai-api",
         Some("grok-4"),
         None,
+        &TokenDisciplineConfig::default(),
         &outcome,
     )
     .unwrap();
@@ -247,6 +250,10 @@ async fn replaying_the_same_persisted_provider_event_is_idempotent_never_double_
         input_compression_version: "raw-runtime-none",
         compression_experiment: None,
         compression_lane: None,
+        edit_form_id: "raw-runtime-none",
+        edit_form_version: "raw-runtime-none",
+        truncation_config_id: "raw-runtime-none",
+        truncation_config_version: "raw-runtime-none",
     };
 
     let repo = AccountingRepository::new(db.conn());

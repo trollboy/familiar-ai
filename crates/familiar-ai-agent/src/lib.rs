@@ -6,6 +6,7 @@ mod isolation;
 pub mod openai;
 pub mod raw_runtime;
 mod registry;
+pub mod token_discipline;
 pub mod xai;
 
 pub use agent::{

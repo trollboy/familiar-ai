@@ -9,7 +9,7 @@ use familiar_ai_agent::raw_runtime::{
     InMemoryToolJournal, JournalIntent, JournalResult, LoopCeilings, LoopConfig, SideEffectClass,
     StablePrefix, StopReason, ToolJournal, VolatileTask,
 };
-use familiar_ai_core::config::AgentRuntimeSandboxConfig;
+use familiar_ai_core::config::{AgentRuntimeSandboxConfig, TokenDisciplineConfig};
 use familiar_ai_daemon::agent_runtime::{
     persist_run_outcome, resume_readiness, write_scope_authorizer_from_prd, ResumeReadiness,
     SandboxedToolExecutor, SqliteToolJournal,
@@ -74,6 +74,7 @@ async fn full_round_trip_persists_journal_evidence_and_usage_ledger() {
         sandbox: no_sandbox(),
         command_timeout_ms: 2_000,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
@@ -163,6 +164,7 @@ async fn full_round_trip_persists_journal_evidence_and_usage_ledger() {
         "raw-runtime",
         Some("fake-model"),
         None,
+        &TokenDisciplineConfig::default(),
         &outcome,
     )
     .unwrap();
@@ -263,6 +265,7 @@ async fn write_outside_expected_files_is_refused_before_any_effect() {
         sandbox: no_sandbox(),
         command_timeout_ms: 2_000,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
@@ -351,6 +354,7 @@ async fn allowlisted_command_executes_and_denylisted_command_is_refused() {
         sandbox: sandbox.clone(),
         command_timeout_ms: 2_000,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
@@ -439,6 +443,7 @@ async fn denylisted_command_is_refused_before_any_process_ever_launches() {
         sandbox,
         command_timeout_ms: 2_000,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
@@ -530,6 +535,7 @@ async fn command_timeout_kills_the_process_group_instead_of_waiting_it_out() {
         sandbox,
         command_timeout_ms: 150,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 

@@ -428,6 +428,14 @@ impl<'a> BatchReviewAgent<'a> {
                 // estimate path rather than fabricated as a provider fact.
                 provider_cost_lexical: None,
                 project_resolution_evidence: None,
+                // Batch review performs no tool-driven edits and applies no
+                // result truncation, so PRD-072's attribution fields are
+                // "none" here — recorded explicitly rather than defaulted,
+                // so the ledger can tell "not applicable" from "unmeasured".
+                edit_form_id: "none",
+                edit_form_version: "none",
+                truncation_config_id: "none",
+                truncation_config_version: "none",
                 output_register_id: "none",
                 output_register_version: "none",
                 input_compression_id: "none",

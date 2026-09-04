@@ -100,6 +100,15 @@ pub struct UsageObservation<'a> {
     pub input_compression_version: &'a str,
     pub compression_experiment: Option<&'a str>,
     pub compression_lane: Option<&'a str>,
+    /// PRD-072: identity/version of the `apply-edit` edit-form policy
+    /// active for this attempt's run — `"raw-runtime-none"` when token
+    /// discipline is disabled, matching the compression fields' pattern.
+    pub edit_form_id: &'a str,
+    pub edit_form_version: &'a str,
+    /// PRD-072: identity/version of the bounded-tool-result windowing
+    /// policy active for this attempt's run.
+    pub truncation_config_id: &'a str,
+    pub truncation_config_version: &'a str,
 }
 
 /// A closed reconciliation status vocabulary (PRD-053). Reconciliation rows
@@ -639,7 +648,7 @@ impl<'a> AccountingRepository<'a> {
         let (spec_identity, empirical_version) = selected_spec.unwrap_or((None, None));
         let tx = self.conn.unchecked_transaction().map_err(db)?;
         tx.execute("INSERT INTO accounting_evidence(evidence_id,execution_id,adapter,cli_version,model_identity,provider_session_id,provider_request_id,usage_json,provider_cost_lexical,observed_at,terminal_status,source_event_hash) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)", params![evidence_id,value.execution_id,value.adapter,value.cli_version,value.model_identity,value.session_id,value.provider_request_id,usage_json,value.provider_cost_lexical,value.period_end,value.terminal_status,value.source_event_hash]).map_err(db)?;
-        tx.execute("INSERT INTO usage_observations(observation_id,evidence_id,project_id,degraded_identity,execution_id,attempt_id,stage,session_id,worker_identity,adapter,model_identity,service_tier,provider_request_id,uncached_input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,reasoning_output_tokens,unknown_reason,period_start,period_end,observed_at,ingested_at,spec_identity,empirical_version,output_register_id,output_register_version,input_compression_id,input_compression_version,compression_experiment,compression_lane) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)", params![observation_id,evidence_id,project_id,degraded,value.execution_id,value.attempt_id,value.stage,value.session_id,value.worker_identity,value.adapter,value.model_identity,value.service_tier,value.provider_request_id,value.uncached_input_tokens,value.cache_read_tokens,value.cache_write_tokens,value.output_tokens,value.reasoning_output_tokens,value.unknown_reason,value.period_start,value.period_end,now,spec_identity,empirical_version,value.output_register_id,value.output_register_version,value.input_compression_id,value.input_compression_version,value.compression_experiment,value.compression_lane]).map_err(db)?;
+        tx.execute("INSERT INTO usage_observations(observation_id,evidence_id,project_id,degraded_identity,execution_id,attempt_id,stage,session_id,worker_identity,adapter,model_identity,service_tier,provider_request_id,uncached_input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,reasoning_output_tokens,unknown_reason,period_start,period_end,observed_at,ingested_at,spec_identity,empirical_version,output_register_id,output_register_version,input_compression_id,input_compression_version,compression_experiment,compression_lane,edit_form_id,edit_form_version,truncation_config_id,truncation_config_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34)", params![observation_id,evidence_id,project_id,degraded,value.execution_id,value.attempt_id,value.stage,value.session_id,value.worker_identity,value.adapter,value.model_identity,value.service_tier,value.provider_request_id,value.uncached_input_tokens,value.cache_read_tokens,value.cache_write_tokens,value.output_tokens,value.reasoning_output_tokens,value.unknown_reason,value.period_start,value.period_end,now,spec_identity,empirical_version,value.output_register_id,value.output_register_version,value.input_compression_id,value.input_compression_version,value.compression_experiment,value.compression_lane,value.edit_form_id,value.edit_form_version,value.truncation_config_id,value.truncation_config_version]).map_err(db)?;
         tx.commit().map_err(db)?;
         Ok(Some(observation_id))
     }
@@ -1586,6 +1595,10 @@ mod tests {
             input_compression_version: "none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id: "none",
+            edit_form_version: "none",
+            truncation_config_id: "none",
+            truncation_config_version: "none",
         };
         let observation = repo.append_observation(&value).unwrap().unwrap();
         assert_eq!(
@@ -1693,6 +1706,10 @@ mod tests {
                 input_compression_version: "none",
                 compression_experiment: None,
                 compression_lane: None,
+                edit_form_id: "none",
+                edit_form_version: "none",
+                truncation_config_id: "none",
+                truncation_config_version: "none",
             };
             let id = repo.append_observation(&value).unwrap().unwrap();
             repo.append_vendor_estimate(&id, cost).unwrap();
@@ -1804,6 +1821,10 @@ mod tests {
             input_compression_version: "none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id: "none",
+            edit_form_version: "none",
+            truncation_config_id: "none",
+            truncation_config_version: "none",
         };
         let observation = repo.append_observation(&value).unwrap().unwrap();
         repo.append_vendor_estimate(&observation, lexical_usd)
@@ -2201,6 +2222,10 @@ mod tests {
                 input_compression_version: "none",
                 compression_experiment: None,
                 compression_lane: None,
+                edit_form_id: "none",
+                edit_form_version: "none",
+                truncation_config_id: "none",
+                truncation_config_version: "none",
             })
             .unwrap();
 

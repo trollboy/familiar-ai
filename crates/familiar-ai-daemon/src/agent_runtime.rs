@@ -21,9 +21,13 @@ use familiar_ai_agent::raw_runtime::{
     ExecutionOutcome, JournalIntent, JournalResult, OfferedTool, ResumeDecision, RunOutcome,
     ScopeAuthorizer, SideEffectClass, StopReason, ToolExecutor, ToolJournal, ValidatedCall,
 };
+use familiar_ai_agent::token_discipline::{self, EditForm};
 #[cfg(unix)]
 use familiar_ai_agent::{finish_watchdog, spawn_watchdog};
-use familiar_ai_core::config::AgentRuntimeSandboxConfig;
+use familiar_ai_core::config::{AgentRuntimeSandboxConfig, TokenDisciplineConfig};
+use familiar_ai_llm::token_discipline::{
+    bound_tool_result, file_read_requirement, slice_lines, FileReadRequirement, ToolResultWindow,
+};
 use familiar_ai_review::parse_expected_files;
 use familiar_ai_storage::repos::accounting::{AccountingRepository, UsageObservation};
 use familiar_ai_storage::repos::agent_runtime::{AgentRuntimeRepository, ToolResultOutcome};
@@ -183,6 +187,9 @@ pub struct SandboxedToolExecutor {
     pub sandbox: AgentRuntimeSandboxConfig,
     pub command_timeout_ms: u64,
     pub max_output_bytes: usize,
+    /// PRD-072 targeted-edit and bounded-result configuration. Disabled
+    /// (the default) reproduces pre-PRD-072 behavior byte-for-byte.
+    pub token_discipline: TokenDisciplineConfig,
 }
 
 impl SandboxedToolExecutor {
@@ -208,7 +215,40 @@ impl SandboxedToolExecutor {
         let content = std::fs::read_to_string(&resolved).map_err(|error| {
             ExecutionError::Failed(format!("read-file {path:?} failed: {error}"))
         })?;
-        Ok(hash_outcome(content))
+        if !self.token_discipline.enabled {
+            return Ok(hash_outcome(content));
+        }
+        let start_line = call.arguments.get("start_line").and_then(|v| v.as_u64());
+        let end_line = call.arguments.get("end_line").and_then(|v| v.as_u64());
+        let total_lines = content.lines().count();
+        match (start_line, end_line) {
+            (Some(start), Some(end)) => {
+                if start == 0 || end < start {
+                    return Err(ExecutionError::Failed(format!(
+                        "read-file {path:?} failed: invalid range start_line={start} end_line={end}"
+                    )));
+                }
+                Ok(hash_outcome(slice_lines(
+                    &content,
+                    start as usize,
+                    end as usize,
+                )))
+            }
+            (None, None) => {
+                match file_read_requirement(total_lines, self.token_discipline.file_read_max_lines, false)
+                {
+                    FileReadRequirement::FullFileAllowed => Ok(hash_outcome(content)),
+                    FileReadRequirement::ExplicitRangeRequired { total_lines, max_lines } => {
+                        Err(ExecutionError::Failed(format!(
+                            "read-file {path:?} has {total_lines} lines, exceeding the {max_lines}-line span; specify start_line and end_line"
+                        )))
+                    }
+                }
+            }
+            _ => Err(ExecutionError::Failed(format!(
+                "read-file {path:?} failed: start_line and end_line must be given together"
+            ))),
+        }
     }
 
     fn search_list(&self, call: &ValidatedCall) -> Result<ExecutionOutcome, ExecutionError> {
@@ -238,24 +278,55 @@ impl SandboxedToolExecutor {
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let content = call
+        let payload = call
             .arguments
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        let change_kind = call
+            .arguments
+            .get("change_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("whole-file");
+        let form = EditForm::parse(change_kind).ok_or_else(|| {
+            ExecutionError::Failed(format!(
+                "apply-edit {path:?} failed: unknown change_kind {change_kind:?}"
+            ))
+        })?;
         let resolved = self.resolve_within_worktree(path)?;
+        // `None` for a file that does not yet exist — whole-file is the
+        // only form that can create one; a targeted edit against a missing
+        // file is its own named divergence, not a silent no-op create.
+        let current = std::fs::read_to_string(&resolved).ok();
+        if form != EditForm::WholeFile && current.is_none() {
+            return Err(ExecutionError::Failed(format!(
+                "apply-edit {path:?} failed: change_kind {change_kind:?} requires an existing file"
+            )));
+        }
+        let new_content = token_discipline::resolve_edit(current.as_deref(), form, payload)
+            .map_err(|error| {
+                ExecutionError::Failed(format!("apply-edit {path:?} failed: {error:?}"))
+            })?;
         if let Some(parent) = resolved.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 ExecutionError::Failed(format!("apply-edit {path:?} failed: {error}"))
             })?;
         }
-        std::fs::write(&resolved, content).map_err(|error| {
+        std::fs::write(&resolved, &new_content).map_err(|error| {
             ExecutionError::Failed(format!("apply-edit {path:?} failed: {error}"))
         })?;
-        Ok(hash_outcome(format!(
-            "wrote {} bytes to {path}",
-            content.len()
-        )))
+        // Byte-for-byte with pre-PRD-072 behavior when discipline is off:
+        // the result text names the edit form only once the operator has
+        // opted in to token discipline.
+        let result_text = if self.token_discipline.enabled {
+            format!(
+                "wrote {} bytes to {path} (change_kind: {change_kind})",
+                new_content.len()
+            )
+        } else {
+            format!("wrote {} bytes to {path}", new_content.len())
+        };
+        Ok(hash_outcome(result_text))
     }
 
     fn run_command(&self, call: &ValidatedCall) -> Result<ExecutionOutcome, ExecutionError> {
@@ -351,10 +422,38 @@ impl SandboxedToolExecutor {
             return Err(ExecutionError::Timeout);
         }
 
-        let mut combined = format!(
+        let combined = format!(
             "exit_status={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
             status.code()
         );
+
+        if self.token_discipline.enabled {
+            let total_lines = combined.lines().count();
+            if total_lines > self.token_discipline.tool_result_max_lines {
+                let handle = format!(".familiar/tool-output/{}.txt", call.call_id);
+                // Lossless retention: the full output lands in the
+                // worktree (the same durable artifact apply-edit's own
+                // writes live in, never the PRD-051 accounting ledger)
+                // before the bounded view is computed, so a failure to
+                // persist it never silently narrows what review evidence
+                // can recover.
+                if let Ok(handle_path) = self.resolve_within_worktree(&handle) {
+                    if let Some(parent) = handle_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&handle_path, &combined);
+                }
+                let window = ToolResultWindow {
+                    max_lines: self.token_discipline.tool_result_max_lines,
+                    head_lines: self.token_discipline.tool_result_head_lines,
+                    tail_lines: self.token_discipline.tool_result_tail_lines,
+                };
+                let bounded = bound_tool_result(&combined, &window, Some(handle));
+                return Ok(hash_outcome(bounded.visible));
+            }
+        }
+
+        let mut combined = combined;
         if combined.len() > self.max_output_bytes {
             combined.truncate(self.max_output_bytes);
         }
@@ -470,11 +569,28 @@ pub fn persist_run_outcome(
     adapter: &str,
     model_identity: Option<&str>,
     project_resolution_evidence: Option<&str>,
+    token_discipline: &TokenDisciplineConfig,
     outcome: &RunOutcome,
 ) -> familiar_ai_core::Result<()> {
     let agent_runtime_repo = AgentRuntimeRepository::new(conn);
     let accounting_repo = AccountingRepository::new(conn);
     let terminal_status = stop_reason_key(outcome.stop_reason);
+
+    // PRD-072: identity/version pair for the discipline configuration that
+    // was active for this run, mirroring migration 043's compression
+    // attribution (`output_register_id`/`input_compression_id`) so the
+    // PRD-051 ledger can partition output/input volume by discipline state.
+    // Disabled reproduces the pre-PRD-072 "raw-runtime-none" value exactly.
+    let (edit_form_id, edit_form_version) = if token_discipline.enabled {
+        ("targeted-edit-preferred", "1")
+    } else {
+        ("raw-runtime-none", "raw-runtime-none")
+    };
+    let (truncation_config_id, truncation_config_version) = if token_discipline.enabled {
+        ("bounded-window", "1")
+    } else {
+        ("raw-runtime-none", "raw-runtime-none")
+    };
 
     // The PRD-051 ledger resolves an observation's `spec_identity`/
     // `empirical_version` by joining the latest `worker_selections` row for
@@ -546,6 +662,10 @@ pub fn persist_run_outcome(
             input_compression_version: "raw-runtime-none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id,
+            edit_form_version,
+            truncation_config_id,
+            truncation_config_version,
         })?;
     }
 

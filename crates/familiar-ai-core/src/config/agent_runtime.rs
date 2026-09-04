@@ -35,6 +35,26 @@ fn default_true() -> bool {
     true
 }
 
+fn default_targeted_edit_threshold_bytes() -> usize {
+    4_096
+}
+
+fn default_tool_result_max_lines() -> usize {
+    200
+}
+
+fn default_tool_result_head_lines() -> usize {
+    100
+}
+
+fn default_tool_result_tail_lines() -> usize {
+    100
+}
+
+fn default_file_read_max_lines() -> usize {
+    2_000
+}
+
 /// Configuration for the Familiar-owned raw-model agent loop (PRD-058).
 /// Absent entirely means the raw runtime is disabled and no behavior
 /// changes for any existing harness-driven execution path.
@@ -56,6 +76,12 @@ pub struct AgentRuntimeConfig {
     /// controls. Unsupported adapters retain native behavior.
     #[serde(default = "default_true")]
     pub prompt_cache_enabled: bool,
+    /// PRD-072 targeted-edit preference and bounded tool-result windows.
+    /// Absent/disabled reproduces pre-PRD-072 behavior byte-for-byte:
+    /// whole-file writes with no stated preference, unbounded file reads,
+    /// and command output truncated only by `sandbox`'s raw byte cap.
+    #[serde(default)]
+    pub token_discipline: TokenDisciplineConfig,
 }
 
 impl Default for AgentRuntimeConfig {
@@ -66,6 +92,47 @@ impl Default for AgentRuntimeConfig {
             ceilings: AgentRuntimeCeilingsConfig::default(),
             sandbox: AgentRuntimeSandboxConfig::default(),
             prompt_cache_enabled: true,
+            token_discipline: TokenDisciplineConfig::default(),
+        }
+    }
+}
+
+/// PRD-072 raw-runtime token discipline: the targeted-edit worker-
+/// instruction threshold and the bounded tool-result windows. `enabled`
+/// defaults to `false` so existing configuration reproduces pre-PRD
+/// behavior exactly until an operator audits and turns it on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TokenDisciplineConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Files at or above this size get the targeted-edit worker
+    /// instruction; the tool itself always accepts both forms regardless.
+    #[serde(default = "default_targeted_edit_threshold_bytes")]
+    pub targeted_edit_threshold_bytes: usize,
+    /// Total line count at or below which a command result or file read
+    /// passes through whole.
+    #[serde(default = "default_tool_result_max_lines")]
+    pub tool_result_max_lines: usize,
+    #[serde(default = "default_tool_result_head_lines")]
+    pub tool_result_head_lines: usize,
+    #[serde(default = "default_tool_result_tail_lines")]
+    pub tool_result_tail_lines: usize,
+    /// A `read-file` call beyond this many lines must supply an explicit
+    /// `start_line`/`end_line` range.
+    #[serde(default = "default_file_read_max_lines")]
+    pub file_read_max_lines: usize,
+}
+
+impl Default for TokenDisciplineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            targeted_edit_threshold_bytes: default_targeted_edit_threshold_bytes(),
+            tool_result_max_lines: default_tool_result_max_lines(),
+            tool_result_head_lines: default_tool_result_head_lines(),
+            tool_result_tail_lines: default_tool_result_tail_lines(),
+            file_read_max_lines: default_file_read_max_lines(),
         }
     }
 }
@@ -155,6 +222,33 @@ impl AgentRuntimeConfig {
                 return Err(format!(
                     "agent_runtime.sandbox.allowed_environment must never name a billing/admin credential; offending entry {name:?}"
                 ));
+            }
+        }
+        if self.token_discipline.enabled {
+            let td = &self.token_discipline;
+            if td.targeted_edit_threshold_bytes == 0 {
+                return Err(
+                    "agent_runtime.token_discipline.targeted_edit_threshold_bytes must be greater than zero"
+                        .into(),
+                );
+            }
+            if td.tool_result_head_lines == 0 || td.tool_result_tail_lines == 0 {
+                return Err(
+                    "agent_runtime.token_discipline.tool_result_head_lines and tool_result_tail_lines must be greater than zero"
+                        .into(),
+                );
+            }
+            if td.tool_result_max_lines == 0 {
+                return Err(
+                    "agent_runtime.token_discipline.tool_result_max_lines must be greater than zero"
+                        .into(),
+                );
+            }
+            if td.file_read_max_lines == 0 {
+                return Err(
+                    "agent_runtime.token_discipline.file_read_max_lines must be greater than zero"
+                        .into(),
+                );
             }
         }
         Ok(())
@@ -252,5 +346,49 @@ mod tests {
             ..AgentRuntimeConfig::default()
         };
         assert!(config.validate().unwrap_err().contains("duplicate"));
+    }
+
+    #[test]
+    fn token_discipline_disabled_by_default_and_validates() {
+        let config = AgentRuntimeConfig {
+            enabled: true,
+            ..AgentRuntimeConfig::default()
+        };
+        assert!(!config.token_discipline.enabled);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn token_discipline_zero_threshold_fails_closed() {
+        let config = AgentRuntimeConfig {
+            enabled: true,
+            token_discipline: TokenDisciplineConfig {
+                enabled: true,
+                targeted_edit_threshold_bytes: 0,
+                ..TokenDisciplineConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        };
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("targeted_edit_threshold_bytes"));
+    }
+
+    #[test]
+    fn token_discipline_zero_head_or_tail_lines_fails_closed() {
+        let config = AgentRuntimeConfig {
+            enabled: true,
+            token_discipline: TokenDisciplineConfig {
+                enabled: true,
+                tool_result_head_lines: 0,
+                ..TokenDisciplineConfig::default()
+            },
+            ..AgentRuntimeConfig::default()
+        };
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("tool_result_head_lines"));
     }
 }

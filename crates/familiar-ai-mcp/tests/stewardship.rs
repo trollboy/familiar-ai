@@ -528,6 +528,10 @@ async fn get_reconciliation_tool_is_project_scoped_and_labels_by_source() {
                 input_compression_version: "none",
                 compression_experiment: None,
                 compression_lane: None,
+                edit_form_id: "none",
+                edit_form_version: "none",
+                truncation_config_id: "none",
+                truncation_config_version: "none",
             })
             .unwrap()
             .unwrap();

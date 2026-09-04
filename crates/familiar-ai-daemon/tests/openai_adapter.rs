@@ -13,7 +13,7 @@ use familiar_ai_agent::raw_runtime::{
 };
 use familiar_ai_core::config::{
     AgentRuntimeSandboxConfig, AuthDescriptor, PriceCurrency, PriceScheduleConfig,
-    PriceScheduleRateConfig,
+    PriceScheduleRateConfig, TokenDisciplineConfig,
 };
 use familiar_ai_daemon::agent_runtime::{
     persist_run_outcome, write_scope_authorizer_from_prd, SandboxedToolExecutor, SqliteToolJournal,
@@ -114,6 +114,7 @@ async fn full_loop_persists_through_the_shared_agent_runtime_pipeline() {
         sandbox: no_sandbox(),
         command_timeout_ms: 2_000,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
     let adapter = OpenAiInferenceAdapter::new(
@@ -171,6 +172,7 @@ async fn full_loop_persists_through_the_shared_agent_runtime_pipeline() {
         "openai-api",
         Some("gpt-5"),
         None,
+        &TokenDisciplineConfig::default(),
         &outcome,
     )
     .unwrap();
@@ -229,6 +231,7 @@ async fn provider_response_identity_and_resolved_model_enrich_the_ledger() {
         sandbox: no_sandbox(),
         command_timeout_ms: 2_000,
         max_output_bytes: 4096,
+        token_discipline: TokenDisciplineConfig::default(),
     };
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
     let adapter = OpenAiInferenceAdapter::new(
@@ -318,6 +321,10 @@ async fn provider_response_identity_and_resolved_model_enrich_the_ledger() {
             input_compression_version: "raw-runtime-none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id: "raw-runtime-none",
+            edit_form_version: "raw-runtime-none",
+            truncation_config_id: "raw-runtime-none",
+            truncation_config_version: "raw-runtime-none",
         })
         .unwrap()
         .unwrap();
@@ -365,6 +372,10 @@ async fn provider_response_identity_and_resolved_model_enrich_the_ledger() {
             input_compression_version: "raw-runtime-none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id: "raw-runtime-none",
+            edit_form_version: "raw-runtime-none",
+            truncation_config_id: "raw-runtime-none",
+            truncation_config_version: "raw-runtime-none",
         })
         .unwrap()
         .unwrap();
@@ -458,6 +469,10 @@ fn resolved_model_binds_a_versioned_dated_price_schedule_to_a_local_estimate() {
             input_compression_version: "raw-runtime-none",
             compression_experiment: None,
             compression_lane: None,
+            edit_form_id: "raw-runtime-none",
+            edit_form_version: "raw-runtime-none",
+            truncation_config_id: "raw-runtime-none",
+            truncation_config_version: "raw-runtime-none",
         })
         .unwrap()
         .unwrap();
