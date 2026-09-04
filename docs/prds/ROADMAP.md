@@ -267,62 +267,61 @@ and accounting commands expose exactly the specified new fields.
   same-user peer identity is only a precondition beneath minted
   per-class session authority. Depends on PRD-034/035/039/044/051/064.
 
-## Audit remediation track (drafted 2026-09-04, awaiting owner approval)
+## Audit remediation track (drafted 2026-09-04, approved 2026-09-04)
 
-Eleven PRDs answering the 2026-09-04 owner audit. They stage in
-`docs/prds/proposed/` as `status: draft` rather than in the active
-directory, because backlog eligibility is computed from reconciled
-backlog state and never consults the front-matter status — a `draft` in
-`docs/prds/` is selectable by the drive today. Approval is a `git mv`
-into `docs/prds/` plus `status: ready`. PRD-091 closes the status gap
-that forces this precaution.
+Eleven PRDs answering the 2026-09-04 owner audit, owner-approved and
+active. Drafted as PRD-081..091 and renumbered to PRD-083..093: a
+concurrent drive session claimed 081 and 082 for its own worktree
+containment and tool-output retention work while these were staged.
 
-- PRD-081 — reachable approval; the decidable pause. **The headline.**
+- PRD-083 — reachable approval; the decidable pause. **The headline.**
   The drive pauses correctly and then advertises only `backlog release`
   (discard the work) and `backlog complete` (bypass every gate);
   `scope-decisions --approve` is never surfaced, and the interactive
   picker is unreachable from the pause and asks for a sha256. Depends on
-  PRD-035/066/080.
-- PRD-082 — operator tools become shipped commands. Rebind, set-phase,
+  PRD-035, PRD-066, PRD-080.
+- PRD-084 — operator tools become shipped commands. Rebind, set-phase,
   and compute-width promote off `cargo run --example`; `operator_waive`
-  and `probe_substance` retire. Depends on PRD-039/065/067.
-- PRD-083 — stall taxonomy and autonomy measurement. Names every stall,
+  and `probe_substance` retire. Depends on PRD-039, PRD-065, PRD-067.
+- PRD-085 — stall taxonomy and autonomy measurement. Names every stall,
   attaches one recovery command to each, records human interventions
   inside a PRD's lifetime, and reports unattended-completion rate.
-  Depends on PRD-077/081/082.
-- PRD-084 — cost measurement; make `CostUnmeasured` the exception.
+  Depends on PRD-077, PRD-083, PRD-084.
+- PRD-086 — cost measurement; make `CostUnmeasured` the exception.
   Goal 1's routing thesis with numbers behind it. Changes no route;
-  feeds PRD-032. Depends on PRD-031/044/047/051.
-- PRD-085 — identity and event-sequence invariants. One minting site for
+  feeds PRD-032. Depends on PRD-031, PRD-044, PRD-047, PRD-051.
+- PRD-087 — identity and event-sequence invariants. One minting site for
   repository identity and for checkpoint/occurrence event ids, explicit
   pre-migration row tolerance, invariants enforced in the gate. Depends
-  on PRD-039/067/077.
-- PRD-086 — load-faithful verification. Reproduce a failure under the
+  on PRD-039, PRD-067, PRD-077.
+- PRD-088 — load-faithful verification. Reproduce a failure under the
   gate's own load (the FAM-BUG-047 lesson), contextual budgets, and
-  risk-tiered gates above a required floor. Depends on PRD-045/067/078.
-- PRD-087 — no holes in required gates. Declared, attributed, expiring,
+  risk-tiered gates above a required floor. Depends on PRD-045, PRD-067,
+  PRD-078.
+- PRD-089 — no holes in required gates. Declared, attributed, expiring,
   self-closing exclusions; migration case is the FAM-BUG-050 SIGTERM
   skip. The underlying bug stays ledger work and is not deferred here.
-  Depends on PRD-078/086.
-- PRD-088 — CLI surface design pass. A no-argument front door, daily
+  Depends on PRD-078, PRD-088.
+- PRD-090 — CLI surface design pass. A no-argument front door, daily
   verbs at the top, everything else namespaced, a declared top-level
-  ceiling, no capability removed. Depends on PRD-035/081/082.
-- PRD-089 — multi-host driver leases. The `$XDG_RUNTIME_DIR` claim
+  ceiling, no capability removed. Depends on PRD-035, PRD-083, PRD-084.
+- PRD-091 — multi-host driver leases. The `$XDG_RUNTIME_DIR` claim
   becomes a durable host-identified expiring lease, lifting the
-  one-driver-one-box ceiling. Depends on PRD-034/056/065.
-- PRD-090 — one build command everywhere. Default features build on
+  one-driver-one-box ceiling. Depends on PRD-034, PRD-056, PRD-065.
+- PRD-092 — one build command everywhere. Default features build on
   Linux without `--no-default-features`; measured build time; gate and
-  install agree. Depends on PRD-034/036.
-- PRD-091 — PRD admission quality and reviewer calibration. Machine
+  install agree. Depends on PRD-034, PRD-036.
+- PRD-093 — PRD admission quality and reviewer calibration. Machine
   checks that refuse a malformed PRD before a model call, reviewer
   finding outcomes tracked to a calibration number, and front-matter
-  `status` honoured by eligibility. Depends on PRD-019/030/045/071.
+  `status` honoured by eligibility. Depends on PRD-019, PRD-030,
+  PRD-045, PRD-071.
 
-Suggested order: PRD-081 first and alone (it is the failure a stranger
-hits first), then 082 and 090 (a binary-release user has neither the
-tools nor a clean build), then 087 and 085 (open gate hole, fundamental
-invariants), then 084 and 083 (measurement before steering), then 086,
-088, 091, and 089.
+Suggested order: PRD-083 first and alone (it is the failure a stranger
+hits first), then PRD-084 and PRD-092 (a binary-release user has neither
+the tools nor a clean build), then PRD-089 and PRD-087 (open gate hole,
+fundamental invariants), then PRD-086 and PRD-085 (measurement before
+steering), then PRD-088, PRD-090, PRD-093, and PRD-091.
 
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to
