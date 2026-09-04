@@ -8,6 +8,7 @@ use crate::{ChangedFile, GitChangeKind, ScopeCheckResult, ScopeDecision, ScopeFi
 pub enum ReviewTier {
     ChecksOnly,
     Standard,
+    Batch,
     Full,
 }
 
@@ -163,6 +164,13 @@ pub struct ReviewTierRule {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewTierPolicy {
     pub full_review_risk_classes: Vec<String>,
+    /// Declared PRD risk classes explicitly opted into the provider batch
+    /// interface (PRD-071). Tiering defaults off: an empty list never
+    /// selects `Batch`. A class named here is meaningless if it is also
+    /// named in `full_review_risk_classes` — full review always wins, so a
+    /// high-risk class already requiring independent review is never
+    /// silently downgraded to batch latency.
+    pub batch_risk_classes: Vec<String>,
     pub rules: Vec<ReviewTierRule>,
 }
 
@@ -239,6 +247,17 @@ pub fn select_review_tier(
             tier: ReviewTier::Full,
             selecting_rule: None,
             reason: "unknown, ambiguous, or high-risk footprint".into(),
+            footprint,
+        };
+    }
+    if let Some(class) = declared_risk_classes
+        .iter()
+        .find(|class| policy.batch_risk_classes.contains(class))
+    {
+        return ReviewTierSelection {
+            tier: ReviewTier::Batch,
+            selecting_rule: None,
+            reason: format!("declared risk class '{class}' is configured for batch review"),
             footprint,
         };
     }
@@ -352,6 +371,7 @@ mod tests {
         let selected = select_review_tier(
             &ReviewTierPolicy {
                 full_review_risk_classes: vec![],
+                batch_risk_classes: vec![],
                 rules: vec![rule(ReviewTier::ChecksOnly)],
             },
             &[],
@@ -371,6 +391,7 @@ mod tests {
         let selected = select_review_tier(
             &ReviewTierPolicy {
                 full_review_risk_classes: vec![],
+                batch_risk_classes: vec![],
                 rules: vec![permissive],
             },
             &[],
@@ -387,6 +408,7 @@ mod tests {
         let selected = select_review_tier(
             &ReviewTierPolicy {
                 full_review_risk_classes: vec!["review-policy".into()],
+                batch_risk_classes: vec![],
                 rules: vec![rule(ReviewTier::ChecksOnly)],
             },
             &["review-policy".into()],
@@ -397,5 +419,64 @@ mod tests {
         assert_eq!(selected.tier, ReviewTier::Full);
         assert_eq!(selected.selecting_rule, None);
         assert!(selected.reason.contains("review-policy"));
+    }
+
+    #[test]
+    fn batch_risk_class_selects_batch_tier() {
+        let selected = select_review_tier(
+            &ReviewTierPolicy {
+                full_review_risk_classes: vec![],
+                batch_risk_classes: vec!["low-risk-docs".into()],
+                rules: vec![],
+            },
+            &["low-risk-docs".into()],
+            &[file()],
+            10,
+            &scope(ScopeFileClass::Test),
+        );
+        assert_eq!(selected.tier, ReviewTier::Batch);
+        assert_eq!(selected.selecting_rule, None);
+        assert!(selected.reason.contains("low-risk-docs"));
+    }
+
+    #[test]
+    fn full_review_class_overrides_batch_configuration_for_same_class() {
+        let selected = select_review_tier(
+            &ReviewTierPolicy {
+                full_review_risk_classes: vec!["review-policy".into()],
+                batch_risk_classes: vec!["review-policy".into()],
+                rules: vec![],
+            },
+            &["review-policy".into()],
+            &[file()],
+            10,
+            &scope(ScopeFileClass::Test),
+        );
+        assert_eq!(selected.tier, ReviewTier::Full);
+    }
+
+    #[test]
+    fn unknown_footprint_never_selects_batch() {
+        let selected = select_review_tier(
+            &ReviewTierPolicy {
+                full_review_risk_classes: vec![],
+                batch_risk_classes: vec!["low-risk-docs".into()],
+                rules: vec![],
+            },
+            &["low-risk-docs".into()],
+            &[],
+            0,
+            &ScopeCheckResult {
+                added: vec![],
+                modified: vec![],
+                deleted: vec![],
+                renamed: vec![],
+                disposition: ScopeDisposition::Contained,
+                findings: vec![],
+                policy_snapshot_hash: "p".into(),
+                phase: "initial".into(),
+            },
+        );
+        assert_eq!(selected.tier, ReviewTier::Full);
     }
 }

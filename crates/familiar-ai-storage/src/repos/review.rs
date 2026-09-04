@@ -422,6 +422,7 @@ mod tests {
                 phase: "initial".into(),
             }],
             tier_selection: None,
+            batch_pending: false,
             aggregate_usage: ExecutionUsage::default(),
             aggregate_duration_ms: 0,
             started_at: "2026-08-03T00:00:00Z".into(),

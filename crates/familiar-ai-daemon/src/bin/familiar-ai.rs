@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use familiar_ai_daemon::cli::accounting::AccountingCommand;
 use familiar_ai_daemon::cli::backlog::BacklogCommand;
+use familiar_ai_daemon::cli::batch_review::BatchReviewCommand;
 use familiar_ai_daemon::cli::billing::BillingCommand;
 use familiar_ai_daemon::cli::control::ControlCommand;
 use familiar_ai_daemon::cli::onboard::OnboardCommand;
@@ -45,6 +46,11 @@ enum Command {
     Accounting {
         #[command(subcommand)]
         command: AccountingCommand,
+    },
+    /// Configure and observe PRD-071 batch-tier independent review.
+    BatchReview {
+        #[command(subcommand)]
+        command: BatchReviewCommand,
     },
     /// Show repository project-configuration approval and binding state.
     Status {
@@ -419,6 +425,12 @@ fn main() -> ExitCode {
         }
         Command::Accounting { command } => {
             match familiar_ai_daemon::cli::accounting::accounting_command(command) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::BatchReview { command } => {
+            match familiar_ai_daemon::cli::batch_review::batch_review_command(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail(error),
             }

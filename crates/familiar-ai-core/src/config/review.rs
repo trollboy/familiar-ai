@@ -53,7 +53,7 @@ pub struct ReviewAgentConfig {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewTierPolicyConfig {
     /// Repositories at assurance levels requiring independent review cannot
@@ -65,6 +65,27 @@ pub struct ReviewTierPolicyConfig {
     /// Declared PRD risk classes that always require full review.
     #[serde(default)]
     pub full_review_risk_classes: Vec<String>,
+    /// Declared PRD risk classes explicitly opted into the provider batch
+    /// interface (PRD-071). Batch tiering defaults off: an empty list here
+    /// (the default) never routes any review through the batch interface.
+    /// A class named both here and in `full_review_risk_classes` still
+    /// receives full review — the audit trail below records the mutation,
+    /// never a silent latency downgrade for a high-risk class.
+    #[serde(default)]
+    pub batch_risk_classes: Vec<String>,
+    /// Maximum wait, in milliseconds, before a parked batch review falls
+    /// back to the interactive tier. Required (non-zero) whenever
+    /// `batch_risk_classes` is non-empty so batch is always a bounded
+    /// discount, never an unbounded stall.
+    #[serde(default)]
+    pub max_batch_wait_ms: u64,
+    /// Names a `[worker_registry.workers.<id>]` entry with
+    /// `runtime = "anthropic-api"` that submissions use as the batch
+    /// transport. Required whenever `batch_risk_classes` is non-empty;
+    /// cross-referenced against the worker registry at config load
+    /// (`Config::validate`), not merely at submission time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_worker: Option<String>,
     #[serde(default)]
     pub rules: Vec<ReviewTierRuleConfig>,
 }
@@ -92,6 +113,41 @@ impl ReviewTierPolicyConfig {
                     "tier_policy.full_review_risk_classes names risk class '{class}' outside the configured repository risk vocabulary"
                 ));
             }
+        }
+        let mut seen_batch = BTreeSet::new();
+        for class in &self.batch_risk_classes {
+            if class.trim().is_empty() || class.trim() != class {
+                return Err(
+                    "tier_policy.batch_risk_classes entries must be non-empty and trimmed".into(),
+                );
+            }
+            if !seen_batch.insert(class.as_str()) {
+                return Err(format!(
+                    "tier_policy.batch_risk_classes contains duplicate class '{class}'"
+                ));
+            }
+            if !risk_vocabulary.contains(class.as_str()) {
+                return Err(format!(
+                    "tier_policy.batch_risk_classes names risk class '{class}' outside the configured repository risk vocabulary"
+                ));
+            }
+        }
+        if !self.batch_risk_classes.is_empty() && self.max_batch_wait_ms == 0 {
+            return Err(
+                "tier_policy.batch_risk_classes requires a positive tier_policy.max_batch_wait_ms bound"
+                    .into(),
+            );
+        }
+        if !self.batch_risk_classes.is_empty()
+            && !self
+                .batch_worker
+                .as_deref()
+                .is_some_and(|worker| !worker.is_empty())
+        {
+            return Err(
+                "tier_policy.batch_risk_classes requires tier_policy.batch_worker naming a worker_registry entry"
+                    .into(),
+            );
         }
         Ok(())
     }

@@ -10,6 +10,7 @@
 
 pub mod accounting;
 pub mod backlog;
+pub mod batch_review;
 pub mod billing;
 pub mod control;
 pub mod deliver;

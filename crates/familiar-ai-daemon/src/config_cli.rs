@@ -326,7 +326,9 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
     }
 }
 
-fn repository_identity(repository: &std::path::Path) -> Result<(PathBuf, String), String> {
+pub(crate) fn repository_identity(
+    repository: &std::path::Path,
+) -> Result<(PathBuf, String), String> {
     let canonical = repository
         .canonicalize()
         .map_err(|e| format!("cannot resolve repository {}: {e}", repository.display()))?;
@@ -1730,7 +1732,12 @@ fn display_restrictions(values: &[String]) -> String {
     }
 }
 
-fn mutate<F>(context: &ConfigContext, command: &str, actor: &str, edit: F) -> Result<(), String>
+pub(crate) fn mutate<F>(
+    context: &ConfigContext,
+    command: &str,
+    actor: &str,
+    edit: F,
+) -> Result<(), String>
 where
     F: FnOnce(&mut Document) -> Result<(), String>,
 {
@@ -1775,11 +1782,11 @@ where
     Ok(())
 }
 
-fn load_config(context: &ConfigContext) -> Result<Config, String> {
+pub(crate) fn load_config(context: &ConfigContext) -> Result<Config, String> {
     Config::load(Some(&context.config_path)).map_err(|error| error.to_string())
 }
 
-fn open_database(context: &ConfigContext, config: &Config) -> Result<Database, String> {
+pub(crate) fn open_database(context: &ConfigContext, config: &Config) -> Result<Database, String> {
     let db = Database::open(&config.database.resolve_path(&context.data_dir))
         .map_err(|error| error.to_string())?;
     db.run_migrations().map_err(|error| error.to_string())?;
@@ -1798,7 +1805,10 @@ fn provider_table<'a>(document: &'a mut Document, name: &str) -> &'a mut Table {
         .expect("inserted provider table")
 }
 
-fn root_table<'a>(document: &'a mut Document, key: &str) -> Result<&'a mut Table, String> {
+pub(crate) fn root_table<'a>(
+    document: &'a mut Document,
+    key: &str,
+) -> Result<&'a mut Table, String> {
     if !document.contains_key(key) {
         document.insert(key, Item::Table(Table::new()));
     }
@@ -2109,7 +2119,7 @@ fn verified_age(value: &str) -> String {
     }
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     digest(&SHA256, bytes)
         .as_ref()
         .iter()

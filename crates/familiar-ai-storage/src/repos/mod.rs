@@ -1,5 +1,6 @@
 pub mod agent_runtime;
 pub mod backlog;
+pub mod batch_review;
 pub mod billing;
 pub mod bootstrap;
 pub mod checkpoint;

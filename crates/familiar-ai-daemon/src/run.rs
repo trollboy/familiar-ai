@@ -31,12 +31,13 @@ use familiar_ai_review::{
     probe_structured_review_capability, validate_review_capability, AgentAssignment,
     AgentObservation, AgentRole, BlockingPolicy, BoundedDocument, CodingRemediationAdapter,
     CommandVerificationRunner, CoordinationRequest, ExpectedFilesError, GitChangeKind,
-    GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewCoordinator, ReviewCycle,
-    ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason, ReviewTask,
-    ReviewTier, ReviewTierPolicy, ReviewTierRule, ScopeClassPolicy, ScopeClassificationRule,
-    ScopeDeclarationMode, ScopeFileClass, ScopeFileClassPolicies, ScopePathEntry, ScopePolicyInput,
-    ScopePolicySnapshot, ScopeRuleSource, StructuredReviewAdapter, VerificationCheck,
-    VerificationPlan, VerificationStatus, WorkflowLimits,
+    GitEvidenceCollector, ProhibitedRule, ProhibitedRuleKind, ReviewAgent, ReviewCoordinator,
+    ReviewCycle, ReviewCycleState, ReviewDisposition, ReviewPackageBudget, ReviewStopReason,
+    ReviewTask, ReviewTier, ReviewTierPolicy, ReviewTierRule, ScopeClassPolicy,
+    ScopeClassificationRule, ScopeDeclarationMode, ScopeFileClass, ScopeFileClassPolicies,
+    ScopePathEntry, ScopePolicyInput, ScopePolicySnapshot, ScopeRuleSource,
+    StructuredReviewAdapter, VerificationCheck, VerificationPlan, VerificationStatus,
+    WorkflowLimits,
 };
 use familiar_ai_storage::{
     AccountingRepository, Database, ExecutionFinalization, ExecutionHistoryRepository,
@@ -1700,10 +1701,12 @@ fn finish_implementation(
         ));
     }
     let preflight = review_preflight.expect("enabled review preflight");
+    let prd_id_string = target.id.to_string();
     let cycle = run_review(ReviewRunInput {
         db,
         context,
         execution_id: id,
+        prd_id: &prd_id_string,
         implementation_result: &result,
         implementation_finalization: finalization,
         implementation_agent: agents.remediation,
@@ -1740,6 +1743,20 @@ fn finish_implementation(
                     .map_err(|e| RunError::Storage(e.to_string()))?;
             }
         }
+    }
+    if cycle.batch_pending {
+        // PRD-071: this attempt was submitted to the provider batch
+        // interface rather than decided interactively. Neither clean nor
+        // blocked — defer exactly like `defer_completion` below: no
+        // probation penalty, no "blocked" checkpoint transition, no
+        // human-review-required error. Returning now frees this PRD's
+        // admission slot immediately; the batch worker (or a later
+        // resume) re-drives this same review once the batch resolves or
+        // its bounded wait expires.
+        eprintln!("review: batch tier submission pending for {id}; deferring disposition");
+        return Ok(RunWorkflowResult {
+            implementation: result,
+        });
     }
     let clean = cycle.state == ReviewCycleState::Completed
         && cycle.disposition == ReviewDisposition::ReadyForHumanApproval
@@ -2247,6 +2264,7 @@ struct ReviewRunInput<'a> {
     db: &'a Database,
     context: &'a ExecutionContext,
     execution_id: &'a str,
+    prd_id: &'a str,
     implementation_result: &'a ExecutionResult,
     implementation_finalization: &'a ExecutionFinalization,
     implementation_agent: &'a dyn CodingAgent,
@@ -2263,6 +2281,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         db,
         context,
         execution_id,
+        prd_id,
         implementation_result,
         implementation_finalization,
         implementation_agent,
@@ -2437,6 +2456,16 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             path_prefixes: check.path_prefixes.clone(),
         })
         .collect();
+    let batch_reviewer = crate::batch_review::build_batch_reviewer(
+        config,
+        db.conn(),
+        format!("{execution_id}-cycle"),
+        slash(&context.repository.repository),
+        prd_id.into(),
+        execution_id.into(),
+        declared_risk_classes.clone(),
+        &reviewer_adapter,
+    );
     let coordinator = ReviewCoordinator {
         collector: &collector,
         verifier: &verifier,
@@ -2444,6 +2473,9 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
         implementer: &remediation_adapter,
         store: &repository,
         policy,
+        batch_reviewer: batch_reviewer
+            .as_ref()
+            .map(|agent| agent as &dyn ReviewAgent),
     };
     let contracts = context
         .documents
@@ -2566,6 +2598,7 @@ fn configured_tier_policy(config: &familiar_ai_core::config::ReviewConfig) -> Re
     };
     ReviewTierPolicy {
         full_review_risk_classes: policy.full_review_risk_classes.clone(),
+        batch_risk_classes: policy.batch_risk_classes.clone(),
         rules: policy
             .rules
             .iter()
@@ -3745,6 +3778,7 @@ mod tests {
                 db: &db,
                 context: &context,
                 execution_id: if remediation { "remediation" } else { "clean" },
+                prd_id: "PRD-000",
                 implementation_result: &ExecutionResult {
                     agent_version: Some("fake".into()),
                     model: Some("implementation-model".into()),
@@ -3835,6 +3869,7 @@ mod tests {
             db: &db,
             context: &context,
             execution_id: "split",
+            prd_id: "PRD-000",
             implementation_result: &ExecutionResult {
                 agent_version: Some("fake".into()),
                 model: Some("implementation-model".into()),
@@ -3895,6 +3930,7 @@ mod tests {
             db: &db,
             context: &context,
             execution_id: "expansion",
+            prd_id: "PRD-000",
             implementation_result: &ExecutionResult {
                 agent_version: Some("fake".into()),
                 model: Some("implementation-model".into()),
@@ -3978,6 +4014,7 @@ mod tests {
             db: &db,
             context: &context,
             execution_id: "rogue",
+            prd_id: "PRD-000",
             implementation_result: &ExecutionResult {
                 agent_version: Some("fake".into()),
                 model: Some("implementation-model".into()),

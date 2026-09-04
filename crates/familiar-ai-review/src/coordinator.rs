@@ -111,9 +111,25 @@ pub struct ReviewCoordinator<'a> {
     pub implementer: &'a dyn RemediationAgent,
     pub store: &'a dyn ReviewStore,
     pub policy: BlockingPolicy,
+    /// The PRD-071 batch-tier transport. `None` means no batch capability
+    /// is configured (or credentials/adapter are unavailable), in which
+    /// case a `Batch`-tier selection safely runs through the ordinary
+    /// interactive `reviewer` instead — never a stall, never a panic.
+    pub batch_reviewer: Option<&'a dyn ReviewAgent>,
 }
 
 impl ReviewCoordinator<'_> {
+    fn active_reviewer(&self, cycle: &ReviewCycle) -> &dyn ReviewAgent {
+        if cycle
+            .tier_selection
+            .as_ref()
+            .is_some_and(|selection| selection.tier == ReviewTier::Batch)
+        {
+            self.batch_reviewer.unwrap_or(self.reviewer)
+        } else {
+            self.reviewer
+        }
+    }
     pub fn run(
         &self,
         repository: &Path,
@@ -161,6 +177,7 @@ impl ReviewCoordinator<'_> {
             scope_policy_snapshot: None,
             scope_evaluations: vec![],
             tier_selection: None,
+            batch_pending: false,
             aggregate_usage: initial_usage,
             aggregate_duration_ms: request.implementation_duration_ms,
             started_at: started,
@@ -316,7 +333,7 @@ impl ReviewCoordinator<'_> {
         } else {
             full_reviewer.clone()
         };
-        let isolation = self.reviewer.isolation_evidence();
+        let isolation = self.active_reviewer(&cycle).isolation_evidence();
         let Some(independence) = check_independence(
             &request.implementation.assignment,
             &selected_reviewer,
@@ -379,10 +396,21 @@ impl ReviewCoordinator<'_> {
                 "review: independent reviewer analyzing (attempt {}, typically 2-3 minutes)...",
                 cycle.attempt
             );
-            let result = match self.reviewer.review(&package, output) {
+            let result = match self.active_reviewer(&cycle).review(&package, output) {
                 Ok(result) => result,
                 Err(error @ ReviewExecutionError::CapabilityIncompatible { .. }) => {
                     return Err(CoordinatorError::ReviewCapabilityOutage(error.to_string()));
+                }
+                Err(ReviewExecutionError::Parked { batch_id }) => {
+                    eprintln!(
+                        "review: attempt {} parked for batch submission {batch_id}",
+                        cycle.attempt
+                    );
+                    cycle.batch_pending = true;
+                    self.store
+                        .save_cycle(&cycle)
+                        .map_err(CoordinatorError::Persistence)?;
+                    return Ok(cycle);
                 }
                 Err(error) => {
                     eprintln!("review: reviewer agent failed: {error}");
@@ -1056,6 +1084,14 @@ pub enum ReviewExecutionError {
         worker: String,
         reason: ReviewCapabilityReason,
     },
+    /// Not a failure: the reviewer submitted this attempt to a provider
+    /// batch interface (PRD-071) instead of deciding synchronously. The
+    /// coordinator parks the cycle at `AwaitingReview`/`batch_pending` and
+    /// returns immediately without consuming a review attempt or entering
+    /// `stop()` — the executing slot is freed for other admitted work, and
+    /// the daemon resumes disposition once the batch resolves.
+    #[error("review parked for batch submission: {batch_id}")]
+    Parked { batch_id: String },
 }
 #[derive(Debug, Error)]
 pub enum RemediationExecutionError {
@@ -1477,6 +1513,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let mut request = base_request();
         request.tier_policy.rules.push(ReviewTierRule {
@@ -1507,6 +1544,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let mut request = base_request();
         request.tier_policy.rules.push(ReviewTierRule {
@@ -1704,6 +1742,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let req = CoordinationRequest {
             cycle_id: "c".into(),
@@ -1787,6 +1826,7 @@ mod tests {
             implementer: &implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let request = CoordinationRequest {
             cycle_id: "remediation-cycle".into(),
@@ -1864,6 +1904,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let cycle = coordinator
             .run(Path::new("."), base_request(), &mut Vec::new())
@@ -1884,6 +1925,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let cycle = coordinator
             .run(Path::new("."), base_request(), &mut Vec::new())
@@ -1904,6 +1946,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let request = base_request();
         let policy_hash = request.scope_policy.snapshot_hash.clone();
@@ -1954,6 +1997,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let cycle = coordinator
             .run(Path::new("."), base_request(), &mut Vec::new())
@@ -1977,6 +2021,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let cycle = coordinator
             .run(Path::new("."), base_request(), &mut Vec::new())
@@ -1999,6 +2044,7 @@ mod tests {
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let cycle = coordinator
             .run(Path::new("."), base_request(), &mut Vec::new())
@@ -2023,6 +2069,7 @@ mod tests {
             implementer: &implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let cycle = coordinator
             .run(Path::new("."), base_request(), &mut Vec::new())
@@ -2044,6 +2091,7 @@ mod tests {
             implementer: &implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let mut request = base_request();
         request.limits.max_review_attempts = 3;
@@ -2073,6 +2121,7 @@ mod tests {
             implementer: &implementer,
             store: &store,
             policy: BlockingPolicy::default(),
+            batch_reviewer: None,
         };
         let request = base_request();
         let policy_hash = request.scope_policy.snapshot_hash.clone();
@@ -2132,11 +2181,109 @@ mod tests {
                 implementer: &Implementer,
                 store: &store,
                 policy: BlockingPolicy::default(),
+                batch_reviewer: None,
             };
             let error = coordinator
                 .run(Path::new("."), base_request(), &mut Vec::new())
                 .unwrap_err();
             assert!(matches!(error, CoordinatorError::Persistence(_)));
         }
+    }
+
+    /// Always parks: simulates a batch-tier `ReviewAgent` that submits and
+    /// returns immediately without deciding the review.
+    struct ParkingReviewer;
+    impl ReviewAgent for ParkingReviewer {
+        fn isolation_evidence(&self) -> Option<AdapterIsolationEvidence> {
+            Some(AdapterIsolationEvidence {
+                adapter_id: "fake".into(),
+                fresh_process_per_execution: true,
+                detail: "fake isolated review".into(),
+            })
+        }
+        fn review(
+            &self,
+            _: &ReviewRequest,
+            _: &mut dyn Write,
+        ) -> Result<ReviewResult, ReviewExecutionError> {
+            Err(ReviewExecutionError::Parked {
+                batch_id: "batch-123".into(),
+            })
+        }
+    }
+    #[test]
+    fn batch_submission_parks_cycle_and_frees_the_slot_without_stopping() {
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &Verifier,
+            reviewer: &ParkingReviewer,
+            implementer: &Implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+            batch_reviewer: None,
+        };
+        let cycle = coordinator
+            .run(Path::new("."), base_request(), &mut Vec::new())
+            .unwrap();
+        // Parked, not decided: neither terminal state, no stop reason
+        // recorded, and the coordinator returned promptly instead of
+        // blocking on the batch result.
+        assert!(cycle.batch_pending);
+        assert_eq!(cycle.state, ReviewCycleState::AwaitingReview);
+        assert!(cycle.stop_reasons.is_empty());
+        assert_eq!(cycle.disposition, ReviewDisposition::Pending);
+        assert!(cycle.review_result.is_none());
+    }
+
+    #[test]
+    fn repeated_park_across_resumed_attempts_never_exhausts_the_retry_limit() {
+        // Each resume re-enters `run` with a fresh cycle (mirroring how the
+        // daemon re-drives review from a durable "implemented_pending_review"
+        // checkpoint); a batch adapter that is still waiting keeps returning
+        // `Parked` on every resume. This must never accumulate toward
+        // `RetryLimitExhausted` — parking is not a review attempt failure.
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &Verifier,
+            reviewer: &ParkingReviewer,
+            implementer: &Implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+            batch_reviewer: None,
+        };
+        for _ in 0..5 {
+            let cycle = coordinator
+                .run(Path::new("."), base_request(), &mut Vec::new())
+                .unwrap();
+            assert!(cycle.batch_pending);
+            assert!(cycle.stop_reasons.is_empty());
+        }
+    }
+
+    /// Once a batch result is available, the `ReviewAgent` returns it as an
+    /// ordinary `Ok(ReviewResult)` — proving batch completions flow through
+    /// exactly the same `apply_and_validate`/disposition machinery as an
+    /// interactive review, with no separate code path deciding the outcome.
+    #[test]
+    fn resumed_batch_result_flows_through_identical_disposition_machinery() {
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &Verifier,
+            reviewer: &Reviewer,
+            implementer: &Implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+            batch_reviewer: None,
+        };
+        let cycle = coordinator
+            .run(Path::new("."), base_request(), &mut Vec::new())
+            .unwrap();
+        assert!(!cycle.batch_pending);
+        assert_eq!(cycle.state, ReviewCycleState::Completed);
+        assert_eq!(cycle.disposition, ReviewDisposition::ReadyForHumanApproval);
+        assert_eq!(cycle.stop_reasons, vec![ReviewStopReason::CleanReview]);
     }
 }

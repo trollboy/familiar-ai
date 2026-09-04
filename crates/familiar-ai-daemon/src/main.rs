@@ -356,6 +356,16 @@ async fn daemon_run(
         None
     };
 
+    // Spawn the PRD-071 batch-review poller. It exits immediately (a no-op
+    // task) when no repository configures a batch-tier worker, so this is
+    // always safe to spawn.
+    let batch_review_handle = tokio::spawn(familiar_ai_daemon::batch_review::run(
+        state.db.clone(),
+        state.config.clone(),
+        state.paths.clone(),
+        shutdown_rx.clone(),
+    ));
+
     // Spawn heartbeat
     let heartbeat_status = state.status.clone();
     let interval = state.config.daemon.heartbeat_interval_secs;
@@ -444,6 +454,11 @@ async fn daemon_run(
     tokio::join!(
         async {
             let _ = tokio::time::timeout(DRAIN, control_worker).await;
+        },
+        // PRD-071's batch-review poller joins the concurrent drain rather
+        // than adding another sequential timeout to the shutdown path.
+        async {
+            let _ = tokio::time::timeout(DRAIN, batch_review_handle).await;
         },
         watcher_drain,
         summary_drain,

@@ -634,6 +634,13 @@ pub struct ReviewCycle {
     pub scope_evaluations: Vec<ScopeCheckResult>,
     #[serde(default)]
     pub tier_selection: Option<ReviewTierSelection>,
+    /// True when this cycle stopped at `AwaitingReview` because the current
+    /// attempt was submitted to a provider batch interface rather than
+    /// decided interactively (PRD-071). Neither `Completed` nor
+    /// `HumanReviewRequired`: the daemon owns resuming disposition once the
+    /// batch resolves or its wait bound expires.
+    #[serde(default)]
+    pub batch_pending: bool,
     pub aggregate_usage: ExecutionUsage,
     pub aggregate_duration_ms: u64,
     pub started_at: String,

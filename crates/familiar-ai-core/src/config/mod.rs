@@ -148,6 +148,30 @@ pub fn stale_legacy_env(keys: impl Iterator<Item = String>) -> Vec<String> {
     stale
 }
 
+/// PRD-071: a `batch_worker` names a `worker_registry.workers` entry that
+/// must exist and run the raw anthropic-api runtime — batch submission is
+/// the provider's own asynchronous Messages API surface, never a CLI
+/// subprocess wrapper.
+fn validate_batch_worker(
+    policy: &ReviewTierPolicyConfig,
+    worker_registry: Option<&WorkerRegistryConfig>,
+) -> Result<(), String> {
+    let Some(worker_id) = policy.batch_worker.as_deref() else {
+        return Ok(());
+    };
+    let worker = worker_registry
+        .and_then(|registry| registry.workers.get(worker_id))
+        .ok_or_else(|| {
+            format!("tier_policy.batch_worker '{worker_id}' is not a configured worker_registry.workers entry")
+        })?;
+    if worker.runtime.as_deref() != Some(ANTHROPIC_API_RUNTIME) {
+        return Err(format!(
+            "tier_policy.batch_worker '{worker_id}' must run the '{ANTHROPIC_API_RUNTIME}' runtime"
+        ));
+    }
+    Ok(())
+}
+
 fn reject_stale_env() -> crate::Result<()> {
     let stale = stale_legacy_env(std::env::vars_os().filter_map(|(key, _)| key.into_string().ok()));
     if stale.is_empty() {
@@ -303,6 +327,13 @@ impl Config {
                                 "repositories.{worktree}.review: {error}"
                             ))
                         })?;
+                    validate_batch_worker(policy, self.worker_registry.as_ref()).map_err(
+                        |error| {
+                            FamiliarError::Config(format!(
+                                "repositories.{worktree}.review: {error}"
+                            ))
+                        },
+                    )?;
                 }
                 if let Some(agents) = &self.agents {
                     agents.validate(review).map_err(|error| {
@@ -437,6 +468,8 @@ impl Config {
                 .collect();
             policy
                 .validate_risk_vocabulary(&risk_vocabulary)
+                .map_err(FamiliarError::Config)?;
+            validate_batch_worker(policy, self.worker_registry.as_ref())
                 .map_err(FamiliarError::Config)?;
         }
         if let Some(agents) = &self.agents {
@@ -1219,6 +1252,9 @@ output_microusd_per_million = 300
             independent_review_required: true,
             standard_reviewer_agent: ReviewAgentConfig::default(),
             full_review_risk_classes: vec![],
+            batch_risk_classes: vec![],
+            max_batch_wait_ms: 0,
+            batch_worker: None,
             rules: vec![ReviewTierRuleConfig {
                 id: "tiny".into(),
                 tier: ReviewTierConfig::ChecksOnly,
@@ -1254,12 +1290,91 @@ output_microusd_per_million = 300
             independent_review_required: false,
             standard_reviewer_agent: ReviewAgentConfig::default(),
             full_review_risk_classes: vec!["unknown-class".into()],
+            batch_risk_classes: vec![],
+            max_batch_wait_ms: 0,
+            batch_worker: None,
             rules: vec![],
         };
         let vocabulary = BTreeSet::from(["review-policy"]);
         let error = policy.validate_risk_vocabulary(&vocabulary).unwrap_err();
         assert!(error.contains("unknown-class"));
         assert!(error.contains("outside the configured repository risk vocabulary"));
+    }
+
+    #[test]
+    fn batch_risk_class_outside_repository_vocabulary_fails_validation() {
+        let policy = ReviewTierPolicyConfig {
+            independent_review_required: false,
+            standard_reviewer_agent: ReviewAgentConfig::default(),
+            full_review_risk_classes: vec![],
+            batch_risk_classes: vec!["unknown-class".into()],
+            max_batch_wait_ms: 3_600_000,
+            batch_worker: None,
+            rules: vec![],
+        };
+        let vocabulary = BTreeSet::from(["review-policy"]);
+        let error = policy.validate_risk_vocabulary(&vocabulary).unwrap_err();
+        assert!(error.contains("unknown-class"));
+        assert!(error.contains("outside the configured repository risk vocabulary"));
+    }
+
+    fn batch_capable_policy() -> ReviewTierPolicyConfig {
+        ReviewTierPolicyConfig {
+            independent_review_required: false,
+            standard_reviewer_agent: ReviewAgentConfig::default(),
+            full_review_risk_classes: vec![],
+            batch_risk_classes: vec!["review-policy".into()],
+            max_batch_wait_ms: 3_600_000,
+            batch_worker: Some("batch-anthropic".into()),
+            rules: vec![],
+        }
+    }
+
+    #[test]
+    fn batch_worker_must_name_a_configured_worker_registry_entry() {
+        let policy = batch_capable_policy();
+        let error = validate_batch_worker(&policy, None).unwrap_err();
+        assert!(error.contains("batch-anthropic"));
+        assert!(error.contains("not a configured worker_registry.workers entry"));
+    }
+
+    #[test]
+    fn batch_worker_must_run_the_anthropic_api_runtime() {
+        let policy = batch_capable_policy();
+        let registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([("batch-anthropic".to_string(), registry_worker("claude"))]),
+            ..Default::default()
+        };
+        let error = validate_batch_worker(&policy, Some(&registry)).unwrap_err();
+        assert!(error.contains("anthropic-api"));
+    }
+
+    #[test]
+    fn batch_worker_naming_an_anthropic_api_runtime_worker_validates() {
+        let policy = batch_capable_policy();
+        let mut worker = registry_worker("claude");
+        worker.runtime = Some(ANTHROPIC_API_RUNTIME.into());
+        let registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([("batch-anthropic".to_string(), worker)]),
+            ..Default::default()
+        };
+        assert!(validate_batch_worker(&policy, Some(&registry)).is_ok());
+    }
+
+    #[test]
+    fn batch_risk_classes_require_a_positive_max_wait() {
+        let policy = ReviewTierPolicyConfig {
+            independent_review_required: false,
+            standard_reviewer_agent: ReviewAgentConfig::default(),
+            full_review_risk_classes: vec![],
+            batch_risk_classes: vec!["review-policy".into()],
+            max_batch_wait_ms: 0,
+            batch_worker: None,
+            rules: vec![],
+        };
+        let vocabulary = BTreeSet::from(["review-policy"]);
+        let error = policy.validate_risk_vocabulary(&vocabulary).unwrap_err();
+        assert!(error.contains("max_batch_wait_ms"));
     }
 
     fn registry_worker(id: &str) -> RegistryWorkerConfig {

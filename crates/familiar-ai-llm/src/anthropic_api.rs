@@ -184,6 +184,204 @@ pub struct WireRequestBody {
 }
 
 // ---------------------------------------------------------------------
+// Message Batches API (PRD-071) — asynchronous submission of one or more
+// single-shot requests. Familiar submits exactly one request per batch
+// (the independent reviewer's shape), never streams a batch member, and
+// never assumes the provider resumes an interrupted batch request.
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+struct WireBatchRequestEntry<'a> {
+    custom_id: &'a str,
+    params: &'a WireRequestBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WireBatchCreateRequest<'a> {
+    requests: Vec<WireBatchRequestEntry<'a>>,
+}
+
+/// The provider batch job's own lifecycle, distinct from the underlying
+/// per-request result: `processing_status` moves `in_progress` ->
+/// `canceling`|`ended`; only once `ended` does `results_url` (and this
+/// client's `fetch_message_batch_results`) become meaningful.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WireMessageBatch {
+    pub id: String,
+    pub processing_status: String,
+    #[serde(default)]
+    pub results_url: Option<String>,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+impl WireMessageBatch {
+    pub fn ended(&self) -> bool {
+        self.processing_status == "ended"
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireBatchResultLine {
+    pub custom_id: String,
+    pub result: WireBatchResult,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireBatchResult {
+    Succeeded { message: WireBatchMessage },
+    Errored { error: Value },
+    Canceled {},
+    Expired {},
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WireBatchMessage {
+    pub id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub content: Vec<WireBatchContentBlock>,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub usage: WireUsage,
+}
+
+impl WireBatchMessage {
+    /// Concatenates every text block, matching how the interactive
+    /// transport hands the reviewer's raw stdout text to the shared
+    /// structured-review parser.
+    pub fn text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                WireBatchContentBlock::Text { text } => Some(text.as_str()),
+                WireBatchContentBlock::Other => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireBatchContentBlock {
+    Text {
+        text: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+impl AnthropicHttpClient {
+    /// `POST /v1/messages/batches` with exactly one request, identified by
+    /// `custom_id`. Returns promptly — this call never waits for the batch
+    /// to process, so the caller's slot is free the moment it returns.
+    pub async fn submit_message_batch(
+        &self,
+        api_key: &str,
+        custom_id: &str,
+        params: &WireRequestBody,
+    ) -> Result<WireMessageBatch, AdapterError> {
+        let url = format!("{}/v1/messages/batches", self.base_url);
+        let request = WireBatchCreateRequest {
+            requests: vec![WireBatchRequestEntry { custom_id, params }],
+        };
+        let response = self
+            .client
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", &self.anthropic_version)
+            .json(&request)
+            .send()
+            .await
+            .map_err(classify_transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(classify_http_status(status, None, &body_text));
+        }
+        response
+            .json()
+            .await
+            .map_err(|error| AdapterError::Ambiguous {
+                reason: format!("batch creation response did not parse: {error}"),
+            })
+    }
+
+    /// `GET /v1/messages/batches/{id}` — a non-billable poll of the batch
+    /// job's own processing status.
+    pub async fn retrieve_message_batch(
+        &self,
+        api_key: &str,
+        batch_id: &str,
+    ) -> Result<WireMessageBatch, AdapterError> {
+        let url = format!("{}/v1/messages/batches/{batch_id}", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", &self.anthropic_version)
+            .send()
+            .await
+            .map_err(classify_transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(classify_http_status(status, None, &body_text));
+        }
+        response
+            .json()
+            .await
+            .map_err(|error| AdapterError::Ambiguous {
+                reason: format!("batch retrieval response did not parse: {error}"),
+            })
+    }
+
+    /// Fetches and parses the batch's `.jsonl` results once
+    /// `processing_status` is `ended`. One line per submitted request; this
+    /// client submits exactly one, so callers expect exactly one line.
+    pub async fn fetch_message_batch_results(
+        &self,
+        api_key: &str,
+        results_url: &str,
+    ) -> Result<Vec<WireBatchResultLine>, AdapterError> {
+        let response = self
+            .client
+            .get(results_url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", &self.anthropic_version)
+            .send()
+            .await
+            .map_err(classify_transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(classify_http_status(status, None, &body_text));
+        }
+        let body_text = response
+            .text()
+            .await
+            .map_err(|error| AdapterError::Ambiguous {
+                reason: format!("batch results body could not be read: {error}"),
+            })?;
+        body_text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str(line).map_err(|error| AdapterError::Ambiguous {
+                    reason: format!("batch result line did not parse: {error}"),
+                })
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------
 // Streaming (SSE) response shapes
 // ---------------------------------------------------------------------
 
@@ -1117,5 +1315,133 @@ mod tests {
         let resolver = StaticCredentialResolver("sk-static".into());
         let result = resolver.resolve(&AuthDescriptor::None).unwrap();
         assert_eq!(result, "sk-static");
+    }
+
+    #[tokio::test]
+    async fn submit_message_batch_returns_promptly_without_waiting_for_completion() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/batches"))
+            .and(header("x-api-key", "sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msgbatch_01",
+                "type": "message_batch",
+                "processing_status": "in_progress",
+                "results_url": null
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AnthropicHttpClient::new(config(server.uri())).unwrap();
+        let mut request = text_request();
+        request.stream = false;
+        let batch = client
+            .submit_message_batch("sk-test", "review-1", &request)
+            .await
+            .unwrap();
+        assert_eq!(batch.id, "msgbatch_01");
+        assert!(!batch.ended());
+        assert!(batch.results_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn retrieve_message_batch_reports_ended_status_and_results_url() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/messages/batches/msgbatch_01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msgbatch_01",
+                "type": "message_batch",
+                "processing_status": "ended",
+                "results_url": "https://api.anthropic.com/v1/messages/batches/msgbatch_01/results",
+                "ended_at": "2026-08-30T00:10:00Z"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AnthropicHttpClient::new(config(server.uri())).unwrap();
+        let batch = client
+            .retrieve_message_batch("sk-test", "msgbatch_01")
+            .await
+            .unwrap();
+        assert!(batch.ended());
+        assert_eq!(
+            batch.results_url.as_deref(),
+            Some("https://api.anthropic.com/v1/messages/batches/msgbatch_01/results")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_message_batch_results_parses_one_jsonl_line_with_usage() {
+        let server = MockServer::start().await;
+        let line = json!({
+            "custom_id": "review-1",
+            "result": {
+                "type": "succeeded",
+                "message": {
+                    "id": "msg_1",
+                    "model": "claude-test-model-resolved",
+                    "content": [{"type": "text", "text": "{\"review_id\":\"review-1\"}"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 100, "output_tokens": 20}
+                }
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/messages/batches/msgbatch_01/results"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(format!("{line}\n"), "application/x-jsonl"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = AnthropicHttpClient::new(config(server.uri())).unwrap();
+        let lines = client
+            .fetch_message_batch_results(
+                "sk-test",
+                &format!("{}/v1/messages/batches/msgbatch_01/results", server.uri()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].custom_id, "review-1");
+        match &lines[0].result {
+            WireBatchResult::Succeeded { message } => {
+                assert_eq!(message.text(), "{\"review_id\":\"review-1\"}");
+                assert_eq!(message.usage.input_tokens, Some(100));
+                assert_eq!(message.usage.output_tokens, Some(20));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_message_batch_results_reports_errored_member_without_a_message() {
+        let server = MockServer::start().await;
+        let line = json!({
+            "custom_id": "review-1",
+            "result": {
+                "type": "errored",
+                "error": {"type": "invalid_request_error", "message": "bad request"}
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/messages/batches/msgbatch_02/results"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(format!("{line}\n"), "application/x-jsonl"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = AnthropicHttpClient::new(config(server.uri())).unwrap();
+        let lines = client
+            .fetch_message_batch_results(
+                "sk-test",
+                &format!("{}/v1/messages/batches/msgbatch_02/results", server.uri()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(matches!(lines[0].result, WireBatchResult::Errored { .. }));
     }
 }

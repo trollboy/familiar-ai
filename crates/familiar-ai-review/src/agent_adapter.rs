@@ -172,31 +172,7 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
             .map_err(|e| ReviewExecutionError::Agent(e.to_string()))?;
         let text =
             String::from_utf8(captured).map_err(|e| ReviewExecutionError::Agent(e.to_string()))?;
-        // The reviewer's wire contract is deliberately minimal: identity
-        // echoes plus findings. Everything else on ReviewResult is observed
-        // or recomputed here and in policy validation, never trusted from
-        // model output.
-        #[derive(serde::Deserialize)]
-        struct WireReviewResult {
-            review_id: String,
-            reviewed_manifest_hash: String,
-            #[serde(default)]
-            findings: Vec<ReviewFinding>,
-        }
-        let trimmed = text.trim();
-        let wire: WireReviewResult = serde_json::from_str(trimmed)
-            .or_else(|first| match (trimmed.find('{'), trimmed.rfind('}')) {
-                (Some(start), Some(end)) if start < end => {
-                    serde_json::from_str(&trimmed[start..=end]).map_err(|_| first)
-                }
-                _ => Err(first),
-            })
-            .map_err(|e| {
-                let snippet: String = trimmed.chars().take(2000).collect();
-                ReviewExecutionError::Agent(format!(
-                    "malformed structured review: {e}; raw reviewer output begins: {snippet}"
-                ))
-            })?;
+        let wire = parse_structured_review_text(&text)?;
         Ok(ReviewResult {
             review_id: wire.review_id,
             reviewer: observation(request.reviewer.clone(), &observed),
@@ -210,6 +186,37 @@ impl ReviewAgent for StructuredReviewAdapter<'_> {
             unavailable_fields: Default::default(),
         })
     }
+}
+
+/// The reviewer's wire contract is deliberately minimal: identity echoes
+/// plus findings. Everything else on `ReviewResult` is observed or
+/// recomputed by the caller and in policy validation, never trusted from
+/// model output. Shared by every reviewer transport (interactive
+/// subprocess, and the PRD-071 provider batch interface) so the exact same
+/// parsing decides what a review said, regardless of how it was submitted.
+#[derive(serde::Deserialize)]
+pub struct WireReviewResult {
+    pub review_id: String,
+    pub reviewed_manifest_hash: String,
+    #[serde(default)]
+    pub findings: Vec<ReviewFinding>,
+}
+
+pub fn parse_structured_review_text(text: &str) -> Result<WireReviewResult, ReviewExecutionError> {
+    let trimmed = text.trim();
+    serde_json::from_str(trimmed)
+        .or_else(|first| match (trimmed.find('{'), trimmed.rfind('}')) {
+            (Some(start), Some(end)) if start < end => {
+                serde_json::from_str(&trimmed[start..=end]).map_err(|_| first)
+            }
+            _ => Err(first),
+        })
+        .map_err(|e| {
+            let snippet: String = trimmed.chars().take(2000).collect();
+            ReviewExecutionError::Agent(format!(
+                "malformed structured review: {e}; raw reviewer output begins: {snippet}"
+            ))
+        })
 }
 
 pub struct CodingRemediationAdapter<'a> {
