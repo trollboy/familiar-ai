@@ -256,7 +256,10 @@ fn retained_tool_output_is_not_readable_by_other_users() {
         .unwrap();
 
     let retained = temp.path().join(".familiar/tool-output/c_perms.txt");
-    assert!(retained.exists(), "expected retained output at {retained:?}");
+    assert!(
+        retained.exists(),
+        "expected retained output at {retained:?}"
+    );
 
     let dir_mode = fs::metadata(retained.parent().unwrap())
         .unwrap()
