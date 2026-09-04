@@ -193,6 +193,21 @@ pub struct SandboxedToolExecutor {
 }
 
 impl SandboxedToolExecutor {
+    /// The single chokepoint every filesystem-touching capability resolves
+    /// its path through. Containment is decided on the *resolved* path —
+    /// the joined path with every symlink followed, canonicalized against
+    /// the deepest ancestor that actually exists for a leaf that does not
+    /// yet exist (an `apply-edit` creating a new file) — never on the
+    /// spelled path. A lexical check alone cannot see a symlink, and this
+    /// runtime offers `run-command`, so a worker can create one and reach
+    /// straight through it with a path that is relative and `..`-free.
+    ///
+    /// This still has a residual TOCTOU window: nothing prevents a
+    /// concurrent `run-command` from replacing a path component with a
+    /// symlink between this check and the filesystem call that follows it.
+    /// Resolving that fully needs O_NOFOLLOW/openat2-style syscalls this
+    /// executor does not yet use; what this closes is the deterministic
+    /// hole where an already-planted symlink is never even inspected.
     fn resolve_within_worktree(&self, relative: &str) -> Result<PathBuf, ExecutionError> {
         if relative.is_empty()
             || Path::new(relative).is_absolute()
@@ -202,7 +217,22 @@ impl SandboxedToolExecutor {
                 "path {relative:?} is not a safe worktree-relative path"
             )));
         }
-        Ok(self.worktree_root.join(relative))
+        let canonical_root = self.worktree_root.canonicalize().map_err(|error| {
+            ExecutionError::Failed(format!(
+                "worktree root {:?} could not be resolved: {error}",
+                self.worktree_root
+            ))
+        })?;
+        let joined = self.worktree_root.join(relative);
+        let resolved = canonicalize_partial(&joined).map_err(|error| {
+            ExecutionError::Failed(format!("path {relative:?} could not be resolved: {error}"))
+        })?;
+        if !resolved.starts_with(&canonical_root) {
+            return Err(ExecutionError::Failed(format!(
+                "path {relative:?} escapes the worktree root"
+            )));
+        }
+        Ok(resolved)
     }
 
     fn read_file(&self, call: &ValidatedCall) -> Result<ExecutionOutcome, ExecutionError> {
@@ -484,6 +514,56 @@ impl ToolExecutor for SandboxedToolExecutor {
                 call.capability.as_str(),
                 call.arguments
             ))),
+        }
+    }
+}
+
+/// Canonicalizes `path`, following every symlink, even when its leaf (and
+/// possibly several of its trailing components) does not exist yet: it
+/// walks up to the deepest ancestor that does exist, canonicalizes that
+/// ancestor, and re-appends the non-existent tail literally. A path that
+/// exists in full is simply canonicalized outright.
+///
+/// The walk-up only ever fires for `NotFound` — a genuinely absent
+/// component. Any other error (permission denied, too many levels of
+/// symlinks, not a directory) is returned to the caller rather than
+/// silently degrading to a lexical re-append, because that fallback is
+/// exactly the lexical-only check this function exists to replace.
+///
+/// `NotFound` alone is not enough to treat a component as "not created
+/// yet", though: a symlink whose target does not exist also fails
+/// `canonicalize` with `NotFound`, indistinguishable by error kind alone
+/// from a missing file. Before walking past such a component, its
+/// `symlink_metadata` is checked — a component with symlink metadata but
+/// no resolvable target is a dangling symlink, refused outright, since
+/// re-appending it literally would authorize a write straight through it
+/// to wherever it points.
+fn canonicalize_partial(path: &Path) -> std::io::Result<PathBuf> {
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path;
+    loop {
+        match current.canonicalize() {
+            Ok(mut canonical) => {
+                for part in trailing.into_iter().rev() {
+                    canonical.push(part);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if current.symlink_metadata().is_ok() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{} is a dangling symlink", current.display()),
+                    ));
+                }
+                let (Some(file_name), Some(parent)) = (current.file_name(), current.parent())
+                else {
+                    return Err(error);
+                };
+                trailing.push(file_name.to_os_string());
+                current = parent;
+            }
+            Err(error) => return Err(error),
         }
     }
 }
