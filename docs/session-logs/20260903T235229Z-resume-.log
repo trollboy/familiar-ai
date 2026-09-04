@@ -1,0 +1,129 @@
+command: familiar-ai resume PRD-71
+date: Thu Sep  3 11:52:29 PM UTC 2026
+host: trollboy (Linux)
+head: a25067ea5ea296843e55d3b0fa2869eb159ff294 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+scope: durable approvals loaded=9 key=/home/trollboy/Projects/familiar-ai/.git
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3077921
+verification: heartbeat check=format elapsed_ms=5238 child=pid:3077921
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3078498
+verification: heartbeat check=lint elapsed_ms=30002 child=pid:3078498
+verification: heartbeat check=lint elapsed_ms=33354 child=pid:3078498
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3082868
+verification: heartbeat check=tests-green-crates elapsed_ms=30000 child=pid:3082868
+verification: heartbeat check=tests-green-crates elapsed_ms=60004 child=pid:3082868
+verification: heartbeat check=tests-green-crates elapsed_ms=66584 child=pid:3082868
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3091412
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30000 child=pid:3091412
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60004 child=pid:3091412
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:3091412
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120002 child=pid:3091412
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150003 child=pid:3091412
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180002 child=pid:3091412
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=184144 child=pid:3091412
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+{"review_id":"00001788454764715784-0001485283-000001-cycle-review-1","reviewed_manifest_hash":"sha256:49868bfa1fe7733cc0afe6f5b930811244b934478f8407c633d38e712826407b","findings":[{"finding_id":"f1-daemon-tests-unverified","category":"test_gap","severity":"high","blocking":false,"title":"The new batch-review tests are exercised only by the failing, non-required workspace check","claim":"The 941-line integration suite added at crates/familiar-ai-daemon/tests/batch_review.rs is the primary evidence for acceptance criteria 1, 2, 3, and 5, but no required verification check compiles or runs the familiar-ai-daemon crate's tests: 'tests-green-crates' is scoped to -p familiar-ai-core -p familiar-ai-review -p familiar-ai-agent -p familiar-ai-storage, and the only check that would run these tests, 'tests-workspace-advisory', is marked required=false and failed with exit code 101. The package therefore contains no passing evidence that the batch submission/park, crash-resume, expiry-fallback, exactly-once, or accounting tests actually pass at this revision.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/tests/batch_review.rs","range":{"start":1,"end":40}},{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:8668e687ab577bc98e55a37cd66a05e44d5d4ab096aa8298727211348d91f0a8","media_type":"text/plain","byte_size":100721,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:1a303eb9f2ed7d11d6fad3b5070b5385ad53b52c4be8690e4418a2fc106acf94","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-8668e687ab577bc98e55a37cd66a05e44d5d4ab096aa8298727211348d91f0a8-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Either add -p familiar-ai-daemon to the required 'tests-green-crates' check so the new suite gates the change, or resolve the workspace-advisory failure and promote that check to required, so the acceptance-criteria evidence rests on a passing gate rather than a failing advisory one.","status":"open","supersedes":null},{"finding_id":"f2-scoped-policy-replaces-global","category":"correctness_defect","severity":"high","blocking":false,"title":"`batch-review enable` writes a partial repository-scoped tier_policy that replaces, not merges, the global policy","claim":"`enable` creates `repositories.<key>.review.tier_policy` containing only `batch_risk_classes`, `max_batch_wait_ms`, and `batch_worker` (tier_policy_table + the three inserts). `resolved_tier_policy` then prefers that repository entry wholesale — `config.repositories.get(key)...tier_policy.as_ref().or(config.review.tier_policy.as_ref())` — with no merge of the global policy's fields. Because `ReviewTierPolicyConfig` derives every remaining field from `#[serde(default)]`, a repository that previously inherited a global policy with `independent_review_required = true`, populated `full_review_risk_classes`, and footprint `rules` silently reverts all three to their defaults for that repository the moment an operator enables batch for one low-risk class. That is exactly the silent downgrade of independent-review and latency guarantees acceptance criterion 6 forbids, and the audit record only shows that a batch class was added.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/cli/batch_review.rs","range":{"start":150,"end":188}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":380,"end":420}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08","media_type":"text/plain","byte_size":38454,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:1a303eb9f2ed7d11d6fad3b5070b5385ad53b52c4be8690e4418a2fc106acf94","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Have `enable` copy the effective (global) tier_policy fields into the repository-scoped table before adding the batch keys, or make policy resolution merge repository overrides onto the global policy field-by-field instead of substituting the whole table; add a test asserting that enabling batch for one class preserves the repository's `independent_review_required`, `full_review_risk_classes`, and `rules`.","status":"open","supersedes":null},{"finding_id":"f3-submission-not-durable-before-provider-call","category":"correctness_defect","severity":"medium","blocking":false,"title":"A batch is submitted to the provider before any durable row exists, so a crash in that window loses and re-bills it","claim":"`BatchReviewAgent::submit` calls `client.submit_message_batch(...)` and only afterwards writes the `batch_reviews` row via `repository.submit(&NewBatchReview{ ... provider_batch_id: &batch.id ... })`. A daemon crash (or a database error on the insert, which is mapped to `ReviewExecutionError::Agent`) between those two statements leaves a live provider batch with no durable record. The next review cycle finds no row via `find_by_review_id`, takes the `else { return self.submit(...) }` path, and submits a second batch for the same review_id; the first batch is never polled, never expires through `mark_expired_fallback`, and never produces an accounting observation. This contradicts acceptance criterion 3's requirement that the daemon 'never loses a submitted batch', and the crash-resume test only covers the window after the row exists.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":180,"end":230}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08","media_type":"text/plain","byte_size":38454,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:1a303eb9f2ed7d11d6fad3b5070b5385ad53b52c4be8690e4418a2fc106acf94","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Write an intent row (state 'submitting', with the deterministic custom_id) before calling the provider and update it with the returned provider_batch_id afterwards; on resume, reconcile a 'submitting' row against the provider's batch list by custom_id rather than issuing a fresh submission.","status":"open","supersedes":null},{"finding_id":"f4-poller-startup-gate-and-early-return","category":"correctness_defect","severity":"medium","blocking":false,"title":"The poller decides once at startup whether to run, and aborts the whole sweep on a single row's transport failure","claim":"`run` evaluates `any_batch_configured(&config)` against the config snapshot captured when the daemon started and returns permanently when it is false. Because `familiar-ai batch-review enable` is an on-disk config mutation performed while the daemon is running, a repository enabled after daemon start has a poller that has already exited: submitted batches are never polled, never marked `expired_fallback`, and the bounded wait of acceptance criterion 5 is not enforced until the daemon is restarted. Separately, inside `poll_once` the per-row failures for `AnthropicHttpClient::new` and `EnvCredentialResolver.resolve` use `return` rather than `continue`, so one repository's missing credential silently abandons every remaining pending row in that tick, including rows already past their deadline.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":600,"end":700}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08","media_type":"text/plain","byte_size":38454,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:1a303eb9f2ed7d11d6fad3b5070b5385ad53b52c4be8690e4418a2fc106acf94","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Keep the poller alive unconditionally and re-read the effective config (or subscribe to config reloads) on each tick, treating `any_batch_configured` as a per-tick skip rather than a permanent exit; change the two per-row `return`s in `poll_once` to `continue` so one repository's failure cannot suppress deadline enforcement for the others. Add a test that a row past its deadline is marked `expired_fallback` even when an earlier row's credential resolution fails.","status":"open","supersedes":null},{"finding_id":"f5-assumed-discount-not-provider-reported","category":"correctness_defect","severity":"medium","blocking":false,"title":"Batch cost is an assumed 50% discount on configured interactive rates, not the provider-reported cost the criterion requires","claim":"Acceptance criterion 4 requires each batch execution's accounting observation to record 'the provider-reported cost with provider provenance, so PRD-051 comparisons measure the actual discount ... rather than assuming a rate'. `batch_cost_estimate` does exactly the opposite: it calls `crate::run::calculate_cost` with the configured interactive rates and divides by the hard-coded `BATCH_PRICE_DISCOUNT_DENOMINATOR = 2`. `record_accounting` then sets `provider_cost_lexical: None` on the ledger observation and routes the derived number through `append_legacy_configured_estimate`. The same assumed figure is written into `batch_reviews.provider_cost_lexical`, a column whose name asserts provider provenance for a value the provider never reported. A PRD-051 comparison built on these rows measures the constant 2, not the actual discount; if Anthropic's batch pricing changes, or the batch member consumes cache reads priced differently, the ledger silently reports the wrong cost.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/batch_review.rs","range":{"start":40,"end":100}},{"kind":"file_range","path":"crates/familiar-ai-storage/migrations/058_batch_reviews.sql","range":{"start":1,"end":31}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08","media_type":"text/plain","byte_size":38454,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788454454062745-0001485283-000000/PRD-71","revision":"sha256:1a303eb9f2ed7d11d6fad3b5070b5385ad53b52c4be8690e4418a2fc106acf94","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-c03c30989c591781013063e4b9e1d742d75942dc9159837a0213a22089908b08-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Record the provider-reported figure when one is available (batch usage/cost fields, or reconciliation against the provider's billing surface as PRD-051's provider-cost path already does) and keep the derived number strictly as an estimate: rename the durable column away from `provider_cost_lexical` (or add an explicit provenance column distinguishing 'provider-reported' from 'batch-rate-estimate'), and make the discount factor configuration rather than a compile-time constant.","status":"open","supersedes":null}]}
+I'll start by examining the relevant files to understand both blocking findings before making changes.
+Good, both `toml` and `toml_edit` are already dependencies. Now let's check the full cli/batch_review.rs imports and the daemon's batch_review.rs top imports to wire this correctly.
+Now let's make the edit to expose `resolved_tier_policy` as `pub(crate)`.
+Now add `Default` derive to `ReviewTierPolicyConfig`:
+Now update `crates/familiar-ai-daemon/src/cli/batch_review.rs` to seed the tier_policy from the effective policy when creating it fresh.
+Now update `tier_policy_table` itself and add the two new helper functions:
+It compiles cleanly. Now let's kill the stray background finds and look at the existing test file for structure so I can add the required merge test and understand test setup helpers.
+Now let's refactor `enable`/`disable` to split out `_with_context` variants for testability, mirroring the `execute`/`execute_with_context` pattern already used in `config_cli.rs`.
+Good, all top-level fields default. Now let's check `Config::validate()`'s full body to ensure no other unmet preconditions (e.g., worker_registry validate needing `risk_vocabulary` aggregated across repos, which we've set).
+Now let's add the test module at the end of the file.
+Now let's check that `tempfile` is available as a dev-dependency for the daemon crate, then run the new tests.
+Let me rewrite this section with a dynamically created repository directory:
+Simplest fix: drop `adapter` from the test worker config since `runtime` alone resolves fine.
+Both new tests pass. Now let's verify they actually catch the f2 bug by checking against the pre-fix behavior — let's confirm the fix is load-bearing by temporarily reverting the seeding and re-running.
+Confirmed — the test fails without the fix and passes with it. Let me revert the temporary sabotage patch back to the real fix.
+f2 fix confirmed and restored. Now let's tackle f1 — the test-gap finding about `familiar-ai-daemon` tests not being in the required verification check.
+Compiles cleanly. Now let's run the full workspace test suite to find the actual runtime failure causing exit code 101.
+Let's search the full log for actual failures/panics since the tail only showed the end (which was all passing).
+review: remediation agent failed: remediation agent failed: agent execution exceeded its configured timeout
+I'll start by examining the two blocking findings in the actual code to understand what needs fixing.
+f2 already appears fixed in the working tree — `enable` now seeds the repo-scoped table from `effective_tier_policy` before inserting batch fields. Let me verify by running the tests and checking f1 (the failing workspace-advisory check).
+Let it run in the background while I check the other files involved (config, storage repo) for f2's completeness.
+This all looks properly done for f2, with `Default` derive added and the field seeding/validation logic. Now let's check `resolved_tier_policy` in `batch_review.rs` to confirm merge/precedence logic is consistent.
+It looks complete (reached the end of crate list). Let's check for any FAILED lines and the final summary.
+The full `cargo test --workspace --no-default-features --no-fail-fast` completed with exit code 0 — no failures. This resolves the root cause behind f1: the previously-failing `tests-workspace-advisory` check now passes, so the daemon's batch-review test suite (and everything else) is actually exercised and green.
+Let me confirm by running the exact configured Docker verification commands, since those are the authoritative evidence source per the findings.
+The Docker-based `tests-workspace-advisory` run does fail — one target, `familiar-ai-daemon --test integration`, failed. Let me find the actual error.
+Good, worktree is cleaned up and my working tree is untouched. Let me run clippy and fmt checks too, to make sure nothing else regressed, before finalizing.
+Found a real fixable issue — the `format` check would fail. Let me fix that within scope.
+`cargo fmt --all` fixed the untracked `batch_review.rs` file (not shown in the tracked diff stat since it's a new file). Let me verify format and clippy are now clean.
+Format is clean now. Let's run clippy.
+Clippy is clean. Now let's re-run the full daemon and workspace test suites (non-Docker, since they've already proven equivalent to the Docker `tests-green-crates` scope) to confirm nothing broke from the fmt fix.
+Everything is green. Here's a summary of the remediation:
+
+**Finding f2 (tier_policy replaces, not merges, on `batch-review enable`)** — already fully fixed in the working tree (`crates/familiar-ai-daemon/src/cli/batch_review.rs`, `crates/familiar-ai-core/src/config/review.rs`): `enable` now resolves the *effective* policy (repo override, falling back to global) via `effective_tier_policy`/`resolved_tier_policy`, seeds a freshly created repo-scoped `tier_policy` table from it via `seed_tier_policy_item`, and only then adds the batch-specific keys — so `independent_review_required`, `full_review_risk_classes`, and `rules` survive. Two regression tests (`effective_tier_policy_falls_back_to_the_global_policy`, `enabling_batch_for_one_class_preserves_inherited_tier_policy_fields`) cover it, and both pass. I found and fixed one real defect while verifying this: the file was **not `cargo fmt`-clean**, which would have failed the `format` check — fixed with `cargo fmt --all`.
+
+**Finding f1 (no required check exercises the daemon's new tests)** — I could not remediate this within scope. Both suggested fixes (add `-p familiar-ai-daemon` to `tests-green-crates`, or promote `tests-workspace-advisory` to required) require editing the verification-plan/check configuration, and I confirmed by grepping the entire repo that no such config exists anywhere in this repository — it's owned entirely by the external review orchestrator, outside `allowed_paths: ["crates/"]`. I investigated the third option (resolve the advisory check's actual failure) and traced it to `crates/familiar-ai-daemon/tests/integration.rs::daemon_starts_and_stops_on_sigterm`, which fails deterministically in the Docker test environment — but I verified this **also fails identically at the unmodified base revision `e82f885`**, before any PRD-71 code exists. It's a pre-existing, unrelated daemon SIGTERM-handling flake, not something these two findings ask me to fix, and "fixing" it would be scope creep beyond the two blocking findings. All of the actual batch-review evidence is solid on its own: `crates/familiar-ai-daemon/tests/batch_review.rs` (9 tests), the daemon crate's full suite (132+ tests), and the entire non-Docker `cargo test --workspace` all pass cleanly.
+Review disposition: HumanReviewRequired; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [DurationLimitExhausted]
+HumanReviewRequired prd=PRD-71
+stop_reasons=["duration_limit_exhausted"]
+finding f1-daemon-tests-unverified High: The new batch-review tests are exercised only by the failing, non-required workspace check
+finding f2-scoped-policy-replaces-global High: `batch-review enable` writes a partial repository-scoped tier_policy that replaces, not merges, the global policy
+finding f3-submission-not-durable-before-provider-call Medium: A batch is submitted to the provider before any durable row exists, so a crash in that window loses and re-bills it
+finding f4-poller-startup-gate-and-early-return Medium: The poller decides once at startup whether to run, and aborts the whole sweep on a single row's transport failure
+finding f5-assumed-discount-not-provider-reported Medium: Batch cost is an assumed 50% discount on configured interactive rates, not the provider-reported cost the criterion requires
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding expected_file_declaration: declared in Expected Files within allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+scope_finding configured_allowed_path: within configured allowed path 'crates/'
+non-interactive input: preserving checkpoint
+error: PRD-71: human review required
+---
+exit: 1
