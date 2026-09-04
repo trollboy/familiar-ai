@@ -1,0 +1,34 @@
+command: familiar-ai drive --max-prds 1 --max-parallel-components 1 --prd PRD-081
+date: Fri Sep  4 09:54:46 PM UTC 2026
+host: trollboy (Linux)
+head: f7d98ebb605b9bb9d06aaed51156f44a49cc3dc3 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788558886408486-0001953210-000000 started warrant={"max_prds":1,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-81"]}
+drive: checkout HEAD=f7d98eb dirty_files=0 ahead of origin/main by 3
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:1953236
+preflight: heartbeat check=verification.format elapsed_ms=5155 child=pid:1953236
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:1953863
+preflight: heartbeat check=verification.lint elapsed_ms=30004 child=pid:1953863 last="    Checking familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.lint elapsed_ms=34210 child=pid:1953863
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:1958279
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30000 child=pid:1958279 last="   Compiling familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=60002 child=pid:1958279 last="    = note: `#[warn(dead_code)]` on by default"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=90004 child=pid:1958279 last="test delivery::tests::retry_after_partial_deploy_does_not_repeat_publish_or_merge ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=120003 child=pid:1958279 last="backlog: PRD-1 docs/prds/PRD-001.md pending -> in_progress actor=system:familiar-ai-run:00001788559044148406-0000012924-…"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=150002 child=pid:1958279 last="test repos::batch_review::tests::applied_reentry_recovers_to_interactive_fallback_with_a_durable_reason ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=170093 child=pid:1958279
+drive: session preflight failed: verification.format: command exited with code Some(1); stdout="#1 [internal] load local bake definitions\\n#1 reading from stdin 549B done\\n#1 DONE 0.0s\\n\\n#2 [internal] load build definition from Dockerfile\\n#2 transferring dockerfile: 1.07kB done\\n#2 DONE 0.0s\\n\\n#3 [internal] load metadata for docker.io/library/rust:1.88-bookworm\\n#3 ...\\n\\n#4 [auth] library/rust:pull token for registry-1.docker.io\\n#4 DONE 0.0s\\n\\n#3 [internal] load metadata for docker.io/library/rust:1.88-bookworm\\n#3 DONE 0.5s\\n\\n#5 [internal] load .dockerignore\\n#5 transferring context: 68B done\\n#5 DONE 0.0s\\n\\n#6 [tester 1/6] FROM docker.io/library/rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0\\n#6 DONE 0.0s\\n\\n#7 [internal] load build context\\n#7 transferring context: 1.67MB 0.1s done\\n#7 DONE 0.1s\\n\\n#8 [tester 2/6] WORKDIR /app\\n#8 CACHED\\n\\n#9 [tester 3/6] RUN cargo install cargo-llvm-cov\\n#9 CACHED\\n\\n#10 [tester 4/6] RUN rustup component add llvm-tools-preview\\n#10 CACHED\\n\\n#11 [tester 5/6] RUN git config --global user.email \"tester@familiar-ai.invalid\"     && git config --global user.name \"familiar-ai-tester\"     && git config --global init.defaultBranch main\\n#11 CACHED\\n\\n#12 [tester 6/6] COPY . .\\n#12 DONE 0.3s\\n\\n#13 exporting to image\\n#13 exporting layers 0.1s done\\n#13 writing image sha256:7ef06106b1599ff15c947ea647ad24dbc6b2582800ee72266455ab5188758e36 done\\n#13 naming to docker.io/library/familiar-ai-test done\\n#13 DONE 0.1s\\n\\n#14 resolving provenance for metadata file\\n#14 DONE 0.0s\\nDiff in /app/crates/familiar-ai-daemon/tests/runtime_path_containment.rs:256:\\n         .unwrap();\\n \\n     let retained = temp.path().join(\".familiar/tool-output/c_perms.txt\");\\n-    assert!(retained.exists(), \"expected retained output at {retained:?}\");\\n+    assert!(\\n+        retained.exists(),\\n+        \"expected retained output at {retained:?}\"\\n+    );\\n \\n     let dir_mode = fs::metadata(retained.parent().unwrap())\\n         .unwrap()" stderr="" omitted_bytes=0
+drive: session drive-00001788558886408486-0001953210-000000 terminated reason=preflight_failed attempted=0 completed=0
+session=drive-00001788558886408486-0001953210-000000 termination=preflight_failed attempted=0 completed=0 known_cost_microusd=0
+error: session drive-00001788558886408486-0001953210-000000 terminated abnormally: preflight_failed
+---
+exit: 1
