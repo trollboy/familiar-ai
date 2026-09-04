@@ -243,7 +243,16 @@ sanitization every other observation follows.
   (`AgentRuntimeConfig::validate`) rejects any allowlisted name that
   contains a billing/admin credential marker.
 - Filesystem capabilities are confined beneath the execution's worktree
-  root; a path containing `..` or an absolute path is refused.
+  root; a path containing `..` or an absolute path is refused. Containment
+  is **resolved-path containment** (PRD-081): the spelled/relative path is
+  rejected lexically first, but the decisive check resolves the joined path
+  — following symlinks, canonicalizing against the deepest existing
+  ancestor when the leaf does not exist yet — and refuses it unless the
+  resolved path is still beneath the canonicalized worktree root. This
+  closes the deterministic hole where a `run-command`-created symlink lets
+  a relative, `..`-free path reach outside the worktree; it does not close
+  the residual TOCTOU window where a component is replaced by a symlink
+  between this check and the filesystem call that follows it.
 - Network access for tool commands is deny-by-default
   (`agent_runtime.sandbox.network_allowed`, default `false`).
 - Cancellation and timeout kill the tool's process group (reusing the

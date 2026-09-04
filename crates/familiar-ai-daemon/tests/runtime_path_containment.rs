@@ -75,7 +75,6 @@ fn enabled_executor(worktree_root: std::path::PathBuf) -> SandboxedToolExecutor 
 /// component, so the lexical guard admits it; `read_to_string` then follows
 /// the symlink out of the worktree entirely.
 #[test]
-#[ignore = "PRD-081: fails until containment/retention is fixed; removing this attribute is an acceptance criterion"]
 fn read_file_refuses_a_symlink_that_escapes_the_worktree() {
     let temp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -105,7 +104,6 @@ fn read_file_refuses_a_symlink_that_escapes_the_worktree() {
 /// A symlink pointing at a single file outside the worktree, rather than at a
 /// directory — the same escape without a traversable component to inspect.
 #[test]
-#[ignore = "PRD-081: fails until containment/retention is fixed; removing this attribute is an acceptance criterion"]
 fn read_file_refuses_a_symlink_to_a_single_outside_file() {
     let temp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -136,7 +134,6 @@ fn read_file_refuses_a_symlink_to_a_single_outside_file() {
 /// The write side of the same hole: containment must not depend on which
 /// capability reached the filesystem.
 #[test]
-#[ignore = "PRD-081: fails until containment/retention is fixed; removing this attribute is an acceptance criterion"]
 fn apply_edit_refuses_to_write_through_an_escaping_symlink() {
     let temp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -167,6 +164,75 @@ fn apply_edit_refuses_to_write_through_an_escaping_symlink() {
         fs::read_to_string(&target).unwrap(),
         "original\n",
         "a file outside the worktree was modified"
+    );
+}
+
+/// `victim.txt` is a symlink whose target does not exist yet. The fallback
+/// that resolves a not-yet-created leaf must not treat a dangling symlink
+/// the same way: `canonicalize` fails with `NotFound` for both, but only a
+/// component with no filesystem entry at all is the to-be-created-leaf case.
+/// A symlink that already exists, dangling or not, is refused outright.
+#[test]
+fn apply_edit_refuses_a_dangling_symlink_leaf_pointing_outside() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("autostart.desktop");
+    symlink(&target, temp.path().join("victim.txt")).unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::ApplyEdit,
+            "c_dangling_symlink_write",
+            serde_json::json!({
+                "path": "victim.txt",
+                "change_kind": "whole-file",
+                "content": "OVERWRITTEN\n",
+            }),
+        ),
+        &authority(),
+    );
+
+    assert!(
+        matches!(result, Err(ExecutionError::Failed(_))),
+        "apply-edit through a dangling symlink must be refused, got {result:?}"
+    );
+    assert!(
+        !target.exists(),
+        "a file outside the worktree was created through a dangling symlink"
+    );
+}
+
+/// Same hole, one level up: the *intermediate* component is the dangling
+/// symlink (`link -> /outside/dir-created-later`), not the leaf itself.
+#[test]
+fn apply_edit_refuses_a_dangling_symlink_intermediate_component() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let not_yet_created = outside.path().join("dir-created-later");
+    symlink(&not_yet_created, temp.path().join("link")).unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::ApplyEdit,
+            "c_dangling_symlink_intermediate",
+            serde_json::json!({
+                "path": "link/new.txt",
+                "change_kind": "whole-file",
+                "content": "OVERWRITTEN\n",
+            }),
+        ),
+        &authority(),
+    );
+
+    assert!(
+        matches!(result, Err(ExecutionError::Failed(_))),
+        "apply-edit through a dangling symlink intermediate component must be refused, got {result:?}"
+    );
+    assert!(
+        !not_yet_created.exists(),
+        "a directory outside the worktree was created through a dangling symlink component"
     );
 }
 
