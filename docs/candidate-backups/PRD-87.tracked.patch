@@ -1,0 +1,734 @@
+diff --git a/crates/familiar-ai-core/src/backlog.rs b/crates/familiar-ai-core/src/backlog.rs
+index c48c47a..b196ae9 100644
+--- a/crates/familiar-ai-core/src/backlog.rs
++++ b/crates/familiar-ai-core/src/backlog.rs
+@@ -692,15 +692,13 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
+         let worktree = git(&["rev-parse", "--show-toplevel"])?
+             .canonicalize()
+             .map_err(|e| BacklogError::Repository(format!("cannot canonicalize worktree: {e}")))?;
+-        let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?
+-            .canonicalize()
+-            .map_err(|e| {
+-                BacklogError::Repository(format!("cannot resolve Git common directory: {e}"))
+-            })?;
+-        let key = common
+-            .to_str()
+-            .ok_or_else(|| BacklogError::Repository("Git common directory is not UTF-8".into()))?
+-            .replace('\\', "/");
++        // PRD-087: repository identity is minted in exactly one place
++        // (`repository_path::repository_origin_key`), so that identity
++        // derived while executing inside any worktree resolves to the same
++        // key as its origin repository. Do not reintroduce an independent
++        // `--git-common-dir` computation here.
++        let key = crate::repository_path::repository_origin_key(&cwd)
++            .map_err(|e| BacklogError::Repository(e.to_string()))?;
+         Ok(RepositoryIdentity { worktree, key })
+     }
+ 
+diff --git a/crates/familiar-ai-core/src/config/context_service.rs b/crates/familiar-ai-core/src/config/context_service.rs
+index ab218b4..5c9ce17 100644
+--- a/crates/familiar-ai-core/src/config/context_service.rs
++++ b/crates/familiar-ai-core/src/config/context_service.rs
+@@ -54,18 +54,9 @@ pub struct EffectiveExecutionConfig {
+ 
+ /// The canonical Git common-directory identity of a worktree — the same key
+ /// `FilesystemBacklogDiscovery::resolve` computes — or None when the path is
+-/// not inside a Git repository (or git is unavailable).
++/// not inside a Git repository (or git is unavailable). PRD-087: this used
++/// to be an independent computation kept in sync with the backlog copy only
++/// by comment; it now delegates to the single minting site.
+ pub(super) fn git_common_directory(path: &Path) -> Option<String> {
+-    let output = std::process::Command::new("git")
+-        .arg("-C")
+-        .arg(path)
+-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+-        .output()
+-        .ok()?;
+-    if !output.status.success() {
+-        return None;
+-    }
+-    let value = String::from_utf8(output.stdout).ok()?;
+-    let canonical = Path::new(value.trim()).canonicalize().ok()?;
+-    Some(canonical.to_str()?.replace('\\', "/"))
++    crate::repository_path::git_common_directory(path)
+ }
+diff --git a/crates/familiar-ai-core/src/lib.rs b/crates/familiar-ai-core/src/lib.rs
+index e942648..eff6619 100755
+--- a/crates/familiar-ai-core/src/lib.rs
++++ b/crates/familiar-ai-core/src/lib.rs
+@@ -34,7 +34,10 @@ pub use config::{
+ };
+ pub use error::{FamiliarError, Result};
+ pub use paths::AppPaths;
+-pub use repository_path::{CanonicalFileIdentity, PathIdentityError};
++pub use repository_path::{
++    git_common_directory, repository_origin_key, CanonicalFileIdentity, PathIdentityError,
++    RepositoryOriginError, INVARIANT_REPOSITORY_IDENTITY,
++};
+ pub use reservation::{
+     GrantMode, OwnerLiveness, OwnerLivenessEvidence, ReservationOwnerIdentity, ResourceRequest,
+     ResourceType, UnknownConsumptionPolicy,
+diff --git a/crates/familiar-ai-core/src/repository_path.rs b/crates/familiar-ai-core/src/repository_path.rs
+index 6a11254..ac56dd2 100644
+--- a/crates/familiar-ai-core/src/repository_path.rs
++++ b/crates/familiar-ai-core/src/repository_path.rs
+@@ -1,4 +1,67 @@
+ use std::path::{Component, Path, PathBuf};
++use std::process::Command;
++
++/// The single minting site for repository origin identity (PRD-087).
++///
++/// Before this, three independent call sites shelled out to
++/// `git rev-parse --git-common-dir` and canonicalized the result: backlog
++/// discovery, per-repository config matching, and accounting evidence. They
++/// agreed only by the accident of being copy-pasted identically — nothing
++/// stopped one of them drifting (a missing `--path-format=absolute`, a
++/// different canonicalization order) and minting a different key for the
++/// same repository. Git's common directory is shared by every linked
++/// worktree of one repository, so this is what makes identity derived while
++/// executing inside a worktree resolve to that worktree's origin repository:
++/// every caller now goes through this one function instead of deriving it
++/// independently.
++pub const INVARIANT_REPOSITORY_IDENTITY: &str = "repository-identity-single-mint";
++
++#[derive(Debug, thiserror::Error)]
++pub enum RepositoryOriginError {
++    #[error("cannot run git: {0}")]
++    Exec(#[source] std::io::Error),
++    #[error("git rev-parse --git-common-dir failed: {0}")]
++    GitFailed(String),
++    #[error("git returned a non-UTF-8 path")]
++    NonUtf8,
++    #[error("cannot canonicalize git common directory: {0}")]
++    Canonicalize(#[source] std::io::Error),
++}
++
++/// The canonical Git common-directory identity of the repository containing
++/// `path`. Every worktree of one repository (the primary checkout and every
++/// `git worktree add` lease) shares the same common directory, so this is
++/// the sole definition of repository identity: two paths produce the same
++/// key if and only if they belong to the same repository.
++pub fn repository_origin_key(path: &Path) -> Result<String, RepositoryOriginError> {
++    let output = Command::new("git")
++        .arg("-C")
++        .arg(path)
++        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
++        .output()
++        .map_err(RepositoryOriginError::Exec)?;
++    if !output.status.success() {
++        return Err(RepositoryOriginError::GitFailed(
++            String::from_utf8_lossy(&output.stderr).trim().to_string(),
++        ));
++    }
++    let value = String::from_utf8(output.stdout).map_err(|_| RepositoryOriginError::NonUtf8)?;
++    let canonical = Path::new(value.trim())
++        .canonicalize()
++        .map_err(RepositoryOriginError::Canonicalize)?;
++    canonical
++        .to_str()
++        .map(|s| s.replace('\\', "/"))
++        .ok_or(RepositoryOriginError::NonUtf8)
++}
++
++/// Advisory form of [`repository_origin_key`] for callers that treat "not a
++/// Git repository" (or git being unavailable) as `None` rather than a hard
++/// error — per-repository config matching and accounting evidence, neither
++/// of which own the repository's authoritative identity.
++pub fn git_common_directory(path: &Path) -> Option<String> {
++    repository_origin_key(path).ok()
++}
+ 
+ /// The project-scoped, repository-relative identity of one file entry.
+ #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+@@ -152,8 +215,79 @@ fn verify_physical_containment(root: &Path, relative: &str) -> Result<(), PathId
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use std::process::Stdio;
+     use tempfile::tempdir;
+ 
++    fn git(dir: &Path, args: &[&str]) {
++        assert!(Command::new("git")
++            .args(args)
++            .current_dir(dir)
++            .stdin(Stdio::null())
++            .status()
++            .unwrap()
++            .success());
++    }
++
++    #[test]
++    fn two_worktrees_of_one_repository_mint_the_same_origin_key() {
++        let temp = tempdir().unwrap();
++        let repo = temp.path().join("repo");
++        std::fs::create_dir(&repo).unwrap();
++        git(&repo, &["init", "-q"]);
++        git(&repo, &["config", "user.email", "test@example.invalid"]);
++        git(&repo, &["config", "user.name", "Test"]);
++        std::fs::write(repo.join("file"), "base").unwrap();
++        git(&repo, &["add", "."]);
++        git(&repo, &["commit", "-qm", "base"]);
++
++        let worktree_a = temp.path().join("wt-a");
++        let worktree_b = temp.path().join("wt-b");
++        git(
++            &repo,
++            &[
++                "worktree",
++                "add",
++                "-b",
++                "wt-a",
++                worktree_a.to_str().unwrap(),
++            ],
++        );
++        git(
++            &repo,
++            &[
++                "worktree",
++                "add",
++                "-b",
++                "wt-b",
++                worktree_b.to_str().unwrap(),
++            ],
++        );
++
++        let main_key = repository_origin_key(&repo).unwrap();
++        let key_a = repository_origin_key(&worktree_a).unwrap();
++        let key_b = repository_origin_key(&worktree_b).unwrap();
++        assert_eq!(
++            main_key, key_a,
++            "worktree a must resolve the origin repository's identity"
++        );
++        assert_eq!(
++            main_key, key_b,
++            "worktree b must resolve the origin repository's identity"
++        );
++
++        // The advisory wrapper is the same single minting site, not a
++        // second independent computation.
++        assert_eq!(git_common_directory(&worktree_a), Some(key_a));
++        assert_eq!(git_common_directory(&worktree_b), Some(key_b));
++    }
++
++    #[test]
++    fn non_repository_path_is_advisory_none_not_a_panic() {
++        let temp = tempdir().unwrap();
++        assert!(git_common_directory(temp.path()).is_none());
++        assert!(repository_origin_key(temp.path()).is_err());
++    }
++
+     #[test]
+     fn relative_normalization_is_idempotent() {
+         let root = tempdir().unwrap();
+diff --git a/crates/familiar-ai-daemon/src/drive.rs b/crates/familiar-ai-daemon/src/drive.rs
+index 36a274a..b515eb6 100644
+--- a/crates/familiar-ai-daemon/src/drive.rs
++++ b/crates/familiar-ai-daemon/src/drive.rs
+@@ -1876,9 +1876,15 @@ pub fn drive(
+                                             "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2",
+                                             rusqlite::params![now, checkpoint.checkpoint_id],
+                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
++                                        // A checkpoint completes at most once, so the fixed
++                                        // id + INSERT OR IGNORE stays idempotent across a
++                                        // retried landing; the sequence still comes from the
++                                        // single allocator (PRD-087) so this row is never a
++                                        // second, independently-numbered minting site.
++                                        let (_, sequence) = familiar_ai_storage::next_checkpoint_event_id(tx, &checkpoint.checkpoint_id).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                         tx.execute(
+-                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
+-                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
++                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,'completed',?5,?6)",
++                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, sequence, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
+                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                     }
+                                     let changed = tx.execute(
+@@ -2306,9 +2312,15 @@ pub fn drive(
+                                                                             "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2",
+                                                                             rusqlite::params![now, checkpoint.checkpoint_id],
+                                                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
++                                                                        // A checkpoint completes at most once, so the fixed
++                                                                        // id + INSERT OR IGNORE stays idempotent across a
++                                                                        // retried landing; the sequence still comes from the
++                                                                        // single allocator (PRD-087) so this row is never a
++                                                                        // second, independently-numbered minting site.
++                                                                        let (_, sequence) = familiar_ai_storage::next_checkpoint_event_id(tx, &checkpoint.checkpoint_id).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                         tx.execute(
+-                                                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
+-                                                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
++                                                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,'completed',?5,?6)",
++                                                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, sequence, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
+                                                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                     }
+                                                                     let changed = tx.execute(
+diff --git a/crates/familiar-ai-daemon/src/run.rs b/crates/familiar-ai-daemon/src/run.rs
+index 142b700..129073f 100644
+--- a/crates/familiar-ai-daemon/src/run.rs
++++ b/crates/familiar-ai-daemon/src/run.rs
+@@ -2933,18 +2933,13 @@ fn persist_accounting_observations(
+     Ok(())
+ }
+ 
++// PRD-087: repository identity is minted in exactly one place
++// (`familiar_ai_core::repository_path::git_common_directory`); this used to
++// be a third independent `--git-common-dir` computation (alongside backlog
++// discovery and per-repository config matching) kept in sync only by
++// convention.
+ fn git_common_directory_evidence(path: &Path) -> Option<String> {
+-    let output = Command::new("git")
+-        .arg("-C")
+-        .arg(path)
+-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+-        .output()
+-        .ok()?;
+-    if !output.status.success() {
+-        return None;
+-    }
+-    let value = String::from_utf8(output.stdout).ok()?;
+-    std::fs::canonicalize(value.trim()).ok().map(|p| slash(&p))
++    familiar_ai_core::repository_path::git_common_directory(path)
+ }
+ 
+ fn terminal(
+diff --git a/crates/familiar-ai-daemon/src/worktree.rs b/crates/familiar-ai-daemon/src/worktree.rs
+index d7acf58..d74388a 100644
+--- a/crates/familiar-ai-daemon/src/worktree.rs
++++ b/crates/familiar-ai-daemon/src/worktree.rs
+@@ -9,6 +9,14 @@ use std::time::Duration;
+ 
+ use serde::{Deserialize, Serialize};
+ 
++/// The origin repository's identity key for a worktree lease. A worktree
++/// never derives repository identity independently: this delegates to the
++/// single minting site (PRD-087), so a lease created here and the primary
++/// checkout it was created from resolve to the same key.
++pub fn origin_repository_key(worktree: &Path) -> Option<String> {
++    familiar_ai_core::repository_path::git_common_directory(worktree)
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+ pub struct WorktreeOwnership {
+     pub session_id: String,
+@@ -189,6 +197,12 @@ impl WorktreeLease {
+         &self.branch
+     }
+ 
++    /// The origin repository's identity key, as seen from inside this
++    /// worktree (PRD-087).
++    pub fn origin_repository_key(&self) -> Option<String> {
++        origin_repository_key(self.path())
++    }
++
+     pub fn heartbeat(&mut self) -> io::Result<()> {
+         self.ownership.heartbeat_at = chrono::Utc::now().to_rfc3339();
+         persist(&self.ownership_path, &self.ownership)
+@@ -310,6 +324,47 @@ mod tests {
+         assert_eq!(record.state, "retained");
+     }
+ 
++    #[test]
++    fn lease_origin_repository_key_matches_the_repository_it_was_created_from() {
++        // PRD-087: identity derived while executing inside a worktree must
++        // resolve to that worktree's origin repository, not something
++        // worktree-specific.
++        let temp = tempfile::tempdir().unwrap();
++        let repo = temp.path().join("repo");
++        fs::create_dir(&repo).unwrap();
++        for args in [
++            vec!["init", "-q"],
++            vec!["config", "user.email", "test@example.invalid"],
++            vec!["config", "user.name", "Test"],
++        ] {
++            assert!(Command::new("git")
++                .args(args)
++                .current_dir(&repo)
++                .status()
++                .unwrap()
++                .success());
++        }
++        fs::write(repo.join("file"), "base").unwrap();
++        assert!(Command::new("git")
++            .args(["add", "."])
++            .current_dir(&repo)
++            .status()
++            .unwrap()
++            .success());
++        assert!(Command::new("git")
++            .args(["commit", "-qm", "base"])
++            .current_dir(&repo)
++            .status()
++            .unwrap()
++            .success());
++        let state = temp.path().join("state");
++        let lease_a = WorktreeLease::create(&repo, &state, "session-a", "PRD-1").unwrap();
++        let lease_b = WorktreeLease::create(&repo, &state, "session-b", "PRD-1").unwrap();
++        let repo_key = familiar_ai_core::repository_path::git_common_directory(&repo).unwrap();
++        assert_eq!(lease_a.origin_repository_key(), Some(repo_key.clone()));
++        assert_eq!(lease_b.origin_repository_key(), Some(repo_key));
++    }
++
+     #[test]
+     fn active_worktree_heartbeat_is_periodic_and_remains_valid_json() {
+         let temp = tempfile::tempdir().unwrap();
+diff --git a/crates/familiar-ai-storage/src/lib.rs b/crates/familiar-ai-storage/src/lib.rs
+index f2f5a25..83b8a0d 100755
+--- a/crates/familiar-ai-storage/src/lib.rs
++++ b/crates/familiar-ai-storage/src/lib.rs
+@@ -20,7 +20,10 @@ pub use repos::batch_review::{
+ };
+ pub use repos::billing::{BillingRepository, BillingSource, BillingStatus, ProviderCostRow};
+ pub use repos::bootstrap::SqliteBootstrapRepository;
+-pub use repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
++pub use repos::checkpoint::{
++    next_checkpoint_event_id, CheckpointRepository, ExecutionCheckpoint,
++    INVARIANT_CHECKPOINT_EVENT_SEQUENCE,
++};
+ pub use repos::config_decision::{ConfigDecision, ConfigDecisionRepository};
+ pub use repos::control_plane::ControlPlaneRepository;
+ pub use repos::decision::DecisionRepository;
+@@ -51,7 +54,7 @@ pub use repos::reservation::{
+     AcquireOutcome, ReservationGrant, ReservationGrantItem, ReservationRepository,
+     SettlementObservation, SettlementResult,
+ };
+-pub use repos::review::ReviewRepository;
++pub use repos::review::{ReviewRepository, INVARIANT_REVIEW_RECOVERY_TOLERANCE};
+ pub use repos::session_rollup::SessionRollupRepository;
+ pub use repos::stewardship::{
+     budget_summary, pending_human_gates, review_findings_for_session, BudgetSummary, PendingGate,
+diff --git a/crates/familiar-ai-storage/src/migrate.rs b/crates/familiar-ai-storage/src/migrate.rs
+index 22990a7..b1b533b 100755
+--- a/crates/familiar-ai-storage/src/migrate.rs
++++ b/crates/familiar-ai-storage/src/migrate.rs
+@@ -204,6 +204,10 @@ const MIGRATIONS: &[Migration] = &[
+         version: 58,
+         sql: include_str!("../migrations/058_batch_reviews.sql"),
+     },
++    Migration {
++        version: 61,
++        sql: include_str!("../migrations/061_identity_invariants.sql"),
++    },
+ ];
+ 
+ pub fn run_migrations(conn: &Connection) -> familiar_ai_core::Result<usize> {
+@@ -319,7 +323,7 @@ mod tests {
+         let db = crate::Database::open_in_memory().unwrap();
+         let first = db.run_migrations().unwrap();
+         let second = db.run_migrations().unwrap();
+-        assert_eq!(first, 49);
++        assert_eq!(first, 50);
+         assert_eq!(second, 0);
+     }
+ 
+@@ -341,7 +345,7 @@ mod tests {
+             vec![
+                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                 24, 25, 26, 27, 28, 29, 30, 31, 32, 39, 40, 41, 42, 43, 44, 45, 47, 49, 51, 52, 53,
+-                54, 55, 56, 57, 58
++                54, 55, 56, 57, 58, 61
+             ]
+         );
+     }
+@@ -436,7 +440,7 @@ mod tests {
+             )
+             .unwrap();
+ 
+-        assert_eq!(db.run_migrations().unwrap(), 6);
++        assert_eq!(db.run_migrations().unwrap(), 7);
+         let selection_schema: String = db
+             .conn()
+             .query_row(
+@@ -489,7 +493,7 @@ mod tests {
+             [&spec],
+         ).unwrap();
+ 
+-        assert_eq!(db.run_migrations().unwrap(), 8);
++        assert_eq!(db.run_migrations().unwrap(), 9);
+         let artifact_id = format!("sha256:{}", "a".repeat(64));
+         let migrated: (String, String) = db
+             .conn()
+@@ -557,7 +561,7 @@ mod tests {
+             )
+             .unwrap();
+ 
+-        assert_eq!(db.run_migrations().unwrap(), 47);
++        assert_eq!(db.run_migrations().unwrap(), 48);
+         let unchanged: (i64, String, String) = db
+             .conn()
+             .query_row(
+@@ -613,7 +617,7 @@ mod tests {
+             )
+             .unwrap();
+ 
+-        assert_eq!(db.run_migrations().unwrap(), 43);
++        assert_eq!(db.run_migrations().unwrap(), 44);
+         let project: (String, String) = db
+             .conn()
+             .query_row(
+@@ -644,7 +648,7 @@ mod tests {
+                 .unwrap();
+         }
+         db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
+-        assert_eq!(db.run_migrations().unwrap(), 42);
++        assert_eq!(db.run_migrations().unwrap(), 43);
+         let preserved: String = db
+             .conn()
+             .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
+@@ -678,7 +682,7 @@ mod tests {
+         db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(3,'repo','docs/prds/PRD-009.md','pending','completed','human:alice','before')",[]).unwrap();
+         db.conn().execute("INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(3,'manual_complete_override','accepted outside normal review')",[]).unwrap();
+ 
+-        assert_eq!(db.run_migrations().unwrap(), 39);
++        assert_eq!(db.run_migrations().unwrap(), 40);
+ 
+         let rows: Vec<(i64, String, String)> = {
+             let mut stmt = db
+diff --git a/crates/familiar-ai-storage/src/repos/backlog.rs b/crates/familiar-ai-storage/src/repos/backlog.rs
+index c1c36a5..6e22c57 100644
+--- a/crates/familiar-ai-storage/src/repos/backlog.rs
++++ b/crates/familiar-ai-storage/src/repos/backlog.rs
+@@ -321,18 +321,18 @@ impl<'a> SqliteBacklogRepository<'a> {
+                 "checkpoint {checkpoint_id} changed during approve-and-complete"
+             )));
+         }
+-        let event_sequence: i64 = tx
+-            .query_row(
+-                "SELECT COUNT(*) FROM execution_checkpoint_events WHERE checkpoint_id=?1",
+-                [&checkpoint_id],
+-                |row| row.get(0),
+-            )
+-            .map_err(storage)?;
++        // PRD-087: mint through the single checkpoint-event allocator
++        // instead of computing a sequence independently here — a second,
++        // divergent copy of this exact pattern is the FAM-BUG-039 shape.
++        let (event_id, sequence) =
++            crate::repos::checkpoint::next_checkpoint_event_id(&tx, &checkpoint_id)
++                .map_err(storage)?;
+         tx.execute(
+-            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
++            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,'completed',?5,?6)",
+             params![
+-                format!("{checkpoint_id}:approved:{event_sequence}"),
++                event_id,
+                 checkpoint_id,
++                sequence,
+                 phase,
+                 format!("approve_and_complete actor={actor} approved_hash={approved_diff_hash} commit={commit}"),
+                 now
+diff --git a/crates/familiar-ai-storage/src/repos/checkpoint.rs b/crates/familiar-ai-storage/src/repos/checkpoint.rs
+index 0d2b3e6..bcea6e1 100644
+--- a/crates/familiar-ai-storage/src/repos/checkpoint.rs
++++ b/crates/familiar-ai-storage/src/repos/checkpoint.rs
+@@ -1,6 +1,14 @@
+ use chrono::Utc;
+ use familiar_ai_core::FamiliarError;
+-use rusqlite::{params, Connection, OptionalExtension};
++use rusqlite::{params, Connection, OptionalExtension, Transaction};
++
++/// PRD-087: identifies the single sequenced allocator below that mints every
++/// `execution_checkpoint_events.event_id`. A checkpoint's identity is durable
++/// across attempts (FAM-BUG-037), so a later attempt legitimately revisits a
++/// phase it already recorded; the allocator's job is making sure that
++/// replay can never collide with — or drop — an earlier occurrence's event
++/// (FAM-BUG-039).
++pub const INVARIANT_CHECKPOINT_EVENT_SEQUENCE: &str = "checkpoint-event-sequence-allocator";
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+ pub struct ExecutionCheckpoint {
+@@ -73,11 +81,18 @@ impl<'a> CheckpointRepository<'a> {
+                     params![value.repository_key, value.prd_id, value.diff_hash],
+                 )
+                 .map_err(db)?;
++        } else {
++            // The created event is a singleton per durable checkpoint
++            // identity (not per re-freeze), so it is only minted the first
++            // time this (repository, prd) checkpoint comes into existence —
++            // through the same allocator every other event uses.
++            let (event_id, sequence) =
++                next_checkpoint_event_id(&transaction, &effective_id).map_err(db)?;
++            transaction.execute(
++                "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'checkpoint_created',NULL,?4,'implementation_checkpoint',?5)",
++                params![event_id, effective_id, sequence, value.phase, now],
++            ).map_err(db)?;
+         }
+-        transaction.execute(
+-            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'checkpoint_created',NULL,?3,'implementation_checkpoint',?4)",
+-            params![format!("{}:created", value.checkpoint_id), effective_id, value.phase, now],
+-        ).map_err(db)?;
+         transaction.commit().map_err(db)?;
+         Ok(())
+     }
+@@ -190,19 +205,14 @@ impl<'a> CheckpointRepository<'a> {
+             )));
+         }
+         // Checkpoint identity is durable across attempts (FAM-BUG-037), so a
+-        // later attempt legitimately revisits a phase; the event id carries a
+-        // per-checkpoint sequence to stay unique per occurrence, not per
+-        // lifetime (FAM-BUG-039).
+-        let sequence: i64 = transaction
+-            .query_row(
+-                "SELECT COUNT(*) FROM execution_checkpoint_events WHERE checkpoint_id=?1",
+-                params![checkpoint_id],
+-                |row| row.get(0),
+-            )
+-            .map_err(db)?;
++        // later attempt legitimately revisits a phase; the allocator below
++        // gives the event id a per-checkpoint sequence so it stays unique
++        // per occurrence, not per lifetime (FAM-BUG-039).
++        let (event_id, sequence) =
++            next_checkpoint_event_id(&transaction, checkpoint_id).map_err(db)?;
+         transaction.execute(
+-            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,?4,?5,?6)",
+-            params![format!("{checkpoint_id}:{phase}:{sequence}"), checkpoint_id, prior, phase, detail, now],
++            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,?5,?6,?7)",
++            params![event_id, checkpoint_id, sequence, prior, phase, detail, now],
+         ).map_err(db)?;
+         transaction.commit().map_err(db)?;
+         Ok(())
+@@ -210,7 +220,7 @@ impl<'a> CheckpointRepository<'a> {
+ 
+     pub fn events(&self, checkpoint_id: &str) -> familiar_ai_core::Result<Vec<(String, String)>> {
+         let mut statement = self.conn.prepare(
+-            "SELECT resulting_phase,detail FROM execution_checkpoint_events WHERE checkpoint_id=?1 ORDER BY recorded_at,event_id",
++            "SELECT resulting_phase,detail FROM execution_checkpoint_events WHERE checkpoint_id=?1 ORDER BY recorded_at,sequence",
+         ).map_err(db)?;
+         let events = statement
+             .query_map([checkpoint_id], |row| Ok((row.get(0)?, row.get(1)?)))
+@@ -221,6 +231,27 @@ impl<'a> CheckpointRepository<'a> {
+     }
+ }
+ 
++/// The single sequenced allocator for `execution_checkpoint_events` ids
++/// (PRD-087, [`INVARIANT_CHECKPOINT_EVENT_SEQUENCE`]). Every writer of that
++/// table — this repository's own `put`/`transition`, the backlog
++/// completion path, and the driver's landing paths — mints its event
++/// through this one function instead of computing a sequence independently,
++/// so a checkpoint re-entered across occurrences can never collide with, or
++/// silently drop, an earlier occurrence's event (FAM-BUG-039). The sequence
++/// is computed from the durable `sequence` column (not a row count), so it
++/// stays monotonic even if a future recovery path ever removes an event.
++pub fn next_checkpoint_event_id(
++    transaction: &Transaction<'_>,
++    checkpoint_id: &str,
++) -> rusqlite::Result<(String, i64)> {
++    let sequence: i64 = transaction.query_row(
++        "SELECT COALESCE(MAX(sequence), -1) + 1 FROM execution_checkpoint_events WHERE checkpoint_id=?1",
++        params![checkpoint_id],
++        |row| row.get(0),
++    )?;
++    Ok((format!("{checkpoint_id}:{sequence}"), sequence))
++}
++
+ fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionCheckpoint> {
+     Ok(ExecutionCheckpoint {
+         checkpoint_id: row.get(0)?,
+diff --git a/crates/familiar-ai-storage/src/repos/review.rs b/crates/familiar-ai-storage/src/repos/review.rs
+index b3f1fdd..486fba1 100644
+--- a/crates/familiar-ai-storage/src/repos/review.rs
++++ b/crates/familiar-ai-storage/src/repos/review.rs
+@@ -6,6 +6,15 @@ use familiar_ai_review::{
+ };
+ use rusqlite::{params, Connection, OptionalExtension};
+ 
++/// PRD-087: a recovery path either accepts the schema its own rows were
++/// written under, or migrates them forward with a recorded migration —
++/// refusing your own history is neither. `recover_incomplete` below is the
++/// recovery path that owns pre-`repository_key` review cycles (FAM-BUG-032);
++/// every row it tolerates instead of refusing gets one row in
++/// `identity_invariant_tolerances`, so the tolerance is a durable fact, not
++/// only a code comment.
++pub const INVARIANT_REVIEW_RECOVERY_TOLERANCE: &str = "review-recovery-schema-tolerance";
++
+ pub struct ReviewRepository<'a> {
+     conn: &'a Connection,
+ }
+@@ -116,7 +125,9 @@ impl<'a> ReviewRepository<'a> {
+             // wedge every future attempt at startup (FAM-BUG-032).
+             let updated = serde_json::to_string(&cycle)
+                 .map_err(|e| FamiliarError::Database(e.to_string()))?;
+-            self.conn
++            let predates_repository_key = cycle.repository_key.is_empty();
++            let transaction = self.conn.unchecked_transaction().map_err(db)?;
++            transaction
+                 .execute(
+                     "UPDATE review_cycles SET state=?2,disposition=?3,cycle_json=?4,ended_at=?5 WHERE cycle_id=?1",
+                     params![
+@@ -128,6 +139,18 @@ impl<'a> ReviewRepository<'a> {
+                     ],
+                 )
+                 .map_err(db)?;
++            if predates_repository_key {
++                transaction.execute(
++                    "INSERT INTO identity_invariant_tolerances(invariant,table_name,row_key,detail,recorded_at) VALUES(?1,'review_cycles',?2,?3,?4)",
++                    params![
++                        INVARIANT_REVIEW_RECOVERY_TOLERANCE,
++                        id,
++                        "recovered cycle predates repository_key; interrupted in place rather than refused or rewritten through save_cycle",
++                        Utc::now().to_rfc3339()
++                    ],
++                ).map_err(db)?;
++            }
++            transaction.commit().map_err(db)?;
+             count += 1;
+         }
+         Ok(count)
+@@ -552,6 +575,18 @@ mod tests {
+             )
+             .unwrap();
+         assert_eq!(evidence, 1);
++        // PRD-087: tolerating this pre-invariant row is a recorded fact, not
++        // a silent pass.
++        let (invariant, row_key): (String, String) = db
++            .conn()
++            .query_row(
++                "SELECT invariant,row_key FROM identity_invariant_tolerances WHERE table_name='review_cycles'",
++                [],
++                |row| Ok((row.get(0)?, row.get(1)?)),
++            )
++            .unwrap();
++        assert_eq!(invariant, INVARIANT_REVIEW_RECOVERY_TOLERANCE);
++        assert_eq!(row_key, "legacy-keyless");
+         // Idempotent: interrupted cycles are terminal for recovery.
+         assert_eq!(repository.recover_incomplete().unwrap(), 0);
+     }
+diff --git a/docs/running_bugs.md b/docs/running_bugs.md
+index 3fa2a6d..cfb0992 100644
+--- a/docs/running_bugs.md
++++ b/docs/running_bugs.md
+@@ -1411,3 +1411,38 @@ reinstall the binary, then rerun the 076 drive.
+   failure as it happens so the operator can act while the rest run. In an
+   overnight session this is 3.5 minutes per stumble, and a stumble as
+   small as an unformatted file is enough to trigger it.
++
++## 2026-09-05 — PRD-087: identity and event-sequence invariants
++
++Three invariants now enforce facts that previously existed only as prose or
++convention: **`repository-identity-single-mint`** (repository identity is
++computed by exactly one function, `familiar_ai_core::repository_path`, so
++identity derived inside a worktree resolves to that worktree's origin
++repository), **`checkpoint-event-sequence-allocator`** (every writer of
++`execution_checkpoint_events` mints its id and sequence through
++`familiar_ai_storage::next_checkpoint_event_id`, so a checkpoint re-entered
++across occurrences can never collide or drop an event), and
++**`review-recovery-schema-tolerance`** (review recovery accepts a cycle row
++written before `repository_key` existed, and records the tolerance in
++`identity_invariant_tolerances` rather than refusing or silently rewriting
++it). Each is pinned by a regression in
++`crates/familiar-ai-daemon/tests/durable_invariants.rs`, which also owns the
++linkage check below.
++
++### Invariant coverage ledger
++
++One line per prior entry in these three families: which invariant covers it
++now, or why it stays uncovered. This list is checked byte-for-byte against
++`durable_invariants.rs` so it cannot silently drift from the code.
++
++- FAM-BUG-040: covered by repository-identity-single-mint
++- FAM-BUG-037: covered by checkpoint-event-sequence-allocator
++- FAM-BUG-039: covered by checkpoint-event-sequence-allocator
++- FAM-BUG-032: covered by review-recovery-schema-tolerance
++- FAM-BUG-016: uncovered: PRD-id spelling identity (canonical vs zero-padded), not repository-origin identity
++- FAM-BUG-026: uncovered: migration tolerance for worker_specs recovery, a different recovery path than review recovery; already remediated by migration 051 itself
++- FAM-BUG-041: uncovered: checkpoint phase-value bug in the scope-approval write path, not event-id minting
++- FAM-BUG-035: uncovered: scope-decision enrollment policy, not identity or event-sequencing
++- FAM-BUG-051: uncovered: file-path prefix scope authority, deferred to PRD-093
++- FAM-BUG-018: uncovered: candidate-revision rebinding durability, not event-id minting
++- FAM-BUG-021: uncovered: checkpoint hash/candidate durability across remediation, not event-id minting

@@ -1,0 +1,181 @@
+diff --git a/Dockerfile b/Dockerfile
+index 15c9d0a..7904afb 100755
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,8 +1,11 @@
+ # Stage 1: Builder
+ FROM rust:1.88-bookworm AS builder
+ WORKDIR /app
++# Kept identical to the README install command and scripts/gate-build.sh —
++# see scripts/check-feature-parity.sh.
+ COPY . .
+-RUN cargo build --release --no-default-features --bin familiar-ai-daemon
++# PRD-092:PARITY
++RUN cargo build --release --bin familiar-ai-daemon
+ 
+ # Stage 2: Test (used by docker compose test service)
+ FROM rust:1.88-bookworm AS tester
+diff --git a/README.md b/README.md
+index 4076182..3287480 100644
+--- a/README.md
++++ b/README.md
+@@ -117,8 +117,11 @@ kernel ≥ 5.13 or macOS, and at least one coding agent CLI on `PATH`
+ git clone git@github.com:trollboy/familiar-ai.git
+ cd familiar-ai
+ 
+-# Build the CLI. --no-default-features skips the tray feature.
+-cargo build --release --no-default-features -p familiar-ai-daemon --bin familiar-ai
++# Build the CLI. Default features build clean on Linux and macOS with no
++# system packages beyond a C toolchain (needed by `ring`) and Rust stable —
++# the tray is opt-in (see "Optional: the tray" below), not a default.
++# PRD-092:PARITY
++cargo build --release -p familiar-ai-daemon --bin familiar-ai
+ install -m755 target/release/familiar-ai ~/.local/bin/
+ 
+ # Point it at a repository containing docs/prds/*.md
+@@ -146,6 +149,22 @@ warrant, never loosen it.
+ 
+ ---
+ 
++## Optional: the tray
++
++The `familiar-ai-daemon` service binary can show a system tray icon. It is an
++opt-in Cargo feature, not part of the default build:
++
++```bash
++cargo build --release -p familiar-ai-daemon --bin familiar-ai-daemon --features tray
++```
++
++On Linux this additionally requires `libgtk-3-dev` and `libxdo-dev`; enabling
++the feature without them fails at configure time naming the missing package,
++not with a linker error at the end of the build. Nothing beyond the default
++build's C toolchain and Rust stable is required to leave the tray disabled.
++
++---
++
+ ## Configuration
+ 
+ Familiar reads `~/.config/familiar-ai/config.toml` (XDG; `Familiar-AI` on macOS).
+@@ -196,7 +215,7 @@ A Rust workspace of fourteen crates. The wave-two execution path is
+ | `familiar-ai-daemon` | `run`, `drive`, `report`, the `familiar-ai` binary |
+ | `familiar-ai-context` / `-tokens` | Context compilation with hard token ceilings |
+ | `familiar-ai-llm` | OpenAI-compatible backends (Ollama, vLLM, LM Studio, OpenRouter) |
+-| `familiar-ai-mcp` / `-summary` / `-watcher` / `-tray` | Wave-one memory surface (dormant w.r.t. the autopilot) |
++| `familiar-ai-mcp` / `-summary` / `-watcher` / `-tray` | Wave-one memory surface (dormant w.r.t. the autopilot); `-tray` is behind the opt-in `tray` feature |
+ | `familiar-ai-logging` / `-testutil` | Tracing setup; shared test fixtures |
+ 
+ ### Key concepts
+@@ -246,17 +265,36 @@ is identical everywhere:
+ 
+ ```bash
+ docker compose build test
+-docker compose run --rm test cargo test --workspace --no-default-features
++docker compose run --rm test cargo test --workspace
+ docker compose run --rm test cargo fmt --all -- --check
+ docker compose run --rm test cargo clippy --workspace --all-targets -- -D warnings
+ ```
+ 
+ Host commands are for repository inspection and version control only.
+ 
++`./scripts/gate-build.sh` is the same default-feature build the Docker image
++and a host install use — see [One build command everywhere](#one-build-command-everywhere).
++
+ Known environment quirks: the tester image excludes `.git/`, so a handful of
+ git-dependent tests fail there by design; `rustfmt`/`clippy` need
+-`rustup component add` at container runtime; the default `tray` feature has a
+-pre-existing compile error, hence `--no-default-features`.
++`rustup component add` at container runtime.
++
++### One build command everywhere
++
++Every documented build invocation uses the default feature set — none carry a
++workaround flag. Four scripts hold that:
++
++| Script | Proves |
++|---|---|
++| `scripts/gate-build.sh` | The default feature set builds on Linux with `cargo build -p familiar-ai-daemon --bin familiar-ai`, no flags |
++| `scripts/check-no-workaround-flags.sh` | No README, `scripts/`, or operator-doc invocation carries `--no-default-features` without a declared reason |
++| `scripts/check-feature-parity.sh` | The Dockerfile, README install command, and gate build resolve the same feature set |
++| `scripts/measure-build-time.sh` | Clean and incremental build wall-clock stay under a declared per-platform ceiling |
++
++Run any of them with `--help`. `check-no-workaround-flags.sh` and
++`measure-build-time.sh` also take `--selftest`, which pins their behaviour
++against fixed cases (a declared-reason exemption; the recorded macOS
++build-speed pathology) without needing to reproduce either on demand.
+ 
+ ### Contributing
+ 
+diff --git a/SPECTRA_AUTONOMOUS_HANDOVER.md b/SPECTRA_AUTONOMOUS_HANDOVER.md
+index b2bd7ba..1fd710a 100644
+--- a/SPECTRA_AUTONOMOUS_HANDOVER.md
++++ b/SPECTRA_AUTONOMOUS_HANDOVER.md
+@@ -146,7 +146,7 @@ At minimum run:
+ ```bash
+ cargo fmt --all -- --check
+ cargo test --workspace
+-cargo build --release --no-default-features -p familiar-ai-daemon --bin familiar-ai
++cargo build --release -p familiar-ai-daemon --bin familiar-ai
+ ```
+ 
+ Before touching Spectra, verify `familiar-ai report`, `history`, and `usage`
+diff --git a/crates/familiar-ai-daemon/Cargo.toml b/crates/familiar-ai-daemon/Cargo.toml
+index 3325448..ae90009 100755
+--- a/crates/familiar-ai-daemon/Cargo.toml
++++ b/crates/familiar-ai-daemon/Cargo.toml
+@@ -14,7 +14,7 @@ name = "familiar-ai"
+ path = "src/bin/familiar-ai.rs"
+ 
+ [features]
+-default = ["tray"]
++default = []
+ tray = ["dep:familiar-ai-tray"]
+ 
+ [dependencies]
+diff --git a/crates/familiar-ai-daemon/src/main.rs b/crates/familiar-ai-daemon/src/main.rs
+index a4aeab8..fabcf74 100755
+--- a/crates/familiar-ai-daemon/src/main.rs
++++ b/crates/familiar-ai-daemon/src/main.rs
+@@ -632,9 +632,17 @@ fn run_with_tray_feature_but_disabled(state: DaemonState) -> ExitCode {
+     };
+ 
+     runtime.block_on(async {
++        let mut termination = TerminationSignals::register().expect("register termination signals");
+         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+         let (_command_tx, command_rx) = mpsc::channel::<DaemonCommand>(64);
+-        daemon_run(&state, command_rx, shutdown_tx, shutdown_rx).await;
++        daemon_run(
++            &state,
++            &mut termination,
++            command_rx,
++            shutdown_tx,
++            shutdown_rx,
++        )
++        .await;
+         if let Err(e) = remove_pid_file(&state.pid_path) {
+             tracing::warn!(error = %e, "failed to remove pid file");
+         }
+diff --git a/crates/familiar-ai-tray/src/lib.rs b/crates/familiar-ai-tray/src/lib.rs
+index 8b8ec29..9357a48 100755
+--- a/crates/familiar-ai-tray/src/lib.rs
++++ b/crates/familiar-ai-tray/src/lib.rs
+@@ -1,6 +1,7 @@
+ pub mod commands;
+ pub mod icon;
+ pub mod menu;
++pub mod sysdeps;
+ pub mod tray;
+ 
+ pub use commands::TrayCommand;
+diff --git a/docker-compose.yml b/docker-compose.yml
+index bea6b58..247e5cd 100755
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -16,7 +16,7 @@ services:
+       target: tester
+     working_dir: /app
+     command: >
+-      cargo llvm-cov test --workspace --no-fail-fast --no-default-features
++      cargo llvm-cov test --workspace --no-fail-fast
+     volumes:
+       - cargo-cache:/usr/local/cargo/registry
+ 
