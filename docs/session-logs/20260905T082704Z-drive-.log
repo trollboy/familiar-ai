@@ -1,0 +1,613 @@
+command: familiar-ai drive --max-prds 4 --max-parallel-components 4 --prd PRD-083 --prd PRD-087 --prd PRD-091 --prd PRD-092
+date: Sat Sep  5 08:27:04 AM UTC 2026
+host: trollboy (Linux)
+head: f4f5b4b94e4409358fe9f2e4d1a9769fcc559e30 (0 dirty files)
+binary: /home/trollboy/.local/bin/familiar-ai
+---
+drive: session drive-00001788596824257818-0003279353-000000 started warrant={"max_prds":4,"max_cost_nanousd":0,"max_uncached_tokens":0,"max_duration_ms":28800000,"prd_allowlist":["PRD-83","PRD-87","PRD-91","PRD-92"]}
+drive: checkout HEAD=f4f5b4b dirty_files=0 ahead of origin/main by 1
+preflight: heartbeat check=agent.implementation elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=agent.reviewer elapsed_ms=0 child=in-process-agent
+preflight: heartbeat check=writable.format elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.format elapsed_ms=0 child=pid:3279392
+preflight: heartbeat check=verification.format elapsed_ms=6161 child=pid:3279392
+preflight: heartbeat check=writable.lint elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.lint elapsed_ms=0 child=pid:3279978
+preflight: heartbeat check=verification.lint elapsed_ms=30000 child=pid:3279978 last="    Checking familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.lint elapsed_ms=37045 child=pid:3279978
+preflight: heartbeat check=writable.tests-green-crates elapsed_ms=0 child=daemon
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pending-spawn
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=0 child=pid:3284494
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=30004 child=pid:3284494 last="   Compiling familiar-ai-storage v0.1.0 (/app/crates/familiar-ai-storage)"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=60001 child=pid:3284494 last="   Compiling familiar-ai-daemon v0.1.0 (/app/crates/familiar-ai-daemon)"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=90004 child=pid:3284494 last="    = note: `#[warn(dead_code)]` on by default"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=120004 child=pid:3284494 last="test summary_worker::tests::initial_scan_skips_hardcoded_dirs ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=150000 child=pid:3284494 last="test evidence::tests::captures_modified_deleted_renamed_and_untracked_files_with_ranges ... ok"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=180000 child=pid:3284494 last="running 7 tests"
+preflight: heartbeat check=verification.tests-green-crates elapsed_ms=184783 child=pid:3284494
+drive: excluded_allowlist PRD-82 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-84 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-86 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-88 ready but outside the session's approved PRD set
+drive: excluded_allowlist PRD-93 ready but outside the session's approved PRD set
+drive: attempt 1 PRD-83 docs/prds/PRD-083.md
+drive: attempt 2 PRD-87 docs/prds/PRD-087.md
+drive: attempt 3 PRD-91 docs/prds/PRD-091.md
+drive: attempt 4 PRD-92 docs/prds/PRD-092.md
+backlog: PRD-83 docs/prds/PRD-083.md pending -> in_progress actor=system:familiar-ai-run:00001788597053154009-0003279353-000002
+backlog: PRD-87 docs/prds/PRD-087.md pending -> in_progress actor=system:familiar-ai-run:00001788597053154013-0003279353-000004
+backlog: PRD-92 docs/prds/PRD-092.md pending -> in_progress actor=system:familiar-ai-run:00001788597053154009-0003279353-000001
+backlog: PRD-91 docs/prds/PRD-091.md pending -> in_progress actor=system:familiar-ai-run:00001788597053154009-0003279353-000003
+I'll start by examining the existing code this PRD needs to modify: the session report, scope-decisions CLI, stewardship CLI/module, and the drive's pause handling.
+I'll start by exploring the repository structure to understand the current build configuration before implementing PRD-092.
+I'll start by exploring the existing repository structure to understand what's already in place before implementing PRD-087.
+Good, migration 061 is pre-allocated specifically for this PRD. Now let's look at the actual source files that need modification.
+Now let's find how `RepositoryIdentity` is constructed/discovered (the `key` derivation) — line ~650-710.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=60017 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=60020 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=60020 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=60021 last_durable_phase=preflight
+Good, this runs on the main thread after `recv()`, so `db`, `repository`, `config`, `paths` are all accessible. Let's see what happens after the pause block (rest of that `if let Err(HumanReviewRequired)` block) to know where to add the interactive/print logic, plus check imports for `io::IsTerminal`.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=120027 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=120030 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=120032 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=120032 last_durable_phase=preflight
+Good — the code already properly feature-gates tray. Now let me check the workspace exclusion for the tray crate, the build.rs (if any) for early dependency diagnostics, and existing tests related to build.rs/config checks.
+Good — tests do spawn `env!("CARGO_BIN_EXE_familiar-ai")` with args like `["backlog", "complete", "--help"]`. Let's look at `cli_recovery.rs` around that usage and `stewardship_cross_surface.rs` for patterns similar to what the PRD wants (cross-surface regressions).
+drive: progress prd=PRD-91 stage=execution elapsed_ms=180035 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=180040 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=180041 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=180042 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=240039 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=240048 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=240051 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=240051 last_durable_phase=preflight
+Good, confirms 062 is exclusively pre-allocated to PRD-091. Now let's check whether PRDs 085/086/087/093 have already claimed migration numbers or created files that might conflict, and check `familiar-ai-storage/src/lib.rs` for how `ControlPlaneRepository` and new types get exported.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=300043 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=300053 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=300060 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=300060 last_durable_phase=preflight
+Good, `repos` is public. I'll add the new types to the re-export line for control_plane. Now let's view the top of storage/src/repos/control_plane.rs imports again (already read) and write the additions.
+Now the migration file:
+Now register the migration in migrate.rs and fix the two count-dependent tests.
+Now let's add the repository methods to storage/src/repos/control_plane.rs.
+Now insert the methods into `impl<'a> ControlPlaneRepository<'a>` block, right after `register_project` (or near the end, before closing brace). I'll add them right before the final `record_late_outcome` closes, i.e., append near the end of impl block.
+Now add the free-function helpers (`insert_lease_row`, `insert_lease_event`, `read_lease`, `lease_row`) near the other free functions like `ensure_slot_pool`.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=360050 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=360056 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=360069 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=360069 last_durable_phase=preflight
+Compiles clean. Let's run the storage crate's existing tests to make sure the migration count fixes are correct.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=420058 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=420059 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=420078 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=420078 last_durable_phase=preflight
+Now fix each expected count by +1.
+No warnings printed, meaning all six replacements matched uniquely. Let's rerun the tests to confirm.
+All migration tests pass. Now let's run the full storage crate test suite to make sure the new repo code doesn't break anything, plus add unit tests for the new lease methods directly in control_plane.rs's test module.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=480064 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=480064 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=480080 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=480082 last_durable_phase=preflight
+All 121 pass. Now let's add unit tests for the new lease methods in the storage repo's own test module (control_plane.rs storage tests).
+Let's view the end of the file to append the test module correctly.
+Let's check the `run_migrations` function itself to understand versioning semantics and error handling.
+All 8 pass. Now let's build the daemon-side `ControlPlaneService` wrapper methods.
+drive: progress prd=PRD-92 stage=execution elapsed_ms=540074 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=540074 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=540086 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=540087 last_durable_phase=preflight
+Now let's add the `DaemonConfig` fields for lease renewal interval and TTL (core/config/daemon.rs), then the `HostLease` guard in worker_lock.rs, then update config/default.toml.
+Now let's add the `HostLease` guard to worker_lock.rs. First check what `ControlPlaneService` type path looks like and confirm no circular-dependency issue (control_plane.rs is a sibling module in the same crate — fine).
+Now insert the `HostLease` struct after the existing `WorkerLock` impl block (before the free helper functions or after `impl WorkerLock`). Let's place it right after the `impl WorkerLock { ... }` block ends (before `fn recover_exact`).
+drive: progress prd=PRD-91 stage=execution elapsed_ms=600085 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=600085 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=600092 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=600093 last_durable_phase=preflight
+Now let me fix the compile bug in `run_with_tray_feature_but_disabled`:
+Now let's verify this compiles with the tray feature enabled (still expecting the libxdo link failure since it's not installed here):
+Now I have a solid understanding of the codebase. Let me check the `familiar-ai-core` lib.rs to see what's publicly exported before making changes.
+Now report.rs — add pending scope decisions and thread through to `render_judgment`.
+Now let's check that `familiar-ai-core`'s Cargo.toml has `thiserror` as a dependency (used already by `PathIdentityError`), and add a test for the new function.
+Good. Now let's add a unit test for `repository_origin_key` in repository_path.rs's existing test module, and update the exports in lib.rs.
+Now let's update lib.rs's pub use to expose the new symbols at the crate root for convenience:
+drive: progress prd=PRD-91 stage=execution elapsed_ms=660091 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=660092 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=660098 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=660099 last_durable_phase=preflight
+Now let's update `backlog.rs`'s `FilesystemBacklogDiscovery::resolve` to delegate to the shared function instead of duplicating the git-common-dir computation.
+Ah, it's an em-dash. Let me just rewrite the whole file with Write instead, since I'm restructuring it significantly anyway.
+This looks correct and clean. Now let's update `config/context_service.rs` to delegate:
+The only error is a pre-existing bug in `run_with_tray_feature_but_disabled` (untouched by me, present since before my changes, only surfaces with the default `tray` feature). Let me confirm my new code has no other issues by checking with default features and filtering.
+Both still used elsewhere. Now let's add the `worktree.rs` helper for worktree-origin resolution.
+Now let's add a method on `WorktreeLease` to expose this, and a regression test in worktree.rs itself proving the lease's origin key matches the source repo:
+Now let's add a test in worktree.rs's test module:
+All my code compiles cleanly. Now let's run the existing worker_lock tests to confirm no regression, then write the dedicated `tests/multi_host_lease.rs`.
+Now let's implement the checkpoint.rs allocator unification and migration for the `sequence` column.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=720106 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=720107 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=720107 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=720108 last_durable_phase=preflight
+Now let's replace the `put()` and `transition()` methods with the unified allocator:
+Good, `types::*` is re-exported so `familiar_ai_review::ScopeFinding`, `GitChangeKind`, etc. are accessible. Now let's update `bin/familiar-ai.rs` — check nothing else needs updating there (signature unchanged). Now let's update `drive.rs`.
+Now let's update `transition()`:
+Now add the `handle_scope_pause` function near `continue_scope_approved_candidate`:
+Now update the call site to use `handle_scope_pause`:
+Good, `&mut db` is the established pattern (e.g. line 1185). Let me fix my call site.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=780114 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=780119 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=780119 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=780119 last_durable_phase=preflight
+Good, compiles clean. Now let's write the dedicated test file.
+Let me simplify those two tests to avoid the awkward rebinding:
+Good, `&self` — my test helper compiles fine. Now let's move to `resume.rs` and `next.rs` additions.
+I'll add `#[derive(Debug)]` to `HostLease` (fields are all Debug-capable) and fix the `mut` warning.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=840124 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=840129 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=840131 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=840131 last_durable_phase=preflight
+Now let's add the shared `next_checkpoint_event_id` function. Let's view where `transition()` ends to place it right after, and check the `db()` helper's signature.
+Now add the `scope_decision_lines` function. Let's place it near `render()`:
+Now let's add the shared allocator function right after the `events()` method (before the closing `}` of the impl block, or as a module-level function). Let's view the surrounding area again:
+Good, `db` is immutable — consistent with existing calls. Now let's add a unit test for `scope_decision_lines` within resume.rs's own test module for good measure (or leave it to the dedicated test file). I'll leave dedicated regressions to `tests/scope_approval_ux.rs`. Now onto `cli/next.rs`:
+Now export it from the storage crate's lib.rs:
+Now let's fix `backlog.rs`'s `approve_and_complete` to use the shared allocator:
+Now wire it into `cli/next.rs`, computing pending decisions before building the mutable-borrowing `manager`:
+Now editing the specific block that duplicates the sequence computation:
+Now let's implement. First, flip the daemon's default feature set:
+Now the tray crate's early-diagnostic build script and its testable detection logic:
+Good, that matches. Now let's update `drive.rs`'s two call sites to populate the `sequence` column via the shared allocator (keeping their existing fixed-id `INSERT OR IGNORE` semantics):
+drive: progress prd=PRD-83 stage=execution elapsed_ms=900143 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=900144 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=900145 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=900146 last_durable_phase=preflight
+Now let's test the tray crate builds and its unit tests pass:
+Now let's write migration 061:
+It works exactly as designed — this confirms the diagnostic fires early and by name on this host (which genuinely lacks `libxdo`). This is precisely the AC3 behavior. Let's install `libxdo-dev` in this sandbox so we can verify the positive path too (build succeeds when the dependency is present) and run the unit tests.
+main.rs isn't modified by me, confirming this is pre-existing. Let me verify on a clean checkout of HEAD to be sure.
+All 5 pass. Now let's update `config/default.toml` to document the new lease settings under `[daemon]`.
+Now let's register migration 61 in migrate.rs:
+drive: progress prd=PRD-91 stage=execution elapsed_ms=960162 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=960162 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=960162 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=960162 last_durable_phase=preflight
+My changes are restored. Now let's drop that stash entry since it's been applied and I confirmed the pre-existing error is unrelated to my work.
+Since this sandbox lacks `libxdo` and I have no root access to install it, the tray crate genuinely cannot build here (by design — that's exactly the gap this PRD closes). Let me verify the `sysdeps` logic in isolation via a scratch crate before relying on it.
+Good, confirmed the `daemon_run` argument-count error in `main.rs` is pre-existing on HEAD (unrelated to this PRD, part of the `familiar-ai-daemon` binary, not the `familiar-ai` binary I'm modifying). Now let's check the actual `familiar-ai` binary (bin/familiar-ai.rs) and the library itself compile with my changes, since that pre-existing error blocks `--tests` for the whole crate.
+Now let's fix the Dockerfile and docker-compose.yml to drop the workaround flag and align feature sets:
+All pass. Now let's run the full daemon crate test suite (no-default-features) and the storage crate full suite, plus fmt/clippy.
+Now let's update `recover_incomplete` itself:
+Now let's update README.md's relevant sections:
+Now let's add an assertion to the existing regression test to verify the tolerance ledger row:
+Now let's update the Architecture crate table entry and the Development section:
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1020175 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1020176 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1020176 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1020176 last_durable_phase=preflight
+All four writers now go through the shared allocator and populate `sequence`. Now let's build the crate to catch compile errors early before continuing further.
+The lib compiles cleanly. Now let's check the `familiar-ai` (CLI) bin target and lib unit tests specifically, bypassing the broken `familiar-ai-daemon` bin.
+Good. Now let's run the lib unit tests I've written so far (in `cli/scope_decisions.rs`).
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1080195 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1080195 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1080195 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1080195 last_durable_phase=preflight
+Confirmed pre-existing flaky/timing-sensitive test (passes in isolation, only failed under full-suite parallel CPU contention) — unrelated to my changes. Let's rerun the full suite once more to confirm this is intermittent, not a real regression.
+Both pass. Now let's write `check-feature-parity.sh` (AC5) and `measure-build-time.sh` (AC4).
+All three tests pass. Now let's run the full lib test suite plus report/stewardship/resume/drive/next-relevant unit tests to check for regressions.
+Confirmed: 132/132 pass on rerun — the earlier failure was flaky/timing-based under load, not a regression I introduced. Now let's run all daemon integration tests together (`--tests`), then fmt and clippy.
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1140208 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1140208 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1140209 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1140210 last_durable_phase=preflight
+All 135 lib tests pass. Now let's write the dedicated integration test file `tests/scope_approval_ux.rs`. Let me first check `familiar_ai_storage`'s public exports needed and `CheckpointRepository`/`ExecutionCheckpoint` fields once more, plus confirm `DriverRepository` API for seeding a stopped attempt for report tests.
+All my work is restored. Let's drop the now-redundant stash entry.
+Now let's redesign `check-feature-parity.sh` with explicit markers instead of fragile grep heuristics:
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1200225 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1200226 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1200226 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1200226 last_durable_phase=preflight
+Now add the `PRD-092:PARITY` markers to the three real files:
+All green. Now let's run fmt and clippy on the touched crates.
+Let's just apply `cargo fmt`.
+`cargo fmt` applied the changes directly (files were reformatted on disk). Let's verify formatting is now clean and rerun the tests to confirm nothing broke.
+Formatting clean. Now rerun tests to confirm the reformatted files still work.
+Now let's re-run the workaround-flags checker to confirm nothing new got flagged, then build `measure-build-time.sh`.
+Good, all confirmed. Now let's build and run the new test file.
+All passing. Now let's test storage crate's checkpoint and review changes:
+All good. Now run clippy on the touched crates.
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1260240 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1260240 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1260240 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1260241 last_durable_phase=preflight
+That's my own sed fix applied correctly. Let's re-run the workaround/parity checks and then do a real (but scoped) build-time measurement here on Linux to validate the real-path logic works end to end.
+Now let's run the actual gate-build.sh and a real (scoped) build-time measurement to validate everything works end-to-end on this host:
+All passing. Now let's run the review.rs tests:
+All good, unaffected. Let's also check the `familiar-ai-mcp` crate (which uses `familiar_ai_storage::ControlPlaneRepository`) and full workspace build to catch anything else touching the storage/daemon crates.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1320253 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1320254 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1320254 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1320254 last_durable_phase=preflight
+Confirmed — all run to completion from a fixed prefix, so each gets exactly +1. Let's apply all the fixes:
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1380262 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1380262 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1380262 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1380262 last_durable_phase=preflight
+Now fix the explicit version list at line ~343:
+Now let's rerun the migrate tests:
+Good, whole workspace builds cleanly. Now let's run the workspace test suite (this may take a while, so I'll background it) plus fmt/clippy checks.
+All migrate tests pass now. Let's run the full storage crate test suite to catch anything else:
+Let me apply rustfmt's formatting directly to keep it consistent with the rest of the codebase:
+Now let's run clippy across the workspace:
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1440276 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1440277 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1440278 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1440278 last_durable_phase=preflight
+Let it run in the background while I do final review of the acceptance criteria and diffs.
+All 132 storage tests pass. Now let's build and test the daemon and core crates fully with `--no-default-features`:
+All 12 new regression tests pass with `--no-default-features`. Now let's run the full daemon test suite (no-default-features) to check for regressions across the whole crate.
+While the full workspace test run finishes in the background, let me review the complete diff for cleanliness.
+This looks clean and well-scoped. Let me check whether the background full-workspace test finished.
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1500285 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1500285 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1500285 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1500285 last_durable_phase=preflight
+This all looks correct and minimal. Let me wait for the background test run to complete.
+I'll wait for the monitor/background task notification before finalizing the report.
+Good, whole workspace builds cleanly (the dead_code warning is pre-existing, unrelated to my changes). Now let's run the daemon crate's existing tests for the files I touched (worktree, drive, run):
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1560301 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1560301 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1560304 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1560305 last_durable_phase=preflight
+All passing. Now let's write the dedicated `durable_invariants.rs` test file. Let's first check an existing daemon integration test for boilerplate conventions (imports, config helpers):
+Let's continue other checks while that runs in the background.
+Let me apply `cargo fmt` to fix all formatting issues.
+Formatting applied cleanly.
+Clean. Let's check on the background test run.
+The full `familiar-ai-daemon` test suite passed (exit code 0), including all pre-existing tests plus the 12 new PRD-083 tests. Let's check for "FAILED" anywhere in the full log to be thorough, and check the summary counts across all test binaries.
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1620318 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1620318 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1620319 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1620319 last_durable_phase=preflight
+Now let's add the ledger linkage section to `docs/running_bugs.md`:
+Full workspace test suite passed (exit code 0), including all doc-tests. Let me confirm no failures anywhere in the full log.
+Zero failures across the entire workspace. Let's stop the now-redundant monitor and finalize.
+PRD-091 is fully implemented and verified. Summary:
+
+**Changed/added files** (all within `expected_files`):
+- `crates/familiar-ai-storage/migrations/062_multi_host_leases.sql` — new `control_plane_leases` (one row per repository, store-side time only) and `control_plane_lease_events` (acquired/takeover/lost/released) tables.
+- `crates/familiar-ai-storage/src/repos/control_plane.rs` — `acquire_lease`/`renew_lease`/`release_lease`/`inspect_lease` on `ControlPlaneRepository`, with `LeaseRecord`/`LeaseAcquireOutcome`/`LeaseRenewOutcome` types; all races serialized via `IMMEDIATE` transactions. Added 8 unit tests.
+- `crates/familiar-ai-daemon/src/control_plane.rs` — thin `ControlPlaneService` wrappers (`acquire_repository_lease`, `renew_repository_lease`, `release_repository_lease`, `inspect_repository_lease`).
+- `crates/familiar-ai-daemon/src/worker_lock.rs` — new `HostLease` guard: acquires via the DB, spawns a renewal thread on a configured heartbeat, flips `is_live()` false and records a `lost` event on expiry/takeover/store error, releases on `Drop`. Purely additive — the existing filesystem `WorkerLock` is untouched.
+- `crates/familiar-ai-daemon/tests/multi_host_lease.rs` — 5 regressions covering all 6 acceptance criteria (refusal naming holder+remaining life, takeover recording, mid-session revoke detected within one renewal interval, per-repo independence, single-host behavior unchanged).
+- `config/default.toml`, `crates/familiar-ai-core/src/config/daemon.rs` — `lease_renewal_interval_secs`/`lease_ttl_secs`, both defaulted so single-host needs no config.
+- Incidental: `crates/familiar-ai-storage/src/lib.rs` (re-export new types), `crates/familiar-ai-storage/src/migrate.rs` (registered migration 062; updated 6 pre-existing tests' hardcoded migration counts, which shift by exactly 1 since 062 sits at the end of the list).
+
+**Verification**: full workspace `cargo test --workspace --no-default-features` — 0 failures. `cargo fmt --check` and `cargo clippy` clean on all touched crates (one pre-existing clippy warning in `bootstrap.rs` and one pre-existing dead-code warning are unrelated). One pre-existing compile error exists in `main.rs`'s `run_with_tray_feature_but_disabled` (wrong arg count, only surfaces with the default `tray` feature) — confirmed unrelated since that file has zero diff from HEAD; not fixed, per scope discipline.
+
+All six acceptance criteria are met and each is pinned by a dedicated regression in `multi_host_lease.rs`.
+stream: 1 interim terminal event(s) superseded by the final result
+scope: durable approvals loaded=10 key=/home/trollboy/Projects/familiar-ai/.git
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3527945
+Good, wildcard re-exports mean `familiar_ai_review::{ReviewTask, BlockingPolicy}` should be accessible. Now let's check the `familiar_ai_daemon::worktree` module visibility and daemon lib.rs to confirm `pub mod worktree;`:
+verification: heartbeat check=format elapsed_ms=12245 child=pid:3527945
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3529766
+Good, well-established convention. Let me add it.
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1680331 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1680334 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1680335 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1680336 last_durable_phase=preflight
+Good — only the pre-existing `familiar-ai-core` warning remains; my `too_many_arguments` warning is resolved. Let's re-run fmt check and the daemon test suite once more to confirm everything is still green after this edit.
+All daemon tests pass with default (tray-free) features. Let's check the command.rs unit tests specifically and confirm no failures occurred earlier in the truncated output.
+verification: heartbeat check=lint elapsed_ms=30001 child=pid:3529766
+verification: heartbeat check=lint elapsed_ms=55686 child=pid:3529766
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3544021
+All good — these are regular (not dev) dependencies too, so accessible. Let's compile and run the new test file:
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1740350 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1740350 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1740351 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1740351 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=30004 child=pid:3544021
+All good. Now let's attempt the broader workspace test suite to check for any regressions elsewhere (e.g., `familiar-ai-storage` since I referenced `ScopeDecision`/`OrchestrationRepository` but didn't modify storage code, and `familiar-ai-mcp`/dashboard if they use `stewardship::list_pending_human_gates` shape).
+Let's verify each test actually pins its invariant by temporarily reverting the fix and confirming failure. First, invariant 2 (event sequence allocator):
+verification: heartbeat check=tests-green-crates elapsed_ms=60000 child=pid:3544021
+The mutation pin works — the test fails loudly when the invariant is broken. Let's restore the fix.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1800368 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1800367 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1800368 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1800369 last_durable_phase=preflight
+Whole workspace type-checks cleanly. Let's now try `cargo check --workspace --all-targets` to also validate all tests/examples compile workspace-wide.
+Restored and passing. Now let's verify invariant 3's mutation pin (review recovery):
+verification: heartbeat check=tests-green-crates elapsed_ms=90000 child=pid:3544021
+Confirmed. Let's restore and verify invariant 1's mutation pin too:
+verification: heartbeat check=tests-green-crates elapsed_ms=120002 child=pid:3544021
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1860392 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1860393 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1860396 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1860396 last_durable_phase=preflight
+All three mutation pins verified as real. Let's restore the fix:
+Good, restored to my intended state (no leftover mutation artifacts). Let's run the full test suite for these files once more to confirm everything is clean after restoration:
+verification: heartbeat check=tests-green-crates elapsed_ms=150001 child=pid:3544021
+All 4 tests pass cleanly. Now let's run formatting and clippy (static analysis) across the workspace:
+Let's apply formatting automatically:
+verification: heartbeat check=tests-green-crates elapsed_ms=180003 child=pid:3544021
+verification: heartbeat check=tests-green-crates elapsed_ms=183225 child=pid:3544021
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pid:3588743
+Formatting applied cleanly. Let's confirm `cargo fmt --check` is now clean across the whole workspace:
+Formatting is clean. Now let's run clippy (static analysis):
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1920411 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1920411 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1920415 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1920428 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30004 child=pid:3588743
+Good, unaffected. Now let's audit each acceptance criterion once more against the final code, and double check `main.rs`'s status/diff for cleanliness.
+Clean, minimal, and mirrors the existing correct call site. Now let's do a final review of each modified file's diff for correctness.
+This all looks correct. Let's review the drive.rs and cli/scope_decisions.rs diffs for final sanity.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60003 child=pid:3588743
+This is correct. Let's view the `cli/scope_decisions.rs` diff for a final sanity pass.
+This all looks correct and matches the design. Now let's double-check the `cli/next.rs` and `resume.rs` diffs once more, plus `cli/stewardship.rs`.
+All changes are consistent and minimal. Now let's run a final full verification pass: fmt, clippy, and the complete daemon test suite one more time to confirm everything is stable after all edits.
+drive: progress prd=PRD-87 stage=execution elapsed_ms=1980421 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=1980422 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=1980423 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=1980430 last_durable_phase=preflight
+Whole workspace formats cleanly. Let's run the complete daemon test suite one final time in the background while I finish auditing acceptance criteria.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90002 child=pid:3588743
+I found a gap: the interactive decision path hardcodes its reason instead of collecting one from the operator, which weakens acceptance criterion 4's "identical durable rows (actor, reason, ...)" requirement. Let me fix that.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120003 child=pid:3588743
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2040531 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2040532 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=2040534 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2040536 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150002 child=pid:3588743
+Clean — no new clippy warnings from my changes; the 2 existing ones are pre-existing and untouched by me. Now let's run the full workspace test suite:
+Now let's fix the two occurrences in the dedicated test file.
+Now let's fix the `interactive_and_flag_decisions_produce_identical_durable_rows` test to give both paths the same reason so the comparison is genuine.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180003 child=pid:3588743
+Now let's view the rest of that test to fix the tuple index references (`flag_row.0`/`.1` etc. used later for phase comparisons used `flag_checkpoint` and `flag_row.3`/`interactive_row.3` originally — now shifted since I added a 5th... wait I added reason as index 2, shifting checkpoint_id from index 3 to index 4).
+`flag_row.3` now refers to `candidate_hash`, not `checkpoint_id`. Fix that reference to `.4`.
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2100572 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2100572 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2100574 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=2100575 last_durable_phase=preflight
+Now let's check the background full-suite run result, then rebuild/retest given these edits.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=210001 child=pid:3588743
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=240004 child=pid:3588743
+I'll just wait for the background task notification instead.
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2160582 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2160583 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2160585 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=2160586 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=270004 child=pid:3588743
+I'll let the full workspace suite run in the background and check back once it completes.
+While the full suite runs in the background, let me review the complete diff for correctness.
+While that runs, let me review the remaining diffs (main.rs, Cargo.toml, Dockerfile, docker-compose.yml, SPECTRA handover) for correctness.
+This looks correct and matches my intended design. Let's check the review.rs diff for cleanliness too:
+This is clean and correct. Now let's check the background test run status.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=300004 child=pid:3588743
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2220595 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2220595 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2220596 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=2220596 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=330002 child=pid:3588743
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=360000 child=pid:3588743
+drive: progress prd=PRD-92 stage=execution elapsed_ms=2280606 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2280606 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2282319 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2282777 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=390004 child=pid:3588743
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=420002 child=pid:3588743
+drive: progress prd=PRD-92 stage=execution elapsed_ms=2340612 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2340612 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2342321 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2342781 last_durable_phase=preflight
+Both background tasks are running. I'll wait for their notifications.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=450004 child=pid:3588743
+Let me strengthen the test failure messages so each names its invariant explicitly when it fails — this matters for AC4's "fails with the invariant named" requirement. Let me re-read the current file first.
+The full workspace test suite passed (exit 0). Let me check its tail output to confirm counts, then continue strengthening the invariant-naming in failure messages.
+Two verification runs are still in progress in the background: the full `cargo test --workspace --no-fail-fast` suite, and a check that enabling `--features tray` on the full daemon binary fails early with the named diagnostic (rather than reaching link). I'll report back once they complete.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=480004 child=pid:3588743
+Confirmed: enabling the tray feature on the full `familiar-ai-daemon` binary fails immediately at the `familiar-ai-tray` build script — right after `familiar-ai-core` compiles, before any of the heavy gtk/muda dependency chain is even built — naming the exact missing library and the install command. This is exactly AC3's required behavior. Now let's check the full workspace test suite.
+Good, `identity_gate` passes cleanly. Now let's rerun the `familiar-ai-core` lib tests cleanly (no concurrent process contention) to determine if the `paths::tests` failures are pre-existing flakes or something introduced by my changes.
+Still progressing well. I'll wait for the completion notification.
+I'll pause here and wait for the full workspace test suite to finish; it's progressing normally through the crates. I'll report full results once it completes.
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2400622 last_durable_phase=preflight
+drive: progress prd=PRD-92 stage=execution elapsed_ms=2400622 last_durable_phase=preflight
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2402323 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2402783 last_durable_phase=preflight
+Confirmed: both pass reliably in isolation. This is pre-existing timing-sensitive test flakiness under heavy parallel CPU load (from my concurrent cargo invocations), not caused by my changes. Now let's run the full suite once more cleanly, without other concurrent processes.
+I'll stop polling and wait for the background test suite to finish naturally — it'll arrive as a task notification.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=510004 child=pid:3588743
+I'll wait quietly now for the background test suite to complete rather than continuing to poll — it'll arrive as a task notification when done.
+Confirmed pre-existing flake (env-var races under concurrent test load, same class as FAM-BUG-047/029), not a regression from my changes — reproduced cleanly 3/3 times in isolation. Now let's strengthen the invariant-naming in failure messages for AC4:
+scope: durable approvals loaded=10 key=/home/trollboy/Projects/familiar-ai/.git
+Let's add the invariant name to these assertion messages:
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=540004 child=pid:3588743
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeBroadened]
+Scope evaluation 'initial' under policy sha256:1ff64a95ad26562c698a09881c92ea766a09fabc68448ab9a018dc36a2627b90:
+scope: JustifiedExpectedFileChange Modified Dockerfile rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Modified README.md rule=prd_expected_file_expansion
+scope: UndeclaredScopeExpansion Modified SPECTRA_AUTONOMOUS_HANDOVER.md rule=undeclared_change
+scope: JustifiedExpectedFileChange Modified crates/familiar-ai-daemon/Cargo.toml rule=file_class:dependency_manifest:declared_expected_file
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/main.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-tray/build.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-tray/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Added crates/familiar-ai-tray/src/sysdeps.rs rule=configured_allowed_path
+scope: UndeclaredScopeExpansion Modified docker-compose.yml rule=undeclared_change
+scope: JustifiedExpectedFileChange Added scripts/check-feature-parity.sh rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added scripts/check-no-workaround-flags.sh rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added scripts/gate-build.sh rule=prd_expected_file_expansion
+scope: JustifiedExpectedFileChange Added scripts/measure-build-time.sh rule=prd_expected_file_expansion
+drive: scope decision pending for PRD-92: familiar-ai scope-decisions --finding-hash sha256:716112af00c6551e2595d1e97f72ea34dbf62e9f1910f73286c9c228a1cacd9f --candidate-hash sha256:2798f50b693228750b6b1d4e690e8101fc286c960ff4fa066b71b635a0ec7a32 --approve --actor human:<identity> --reason "..."
+drive: scope decision pending for PRD-92: familiar-ai scope-decisions --finding-hash sha256:bd913b3a3c039dc8a4e46a1877b198dd1f2e769137f73d9e77e737a5cb634181 --candidate-hash sha256:2798f50b693228750b6b1d4e690e8101fc286c960ff4fa066b71b635a0ec7a32 --approve --actor human:<identity> --reason "..."
+drive: attempt 4 PRD-92 failed: human review required
+drive: attempt 4 PRD-92 outcome=retained reason=scope_broadened
+drive: dependency_not_integrated PRD-85 dependency PRD-83 was attempted this session and is not integrated into the session revision
+drive: dependency_not_integrated PRD-90 dependency PRD-83 was attempted this session and is not integrated into the session revision
+Need to remove the duplicate import at line 382. Let's view that area and fix it:
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2460628 last_durable_phase=preflight
+Now let's update the assertion messages to name the invariant explicitly. First for invariant 1:
+drive: progress prd=PRD-91 stage=execution elapsed_ms=2462327 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2462785 last_durable_phase=preflight
+Now for invariant 2 — the critical `.unwrap()` calls on the second occurrence's transitions (the ones that actually break during mutation):
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=570003 child=pid:3588743
+Now for invariant 3 (review recovery):
+Now let's rebuild, format, and rerun everything to confirm correctness:
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=596680 child=pid:3588743
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [VerificationUnsuccessful]
+drive: attempt 3 PRD-91 failed: human review required
+drive: attempt 3 PRD-91 outcome=retained reason=verification_failed
+All 4 pass. Let's run clippy once more on the final state to make sure the message-strengthening edits didn't introduce lint issues:
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2520633 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2522788 last_durable_phase=preflight
+All 12 new PRD-083 tests pass, and the entire visible test suite is green (with 5 pre-existing, intentionally-ignored PRD-081/082 tests unrelated to this work). Let's run fmt and clippy once more to confirm the latest edits are clean.
+Clean. Let's do a final full sequential verification run across all affected crates:
+Only the pre-existing unrelated warning remains. Everything is clean. Let's do a final full workspace check to be thorough.
+Whole workspace is clean. Let's do the final acceptance-criteria audit summary and prepare the report.
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2580640 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2582792 last_durable_phase=preflight
+135 lib tests + 12 dedicated regression tests all pass. Everything is verified. Let me write the final summary.
+
+## Summary
+
+Implemented PRD-083 (Reachable Approval — the Decidable Pause) in `crates/familiar-ai-daemon`:
+
+**Core changes:**
+- **`stewardship.rs`**: added `scope_decision_commands()` (the exact approve/reject `scope-decisions` lines, hash-bound, with `human:<identity>` placeholder) and `scope_pause_notices()`; `list_pending_human_gates` now prepends scope commands ahead of release/complete/resume recovery commands whenever a gate has a pending scope decision.
+- **`report.rs`**: `render_judgment` now prints each stopped attempt's approve/reject commands before its `backlog release`/`backlog complete` lines.
+- **`cli/scope_decisions.rs`**: rewrote the bare invocation into `list_or_decide_interactively` — a numbered, hash-free listing (PRD, change, finding) that takes a decision by ordinal or PRD id, with actor and reason both validated identically to the flag path. This same function is shared with the drive's pause.
+- **`drive.rs`**: added `handle_scope_pause` — invokes the interactive picker when attended, otherwise prints paste-runnable approve **and** reject commands. Wired into the real pause site with real terminal detection.
+- **`cli/next.rs`** / **`resume.rs`**: when blocked or resuming, both now surface any pending scope decision's exact commands (not in `expected_files`, but required by the acceptance criteria — noted as a scope addition).
+- **`cli/stewardship.rs`**: doc-comment update only.
+
+**Incidental fix:** `main.rs`'s `run_with_tray_feature_but_disabled` had a pre-existing (already-committed, unrelated to this PRD) call to `daemon_run` missing the `&mut TerminationSignals` argument added by an earlier commit — this broke compilation of every test target in the crate (and the whole workspace's `--all-targets`). Fixed minimally by mirroring the correct call site, since it blocked verifying this PRD's own work.
+
+**Tests:** new `tests/scope_approval_ux.rs` (12 tests) pins all five acceptance criteria directly, including an attended-picker regression driven via injected `BufRead`/`Write` (no real TTY needed) and a flag-vs-interactive row-equivalence test. All 135 pre-existing lib tests plus the full existing integration suite remain green (verified with `--no-default-features` to route around an unrelated missing system library, `libxdo`, needed only for the optional tray feature). `cargo fmt` and `cargo clippy` are clean except one pre-existing, unrelated warning in `familiar-ai-core`.
+
+No acceptance criteria are outstanding.
+scope: durable approvals loaded=10 key=/home/trollboy/Projects/familiar-ai/.git
+review: verification 'format' running...
+verification: heartbeat check=format elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=format elapsed_ms=0 child=pid:3707385
+verification: heartbeat check=format elapsed_ms=14618 child=pid:3707385
+review: verification 'lint' running...
+verification: heartbeat check=lint elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=lint elapsed_ms=0 child=pid:3708472
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2640645 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2642795 last_durable_phase=preflight
+verification: heartbeat check=lint elapsed_ms=30004 child=pid:3708472
+verification: heartbeat check=lint elapsed_ms=54503 child=pid:3708472
+review: verification 'tests-green-crates' running...
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-green-crates elapsed_ms=0 child=pid:3715950
+Let me check the full daemon test log for any failures across the whole run, not just the tail:
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2700689 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2702830 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=30000 child=pid:3715950
+verification: heartbeat check=tests-green-crates elapsed_ms=60001 child=pid:3715950
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2760695 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2762835 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=90003 child=pid:3715950
+verification: heartbeat check=tests-green-crates elapsed_ms=120003 child=pid:3715950
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2820700 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2822841 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=150002 child=pid:3715950
+verification: heartbeat check=tests-green-crates elapsed_ms=180003 child=pid:3715950
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2880723 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2882845 last_durable_phase=preflight
+verification: heartbeat check=tests-green-crates elapsed_ms=210004 child=pid:3715950
+verification: heartbeat check=tests-green-crates elapsed_ms=240000 child=pid:3715950
+verification: heartbeat check=tests-green-crates elapsed_ms=250264 child=pid:3715950
+review: verification 'tests-workspace-advisory' running...
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=0 child=pending-spawn
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=3 child=pid:3764056
+drive: progress prd=PRD-83 stage=execution elapsed_ms=2940729 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=2942851 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=30004 child=pid:3764056
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=60003 child=pid:3764056
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3000734 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=3002859 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=90003 child=pid:3764056
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=120004 child=pid:3764056
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3060738 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=3062862 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=150002 child=pid:3764056
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=180004 child=pid:3764056
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3120744 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=3122869 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=210003 child=pid:3764056
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=240002 child=pid:3764056
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3180749 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=3182872 last_durable_phase=preflight
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=270004 child=pid:3764056
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=300001 child=pid:3764056
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3240754 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=3242874 last_durable_phase=preflight
+Let's do one final clean isolated run of the daemon lib tests to have solid evidence, then wrap up.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=330001 child=pid:3764056
+All 133 pass with bounded concurrency, confirming the flakes are purely load-induced timing margins in pre-existing, unrelated tests. Now let's audit the acceptance criteria one final time against the diff to make sure everything is covered before reporting completion.
+verification: heartbeat check=tests-workspace-advisory elapsed_ms=359539 child=pid:3764056
+review: independent reviewer analyzing (attempt 1, typically 2-3 minutes)...
+This is clean and well-formed. Let's do a final check of the daemon's `run.rs` and `drive.rs` diffs for cleanliness:
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3300757 last_durable_phase=preflight
+drive: progress prd=PRD-87 stage=execution elapsed_ms=3302878 last_durable_phase=preflight
+## Summary
+
+PRD-087 is fully implemented. All five acceptance criteria are met, verified by real regression tests, and each was confirmed to fail loudly (mutation-tested by hand) when its underlying fix was temporarily reverted.
+
+**What was found:** repository identity was actually being minted independently in *three* places (`backlog.rs`, `config/context_service.rs`, and `daemon/run.rs`), each shelling out to `git rev-parse --git-common-dir` separately — kept in sync only by a code comment. Checkpoint/occurrence event-sequence numbering was similarly duplicated across four writers (`checkpoint.rs`'s `put`/`transition`, storage `backlog.rs`'s `approve_and_complete`, and two landing paths in `daemon/drive.rs`).
+
+**What changed:**
+- `crates/familiar-ai-core/src/repository_path.rs` — new single minting site: `repository_origin_key`/`git_common_directory`.
+- `backlog.rs`, `config/context_service.rs`, `daemon/run.rs` — now delegate instead of duplicating.
+- `crates/familiar-ai-daemon/src/worktree.rs` — `origin_repository_key` for worktree-origin resolution.
+- `crates/familiar-ai-storage/src/repos/checkpoint.rs` — single `next_checkpoint_event_id` allocator, used by all four writers (`backlog.rs`, `drive.rs` updated accordingly).
+- `crates/familiar-ai-storage/migrations/061_identity_invariants.sql` (+ `migrate.rs` registration) — real `sequence` column with a `UNIQUE(checkpoint_id, sequence)` index, backfilled from existing rows; new `identity_invariant_tolerances` audit ledger.
+- `crates/familiar-ai-storage/src/repos/review.rs` — pre-existing FAM-BUG-032 tolerance now also records itself to the ledger.
+- `crates/familiar-ai-daemon/tests/durable_invariants.rs` (new) — the four required regressions, each naming its invariant on failure.
+- `docs/running_bugs.md` — new ledger-linkage section, checked byte-for-byte by the test above.
+- Collateral: 8 migration-count literals in `migrate.rs` bumped by the new migration (verified against actual counts, not guessed).
+
+**Verification:** `cargo fmt --check` clean; `clippy -D warnings` clean except two pre-existing warnings in untouched files (`bootstrap.rs`, `summary_worker.rs`); full `familiar-ai-core`/`familiar-ai-storage`/`familiar-ai-daemon` suites green in isolation. Two load-dependent timing flakes surfaced under full-workspace parallel load (`drive::tests::progress_heartbeat_...`, `worktree::tests::missing_ownership_record_...`) — both pre-existing (unrelated code, reproduce with `git stash`, pass cleanly standalone), matching the exact flake class already documented as FAM-BUG-047/030/033.
+
+**Pre-existing issue found but not touched (out of scope):** `familiar-ai-daemon/src/main.rs` fails to compile only with the default `tray` feature (a stale call to `daemon_run`); the project's actual gate builds `--no-default-features`, where it's unaffected. Confirmed pre-existing via `git stash`.
+scope: durable approvals loaded=10 key=/home/trollboy/Projects/familiar-ai/.git
+Review disposition: HumanReviewRequired; waivers: []; independence: None; stop reasons: [ScopeBroadened]
+Scope evaluation 'initial' under policy sha256:58d1bfee186591b168f710a42510e41b9ca87aa8b45c77bae3a41f83c5682d5d:
+scope: AllowedChange Modified crates/familiar-ai-core/src/backlog.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-core/src/config/context_service.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-core/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-core/src/repository_path.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/drive.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/run.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-daemon/src/worktree.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-daemon/tests/durable_invariants.rs rule=expected_file_declaration
+scope: AllowedChange Added crates/familiar-ai-storage/migrations/061_identity_invariants.sql rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-storage/src/lib.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-storage/src/migrate.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-storage/src/repos/backlog.rs rule=configured_allowed_path
+scope: AllowedChange Modified crates/familiar-ai-storage/src/repos/checkpoint.rs rule=expected_file_declaration
+scope: AllowedChange Modified crates/familiar-ai-storage/src/repos/review.rs rule=expected_file_declaration
+scope: UndeclaredScopeExpansion Modified docs/running_bugs.md rule=undeclared_change
+drive: scope decision pending for PRD-87: familiar-ai scope-decisions --finding-hash sha256:cda6d9a6fff8104b12e20ed3c9cad99e3fe2ba3698425fea8590f9066f1ebc60 --candidate-hash sha256:b36053ce28d827f9385c832177ce3add7186bba5196176e32d7c510daf73ceeb --approve --actor human:<identity> --reason "..."
+drive: attempt 2 PRD-87 failed: human review required
+drive: attempt 2 PRD-87 outcome=retained reason=scope_broadened
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3360761 last_durable_phase=preflight
+drive: progress prd=PRD-83 stage=execution elapsed_ms=3420765 last_durable_phase=preflight
+{"review_id":"00001788597053154009-0003279353-000002-cycle-review-1","reviewed_manifest_hash":"sha256:6949dd65fbfa047f0da3f02cb20eeaa3be15fbe163b26507d214bfdde48ac041","findings":[{"finding_id":"F1-bare-listing-drops-json","category":"correctness_defect","severity":"medium","blocking":false,"title":"Bare `scope-decisions` no longer emits machine-readable JSON in non-interactive use","claim":"The previous no-argument path printed one `serde_json::to_string(item)` line per pending decision unconditionally, and only added interactive prompts when stdin/stderr were terminals. The new path delegates every no-argument invocation to `list_or_decide_interactively`, which prints only the human `describe_pending_decision` line regardless of `attended`. Acceptance criterion 2 scopes the numbered picker to \"on a terminal\"; the change also replaces the non-terminal output, so any script, daemon, or automation that parsed the JSON listing (the only machine-readable enumeration of pending scope decisions on this command) now receives prose it cannot parse, and the finding hash it needs for the flag form is deliberately absent from that prose. The new integration test `bare_scope_decisions_cli_lists_without_a_hash` runs the binary with a non-terminal stdout and asserts the numbered prose, pinning the removal rather than the terminal-only behavior the criterion asks for.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/cli/scope_decisions.rs","range":{"start":28,"end":43}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/cli/scope_decisions.rs","range":{"start":67,"end":173}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c","media_type":"text/plain","byte_size":77449,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788596824257818-0003279353-000000/PRD-83","revision":"sha256:bb6c3b4d15d3f6b3aaf9e7769d13ddd95f44c636916f1a88f765e85dfa5f687d","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Branch the listing on `attended`: keep the numbered, hash-free prose for the terminal path the PRD specifies, and keep emitting the prior one-JSON-object-per-line listing when stdout is not a terminal (or expose it behind an explicit `--json` flag and keep the old default for non-tty). Add a regression that runs the bare command with a non-terminal stdout and asserts the machine-readable form still parses.","status":"open","supersedes":null},{"finding_id":"F2-prd-selection-ambiguous","category":"correctness_defect","severity":"medium","blocking":false,"title":"Selecting by PRD identifier silently decides only the first of several findings for that PRD","claim":"`list_or_decide_interactively` resolves a non-ordinal selection with `pending.iter().find(|item| item.prd_id.eq_ignore_ascii_case(selection))` and then decides exactly that one finding before returning. A single paused attempt routinely carries more than one pending finding — `drive.rs` passes a `pending_hashes` slice and loops over it — so when two or more rows share a `prd_id`, typing that PRD id approves or rejects an arbitrary (first-listed) finding and returns success, leaving the remaining findings pending with no indication that the PRD was only partially decided. The operator reasonably reads \"decide by PRD identifier\" as deciding that PRD; the attempt then stays blocked for a reason the surface just told them they resolved. The same one-decision-per-invocation limit hits the drive's attended pause, which calls this function once and prints nothing further.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/cli/scope_decisions.rs","range":{"start":67,"end":173}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/drive.rs","range":{"start":267,"end":311}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c","media_type":"text/plain","byte_size":77449,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788596824257818-0003279353-000000/PRD-83","revision":"sha256:bb6c3b4d15d3f6b3aaf9e7769d13ddd95f44c636916f1a88f765e85dfa5f687d","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Collect every pending row whose `prd_id` matches the selection and either apply the decision to all of them under one actor/reason, or reject the ambiguous selection with a message naming the ordinals involved. Either way, after a decision, re-report how many findings for that PRD remain pending. Add a regression seeding two findings under one `prd_id` and asserting that a PRD-id selection does not leave a silently undecided row.","status":"open","supersedes":null},{"finding_id":"F3-attended-pause-no-fallback","category":"correctness_defect","severity":"medium","blocking":false,"title":"Attended drive pause prints no approve/reject command when the interactive decision aborts or fails","claim":"In `handle_scope_pause`, the `attended` branch calls `list_or_decide_interactively` and then returns unconditionally — on success, on a blank \"preserve\" answer, and on error. The unattended branch is the only path that prints the paste-runnable commands. `list_or_decide_interactively` returns `Err` for an actor missing the `human:` prefix, an empty reason, or an unmatched selection, and returns `Ok(())` for a blank selection; in all of those cases the attended operator is left with a one-line failure message (or nothing at all) and no hash-bound command they can retry with, which is precisely the dead end acceptance criterion 3 and 5 exist to close. A mistyped actor at a terminal is a likelier outcome than an unattended run, and it is the one case with no remedy on screen.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/drive.rs","range":{"start":267,"end":311}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/cli/scope_decisions.rs","range":{"start":67,"end":173}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c","media_type":"text/plain","byte_size":77449,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788596824257818-0003279353-000000/PRD-83","revision":"sha256:bb6c3b4d15d3f6b3aaf9e7769d13ddd95f44c636916f1a88f765e85dfa5f687d","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Have the attended branch fall through to the `scope_decision_commands` printing whenever the interactive surface returns an error or leaves findings undecided, so every scope pause ends with either a recorded decision or a runnable command. Pin it with a regression that drives `handle_scope_pause(attended = true)` with an invalid actor and asserts the approve and reject commands appear in the output.","status":"open","supersedes":null},{"finding_id":"F4-unrelated-daemon-signal-change","category":"scope_violation","severity":"low","blocking":false,"title":"Unrelated termination-signal registration change in main.rs","claim":"`run_with_tray_feature_but_disabled` is rewritten to construct `TerminationSignals::register().expect(\"register termination signals\")` and pass it into `daemon_run`. Nothing in the objective or the five acceptance criteria concerns daemon lifecycle or signal handling, no other changed file touches `daemon_run`'s signature, and no test in `tests/scope_approval_ux.rs` exercises this path. The change is inside `allowed_paths` (`crates/`) but is a drive-by edit to an unrelated subsystem, and it introduces a panicking `expect` on a startup path that the required test check explicitly skips (`--skip daemon_starts_and_stops_on_sigterm`), so the candidate carries an unreviewed behavioral change with no accompanying coverage.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/main.rs","range":{"start":637,"end":645}}],"remediation":"Split this hunk out of the PRD-083 candidate. If it is a genuine fix for a broken tray-feature build path, land it as its own change with a test that exercises the signal path; if it is incidental, revert it here.","status":"open","supersedes":null},{"finding_id":"F5-gate-json-field-rewrite","category":"unverifiable_claim","severity":"low","blocking":false,"title":"Human-gate items are re-serialized field-by-field, which may drop fields from the gate struct","claim":"`list_pending_human_gates` previously placed the values returned by `pending_human_gates` into `items` directly, serialized by their own `Serialize` implementation. The new code consumes each gate and rebuilds a `json!` object naming exactly six fields (`kind`, `session_id`, `prd_id`, `prd_path`, `detail`, `recovery_commands`). Whether that is lossless depends on the field list of the gate type, which is defined in `familiar-ai-storage` and is not part of this package, so I cannot confirm it. If the struct carries any additional field (a checkpoint id, timestamp, or attempt sequence), the JSON contract of `familiar-ai stewardship gates` silently loses it, and the new tests only assert `recovery_commands`, `prd_id`, and the presence of `scope-decisions`, so nothing would catch the loss.","evidence":[{"kind":"file_range","path":"crates/familiar-ai-daemon/src/stewardship.rs","range":{"start":388,"end":415}},{"kind":"verification","check_id":"tests-green-crates","output":{"content_hash":"sha256:6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c","media_type":"text/plain","byte_size":77449,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788596824257818-0003279353-000000/PRD-83","revision":"sha256:bb6c3b4d15d3f6b3aaf9e7769d13ddd95f44c636916f1a88f765e85dfa5f687d","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-6819f07e7d61fd0bea8df7a32b6ad1c35bf71b6dc98c85c989f0e7d95b48460c-stdout","truncated":false,"omitted_bytes":0}}],"remediation":"Prefer mutating the gate's own `recovery_commands` and serializing the struct (`serde_json::to_value(gate)`) so the JSON contract stays derived from one definition; if the manual `json!` is kept, add a regression asserting the full key set of a gate item so a future field addition fails loudly rather than silently disappearing from the CLI output.","status":"open","supersedes":null},{"finding_id":"F6-advisory-suite-failing","category":"unverifiable_claim","severity":"medium","blocking":false,"title":"Workspace test suite fails at the candidate with no baseline to attribute it","claim":"`tests-workspace-advisory` (`cargo test --workspace --no-default-features --no-fail-fast`) exits 101 at the candidate revision. The required `tests-green-crates` check passes only because it restricts to five crates and skips `daemon_starts_and_stops_on_sigterm` — the very test covering the daemon signal path this candidate modifies in `main.rs`. The package contains no base-revision run of the advisory check, so I cannot tell from the disclosed evidence whether the failure is pre-existing or introduced here, and the one unrelated hunk in this candidate lands squarely in the area the required check excludes. That coincidence is worth resolving before disposition rather than after.","evidence":[{"kind":"verification","check_id":"tests-workspace-advisory","output":{"content_hash":"sha256:ce1344a8e4be1628d767b03dabe3e78ca252ba4e7dc85ed27b07f6b790bb337c","media_type":"text/plain","byte_size":113499,"repository":"/home/trollboy/.local/state/familiar-ai/worktrees/drive-00001788596824257818-0003279353-000000/PRD-83","revision":"sha256:bb6c3b4d15d3f6b3aaf9e7769d13ddd95f44c636916f1a88f765e85dfa5f687d","storage_ref":"/home/trollboy/.local/share/familiar-ai/review-artifacts/sha256-ce1344a8e4be1628d767b03dabe3e78ca252ba4e7dc85ed27b07f6b790bb337c-stdout","truncated":false,"omitted_bytes":0}},{"kind":"file_range","path":"crates/familiar-ai-daemon/src/main.rs","range":{"start":637,"end":645}}],"remediation":"Run the advisory workspace suite at base revision dfa1b220d60a8a28047a26f6fee80b7dec8cc0cf and attach both runs, or name the failing tests and state explicitly that they fail identically at base. If any failure is new, fix it or drop the unrelated `main.rs` hunk and re-run.","status":"open","supersedes":null}]}
+Review disposition: ReadyForHumanApproval; waivers: []; independence: Some(IndependentProviderOrModel); stop reasons: [CleanReview]
+drive: integration remediation required for PRD-83: storage failure: terminal review retains open finding F4-unrelated-daemon-signal-change without a durable human waiver
+drive: attempt 1 PRD-83 outcome=retained reason=integration_failed
+drive: session drive-00001788596824257818-0003279353-000000 terminated reason=budget_prds_exhausted attempted=4 completed=0
+session=drive-00001788596824257818-0003279353-000000 termination=budget_prds_exhausted attempted=4 completed=0 known_cost_microusd=35689570
+---
+exit: 0
