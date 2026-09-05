@@ -1411,3 +1411,46 @@ reinstall the binary, then rerun the 076 drive.
   failure as it happens so the operator can act while the rest run. In an
   overnight session this is 3.5 minutes per stumble, and a stumble as
   small as an unformatted file is enough to trigger it.
+
+### FAM-BUG-052 — A nested `target/` escapes the root ignore and destroys review evidence
+
+- **Status:** Fixed (ignore rule); diagnostic still poor
+- **Found:** 2026-09-05, resuming PRD-92. The review died with:
+
+  ```
+  review: diff capture failed: diff contains 442136446 bytes,
+      exceeding evidence limit 4000000
+  Review disposition: HumanReviewRequired; stop reasons: [EvidenceFailure]
+  ```
+
+- **Cause:** `.gitignore` line 5 was `/target/`. The leading slash anchors
+  the rule to the repository root, so `crates/familiar-ai-tray/target/`
+  was never ignored. That crate is **workspace-excluded** (`Cargo.toml`
+  `exclude = ["crates/familiar-ai-tray"]`), so building it *always*
+  produces its own nested `target/` — 367MB of it here.
+- **Why it was certain to fire:** PRD-92's whole job was adding a
+  `build.rs` to the tray crate. Testing a build script means building
+  that crate, in that directory. The task and the landmine were the same
+  action.
+- **Blast radius:** any PRD whose implementer runs cargo inside a crate
+  directory poisons its own review diff, and the failure arrives at the
+  *end* — after implementation and verification have already been paid
+  for. PRD-92 burned a full resume cycle on it.
+- **Fix:** added a bare `target/` rule, which matches at any depth. The
+  root-anchored `/target/` is left in place; it is now redundant but
+  harmless.
+- **Still open — the diagnostic.** The error reports only a byte count.
+  It should name the largest contributing paths, because "442MB" gives an
+  operator nothing to act on while "crates/familiar-ai-tray/target/ —
+  367MB" is self-explanatory. Filed as FAM-FRICTION-010.
+
+### FAM-FRICTION-010 — Evidence-limit failures report a byte count and nothing else
+
+- **Status:** Open
+- **Found:** 2026-09-05, alongside FAM-BUG-052.
+- **Detail:** `diff contains 442136446 bytes, exceeding evidence limit
+  4000000` names the symptom and withholds every fact needed to fix it.
+  Diagnosing it took a `du` sweep of the candidate worktree.
+- **Fix:** when the diff exceeds the budget, list the top few paths by
+  contributed bytes. The information is already in hand at the point the
+  check fails.

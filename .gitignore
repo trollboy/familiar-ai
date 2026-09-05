@@ -3,6 +3,10 @@
 # ============================
 
 /target/
+# Workspace-excluded crates (crates/familiar-ai-tray) build into their own
+# nested target/, which a root-anchored rule cannot match. An unignored
+# 367MB target/ blew PRD-92's review evidence budget (FAM-BUG-052).
+target/
 
 # Keep Cargo.lock for applications.
 # Uncomment the next line only if this becomes a published library.
