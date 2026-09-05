@@ -1,0 +1,898 @@
+diff --git a/crates/familiar-ai-agent/src/local_worker.rs b/crates/familiar-ai-agent/src/local_worker.rs
+index e58b7be..e078d5b 100644
+--- a/crates/familiar-ai-agent/src/local_worker.rs
++++ b/crates/familiar-ai-agent/src/local_worker.rs
+@@ -11,6 +11,7 @@
+ 
+ use async_trait::async_trait;
+ 
++use familiar_ai_core::config::{LocalRuntimeKind as ConfigLocalRuntimeKind, LocalWorkerConfig};
+ use familiar_ai_llm::attempt::{
+     AdapterError, InferenceAdapter, StreamObserver, SubmitOutcome, SubmitRequest,
+ };
+@@ -51,6 +52,29 @@ impl LocalInferenceAdapter {
+         self.client.probe_health().await
+     }
+ 
++    /// Builds the adapter straight from a worker's registered PRD-063
++    /// `[worker_registry.workers.<id>.local]` profile: which runtime applies
++    /// and where its endpoint is reached. `token` is still resolved by the
++    /// caller at the adapter boundary (BYO-Auth) — this constructor never
++    /// reads a credential itself, matching [`LocalInferenceAdapter::new`].
++    pub fn from_registry_config(
++        config: &LocalWorkerConfig,
++        token: LocalAuthToken,
++    ) -> Result<Self, String> {
++        let runtime = match config.runtime_kind {
++            ConfigLocalRuntimeKind::Ollama => LocalRuntimeKind::Ollama,
++            ConfigLocalRuntimeKind::Unsloth => LocalRuntimeKind::Unsloth,
++        };
++        Self::new(
++            runtime,
++            token,
++            LocalChatConfig {
++                base_url: config.endpoint.base_url.clone(),
++                ..LocalChatConfig::default()
++            },
++        )
++    }
++
+     /// Verifies the endpoint's claimed model against a registered PRD-062
+     /// artifact digest. `Unverifiable` is the honest degraded path for any
+     /// runtime or condition without exposed digest metadata — never treated
+@@ -115,4 +139,22 @@ mod tests {
+         .unwrap();
+         assert_eq!(unsloth.runtime_id(), UNSLOTH_RUNTIME_ID);
+     }
++
++    #[test]
++    fn adapter_builds_from_the_registered_local_worker_profile() {
++        use familiar_ai_core::config::{LocalEndpointConfig, LocalResourceProfileConfig};
++
++        let config = LocalWorkerConfig {
++            runtime_kind: ConfigLocalRuntimeKind::Ollama,
++            endpoint: LocalEndpointConfig {
++                base_url: "http://127.0.0.1:11434".into(),
++                tls: false,
++            },
++            resources: LocalResourceProfileConfig::default(),
++        };
++        let adapter =
++            LocalInferenceAdapter::from_registry_config(&config, LocalAuthToken::new(None))
++                .unwrap();
++        assert_eq!(adapter.runtime_id(), OLLAMA_RUNTIME_ID);
++    }
+ }
+diff --git a/crates/familiar-ai-core/src/config/registry_workers.rs b/crates/familiar-ai-core/src/config/registry_workers.rs
+index c82d4df..140728d 100644
+--- a/crates/familiar-ai-core/src/config/registry_workers.rs
++++ b/crates/familiar-ai-core/src/config/registry_workers.rs
+@@ -344,6 +344,17 @@ impl LocalEndpointConfig {
+     pub fn trust(&self) -> LocalEndpointTrustConfig {
+         classify_local_endpoint_trust(&self.base_url)
+     }
++
++    /// Whether `base_url`'s scheme is actually `https`. `tls` is validated
++    /// against this rather than trusted as an independent operator
++    /// declaration — a mismatched declaration is a configuration error, not
++    /// silently ignored.
++    pub fn base_url_uses_https(&self) -> bool {
++        self.base_url
++            .split("://")
++            .next()
++            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
++    }
+ }
+ 
+ /// The PRD-063 hardware/resource profile: what PRD-064 typed reservations
+@@ -709,11 +720,25 @@ impl WorkerRegistryConfig {
+                         "worker_registry.workers.{id} local.endpoint.base_url must not be empty"
+                     ));
+                 }
+-                if local.endpoint.trust() != LocalEndpointTrustConfig::Loopback
+-                    && worker.auth_profile.is_none()
+-                {
++                if local.endpoint.trust() != LocalEndpointTrustConfig::Loopback {
++                    if worker.auth_profile.is_none() {
++                        return Err(format!(
++                            "worker_registry.workers.{id} non-loopback local endpoints require auth_profile"
++                        ));
++                    }
++                    // A credential is never sent in cleartext to a
++                    // non-loopback host: both the declared `tls` flag and
++                    // the URL's own scheme must say so, so the credential
++                    // can never travel over plaintext by a mismatched or
++                    // ignored declaration.
++                    if !local.endpoint.tls || !local.endpoint.base_url_uses_https() {
++                        return Err(format!(
++                            "worker_registry.workers.{id} non-loopback local endpoints require tls = true and an https:// base_url"
++                        ));
++                    }
++                } else if local.endpoint.tls && !local.endpoint.base_url_uses_https() {
+                     return Err(format!(
+-                        "worker_registry.workers.{id} non-loopback local endpoints require auth_profile"
++                        "worker_registry.workers.{id} local.endpoint.tls = true requires an https:// base_url"
+                     ));
+                 }
+             }
+@@ -995,12 +1020,48 @@ mod local_worker_tests {
+ 
+         let mut local = loopback_local(LocalRuntimeKind::Ollama);
+         local.endpoint.base_url = "https://gpu-box.lan:11434".into();
++        local.endpoint.tls = true;
+         let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), Some("gpu-box"));
+         registry(worker)
+             .validate(&std::collections::BTreeSet::new())
+             .unwrap();
+     }
+ 
++    #[test]
++    fn non_loopback_endpoint_requires_tls_true_and_https_scheme() {
++        // auth_profile present but plaintext http:// base_url: refused, even
++        // though `tls` defaults to false and would otherwise pass unnoticed.
++        let mut local = loopback_local(LocalRuntimeKind::Ollama);
++        local.endpoint.base_url = "http://gpu-box.lan:11434".into();
++        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), Some("gpu-box"));
++        let error = registry(worker)
++            .validate(&std::collections::BTreeSet::new())
++            .unwrap_err();
++        assert!(error.contains("tls = true and an https"), "{error}");
++
++        // auth_profile and https:// base_url, but the declared `tls` flag
++        // was left false: the flag is load-bearing, not decorative.
++        let mut local = loopback_local(LocalRuntimeKind::Ollama);
++        local.endpoint.base_url = "https://gpu-box.lan:11434".into();
++        local.endpoint.tls = false;
++        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), Some("gpu-box"));
++        let error = registry(worker)
++            .validate(&std::collections::BTreeSet::new())
++            .unwrap_err();
++        assert!(error.contains("tls = true and an https"), "{error}");
++    }
++
++    #[test]
++    fn declared_tls_true_must_match_an_https_scheme() {
++        let mut local = loopback_local(LocalRuntimeKind::Ollama);
++        local.endpoint.tls = true;
++        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), None);
++        let error = registry(worker)
++            .validate(&std::collections::BTreeSet::new())
++            .unwrap_err();
++        assert!(error.contains("requires an https:// base_url"), "{error}");
++    }
++
+     #[test]
+     fn local_and_runtime_config_are_mutually_exclusive() {
+         let mut worker = local_worker(
+diff --git a/crates/familiar-ai-daemon/src/local_worker_runtime.rs b/crates/familiar-ai-daemon/src/local_worker_runtime.rs
+index bb056e6..91bb7a5 100644
+--- a/crates/familiar-ai-daemon/src/local_worker_runtime.rs
++++ b/crates/familiar-ai-daemon/src/local_worker_runtime.rs
+@@ -14,9 +14,11 @@
+ use chrono::{DateTime, Utc};
+ 
+ use familiar_ai_agent::raw_runtime::{RunOutcome, StopReason};
++use familiar_ai_core::config::LocalResourceProfileConfig;
+ use familiar_ai_core::{
+     GrantMode, ReservationOwnerIdentity, ResourceRequest, ResourceType, UnknownConsumptionPolicy,
+ };
++use familiar_ai_llm::local_runtime::ArtifactVerificationOutcome;
+ use familiar_ai_storage::repos::local_telemetry::{
+     LocalArtifactVerificationState, LocalTelemetryRepository, LocalTelemetryRow,
+ };
+@@ -130,6 +132,98 @@ pub fn acquire_with_unknown_capacity_policy(
+     repo.acquire(owner, requests, GrantMode::AllOrNothing, None)
+ }
+ 
++/// Builds a worker's per-execution requests straight from its declared
++/// PRD-063 [`LocalResourceProfileConfig`], rather than a caller hand-picking
++/// the same fields positionally.
++pub fn execution_resource_requests_for_profile(
++    pool_prefix: &str,
++    profile: &LocalResourceProfileConfig,
++) -> Vec<ResourceRequest> {
++    execution_resource_requests(
++        pool_prefix,
++        profile.accelerator_memory_mb,
++        profile.system_memory_mb,
++        profile.exclusive_runtime,
++    )
++}
++
++/// Defines this worker's PRD-064 pool capacities from its declared PRD-063
++/// resource profile: `concurrent_inference_slots` and `model_loading_slots`
++/// are the pool capacities themselves — how many concurrent executions or
++/// simultaneous cold starts this hardware profile supports — replacing a
++/// caller hand-picking a capacity the operator never configured. A field
++/// left absent defines no pool for that resource at all: an unconfigured
++/// resource stays unknown capacity, refused by
++/// [`acquire_with_unknown_capacity_policy`]'s default rather than assumed to
++/// have some invented size.
++pub fn define_pools_from_resource_profile(
++    repo: &mut ReservationRepository<'_>,
++    pool_prefix: &str,
++    profile: &LocalResourceProfileConfig,
++) -> familiar_ai_core::Result<()> {
++    if let Some(capacity) = profile.concurrent_inference_slots {
++        repo.define_pool(
++            &format!("{pool_prefix}:inference-slots"),
++            &ResourceType::InferenceSlots,
++            capacity,
++            false,
++        )?;
++    }
++    if let Some(capacity) = profile.model_loading_slots {
++        repo.define_pool(
++            &format!("{pool_prefix}:model-loading-slots"),
++            &ResourceType::ModelLoadingSlots,
++            capacity,
++            false,
++        )?;
++    }
++    Ok(())
++}
++
++/// Whether an observed thermal or power reading has crossed this worker's
++/// declared PRD-063 ceiling. `None` in either the profile or the
++/// observation means no ceiling is configured or no sensor is available —
++/// refusal only ever fires on a real observation against an operator-set
++/// ceiling, never on an absent value assumed safe or unsafe.
++pub fn thermal_or_power_ceiling_exceeded(
++    profile: &LocalResourceProfileConfig,
++    observed_temperature_celsius: Option<f64>,
++    observed_power_watts: Option<f64>,
++) -> Option<&'static str> {
++    if let (Some(ceiling), Some(observed)) = (
++        profile.thermal_ceiling_celsius,
++        observed_temperature_celsius,
++    ) {
++        if observed >= ceiling as f64 {
++            return Some("thermal-ceiling-exceeded");
++        }
++    }
++    if let (Some(ceiling), Some(observed)) = (profile.power_ceiling_watts, observed_power_watts) {
++        if observed >= ceiling as f64 {
++            return Some("power-ceiling-exceeded");
++        }
++    }
++    None
++}
++
++/// Maps a runtime's artifact-digest probe outcome
++/// (`familiar_ai_llm::local_runtime::ArtifactVerificationOutcome`) to the
++/// persisted PRD-063 telemetry state: only a confirmed digest match records
++/// `Verified`. `Mismatch` is an active refusal signal, kept distinct from
++/// the merely-unproven `DegradedUnverified` — neither is ever treated as a
++/// match by routing policy (`docs/contracts/local-worker-runtime.md`).
++pub fn artifact_verification_state_for(
++    outcome: &ArtifactVerificationOutcome,
++) -> LocalArtifactVerificationState {
++    match outcome {
++        ArtifactVerificationOutcome::Verified { .. } => LocalArtifactVerificationState::Verified,
++        ArtifactVerificationOutcome::Mismatch { .. } => LocalArtifactVerificationState::Mismatch,
++        ArtifactVerificationOutcome::Unverifiable { .. } => {
++            LocalArtifactVerificationState::DegradedUnverified
++        }
++    }
++}
++
+ /// Reserves one model-loading slot for the cold-start window. Callers
+ /// release it (via [`ReservationRepository::release`]) as soon as the model
+ /// finishes loading, independent of the inference-slot reservation that
+@@ -238,6 +332,14 @@ pub struct LocalRunMeasurements {
+     pub energy_measurement_provenance: Option<String>,
+ }
+ 
++/// `retries` is supplied by the caller, never derived from
++/// `outcome.attempts`: the PRD-058 loop mints one attempt per submission,
++/// including every ordinary multi-turn tool-call round trip, so
++/// `attempts.len()` counts loop turns, not retries. Only a caller that
++/// itself resubmits after a failed/ambiguous prior outcome (this function
++/// sees none of that history — one call sees exactly one `RunOutcome`) knows
++/// how many genuine retries occurred; until such resumption tracking exists,
++/// callers pass `0` rather than a fabricated count.
+ #[allow(clippy::too_many_arguments)]
+ pub fn persist_local_telemetry(
+     repo: &LocalTelemetryRepository<'_>,
+@@ -249,6 +351,7 @@ pub fn persist_local_telemetry(
+     artifact_verification_state: LocalArtifactVerificationState,
+     measurements: &LocalRunMeasurements,
+     outcome: &RunOutcome,
++    retries: u32,
+ ) -> familiar_ai_core::Result<String> {
+     let usage = outcome.attempts.iter().fold(
+         Default::default(),
+@@ -263,7 +366,6 @@ pub fn persist_local_telemetry(
+         .first()
+         .map(|attempt| attempt.attempt_id.0.as_str())
+         .unwrap_or("no-attempt");
+-    let retries = outcome.attempts.len().saturating_sub(1) as u32;
+     let row = LocalTelemetryRow {
+         execution_id,
+         attempt_id,
+@@ -320,6 +422,106 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn pool_capacity_is_derived_from_the_declared_resource_profile() {
++        let mut db = database();
++        let mut repo = ReservationRepository::new(db.conn_mut());
++        let profile = LocalResourceProfileConfig {
++            concurrent_inference_slots: Some(2),
++            model_loading_slots: Some(1),
++            ..Default::default()
++        };
++        define_pools_from_resource_profile(&mut repo, "local:ollama:llama3", &profile).unwrap();
++
++        let requests = execution_resource_requests_for_profile("local:ollama:llama3", &profile);
++        let first = acquire_with_unknown_capacity_policy(
++            &mut repo,
++            &owner("a"),
++            &requests,
++            UnknownCapacityPolicy::Refuse,
++        )
++        .unwrap();
++        assert!(matches!(first, AcquireOutcome::Granted(_)));
++        // The profile declared two concurrent inference slots: a second
++        // claimant is granted, not refused.
++        let second = acquire_with_unknown_capacity_policy(
++            &mut repo,
++            &owner("b"),
++            &requests,
++            UnknownCapacityPolicy::Refuse,
++        )
++        .unwrap();
++        assert!(matches!(second, AcquireOutcome::Granted(_)));
++        // A third exceeds the declared capacity.
++        let third = acquire_with_unknown_capacity_policy(
++            &mut repo,
++            &owner("c"),
++            &requests,
++            UnknownCapacityPolicy::Refuse,
++        )
++        .unwrap();
++        assert!(matches!(third, AcquireOutcome::Refused { .. }));
++    }
++
++    #[test]
++    fn resource_profile_fields_left_absent_define_no_pool() {
++        let mut db = database();
++        let mut repo = ReservationRepository::new(db.conn_mut());
++        // No fields configured: nothing is defined, so the ordinary
++        // unknown-capacity refusal applies rather than an invented capacity.
++        define_pools_from_resource_profile(
++            &mut repo,
++            "local:ollama:llama3",
++            &LocalResourceProfileConfig::default(),
++        )
++        .unwrap();
++        let requests =
++            execution_resource_requests_for_profile("local:ollama:llama3", &Default::default());
++        let outcome = acquire_with_unknown_capacity_policy(
++            &mut repo,
++            &owner("a"),
++            &requests,
++            UnknownCapacityPolicy::Refuse,
++        )
++        .unwrap();
++        assert!(matches!(outcome, AcquireOutcome::Refused { .. }));
++    }
++
++    #[test]
++    fn thermal_and_power_ceilings_refuse_only_on_a_real_observation_exceeding_them() {
++        let profile = LocalResourceProfileConfig {
++            thermal_ceiling_celsius: Some(90),
++            power_ceiling_watts: Some(250),
++            ..Default::default()
++        };
++        assert_eq!(
++            thermal_or_power_ceiling_exceeded(&profile, Some(95.0), None),
++            Some("thermal-ceiling-exceeded")
++        );
++        assert_eq!(
++            thermal_or_power_ceiling_exceeded(&profile, None, Some(300.0)),
++            Some("power-ceiling-exceeded")
++        );
++        assert_eq!(
++            thermal_or_power_ceiling_exceeded(&profile, Some(70.0), Some(100.0)),
++            None
++        );
++        // No sensor reading available: never refused on an absent value.
++        assert_eq!(
++            thermal_or_power_ceiling_exceeded(&profile, None, None),
++            None
++        );
++        // No ceiling configured: never refused regardless of reading.
++        assert_eq!(
++            thermal_or_power_ceiling_exceeded(
++                &LocalResourceProfileConfig::default(),
++                Some(999.0),
++                Some(999.0)
++            ),
++            None
++        );
++    }
++
+     #[test]
+     fn unknown_capacity_refuses_by_default_never_inventing_availability() {
+         let mut db = database();
+@@ -606,6 +808,7 @@ mod tests {
+             LocalArtifactVerificationState::Verified,
+             &measurements,
+             &outcome,
++            0,
+         )
+         .unwrap();
+         let rows = repo.telemetry_for_execution("exec_1").unwrap();
+@@ -613,6 +816,82 @@ mod tests {
+         assert_eq!(rows[0].0, telemetry_id);
+     }
+ 
++    /// A successful multi-turn run (several ordinary tool-call round trips,
++    /// zero failures) must never be recorded as having retried: `retries`
++    /// reflects only what the caller explicitly reports, not
++    /// `outcome.attempts.len()`.
++    #[test]
++    fn multi_attempt_successful_run_records_zero_retries_not_attempt_count() {
++        let db = database();
++        db.conn().execute("INSERT INTO execution_history(execution_id,started_at,agent,outcome,repository,worktree,prd_path,unavailable_fields) VALUES('exec_1','now','local-worker','running','repo','wt','docs/prds/PRD-063.md','[]')", []).unwrap();
++        let repo = LocalTelemetryRepository::new(db.conn());
++        let mut outcome = stub_outcome(
++            StopReason::Completed {
++                structured_output: false,
++            },
++            Some(20),
++        );
++        // Three ordinary submissions (e.g. two tool-call round trips plus a
++        // final completing turn), none of them a retry.
++        outcome.attempts = vec![
++            outcome.attempts[0].clone(),
++            outcome.attempts[0].clone(),
++            outcome.attempts[0].clone(),
++        ];
++        let measurements = LocalRunMeasurements::default();
++        let telemetry_id = persist_local_telemetry(
++            &repo,
++            "exec_1",
++            "implementation",
++            "local-ollama-llama3",
++            "ollama",
++            Some("sha256:aaaa"),
++            LocalArtifactVerificationState::Verified,
++            &measurements,
++            &outcome,
++            0,
++        )
++        .unwrap();
++        let retries: u32 = db
++            .conn()
++            .query_row(
++                "SELECT retries FROM local_worker_telemetry WHERE telemetry_id=?1",
++                [&telemetry_id],
++                |row| row.get(0),
++            )
++            .unwrap();
++        assert_eq!(
++            retries, 0,
++            "three successful submissions must not be reported as two retries"
++        );
++    }
++
++    #[test]
++    fn artifact_verification_outcome_maps_to_the_persisted_state_honestly() {
++        assert_eq!(
++            artifact_verification_state_for(&ArtifactVerificationOutcome::Verified {
++                digest: "sha256:aaaa".into()
++            }),
++            LocalArtifactVerificationState::Verified
++        );
++        // A mismatch is an active refusal signal, never accepted as a match.
++        assert_eq!(
++            artifact_verification_state_for(&ArtifactVerificationOutcome::Mismatch {
++                claimed: "sha256:bbbb".into(),
++                expected: "sha256:aaaa".into(),
++            }),
++            LocalArtifactVerificationState::Mismatch
++        );
++        // Unverifiable is merely unproven, distinct from an active mismatch,
++        // and still never treated as a match.
++        assert_eq!(
++            artifact_verification_state_for(&ArtifactVerificationOutcome::Unverifiable {
++                reason: "no digest metadata".into()
++            }),
++            LocalArtifactVerificationState::DegradedUnverified
++        );
++    }
++
+     #[test]
+     fn timeout_or_crash_failure_kind_is_recorded_honestly_not_as_completion() {
+         assert_eq!(failure_kind_for(StopReason::Timeout), Some("timeout"));
+diff --git a/crates/familiar-ai-daemon/tests/local_worker_runtime.rs b/crates/familiar-ai-daemon/tests/local_worker_runtime.rs
+index 14829e9..07e8e0e 100644
+--- a/crates/familiar-ai-daemon/tests/local_worker_runtime.rs
++++ b/crates/familiar-ai-daemon/tests/local_worker_runtime.rs
+@@ -14,10 +14,16 @@ use familiar_ai_agent::raw_runtime::{
+     InMemoryToolJournal, LoopCeilings, LoopConfig, StablePrefix, StopReason, ToolExecutor,
+     ValidatedCall, VolatileTask,
+ };
++use familiar_ai_core::config::{
++    LocalEndpointConfig, LocalResourceProfileConfig, LocalRuntimeKind as ConfigLocalRuntimeKind,
++    LocalWorkerConfig,
++};
+ use familiar_ai_core::{GrantMode, ReservationOwnerIdentity, ResourceType};
+ use familiar_ai_daemon::local_worker_runtime::{
+-    acquire_with_unknown_capacity_policy, execution_resource_requests, persist_local_telemetry,
+-    resolve_reservation, LocalRunMeasurements, UnknownCapacityPolicy,
++    acquire_with_unknown_capacity_policy, artifact_verification_state_for,
++    define_pools_from_resource_profile, execution_resource_requests,
++    execution_resource_requests_for_profile, persist_local_telemetry, resolve_reservation,
++    LocalRunMeasurements, UnknownCapacityPolicy,
+ };
+ use familiar_ai_llm::attempt::AttemptId;
+ use familiar_ai_storage::repos::local_telemetry::{
+@@ -28,7 +34,7 @@ use familiar_ai_storage::repos::reservation::{
+ };
+ use familiar_ai_storage::Database;
+ use serde_json::{json, Value};
+-use wiremock::matchers::method;
++use wiremock::matchers::{method, path};
+ use wiremock::{Mock, MockServer, ResponseTemplate};
+ 
+ fn setup_execution(db: &Database, execution_id: &str) {
+@@ -124,9 +130,22 @@ async fn mount_sse(server: &MockServer, frames: &[Value]) {
+         .await;
+ }
+ 
+-/// End-to-end: acquire a reservation, run the real loop against a fake
+-/// endpoint, commit the reservation with observed consumption, and persist
+-/// honest telemetry with no invented cost.
++async fn mount_tags(server: &MockServer, model: &str, digest: &str) {
++    Mock::given(method("GET"))
++        .and(path("/api/tags"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "models": [{"name": model, "digest": digest}]
++        })))
++        .mount(server)
++        .await;
++}
++
++/// End-to-end: derive PRD-064 pool capacity and the `InferenceAdapter`
++/// straight from a worker's registered PRD-063 `[..local]` profile (never
++/// hand-picked positionally), verify the endpoint's claimed artifact, run
++/// the real loop against a fake endpoint, commit the reservation with
++/// observed consumption, and persist honest telemetry with no invented
++/// cost.
+ #[tokio::test]
+ async fn full_pipeline_reserves_runs_commits_and_records_telemetry() {
+     let server = MockServer::start().await;
+@@ -138,21 +157,41 @@ async fn full_pipeline_reserves_runs_commits_and_records_telemetry() {
+         ],
+     )
+     .await;
++    mount_tags(&server, "llama3", "sha256:aaaa").await;
+ 
+     let mut db = Database::open_in_memory().unwrap();
+     db.run_migrations().unwrap();
+     setup_execution(&db, "exec_1");
+ 
+-    let requests = execution_resource_requests("local:ollama:llama3", Some(4096), None, false);
++    let worker_config = LocalWorkerConfig {
++        runtime_kind: ConfigLocalRuntimeKind::Ollama,
++        endpoint: LocalEndpointConfig {
++            base_url: server.uri(),
++            tls: false,
++        },
++        resources: LocalResourceProfileConfig {
++            accelerator_memory_mb: Some(4096),
++            concurrent_inference_slots: Some(1),
++            ..Default::default()
++        },
++    };
++
++    let requests =
++        execution_resource_requests_for_profile("local:ollama:llama3", &worker_config.resources);
+     let grant = {
+         let mut repo = ReservationRepository::new(db.conn_mut());
+-        repo.define_pool(
+-            "local:ollama:llama3:inference-slots",
+-            &ResourceType::InferenceSlots,
+-            1,
+-            false,
++        define_pools_from_resource_profile(
++            &mut repo,
++            "local:ollama:llama3",
++            &worker_config.resources,
+         )
+         .unwrap();
++        // The pool's total hardware capacity (how much accelerator memory
++        // this machine has) is an operator-level fact distinct from this
++        // worker's own declared footprint request
++        // (`accelerator_memory_mb`) — the resource profile supplies the
++        // latter, not the former, so the pool itself stays hand-defined
++        // here.
+         repo.define_pool(
+             "local:ollama:llama3:accelerator-memory",
+             &ResourceType::AcceleratorMemory,
+@@ -175,15 +214,15 @@ async fn full_pipeline_reserves_runs_commits_and_records_telemetry() {
+         }
+     };
+ 
+-    let adapter = LocalInferenceAdapter::new(
+-        LocalRuntimeKind::Ollama,
+-        LocalAuthToken::new(None),
+-        LocalChatConfig {
+-            base_url: server.uri(),
+-            request_timeout_secs: 5,
+-        },
+-    )
+-    .unwrap();
++    let adapter =
++        LocalInferenceAdapter::from_registry_config(&worker_config, LocalAuthToken::new(None))
++            .unwrap();
++    let verification = adapter.verify_artifact("llama3", Some("sha256:aaaa")).await;
++    assert_eq!(
++        artifact_verification_state_for(&verification),
++        LocalArtifactVerificationState::Verified
++    );
++
+     let mut executor = NoopExecutor;
+     let authorizer = AllowAll;
+     let mut journal = InMemoryToolJournal::default();
+@@ -235,12 +274,13 @@ async fn full_pipeline_reserves_runs_commits_and_records_telemetry() {
+         "local-ollama-llama3",
+         "ollama",
+         Some("sha256:aaaa"),
+-        LocalArtifactVerificationState::Verified,
++        artifact_verification_state_for(&verification),
+         &LocalRunMeasurements {
+             wall_time_ms: Some(500),
+             ..Default::default()
+         },
+         &outcome,
++        0,
+     )
+     .unwrap();
+     let rows = telemetry_repo.telemetry_for_execution("exec_1").unwrap();
+@@ -366,3 +406,118 @@ async fn endpoint_disappearance_holds_reservation_and_records_no_fabricated_atte
+     assert_eq!(settlement.state, "held");
+     assert!(settlement.unknown_consumption);
+ }
++
++/// Reads a pool's configured capacity straight from storage. There is no
++/// public accessor, and the assertion this test needs is precisely that the
++/// operator's number survived.
++fn pool_capacity(db: &Database, pool_id: &str, resource_type: &ResourceType) -> i64 {
++    db.conn()
++        .query_row(
++            "SELECT capacity FROM resource_pools WHERE pool_id=?1 AND resource_type=?2",
++            rusqlite::params![pool_id, resource_type.as_str()],
++            |row| row.get(0),
++        )
++        .unwrap()
++}
++
++/// N1: `acquire_with_unknown_capacity_policy` documents itself as applying
++/// the policy "to any pool Familiar has never observed". It cannot actually
++/// tell that case apart from a pool that exists and merely cannot satisfy
++/// this request — `acquire` reports both as `Refused { unavailable }` — so
++/// `SerializeConservatively` calls `define_pool(.., 1, false)` on pools the
++/// operator configured.
++///
++/// `define_pool` upserts under a guard
++/// (`available + (new_capacity - old_capacity) >= 0`), which blocks the
++/// rewrite only while the pool is genuinely busy. A pool that is *mostly
++/// free* and refuses merely because one request exceeds it passes the guard
++/// and is silently rewritten: `concurrent_inference_slots = 4` becomes
++/// capacity 1, permanently, and Familiar's record of the machine no longer
++/// matches what the operator configured.
++#[test]
++fn conservative_bootstrap_never_rewrites_an_operator_configured_pool() {
++    let mut db = Database::open_in_memory().unwrap();
++    db.run_migrations().unwrap();
++
++    let profile = LocalResourceProfileConfig {
++        concurrent_inference_slots: Some(4),
++        ..Default::default()
++    };
++    // One oversized request against the operator's own pool: five slots on a
++    // machine configured for four. Nothing is outstanding, so this is
++    // refusal by size, not by contention.
++    let requests = vec![familiar_ai_core::ResourceRequest {
++        pool_id: "local:ollama:llama3:inference-slots".into(),
++        resource_type: ResourceType::InferenceSlots,
++        amount: 5,
++    }];
++
++    {
++        let mut repo = ReservationRepository::new(db.conn_mut());
++        define_pools_from_resource_profile(&mut repo, "local:ollama:llama3", &profile).unwrap();
++        let outcome = acquire_with_unknown_capacity_policy(
++            &mut repo,
++            &owner("exec_oversized"),
++            &requests,
++            UnknownCapacityPolicy::SerializeConservatively,
++        )
++        .unwrap();
++        // Five slots never fit in four; the policy must not invent a way.
++        assert!(
++            matches!(outcome, AcquireOutcome::Refused { .. }),
++            "an oversized request must stay refused, got {outcome:?}"
++        );
++    }
++
++    assert_eq!(
++        pool_capacity(
++            &db,
++            "local:ollama:llama3:inference-slots",
++            &ResourceType::InferenceSlots
++        ),
++        4,
++        "the operator's configured capacity was rewritten by the conservative \
++         bootstrap; it may only ever define a pool Familiar has never observed"
++    );
++}
++
++/// The other half of the contract, so a fix cannot simply stop bootstrapping.
++/// A pool that genuinely has no row must still get exactly one conservative
++/// occupant — never a larger invented number.
++#[test]
++fn conservative_bootstrap_still_defines_a_never_observed_pool() {
++    let mut db = Database::open_in_memory().unwrap();
++    db.run_migrations().unwrap();
++
++    // No define_pool call ever ran for this resource.
++    let requests = vec![familiar_ai_core::ResourceRequest {
++        pool_id: "local:ollama:llama3:inference-slots".into(),
++        resource_type: ResourceType::InferenceSlots,
++        amount: 1,
++    }];
++
++    {
++        let mut repo = ReservationRepository::new(db.conn_mut());
++        let outcome = acquire_with_unknown_capacity_policy(
++            &mut repo,
++            &owner("exec_unknown"),
++            &requests,
++            UnknownCapacityPolicy::SerializeConservatively,
++        )
++        .unwrap();
++        assert!(
++            matches!(outcome, AcquireOutcome::Granted(_)),
++            "an unobserved pool must be bootstrapped to one occupant, got {outcome:?}"
++        );
++    }
++
++    assert_eq!(
++        pool_capacity(
++            &db,
++            "local:ollama:llama3:inference-slots",
++            &ResourceType::InferenceSlots
++        ),
++        1,
++        "an unobserved pool must be bootstrapped to exactly one occupant"
++    );
++}
+diff --git a/crates/familiar-ai-llm/src/local_runtime.rs b/crates/familiar-ai-llm/src/local_runtime.rs
+index e54dc72..81f6c77 100644
+--- a/crates/familiar-ai-llm/src/local_runtime.rs
++++ b/crates/familiar-ai-llm/src/local_runtime.rs
+@@ -43,6 +43,41 @@ impl LocalRuntimeKind {
+ pub const UNSLOTH_RUNTIME_ID: &str = "unsloth";
+ pub const OLLAMA_RUNTIME_ID: &str = "ollama";
+ 
++fn url_scheme(base_url: &str) -> &str {
++    base_url.split("://").next().unwrap_or("")
++}
++
++fn url_host(base_url: &str) -> &str {
++    let without_scheme = base_url.split("://").nth(1).unwrap_or(base_url);
++    let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
++    if let Some(rest) = authority.strip_prefix('[') {
++        rest.split(']').next().unwrap_or("")
++    } else {
++        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
++    }
++}
++
++fn host_is_loopback(host: &str) -> bool {
++    if host.eq_ignore_ascii_case("localhost") || host == "::1" {
++        return true;
++    }
++    match host.parse::<std::net::IpAddr>() {
++        Ok(std::net::IpAddr::V4(v4)) => v4.octets()[0] == 127,
++        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback(),
++        Err(_) => false,
++    }
++}
++
++/// Whether it is safe to attach a bearer credential to a request against
++/// `base_url`: either the transport is TLS-protected (`https`), or the
++/// endpoint is loopback — plaintext that never leaves the local machine.
++/// Anything else (a plaintext LAN or remote endpoint) would send the
++/// credential in cleartext over the network, so credential attachment is
++/// refused rather than silently sent (`docs/contracts/local-worker-runtime.md`).
++fn credential_safe_transport(base_url: &str) -> bool {
++    url_scheme(base_url).eq_ignore_ascii_case("https") || host_is_loopback(url_host(base_url))
++}
++
+ /// A resolved local endpoint credential, held only for the client's
+ /// lifetime. Loopback endpoints typically carry none (`None`); non-loopback
+ /// endpoints require one by BYO-Auth external reference
+@@ -120,7 +155,17 @@ pub struct LocalChatRequest<'a> {
+ }
+ 
+ impl LocalChatClient {
++    /// Fails closed rather than attaching a bearer credential to a plaintext
++    /// non-loopback endpoint (`credential_safe_transport`): the credential
++    /// would otherwise be sent in cleartext over the network to a LAN or
++    /// remote host.
+     pub fn new(token: LocalAuthToken, config: LocalChatConfig) -> Result<Self, String> {
++        if token.bearer_header().is_some() && !credential_safe_transport(&config.base_url) {
++            return Err(format!(
++                "refusing to attach a bearer credential to plaintext non-loopback endpoint \"{}\": use an https:// base_url or a loopback endpoint",
++                config.base_url
++            ));
++        }
+         let client = Client::builder()
+             .timeout(Duration::from_secs(config.request_timeout_secs))
+             .build()
+@@ -1001,4 +1046,58 @@ mod tests {
+         let token = LocalAuthToken::new(Some("secret".into()));
+         assert_eq!(format!("{token:?}"), "LocalAuthToken(Some([REDACTED]))");
+     }
++
++    #[test]
++    fn credential_is_refused_over_plaintext_non_loopback_endpoints() {
++        let result = LocalChatClient::new(
++            LocalAuthToken::new(Some("secret".into())),
++            LocalChatConfig {
++                base_url: "http://gpu-box.lan:11434".into(),
++                request_timeout_secs: 5,
++            },
++        );
++        assert!(result.is_err(), "plaintext LAN endpoint must be refused");
++    }
++
++    #[test]
++    fn credential_is_accepted_over_https_non_loopback_endpoints() {
++        let result = LocalChatClient::new(
++            LocalAuthToken::new(Some("secret".into())),
++            LocalChatConfig {
++                base_url: "https://gpu-box.lan:11434".into(),
++                request_timeout_secs: 5,
++            },
++        );
++        assert!(result.is_ok(), "https LAN endpoint must be accepted");
++    }
++
++    #[test]
++    fn credential_is_accepted_over_plaintext_loopback_endpoints() {
++        let result = LocalChatClient::new(
++            LocalAuthToken::new(Some("secret".into())),
++            LocalChatConfig {
++                base_url: "http://127.0.0.1:11434".into(),
++                request_timeout_secs: 5,
++            },
++        );
++        assert!(
++            result.is_ok(),
++            "plaintext loopback endpoint must be accepted"
++        );
++    }
++
++    #[test]
++    fn no_credential_is_accepted_over_any_transport() {
++        let result = LocalChatClient::new(
++            LocalAuthToken::new(None),
++            LocalChatConfig {
++                base_url: "http://gpu-box.lan:11434".into(),
++                request_timeout_secs: 5,
++            },
++        );
++        assert!(
++            result.is_ok(),
++            "no credential means nothing can leak, so any transport is accepted"
++        );
++    }
+ }
