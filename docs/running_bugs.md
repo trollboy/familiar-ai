@@ -1454,3 +1454,35 @@ reinstall the binary, then rerun the 076 drive.
 - **Fix:** when the diff exceeds the budget, list the top few paths by
   contributed bytes. The information is already in hand at the point the
   check fails.
+
+### FAM-BUG-053 — Rebinding a checkpoint silently voids every scope approval on it
+
+- **Status:** Open
+- **Found:** 2026-09-05, unsticking PRD-92.
+- **Detail:** `scope_decisions` rows are keyed by `(finding_hash,
+  candidate_hash)`. `operator_rebind` recomputes the candidate snapshot
+  and writes a new `diff_hash`, so every approval recorded against the
+  previous candidate stops matching. The rows are not deleted — the
+  resume still reports `durable approvals loaded=13` — they simply no
+  longer apply, and the findings resurface as if never decided.
+
+  ```
+  approvals keyed to:  sha256:2798f50b...   (approved by human:trollboy)
+  candidate hash now:  sha256:6e476a84...   (after operator_rebind)
+  ```
+
+- **Why it matters:** rebind exists precisely for surgical operator edits
+  to a candidate. Its whole purpose is a situation where human decisions
+  have usually already been made. Voiding them is the opposite of what an
+  operator expects, and nothing warns. The owner approved three findings,
+  watched them apply, then saw two of them return.
+- **Contrast:** review-finding waivers are *substance*-keyed (category
+  plus cited paths, subset semantics) specifically so a reviewer's
+  finding-id rotation cannot void a human decision. Scope decisions never
+  got that treatment, so the two human-decision mechanisms have opposite
+  durability under the same kind of change.
+- **Fix:** key scope approvals by substance — the finding's path, change
+  kind, and rule — as waivers already are, so an approval survives a
+  candidate that still contains the same change. Failing that, rebind
+  must at minimum re-point or explicitly invalidate affected approvals
+  and say so out loud, rather than leaving rows that load but never match.
