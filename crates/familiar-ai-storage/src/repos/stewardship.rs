@@ -133,6 +133,53 @@ pub fn review_findings_for_session(
     Ok(out)
 }
 
+/// The commands that actually advance a stopped attempt, ordered so the
+/// first one is the one an operator most likely wants.
+///
+/// This list used to be two entries regardless of why the attempt stopped:
+/// `backlog release` (discard the work) and `backlog complete` (mark it done,
+/// bypassing every gate). For a scope pause — by far the most common stop —
+/// neither is right, and the command that *is* right (`scope-decisions`) was
+/// never named, so the only advertised ways forward were destructive. The
+/// destructive pair is still offered, but last, and only after the remedy.
+fn recovery_for(detail: &str, prd_id: &str, prd_path: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    if detail.starts_with("scope_") {
+        commands.push(
+            "familiar-ai scope-decisions   # numbered picker; approve or reject each finding"
+                .to_string(),
+        );
+    }
+    if matches!(
+        detail,
+        "verification_failed"
+            | "human_review_required"
+            | "integration_failed"
+            | "checkpoint_failed"
+            | "malformed_output"
+            | "unclassified_result"
+    ) || detail.starts_with("interrupted")
+    {
+        commands.push(format!(
+            "familiar-ai resume {prd_id}   # re-drive the retained candidate"
+        ));
+    }
+    if detail == "integration_failed" || detail == "human_review_required" {
+        commands.push(
+            "familiar-ai waive --help   # required when a terminal review retains an open finding"
+                .to_string(),
+        );
+    }
+    // Destructive, therefore last and labelled.
+    commands.push(format!(
+        "familiar-ai backlog release {prd_path} --actor human:<you> --reason \"<why>\"   # DISCARDS the work"
+    ));
+    commands.push(format!(
+        "familiar-ai backlog complete {prd_path} --actor human:<you> --reason \"<why>\"   # BYPASSES all gates"
+    ));
+    commands
+}
+
 /// One item currently awaiting a human decision: a stopped driver attempt
 /// (not completed) or a checkpoint blocked/invalidated by PRD-039 recovery
 /// validation, together with the exact recovery command(s) that resolve it.
@@ -186,15 +233,8 @@ pub fn pending_human_gates(
             gates.push(PendingGate {
                 kind: "stopped_attempt".into(),
                 session_id: Some(session_id),
-                prd_id,
-                recovery_commands: vec![
-                    format!(
-                        "familiar-ai backlog release {prd_path} --actor human:<you> --reason \"<why>\""
-                    ),
-                    format!(
-                        "familiar-ai backlog complete {prd_path} --actor human:<you> --reason \"<why>\""
-                    ),
-                ],
+                prd_id: prd_id.clone(),
+                recovery_commands: recovery_for(&detail, &prd_id, &prd_path),
                 prd_path,
                 detail,
             });
