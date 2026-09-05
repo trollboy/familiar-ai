@@ -1455,34 +1455,55 @@ reinstall the binary, then rerun the 076 drive.
   contributed bytes. The information is already in hand at the point the
   check fails.
 
-### FAM-BUG-053 — Rebinding a checkpoint silently voids every scope approval on it
+### FAM-BUG-053 — RETRACTED: scope approvals are not voided by a rebind
+
+- **Status:** Retracted 2026-09-05, same day. The diagnosis was wrong.
+- **What I claimed:** that `scope_decisions` rows are keyed by
+  `(finding_hash, candidate_hash)` and that `operator_rebind` therefore
+  silently invalidates every approval on the candidate.
+- **What is actually true:** `approved_scope_findings` queries
+  `WHERE repository_key=?1 AND decision='approved'` — there is no
+  `candidate_hash` predicate — and it keys each row by
+  `scope_finding_substance_hash`, which blanks `policy_snapshot_hash`
+  before hashing precisely so unrelated landings cannot orphan a human
+  decision (PRD-080). Approvals survive both rebinds and policy rotation.
+- **What actually happened:** `human_review_absorbed` is all-or-nothing —
+
+  ```rust
+  evaluation.findings.iter().all(|f| match f.decision {
+      ProhibitedChange => false,
+      AmbiguousHumanReview | UndeclaredScopeExpansion =>
+          approved.contains(&scope_finding_substance_hash(f)),
+      AllowedChange | JustifiedExpectedFileChange => true,
+  })
+  ```
+
+  A third finding appeared that the owner had never approved (an
+  `AmbiguousHumanReview` on `crates/familiar-ai-tray/Cargo.lock`, itself
+  an artifact of the in-crate build behind FAM-BUG-052). One unapproved
+  finding makes `.all()` false, so the attempt stopped and the printout
+  re-listed every finding — including the two already decided.
+- **How I got it wrong:** I read the scope *evaluation* printout, which
+  lists every changed path and its disposition, as a list of undecided
+  findings. Then I compared the approval rows' `candidate_hash` to the
+  post-rebind `diff_hash`, saw they differed, and treated a coincidence
+  as the cause without reading the lookup query. Two minutes of reading
+  `approved_scope_findings` would have refuted it.
+- **The real defect, filed as FAM-FRICTION-011:** nothing in the output
+  distinguishes an already-approved finding from a pending one, so a
+  single new finding looks identical to every prior decision being lost.
+
+### FAM-FRICTION-011 — Scope output cannot distinguish decided findings from pending ones
 
 - **Status:** Open
-- **Found:** 2026-09-05, unsticking PRD-92.
-- **Detail:** `scope_decisions` rows are keyed by `(finding_hash,
-  candidate_hash)`. `operator_rebind` recomputes the candidate snapshot
-  and writes a new `diff_hash`, so every approval recorded against the
-  previous candidate stops matching. The rows are not deleted — the
-  resume still reports `durable approvals loaded=13` — they simply no
-  longer apply, and the findings resurface as if never decided.
+- **Found:** 2026-09-05, while misdiagnosing FAM-BUG-053.
+- **Detail:** When absorption fails, the evaluation prints every finding
+  with its disposition and no decision state. An operator who approved
+  two findings and then sees three listed has no way to tell whether one
+  is new or all three came back. It cost a wrong bug report, a wrong fix
+  plan, and a retraction.
+- **Fix:** mark each finding with whether a durable approval already
+  covers it, and when absorption fails say which findings blocked it —
+  "1 of 3 findings is undecided: crates/familiar-ai-tray/Cargo.lock"
+  rather than reprinting all three identically.
 
-  ```
-  approvals keyed to:  sha256:2798f50b...   (approved by human:trollboy)
-  candidate hash now:  sha256:6e476a84...   (after operator_rebind)
-  ```
-
-- **Why it matters:** rebind exists precisely for surgical operator edits
-  to a candidate. Its whole purpose is a situation where human decisions
-  have usually already been made. Voiding them is the opposite of what an
-  operator expects, and nothing warns. The owner approved three findings,
-  watched them apply, then saw two of them return.
-- **Contrast:** review-finding waivers are *substance*-keyed (category
-  plus cited paths, subset semantics) specifically so a reviewer's
-  finding-id rotation cannot void a human decision. Scope decisions never
-  got that treatment, so the two human-decision mechanisms have opposite
-  durability under the same kind of change.
-- **Fix:** key scope approvals by substance — the finding's path, change
-  kind, and rule — as waivers already are, so an approval survives a
-  candidate that still contains the same change. Failing that, rebind
-  must at minimum re-point or explicitly invalidate affected approvals
-  and say so out loud, rather than leaving rows that load but never match.
