@@ -1355,3 +1355,59 @@ reinstall the binary, then rerun the 076 drive.
   this Docker-failing test. A required gate that is red on main blocks
   every landing, so it is demoted to advisory until this test is green,
   then re-promoted. The bug stays open; the demotion is not a waiver.
+
+### FAM-BUG-051 — A directory in `expected_files` grants unchecked scope authority
+
+- **Status:** Open — mitigated for the current wave, root cause unfixed
+- **Found:** 2026-09-05, planning the audit-remediation wave. Eight PRDs
+  declared `crates/familiar-ai-storage/migrations/` — a directory, not a
+  file — and `achievable_width()` reported them as mutually disjoint.
+- **Reproduction (the scheduler answering its own question):**
+
+  ```
+  $ compute_width PRD-85 PRD-91     # their ONLY shared expected_file is migrations/
+  graph_width=2 achievable_width=2
+  conflicts: none — every pair is scope-disjoint
+  ```
+
+- **Why it matters, in two ways:**
+  1. **The narrow harm.** Next free migration is `059`. Admitting five
+     migration-claimants simultaneously means five PRDs each create
+     `059_*.sql` and collide at merge. This is exactly the PRD-71/72
+     collision on `057` that cost a session, except five ways — and the
+     scheduler reports zero conflicts on the way in, so nothing warns.
+  2. **The real defect.** Overlap detection compares `expected_files`
+     entries without treating a trailing-slash entry as a prefix claim.
+     A PRD declaring `crates/` therefore holds authority over the whole
+     workspace while appearing disjoint from everything. Scope policy is
+     the mechanism the entire unattended-safety argument rests on; an
+     entry form that silently disables overlap checking is a hole in that
+     mechanism, not a migration-numbering nuisance.
+- **Mitigation applied:** PRD-085/086/087/091/093 now declare concrete
+  filenames (`migrations/059_autonomy_measurement.sql` … `063_…`), so the
+  scheduler sees distinct files and the numbers cannot collide.
+  PRD-063/071/073 still carry directory entries and were left alone —
+  071 is already integrated and 063 has an in-flight candidate whose
+  migration would no longer match a rewritten declaration.
+- **Fix (not yet written):** decide overlap on path *containment* rather
+  than equality, so a directory entry conflicts with every entry beneath
+  it, and either reject directory entries at admission or record them as
+  the prefix claims they are. Deserves its own PRD; PRD-093 (admission
+  quality) is the natural home.
+
+### FAM-FRICTION-009 — Preflight runs every gate before reporting the first failure
+
+- **Status:** Open
+- **Found:** 2026-09-04, driving PRD-081. `verification.format` failed at
+  5.2s; preflight then ran `verification.lint` (34s) and
+  `verification.tests-green-crates` (170s) anyway, and only afterwards
+  reported `session preflight failed: verification.format`.
+- **Cost:** ~205 seconds burned after the answer was already known, with
+  `attempted=0 completed=0` — no work was ever going to start. Only the
+  one failure was reported, so this is not collect-all-failures behavior
+  that trades time for a fuller diagnosis; the later gates' results were
+  discarded.
+- **Fix:** stop at the first failing preflight gate, or report each
+  failure as it happens so the operator can act while the rest run. In an
+  overnight session this is 3.5 minutes per stumble, and a stumble as
+  small as an unformatted file is enough to trigger it.
