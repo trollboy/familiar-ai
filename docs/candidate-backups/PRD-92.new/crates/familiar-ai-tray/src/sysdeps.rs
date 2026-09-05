@@ -37,11 +37,23 @@ impl MissingDependency {
     }
 }
 
+/// Environment variable that, when set, replaces the fixed system search
+/// dirs entirely (colon-separated paths, `std::env::split_paths`). Exists so
+/// an out-of-process integration test can force a deterministic "missing"
+/// or "present" outcome regardless of what the host actually has installed
+/// — see `familiar-ai-daemon/tests/tray_feature_build.rs`. Not read anywhere
+/// except here; production hosts never set it.
+pub const SEARCH_DIRS_OVERRIDE_ENV: &str = "FAMILIAR_AI_TRAY_XDO_SEARCH_DIRS_OVERRIDE";
+
 /// Directories on the linker's default search path, in the order a
 /// distribution linker would consult them. Kept small and explicit rather
 /// than shelling out to `ld --verbose`, since the only question that matters
 /// here is "does *a* copy of `libxdo.so` exist anywhere plausible."
 pub fn default_search_dirs() -> Vec<PathBuf> {
+    if let Some(value) = std::env::var_os(SEARCH_DIRS_OVERRIDE_ENV) {
+        return std::env::split_paths(&value).collect();
+    }
+
     let mut dirs = vec![
         PathBuf::from("/usr/lib"),
         PathBuf::from("/usr/lib64"),
@@ -57,8 +69,13 @@ pub fn default_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// True if any directory in `search_dirs` contains a `libxdo.so` (bare, or
-/// versioned as `libxdo.so.<N>`).
+/// True if any directory in `search_dirs` contains a copy of `libxdo` that
+/// `-lxdo` can actually resolve against: the unversioned development
+/// symlink `libxdo.so`, or a static archive `libxdo.a`. A runtime-only
+/// versioned file such as `libxdo.so.3` does *not* count — the linker looks
+/// for the unversioned name, so a host with only the versioned `.so`
+/// (e.g. `libxdo3` installed without `libxdo-dev`) would pass a check that
+/// accepted it and then still fail at the real link step.
 fn xdo_present_in(search_dirs: &[PathBuf]) -> bool {
     search_dirs.iter().any(|dir| has_libxdo(dir))
 }
@@ -71,7 +88,7 @@ fn has_libxdo(dir: &Path) -> bool {
         entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name == "libxdo.so" || name.starts_with("libxdo.so."))
+            .is_some_and(|name| name == "libxdo.so" || name == "libxdo.a")
     })
 }
 
@@ -112,10 +129,29 @@ mod tests {
     }
 
     #[test]
-    fn finds_versioned_libxdo_so() {
+    fn finds_bare_libxdo_a() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("libxdo.a"), []).unwrap();
+        assert!(find_missing(&[dir.path().to_path_buf()]).is_none());
+    }
+
+    #[test]
+    fn versioned_only_libxdo_so_is_reported_missing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("libxdo.so.3"), []).unwrap();
-        assert!(find_missing(&[dir.path().to_path_buf()]).is_none());
+        let missing = find_missing(&[dir.path().to_path_buf()]);
+        let missing = missing.expect("a versioned-only libxdo.so.3 must not satisfy -lxdo");
+        assert!(missing.diagnostic().contains("libxdo-dev"));
+    }
+
+    #[test]
+    fn search_dirs_override_env_replaces_the_fixed_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("libxdo.so"), []).unwrap();
+        std::env::set_var(SEARCH_DIRS_OVERRIDE_ENV, dir.path());
+        let dirs = default_search_dirs();
+        std::env::remove_var(SEARCH_DIRS_OVERRIDE_ENV);
+        assert_eq!(dirs, vec![dir.path().to_path_buf()]);
     }
 
     #[test]
