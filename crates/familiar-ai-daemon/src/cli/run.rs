@@ -42,64 +42,79 @@ pub(crate) fn handle_attached_review(
                 // the allowed ones — twenty-one lines of "this file was
                 // fine" — leaving the operator to infer the cause from a
                 // line that had nothing to do with it.
+                let rule = "─".repeat(64);
+                eprintln!("\n{rule}");
                 eprintln!(
-                    "\n{prd_id} stopped: {}",
+                    "{prd_id} needs you: {}",
                     describe_stops(&cycle.stop_reasons)
                 );
+                eprintln!("{rule}\n");
+                eprintln!("Familiar implemented the change and ran the gates. It stopped");
+                eprintln!("rather than land work it could not prove.\n");
 
                 let failed: Vec<_> = cycle
                     .verification_history
                     .iter()
                     .filter(|check| check.status != familiar_ai_review::VerificationStatus::Passed)
                     .collect();
-                if !failed.is_empty() {
-                    eprintln!("\n  verification:");
-                    for check in failed {
-                        eprintln!(
-                            "    {:22} {:?}{}",
-                            check.check_id,
-                            check.status,
-                            if check.required {
-                                "  (required)"
-                            } else {
-                                "  (advisory)"
-                            }
-                        );
-                        if !check.summary.trim().is_empty() {
-                            eprintln!("      {}", check.summary.trim());
-                        }
+                for check in &failed {
+                    let kind = if check.required {
+                        "Required"
+                    } else {
+                        "Advisory"
+                    };
+                    eprintln!(
+                        "  {kind} check `{}` did not pass ({:?}).",
+                        check.check_id, check.status
+                    );
+                    // The assertion itself is captured on disk and was never
+                    // shown; opening a sha256-named artifact by hand is not a
+                    // thing an operator should have to do to learn what broke.
+                    let failures = check
+                        .stdout
+                        .as_ref()
+                        .map(|evidence| failing_tests(&evidence.storage_ref))
+                        .unwrap_or_default();
+                    for failure in failures.iter().take(3) {
+                        eprintln!("\n{failure}");
                     }
+                    if failures.len() > 3 {
+                        eprintln!("\n      ... and {} more", failures.len() - 3);
+                    }
+                    if failures.is_empty() && !check.summary.trim().is_empty() {
+                        eprintln!("      {}", check.summary.trim());
+                    }
+                    eprintln!();
                 }
 
                 if let Some(review) = &cycle.review_result {
                     let blocking: Vec<_> = review.findings.iter().filter(|f| f.blocking).collect();
-                    let advisory: Vec<_> = review.findings.iter().filter(|f| !f.blocking).collect();
                     if !blocking.is_empty() {
-                        eprintln!("\n  blocking findings:");
+                        eprintln!("  A reviewer flagged this as blocking:");
                         for finding in blocking {
                             eprintln!(
-                                "    {:?}  {}  {}",
+                                "    {:?}  {}\n      {}",
                                 finding.severity, finding.finding_id, finding.title
                             );
                         }
+                        eprintln!();
                     }
-                    if !advisory.is_empty() {
-                        eprintln!("\n  non-blocking findings ({}):", advisory.len());
-                        for finding in advisory {
-                            eprintln!(
-                                "    {:?}  {}  {}",
-                                finding.severity, finding.finding_id, finding.title
-                            );
-                        }
+                    let advisory = review.findings.iter().filter(|f| !f.blocking).count();
+                    if advisory > 0 {
+                        eprintln!(
+                            "  {advisory} further non-blocking finding(s) were raised; they do"
+                        );
+                        eprintln!("  not stop this landing.\n");
                     }
                 }
 
-                // Only findings that actually need a decision. An allowed or
-                // justified change is the policy working, not a question.
-                let undecided: Vec<_> = cycle
+                let all_scope: Vec<_> = cycle
                     .scope_evaluations
                     .iter()
                     .flat_map(|evaluation| &evaluation.findings)
+                    .collect();
+                let undecided: Vec<_> = all_scope
+                    .iter()
                     .filter(|finding| {
                         matches!(
                             finding.decision,
@@ -110,13 +125,21 @@ pub(crate) fn handle_attached_review(
                     })
                     .collect();
                 if undecided.is_empty() {
-                    eprintln!("\n  scope: clean");
+                    eprintln!(
+                        "  Scope is clean: all {} changed paths were inside what the PRD",
+                        all_scope.len()
+                    );
+                    eprintln!("  declared or the configuration allows.\n");
                 } else {
-                    eprintln!("\n  scope needs a decision ({}):", undecided.len());
+                    eprintln!(
+                        "  {} of {} changed paths need a scope decision from you:",
+                        undecided.len(),
+                        all_scope.len()
+                    );
                     for finding in &undecided {
                         eprintln!("    {:?}  {}", finding.decision, finding.path);
                     }
-                    eprintln!("    decide these with: familiar-ai scope-decisions");
+                    eprintln!("\n  Decide them in one pass with:  familiar-ai scope-decisions\n");
                 }
 
                 if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
@@ -134,11 +157,16 @@ pub(crate) fn handle_attached_review(
                 unsafe {
                     libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
                 }
-                eprintln!(
-                    "\n  [r] retry remediation   send the implementer back at the failures above"
-                );
-                eprintln!("  [a] accept reviewed risk  land it with those failures unresolved");
-                eprintln!("  [p] preserve checkpoint   stop here and decide later\n");
+                eprintln!("What you can do:\n");
+                eprintln!("  [r] retry remediation");
+                eprintln!("      Send the implementer back at the failures above. Usually right");
+                eprintln!("      when the failure is specific and a fix is known.\n");
+                eprintln!("  [a] accept reviewed risk");
+                eprintln!("      Land it anyway, recording you as having reviewed and accepted");
+                eprintln!("      those failures. The tool will not undo it.\n");
+                eprintln!("  [p] preserve checkpoint");
+                eprintln!("      Stop here. Nothing is lost — pick it up later with");
+                eprintln!("      `familiar-ai resume {prd_id}`.\n");
                 eprint!("Choose [r]etry remediation, [a]ccept reviewed risk, or [p]reserve checkpoint: ");
                 let _ = io::stderr().flush();
                 let mut choice = String::new();
@@ -233,4 +261,44 @@ fn describe_stops(stops: &[familiar_ai_review::ReviewStopReason]) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Pulls the failing tests out of a captured verification stdout. The
+/// assertion an operator needs is already on disk; without this it is
+/// reachable only by opening a sha256-named artifact by hand.
+fn failing_tests(storage_ref: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(storage_ref) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(rest) = line.strip_prefix("thread '") else {
+            continue;
+        };
+        let Some((name, location)) = rest.split_once("' panicked at ") else {
+            continue;
+        };
+        let mut block = format!(
+            "      {name}\n        at {}",
+            location.trim_end_matches(':')
+        );
+        for detail in lines.iter().skip(index + 1).take(3) {
+            let detail = detail.trim();
+            // Stop at the end of the message, and never relay captured log
+            // spew — a JSON line from the daemon under test is not an
+            // explanation of why the test failed.
+            if detail.is_empty() || detail.starts_with("note:") || detail.starts_with('{') {
+                break;
+            }
+            let detail = if detail.chars().count() > 110 {
+                format!("{}...", detail.chars().take(107).collect::<String>())
+            } else {
+                detail.to_string()
+            };
+            block.push_str(&format!("\n        {detail}"));
+        }
+        out.push(block);
+    }
+    out
 }
