@@ -195,7 +195,16 @@ pub(crate) fn handle_attached_review(
                 }
                 eprintln!("What you can do:\n");
                 eprintln!("  [r] retry remediation");
-                if any_deterministic {
+                // The stop reason dominates every per-check signal: with no
+                // attempts left, retry cannot invoke the implementer at all,
+                // and advice derived from an advisory check's flakiness is
+                // worse than none.
+                if retries_exhausted(&cycle.stop_reasons) {
+                    eprintln!("      No remediation attempts remain for this cycle, so this will");
+                    eprintln!("      not send the implementer back — it re-runs the checks only.");
+                    eprintln!("      Closing the findings above needs a fix, a new cycle, or an");
+                    eprintln!("      explicit decision to defer them.\n");
+                } else if any_deterministic {
                     eprintln!(
                         "      A failure above is deterministic — the same input has produced"
                     );
@@ -414,6 +423,22 @@ fn classify_failure(
     }
 }
 
+/// Whether the cycle has run out of budget for another remediation attempt.
+/// This dominates any per-check flakiness signal: with no attempts left,
+/// `[r]` re-runs the checks without ever invoking the implementer.
+fn retries_exhausted(stops: &[familiar_ai_review::ReviewStopReason]) -> bool {
+    use familiar_ai_review::ReviewStopReason as R;
+    stops.iter().any(|stop| {
+        matches!(
+            stop,
+            R::RetryLimitExhausted
+                | R::DurationLimitExhausted
+                | R::TokenLimitExhausted
+                | R::CostLimitExhausted
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,6 +537,30 @@ mod tests {
             classify_failure(&history, history.last().unwrap()),
             FailureShape::First
         ));
+    }
+
+    /// The case that misled the owner: an advisory check looked flaky, so the
+    /// prompt said retrying was reasonable — while the cycle had no attempts
+    /// left and the real blocker was a review finding. The stop reason has to
+    /// win over any per-check signal.
+    #[test]
+    fn exhausted_retries_are_recognised_regardless_of_check_shape() {
+        use familiar_ai_review::ReviewStopReason;
+        for stop in [
+            ReviewStopReason::RetryLimitExhausted,
+            ReviewStopReason::DurationLimitExhausted,
+            ReviewStopReason::TokenLimitExhausted,
+            ReviewStopReason::CostLimitExhausted,
+        ] {
+            assert!(
+                retries_exhausted(&[stop]),
+                "{stop:?} must be reported as leaving no attempts"
+            );
+        }
+        assert!(!retries_exhausted(&[
+            ReviewStopReason::VerificationUnsuccessful
+        ]));
+        assert!(!retries_exhausted(&[]));
     }
 
     #[test]
