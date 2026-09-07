@@ -1,0 +1,377 @@
+diff --git a/crates/familiar-ai-agent/src/local_worker.rs b/crates/familiar-ai-agent/src/local_worker.rs
+index b340c2c..a7276fd 100644
+--- a/crates/familiar-ai-agent/src/local_worker.rs
++++ b/crates/familiar-ai-agent/src/local_worker.rs
+@@ -21,6 +21,9 @@
+ //! deferred, matching every other PRD-058 raw-runtime adapter already in
+ //! this workspace (`AnthropicAdapter`, the OpenAI and xAI adapters): fully
+ //! implemented and tested, none reachable from production dispatch either.
++//! `familiar_ai_daemon::run::resolved_worker_plan` refuses (`Err`) any
++//! stage selection that lands on a `local`-profile worker rather than
++//! silently building the wrong CLI-driven adapter in this type's place.
+ 
+ use async_trait::async_trait;
+ 
+diff --git a/crates/familiar-ai-agent/tests/local_worker.rs b/crates/familiar-ai-agent/tests/local_worker.rs
+index cee5852..ce58f9b 100644
+--- a/crates/familiar-ai-agent/tests/local_worker.rs
++++ b/crates/familiar-ai-agent/tests/local_worker.rs
+@@ -12,9 +12,9 @@ use familiar_ai_agent::raw_runtime::{
+     InMemoryToolJournal, LoopCeilings, LoopConfig, ProviderFailureTaxonomy, ScopeAuthorizer,
+     StablePrefix, StopReason, ToolExecutor, ValidatedCall, VolatileTask,
+ };
+-use familiar_ai_llm::attempt::AttemptId;
++use familiar_ai_llm::attempt::{AttemptId, StructuredOutputRequest};
+ use serde_json::{json, Value};
+-use wiremock::matchers::method;
++use wiremock::matchers::{body_partial_json, method, path};
+ use wiremock::{Mock, MockServer, ResponseTemplate};
+ 
+ fn authority() -> AuthorityContext {
+@@ -489,3 +489,199 @@ async fn artifact_verification_degrades_honestly_when_unverifiable() {
+         familiar_ai_agent::local_worker::ArtifactVerificationOutcome::Unverifiable { .. }
+     ));
+ }
++
++#[tokio::test]
++async fn artifact_digest_verified_for_ollama_matching_digest() {
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/api/tags"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "models": [{"name": "llama3", "digest": "sha256:abc"}]
++        })))
++        .mount(&server)
++        .await;
++    let adapter = adapter_for(&server, LocalRuntimeKind::Ollama);
++    let outcome = adapter.verify_artifact("llama3", Some("sha256:abc")).await;
++    assert_eq!(
++        outcome,
++        familiar_ai_agent::local_worker::ArtifactVerificationOutcome::Verified {
++            digest: "sha256:abc".into()
++        }
++    );
++}
++
++#[tokio::test]
++async fn artifact_digest_mismatch_is_never_silently_accepted() {
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/api/tags"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "models": [{"name": "llama3", "digest": "sha256:different"}]
++        })))
++        .mount(&server)
++        .await;
++    let adapter = adapter_for(&server, LocalRuntimeKind::Ollama);
++    let outcome = adapter.verify_artifact("llama3", Some("sha256:abc")).await;
++    assert_eq!(
++        outcome,
++        familiar_ai_agent::local_worker::ArtifactVerificationOutcome::Mismatch {
++            claimed: "sha256:different".into(),
++            expected: "sha256:abc".into(),
++        }
++    );
++}
++
++#[tokio::test]
++async fn absent_registered_digest_is_unverifiable_not_a_default_match() {
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/api/tags"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "models": [{"name": "llama3", "digest": "sha256:abc"}]
++        })))
++        .mount(&server)
++        .await;
++    let adapter = adapter_for(&server, LocalRuntimeKind::Ollama);
++    let outcome = adapter.verify_artifact("llama3", None).await;
++    assert!(matches!(
++        outcome,
++        familiar_ai_agent::local_worker::ArtifactVerificationOutcome::Unverifiable { .. }
++    ));
++}
++
++#[tokio::test]
++async fn probe_health_lists_the_served_models() {
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(path("/v1/models"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "data": [{"id": "llama3"}, {"id": "qwen3"}]
++        })))
++        .mount(&server)
++        .await;
++    let adapter = adapter_for(&server, LocalRuntimeKind::Ollama);
++    let models = adapter.probe_health().await.unwrap();
++    assert_eq!(models, vec!["llama3".to_string(), "qwen3".to_string()]);
++}
++
++#[tokio::test]
++async fn auth_failure_stops_non_retryable_with_no_fabricated_attempt() {
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
++            "error": {"message": "invalid credentials"}
++        })))
++        .mount(&server)
++        .await;
++
++    let adapter = adapter_for(&server, LocalRuntimeKind::Ollama);
++    let mut executor = SpyExecutor::default();
++    let authorizer = permissive_authorizer();
++    let mut journal = InMemoryToolJournal::default();
++
++    let outcome = run_loop(
++        &adapter,
++        &mut executor,
++        &authorizer,
++        &mut journal,
++        &CancellationToken::new(),
++        &prefix(),
++        &task(),
++        &base_config(),
++        attempt_id_source(),
++    )
++    .await;
++
++    assert_eq!(
++        outcome.stop_reason,
++        StopReason::ProviderFailure {
++            taxonomy: ProviderFailureTaxonomy::NonRetryable
++        }
++    );
++    assert!(outcome.attempts.is_empty());
++}
++
++#[tokio::test]
++async fn server_overload_is_retryable_with_no_fabricated_attempt() {
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
++            "error": {"message": "loading model"}
++        })))
++        .mount(&server)
++        .await;
++
++    let adapter = adapter_for(&server, LocalRuntimeKind::Ollama);
++    let mut executor = SpyExecutor::default();
++    let authorizer = permissive_authorizer();
++    let mut journal = InMemoryToolJournal::default();
++
++    let outcome = run_loop(
++        &adapter,
++        &mut executor,
++        &authorizer,
++        &mut journal,
++        &CancellationToken::new(),
++        &prefix(),
++        &task(),
++        &base_config(),
++        attempt_id_source(),
++    )
++    .await;
++
++    assert_eq!(
++        outcome.stop_reason,
++        StopReason::ProviderFailure {
++            taxonomy: ProviderFailureTaxonomy::Retryable
++        }
++    );
++    assert!(outcome.attempts.is_empty());
++}
++
++#[tokio::test]
++async fn structured_output_request_reaches_the_wire_as_json_schema_response_format() {
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .and(body_partial_json(json!({
++            "response_format": {
++                "type": "json_schema",
++                "json_schema": {"name": "plan", "schema": {"type": "object"}}
++            }
++        })))
++        .respond_with(ResponseTemplate::new(200).set_body_raw(
++            sse(&[json!({"choices": [{"delta": {"content": "{}"}, "finish_reason": "stop"}]})]),
++            "text/event-stream",
++        ))
++        .mount(&server)
++        .await;
++
++    let adapter = adapter_for(&server, LocalRuntimeKind::Ollama);
++    let mut executor = SpyExecutor::default();
++    let authorizer = permissive_authorizer();
++    let mut journal = InMemoryToolJournal::default();
++    let mut config = base_config();
++    config.structured_output = Some(StructuredOutputRequest {
++        schema_name: "plan".into(),
++        json_schema: r#"{"type":"object"}"#.into(),
++    });
++
++    let outcome = run_loop(
++        &adapter,
++        &mut executor,
++        &authorizer,
++        &mut journal,
++        &CancellationToken::new(),
++        &prefix(),
++        &task(),
++        &config,
++        attempt_id_source(),
++    )
++    .await;
++
++    assert_eq!(
++        outcome.stop_reason,
++        StopReason::Completed {
++            structured_output: true
++        }
++    );
++}
+diff --git a/crates/familiar-ai-core/src/config/registry_workers.rs b/crates/familiar-ai-core/src/config/registry_workers.rs
+index e1b64ca..ce3ad9f 100644
+--- a/crates/familiar-ai-core/src/config/registry_workers.rs
++++ b/crates/familiar-ai-core/src/config/registry_workers.rs
+@@ -391,7 +391,12 @@ pub struct LocalResourceProfileConfig {
+ /// follow-up change, matching the identical, pre-existing state of every
+ /// other PRD-058 raw-runtime adapter in this workspace (Anthropic, OpenAI,
+ /// xAI: fully implemented and tested, none reachable from production
+-/// dispatch either).
++/// dispatch either). Until that follow-up lands,
++/// `familiar_ai_daemon::run::resolved_worker_plan` fails closed rather than
++/// silently misdispatching: a selected worker declaring this block returns
++/// an explicit `Err` before any `CodingAgent` is built, because its
++/// `runtime` (e.g. `"ollama"`) can otherwise collide with an unrelated
++/// pre-existing CLI-driven adapter id of the same name.
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+ #[serde(deny_unknown_fields)]
+ pub struct LocalWorkerConfig {
+diff --git a/crates/familiar-ai-daemon/src/local_worker_runtime.rs b/crates/familiar-ai-daemon/src/local_worker_runtime.rs
+index 8b1ee5c..1e62063 100644
+--- a/crates/familiar-ai-daemon/src/local_worker_runtime.rs
++++ b/crates/familiar-ai-daemon/src/local_worker_runtime.rs
+@@ -27,6 +27,15 @@
+ //! for local workers specifically — without inventing the shared
+ //! raw-runtime dispatch mechanism all four providers are waiting on — is
+ //! deferred to a follow-up change.
++//!
++//! Until that follow-up lands, `run::resolved_worker_plan` fails closed
++//! (`Err`, before any `CodingAgent` is built) whenever a stage selection
++//! lands on a worker declaring a `local` profile, rather than silently
++//! misdispatching it through the CLI-driven path: a local worker's
++//! `runtime` (e.g. `"ollama"`) can otherwise collide with an unrelated
++//! pre-existing CLI-driven adapter id of the same name, which would
++//! silently execute the worker through the wrong, unverified, unreserved,
++//! untelemetered path instead of refusing outright.
+ 
+ use chrono::{DateTime, Utc};
+ 
+diff --git a/crates/familiar-ai-daemon/src/run.rs b/crates/familiar-ai-daemon/src/run.rs
+index 21a855a..a16b890 100644
+--- a/crates/familiar-ai-daemon/src/run.rs
++++ b/crates/familiar-ai-daemon/src/run.rs
+@@ -492,6 +492,30 @@ pub fn resolved_worker_plan(
+     if let Some(record) = &review {
+         records.push(record.clone());
+     }
++    // A worker declaring a PRD-063 `local` profile is meant to run through
++    // `familiar_ai_agent::local_worker::LocalInferenceAdapter` and the
++    // PRD-064 reservation/telemetry glue in `local_worker_runtime` — not
++    // through this crate's CLI-driven `AgentAdapterKind` dispatch, which
++    // has no way to represent it (its `runtime`, e.g. `"ollama"`, can
++    // collide with an unrelated pre-existing CLI-driven adapter id) and
++    // would otherwise silently execute it through the wrong, unverified,
++    // unreserved, untelemetered path. Production dispatch for local
++    // workers is not wired yet (`docs/contracts/local-worker-runtime.md`),
++    // so a selection landing on one must fail closed here, before any
++    // `CodingAgent` is built, rather than silently misdispatching.
++    for record in &records {
++        let selected = &configured.workers[&record.selected_worker];
++        if selected.local.is_some() {
++            return Err(format!(
++                "worker_registry.workers.{} is a provider=\"local\" worker selected for {:?}; \
++                 production dispatch for local workers is not yet wired through \
++                 familiar_ai_daemon::run (see docs/contracts/local-worker-runtime.md) — until \
++                 that follow-up lands, exclude it from routing (set available = false, or \
++                 repoint any pin/rule that selects it)",
++                record.selected_worker, record.stage
++            ));
++        }
++    }
+     let reviewer_id = review
+         .as_ref()
+         .map(|r| r.selected_worker.as_str())
+diff --git a/crates/familiar-ai-daemon/tests/local_worker_runtime.rs b/crates/familiar-ai-daemon/tests/local_worker_runtime.rs
+index 07e8e0e..6850bcd 100644
+--- a/crates/familiar-ai-daemon/tests/local_worker_runtime.rs
++++ b/crates/familiar-ai-daemon/tests/local_worker_runtime.rs
+@@ -521,3 +521,69 @@ fn conservative_bootstrap_still_defines_a_never_observed_pool() {
+         "an unobserved pool must be bootstrapped to exactly one occupant"
+     );
+ }
++
++// ---------------------------------------------------------------------
++// Production dispatch is not wired yet (see this crate's
++// `local_worker_runtime` module docs): a `provider = "local"` worker's
++// `runtime` (e.g. `"ollama"`) can collide with an unrelated pre-existing
++// CLI-driven adapter id of the same name. `run::resolved_worker_plan` must
++// fail closed rather than silently building the wrong, unverified,
++// unreserved, untelemetered CLI-driven agent in its place.
++// ---------------------------------------------------------------------
++
++#[test]
++fn worker_selection_refuses_a_local_profile_worker_instead_of_misdispatching_it() {
++    use familiar_ai_core::config::{
++        LocalEndpointConfig, LocalRuntimeKind as ConfigLocalRuntimeKind, LocalWorkerConfig,
++        RegistryWorkerConfig, WorkerCapabilityConfig, WorkerRegistryConfig, LOCAL_PROVIDER,
++    };
++    use familiar_ai_core::Config;
++    use familiar_ai_daemon::run::{resolved_worker_plan, RouteContext};
++
++    let local_worker = RegistryWorkerConfig {
++        adapter: None,
++        provider: LOCAL_PROVIDER.into(),
++        model: "llama3".into(),
++        runtime: Some("ollama".into()),
++        model_artifact: None,
++        auth_profile: None,
++        capability_profile: None,
++        runtime_config: None,
++        local: Some(LocalWorkerConfig {
++            runtime_kind: ConfigLocalRuntimeKind::Ollama,
++            endpoint: LocalEndpointConfig {
++                base_url: "http://127.0.0.1:11434".into(),
++                tls: false,
++            },
++            resources: Default::default(),
++        }),
++        executable: None,
++        capabilities: vec![
++            WorkerCapabilityConfig::Implementation,
++            WorkerCapabilityConfig::Remediation,
++        ],
++        fresh_process_isolation: true,
++        context_tokens: 32_000,
++        estimated_cost_microusd: Some(1),
++        available: true,
++        effort: None,
++        permission_mode: None,
++        extra_args: Vec::new(),
++    };
++
++    let mut registry = WorkerRegistryConfig::default();
++    registry
++        .workers
++        .insert("llama3-ollama".into(), local_worker);
++    let config = Config {
++        worker_registry: Some(registry),
++        ..Config::default()
++    };
++
++    let error = resolved_worker_plan(&config, &RouteContext::default())
++        .expect_err("a local-profile worker must never be silently dispatched");
++    assert!(
++        error.contains("llama3-ollama") && error.contains("local"),
++        "error must name the offending worker and explain the local-dispatch gap, got: {error}"
++    );
++}
