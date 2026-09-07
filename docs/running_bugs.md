@@ -1507,3 +1507,43 @@ reinstall the binary, then rerun the 076 drive.
   "1 of 3 findings is undecided: crates/familiar-ai-tray/Cargo.lock"
   rather than reprinting all three identically.
 
+
+### FAM-BUG-054 — A failing required check dead-ends; remediation is unreachable
+
+- **Status:** Open
+- **Found:** 2026-09-06, driving PRD-63 with a hand-written failing test.
+- **Detail:** When a required verification check fails, the coordinator
+  stops before the reviewer runs:
+
+  ```rust
+  // coordinator.rs:305
+  } else {
+      ReviewStopReason::VerificationUnsuccessful
+  };
+  return self.stop(cycle, reason);
+  ```
+
+  Remediation is only ever invoked on findings a *review* produced. A
+  review never happens, so the implementer is never asked to fix the
+  failing test. The attended pause then offers `[r]etry remediation`,
+  which calls `resume_implemented_checkpoint`, which re-runs the same
+  verification, which fails identically, and returns to the same prompt.
+- **Observed:** the owner pressed `r` repeatedly on PRD-63 with the
+  implementation provably unchanged between attempts (worktree HEAD
+  static, `acquire_with_unknown_capacity_policy` byte-identical). The
+  only forward options were to accept a known-bad landing or stop.
+- **Why it matters:** a red required test is the most common way work is
+  unfinished, and it is precisely the case the loop cannot act on. The
+  system can remediate a reviewer's *opinion* but not a compiler's or a
+  test runner's *fact* — which inverts the "Determinism Before
+  Intelligence" principle the verification gate exists to serve.
+- **Consequence for the oracle pattern:** PRD-081 succeeded because its
+  tests were `#[ignore]`d, letting verification pass so review and
+  remediation could run. That attribute was load-bearing and I had
+  recorded it as housekeeping. A failing-by-design test is not a work
+  item to this architecture; it is a wall.
+- **Fix:** route a failed required check into remediation the same way a
+  blocking review finding is routed — synthesise a finding carrying the
+  check id and the captured failure, hand it to the implementer, and
+  re-verify. Failing that, the pause must not offer `[r]` when it cannot
+  change the outcome.
