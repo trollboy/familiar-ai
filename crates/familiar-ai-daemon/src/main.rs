@@ -600,6 +600,18 @@ fn main() -> ExitCode {
         state_arc.db.clone(),
         tray_tx,
         state_arc.config_path.clone(),
+        // A native window needs no HTTP listener, so on Linux the item is
+        // always offered; elsewhere it falls back to the served page, and is
+        // omitted when that is not running either.
+        dashboard_target(&state_arc.config.dashboard),
+        Some(Arc::new(familiar_ai_daemon::tray_data::DaemonDataSource::new(
+            state_arc.db.clone(),
+            state_arc.router.clone(),
+            runtime.clone(),
+            state_arc.control.clone(),
+            state_arc.paths.clone(),
+        )) as Arc<dyn familiar_ai_tray::DataSource>),
+        shutdown_rx.clone(),
     );
 
     let tray_result = tray_app.run();
@@ -619,6 +631,19 @@ fn main() -> ExitCode {
 }
 
 #[cfg(feature = "tray")]
+fn dashboard_target(
+    config: &familiar_ai_core::config::DashboardConfig,
+) -> Option<familiar_ai_tray::commands::DashboardTarget> {
+    use familiar_ai_tray::commands::DashboardTarget;
+    if cfg!(target_os = "linux") {
+        return Some(DashboardTarget::Window);
+    }
+    config
+        .enabled
+        .then(|| DashboardTarget::Web(format!("http://{}", config.bind_address)))
+}
+
+#[cfg(feature = "tray")]
 fn run_with_tray_feature_but_disabled(state: DaemonState) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -634,7 +659,18 @@ fn run_with_tray_feature_but_disabled(state: DaemonState) -> ExitCode {
     runtime.block_on(async {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_command_tx, command_rx) = mpsc::channel::<DaemonCommand>(64);
-        daemon_run(&state, command_rx, shutdown_tx, shutdown_rx).await;
+        // Same registration window as the tray path above: bootstrap ran on
+        // the main thread before any runtime existed (FAM-BUG-050).
+        let mut termination =
+            TerminationSignals::register().expect("register termination signals");
+        daemon_run(
+            &state,
+            &mut termination,
+            command_rx,
+            shutdown_tx,
+            shutdown_rx,
+        )
+        .await;
         if let Err(e) = remove_pid_file(&state.pid_path) {
             tracing::warn!(error = %e, "failed to remove pid file");
         }

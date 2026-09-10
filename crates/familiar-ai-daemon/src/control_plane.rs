@@ -91,6 +91,34 @@ impl ControlPlaneService {
         )
     }
 
+    /// Executions for one project. Observe authority, exactly like `observe`:
+    /// this is a read of what the project is doing.
+    pub fn executions(
+        &self,
+        scope: &CapabilityScope,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<familiar_ai_storage::ExecutionRow>> {
+        require(scope, Authority::Observe, project_id, None)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        familiar_ai_storage::list_executions(db.conn(), project_id, limit.min(200))
+    }
+
+    /// `active`, `paused`, `archived`, or `None` when the project has never
+    /// been registered. Distinguishing "not registered" from "active" matters:
+    /// a submission against an unregistered project cannot be scheduled.
+    pub fn project_state(&self, scope: &CapabilityScope, project_id: &str) -> Result<Option<String>> {
+        require(scope, Authority::Observe, project_id, None)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        familiar_ai_storage::project_state(db.conn(), project_id)
+    }
+
     pub fn claim_next(&self) -> Result<Option<String>> {
         let mut db = self
             .db

@@ -84,6 +84,15 @@ impl AdapterFactories {
         Ok(())
     }
 
+    /// Every registered adapter id, in a stable order.
+    ///
+    /// Exists so a user interface offering a choice of adapters reads the
+    /// registry instead of carrying a second, hand-maintained copy of it that
+    /// silently goes stale when an adapter is added.
+    pub fn ids(&self) -> Vec<String> {
+        self.factories.keys().cloned().collect()
+    }
+
     pub fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String> {
         self.factories
             .get(&worker.runtime_id)

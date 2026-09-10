@@ -12,7 +12,8 @@ pub use repos::accounting::{
     UsageSeriesPoint, UsageSeriesRequest,
 };
 pub use repos::backlog::{
-    list_entries as list_backlog_entries, list_recovery_events, BacklogEntryRow, RecoveryEventRow,
+    list_entries as list_backlog_entries, list_recovery_events, list_repository_keys,
+    BacklogEntryRow, RecoveryEventRow,
     SqliteBacklogRepository,
 };
 pub use repos::batch_review::{
@@ -22,7 +23,9 @@ pub use repos::billing::{BillingRepository, BillingSource, BillingStatus, Provid
 pub use repos::bootstrap::SqliteBootstrapRepository;
 pub use repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
 pub use repos::config_decision::{ConfigDecision, ConfigDecisionRepository};
-pub use repos::control_plane::ControlPlaneRepository;
+pub use repos::control_plane::{
+    list_executions, project_state, ControlPlaneRepository, ExecutionRow,
+};
 pub use repos::decision::DecisionRepository;
 pub use repos::delivery::{
     DeliveryAuthorityDecision, DeliveryDecisionRow, DeliveryEffect, DeliveryRepository,

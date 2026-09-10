@@ -9,6 +9,66 @@ pub struct ControlPlaneRepository<'a> {
     conn: &'a mut Connection,
 }
 
+/// One execution as an operator sees it in a list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExecutionRow {
+    pub execution_id: String,
+    pub project_id: String,
+    pub state: String,
+    pub mode: String,
+    /// The host-interpreted command. Never model-visible, but the operator
+    /// deciding whether to stop something needs to see what it is.
+    pub command_json: String,
+    pub worker_identity: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Executions for one project, newest first. Terminal states are included —
+/// an operator wants to see what just finished, not only what is live — and
+/// the caller decides what to show as stoppable.
+pub fn list_executions(
+    conn: &Connection,
+    project_id: &str,
+    limit: usize,
+) -> Result<Vec<ExecutionRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT execution_id,project_id,state,mode,command_json,worker_identity,\
+             created_at,updated_at FROM control_plane_executions \
+             WHERE project_id=?1 ORDER BY created_at DESC, execution_id DESC LIMIT ?2",
+        )
+        .map_err(db)?;
+    let rows = stmt
+        .query_map(params![project_id, limit as i64], |row| {
+            Ok(ExecutionRow {
+                execution_id: row.get(0)?,
+                project_id: row.get(1)?,
+                state: row.get(2)?,
+                mode: row.get(3)?,
+                command_json: row.get(4)?,
+                worker_identity: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(db)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db)
+}
+
+/// The registered state of a project (`active`, `paused`, `archived`), or
+/// `None` when it has never been registered with the control plane.
+pub fn project_state(conn: &Connection, project_id: &str) -> Result<Option<String>> {
+    let mut stmt = conn
+        .prepare("SELECT state FROM control_plane_projects WHERE project_id=?1")
+        .map_err(db)?;
+    let mut rows = stmt.query(params![project_id]).map_err(db)?;
+    match rows.next().map_err(db)? {
+        Some(row) => Ok(Some(row.get(0).map_err(db)?)),
+        None => Ok(None),
+    }
+}
+
 impl<'a> ControlPlaneRepository<'a> {
     pub fn new(conn: &'a mut Connection) -> Self {
         Self { conn }

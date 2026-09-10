@@ -886,6 +886,25 @@ pub struct BacklogEntryRow {
 /// delivered to the caller (exclusive); an empty/absent cursor starts at the
 /// beginning. Callers reading more than `limit` rows continue with the last
 /// item's `prd_path` as the next cursor.
+/// Every repository this database holds stewardship state for, as raw
+/// `repository_key` values. The dashboard serves many repositories from one
+/// long-running process and its `repo` parameter is mandatory, so a caller
+/// with no repository in hand has no way to ask a first question without
+/// this. Drawn from both the backlog and the driver sessions because a
+/// repository can appear in either before it appears in both.
+pub fn list_repository_keys(conn: &Connection) -> familiar_ai_core::Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT repository_key FROM backlog_prds \
+             UNION \
+             SELECT repository_key FROM driver_sessions \
+             ORDER BY 1",
+        )
+        .map_err(db)?;
+    let rows = stmt.query_map([], |row| row.get(0)).map_err(db)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db)
+}
+
 pub fn list_entries(
     conn: &Connection,
     repository_key: &str,

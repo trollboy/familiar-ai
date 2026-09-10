@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use familiar_ai_core::RepositoryIdentity;
 use familiar_ai_storage::{
     budget_summary, list_backlog_entries, list_recovery_events as repo_list_recovery_events,
-    pending_human_gates, review_findings_for_session, AccountingRepository, CheckpointRepository,
-    Database, DeliveryRepository, DriverRepository,
+    list_repository_keys, pending_human_gates, review_findings_for_session, AccountingRepository,
+    CheckpointRepository, Database, DeliveryRepository, DriverRepository,
 };
 
 #[derive(Debug)]
@@ -74,6 +74,25 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
         cut -= 1;
     }
     cut
+}
+
+/// The repositories this database knows about. Deliberately the one
+/// stewardship read that is NOT repository-scoped: every other endpoint
+/// requires a `repo` the caller must already have, and this is how a caller
+/// gets one. It discloses only repository paths, never their contents.
+pub fn list_repositories(db: &Database) -> Result<Value, StewardshipError> {
+    let keys = list_repository_keys(db.conn()).map_err(storage)?;
+    let items: Vec<Value> = keys
+        .into_iter()
+        .map(|key| {
+            // Keys are stored as the git directory; the `repo` parameter
+            // resolves from a working-tree path, so hand back the form the
+            // caller can actually pass straight back to us.
+            let path = key.strip_suffix("/.git").unwrap_or(&key).to_string();
+            json!({"repository_key": key, "path": path})
+        })
+        .collect();
+    Ok(json!({"repositories": items}))
 }
 
 pub fn list_backlog(

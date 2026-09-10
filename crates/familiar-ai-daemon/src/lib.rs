@@ -18,6 +18,8 @@ pub mod report;
 pub mod resume;
 pub mod run;
 pub mod stewardship;
+#[cfg(feature = "tray")]
+pub mod tray_data;
 pub mod supervisor;
 pub mod systemd;
 pub mod worker_lock;
