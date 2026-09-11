@@ -1,9 +1,17 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
 use familiar_ai_core::control_plane::{OwnershipClaim, CONTROL_PROTOCOL_VERSION};
+use familiar_ai_storage::{LeaseAcquireOutcome, LeaseRenewOutcome};
 use ring::rand::{SecureRandom, SystemRandom};
+
+use crate::control_plane::ControlPlaneService;
 
 /// The one mutation claim shared by daemon hosting and CLI fallback. The
 /// repository argument remains for source compatibility but ownership is
@@ -130,6 +138,218 @@ impl WorkerLock {
     pub fn claim(&self) -> &OwnershipClaim {
         &self.claim
     }
+}
+
+/// A durable, cross-host, per-repository driver lease (PRD-091). Distinct
+/// from `WorkerLock`: the filesystem claim above stays exactly as it was and
+/// keeps doing local, per-installation mutual exclusion; `HostLease` is the
+/// additional database-backed authority that a second machine can also see,
+/// so two hosts driving the same repository against the same store still
+/// refuse each other. Two hosts driving *different* repositories never
+/// contend, since each lease is keyed by repository.
+pub struct HostLease {
+    repository_key: String,
+    holder_token: String,
+    control: ControlPlaneService,
+    live: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    renewal_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HostLease {
+    /// A stable identifier for this machine. Best-effort: an unresolvable
+    /// hostname still yields mutual exclusion (a second host would need to
+    /// coincidentally share the fallback string), it just loses the
+    /// human-readable holder name in a refusal message.
+    pub fn host_identity() -> String {
+        host_identity()
+    }
+
+    /// Acquire the lease for `repository_key`, or fail naming the current
+    /// holder and its remaining life if another host or process holds it
+    /// live. On success, a background thread renews on `renewal_interval`
+    /// until the lease is released or lost.
+    pub fn acquire(
+        control: &ControlPlaneService,
+        repository_key: &str,
+        renewal_interval: Duration,
+        ttl_secs: i64,
+    ) -> Result<Self, String> {
+        Self::acquire_as(
+            control,
+            repository_key,
+            &host_identity(),
+            renewal_interval,
+            ttl_secs,
+        )
+    }
+
+    /// As `acquire`, with an explicit host identity rather than the local
+    /// machine's hostname. Production code should call `acquire`; this exists
+    /// so tests can simulate distinct hosts sharing one store from a single
+    /// process.
+    pub fn acquire_as(
+        control: &ControlPlaneService,
+        repository_key: &str,
+        host_identity: &str,
+        renewal_interval: Duration,
+        ttl_secs: i64,
+    ) -> Result<Self, String> {
+        let host_identity = host_identity.to_owned();
+        let process_identity = local_process_identity();
+        let holder_token = random_token().map_err(|e| e.to_string())?;
+        match control
+            .acquire_repository_lease(
+                repository_key,
+                &host_identity,
+                &process_identity,
+                &holder_token,
+                ttl_secs,
+            )
+            .map_err(|e| e.to_string())?
+        {
+            LeaseAcquireOutcome::Acquired(_) => {}
+            LeaseAcquireOutcome::Refused {
+                holder_host,
+                holder_process,
+                remaining_ms,
+            } => {
+                return Err(format!(
+                    "refusing to drive '{repository_key}': the lease is held by host {holder_host} process {holder_process} for {remaining_ms}ms more"
+                ));
+            }
+        }
+        let live = Arc::new(AtomicBool::new(true));
+        let stop = Arc::new(AtomicBool::new(false));
+        let renewal_thread = {
+            let control = control.clone();
+            let repository_key = repository_key.to_owned();
+            let host_identity = host_identity.clone();
+            let process_identity = process_identity.clone();
+            let holder_token = holder_token.clone();
+            let live = live.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                renewal_loop(
+                    control,
+                    repository_key,
+                    host_identity,
+                    process_identity,
+                    holder_token,
+                    ttl_secs,
+                    renewal_interval,
+                    live,
+                    stop,
+                )
+            })
+        };
+        Ok(Self {
+            repository_key: repository_key.to_owned(),
+            holder_token,
+            control: control.clone(),
+            live,
+            stop,
+            renewal_thread: Some(renewal_thread),
+        })
+    }
+
+    /// Whether this host still holds the lease, as of its last renewal
+    /// attempt. Once false it never becomes true again — a fresh `acquire`
+    /// is required.
+    pub fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn renewal_loop(
+    control: ControlPlaneService,
+    repository_key: String,
+    host_identity: String,
+    process_identity: String,
+    holder_token: String,
+    ttl_secs: i64,
+    renewal_interval: Duration,
+    live: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
+    const POLL: Duration = Duration::from_millis(50);
+    loop {
+        let mut waited = Duration::ZERO;
+        while waited < renewal_interval {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            let step = POLL.min(renewal_interval - waited);
+            std::thread::sleep(step);
+            waited += step;
+        }
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let renewed = control.renew_repository_lease(
+            &repository_key,
+            &host_identity,
+            &process_identity,
+            &holder_token,
+            ttl_secs,
+        );
+        match renewed {
+            Ok(LeaseRenewOutcome::Renewed(_)) => {}
+            // Lost (expiry, an out-of-band takeover) or an unreachable store:
+            // both fail the driver closed within one renewal interval rather
+            // than let a partitioned host keep writing durable state.
+            Ok(LeaseRenewOutcome::Lost { .. }) | Err(_) => {
+                live.store(false, Ordering::Release);
+                return;
+            }
+        }
+    }
+}
+
+impl Drop for HostLease {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.renewal_thread.take() {
+            let _ = thread.join();
+        }
+        if self.live.load(Ordering::Acquire) {
+            let _ = self
+                .control
+                .release_repository_lease(&self.repository_key, &self.holder_token);
+        }
+    }
+}
+
+fn random_token() -> io::Result<String> {
+    let mut random = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| io::Error::other("secure lease token generation failed"))?;
+    Ok(random.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn local_process_identity() -> String {
+    let pid = std::process::id();
+    format!(
+        "{pid}:{}",
+        process_start_identity(pid).unwrap_or_else(|| "unavailable".into())
+    )
+}
+
+#[cfg(unix)]
+fn host_identity() -> String {
+    let mut buffer = [0_u8; 256];
+    let result = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if result != 0 {
+        return "unknown-host".into();
+    }
+    let end = buffer.iter().position(|b| *b == 0).unwrap_or(buffer.len());
+    String::from_utf8_lossy(&buffer[..end]).into_owned()
+}
+#[cfg(not(unix))]
+fn host_identity() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown-host".into())
 }
 
 fn recover_exact(path: &Path, original: &str, generation: u64) -> io::Result<u64> {

@@ -14,6 +14,15 @@ pub struct DaemonConfig {
     pub default_project_concurrency_ceiling: usize,
     #[serde(default = "default_health_timeout_ms")]
     pub health_timeout_ms: u64,
+    /// PRD-091: how often a held per-repository driver lease renews. Must
+    /// stay well below `lease_ttl_secs` so ordinary scheduling jitter never
+    /// causes an unintended expiry.
+    #[serde(default = "default_lease_renewal_interval_secs")]
+    pub lease_renewal_interval_secs: u64,
+    /// PRD-091: how long a per-repository driver lease survives after its
+    /// last successful renewal before it becomes takeable by another host.
+    #[serde(default = "default_lease_ttl_secs")]
+    pub lease_ttl_secs: i64,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -26,6 +35,14 @@ fn default_control_plane_ceiling() -> usize {
 
 fn default_health_timeout_ms() -> u64 {
     5_000
+}
+
+fn default_lease_renewal_interval_secs() -> u64 {
+    20
+}
+
+fn default_lease_ttl_secs() -> i64 {
+    90
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +88,8 @@ impl Default for DaemonConfig {
             global_concurrency_ceiling: default_control_plane_ceiling(),
             default_project_concurrency_ceiling: default_control_plane_ceiling(),
             health_timeout_ms: default_health_timeout_ms(),
+            lease_renewal_interval_secs: default_lease_renewal_interval_secs(),
+            lease_ttl_secs: default_lease_ttl_secs(),
         }
     }
 }
