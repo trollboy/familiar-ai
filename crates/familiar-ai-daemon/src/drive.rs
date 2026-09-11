@@ -8,7 +8,7 @@
 //! `familiar-ai run` performs them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -262,6 +262,51 @@ pub fn continue_scope_approved_candidate(
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// PRD-083: a scope pause reaches the operator by its own remedy, never
+/// only by its log line. Attended sessions get the same numbered picker
+/// `familiar-ai scope-decisions` exposes, so a decision made from the
+/// drive's own pause and one made from the flag form take identical durable
+/// rows through the identical continuation. Unattended sessions get the
+/// exact paste-runnable approve AND reject commands for every pending
+/// finding -- never approve alone -- so the pause is never silent about its
+/// own remedy. `input`/`output` are injected so this is testable without a
+/// real terminal; production callers pass real stdin/stderr.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_scope_pause(
+    db: &mut Database,
+    repository: &RepositoryIdentity,
+    config: &Config,
+    prd_id: &str,
+    pending_hashes: &[String],
+    candidate_hash: &str,
+    attended: bool,
+    input: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+) {
+    if pending_hashes.is_empty() {
+        return;
+    }
+    if attended {
+        if let Err(error) = crate::cli::scope_decisions::list_or_decide_interactively(
+            db, repository, config, true, input,
+        ) {
+            let _ = writeln!(
+                output,
+                "drive: interactive scope decision failed for {prd_id}: {error}"
+            );
+        }
+        return;
+    }
+    for hash in pending_hashes {
+        for command in crate::stewardship::scope_decision_commands(hash, candidate_hash) {
+            let _ = writeln!(
+                output,
+                "drive: scope decision pending for {prd_id}: {command}"
+            );
+        }
+    }
 }
 
 struct ProgressGuard {
@@ -1638,14 +1683,24 @@ pub fn drive(
                                     }
                                 }
                             }
-                            // PRD-080: a scope pause is decidable, not a dead
-                            // end — surface the exact command per finding.
-                            for hash in &pending_hashes {
-                                eprintln!(
-                                    "drive: scope decision pending for {prd_id}: familiar-ai scope-decisions --finding-hash {hash} --candidate-hash {} --approve --actor human:<identity> --reason \"...\"",
-                                    checkpoint.diff_hash
-                                );
-                            }
+                            // PRD-080/PRD-083: a scope pause is decidable,
+                            // not a dead end -- reach the operator with its
+                            // own remedy, attended or not.
+                            let attended =
+                                std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+                            let mut stdin = std::io::stdin().lock();
+                            let mut stderr = std::io::stderr().lock();
+                            handle_scope_pause(
+                                &mut db,
+                                &repository,
+                                config,
+                                prd_id,
+                                &pending_hashes,
+                                &checkpoint.diff_hash,
+                                attended,
+                                &mut stdin,
+                                &mut stderr,
+                            );
                         }
                         if let Some(policy) = delivery_policy.filter(|policy| {
                             policy.mode == familiar_ai_core::DeliveryMode::PocSelfApproval

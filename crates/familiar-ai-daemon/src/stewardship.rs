@@ -11,7 +11,7 @@ use familiar_ai_core::RepositoryIdentity;
 use familiar_ai_storage::{
     budget_summary, list_backlog_entries, list_recovery_events as repo_list_recovery_events,
     list_repository_keys, pending_human_gates, review_findings_for_session, AccountingRepository,
-    CheckpointRepository, Database, DeliveryRepository, DriverRepository,
+    CheckpointRepository, Database, DeliveryRepository, DriverRepository, OrchestrationRepository,
 };
 
 #[derive(Debug)]
@@ -361,12 +361,77 @@ fn reconciliation_by_source(
         .collect()
 }
 
+/// The exact paste-runnable approve and reject commands for one hash-bound
+/// pending scope decision, with an actor placeholder (PRD-083). Release and
+/// complete never answer a scope decision, so wherever a scope pause is the
+/// actual blocker these precede any release/complete continuation rather
+/// than leaving it as the only one offered.
+pub fn scope_decision_commands(finding_hash: &str, candidate_hash: &str) -> Vec<String> {
+    vec![
+        format!(
+            "familiar-ai scope-decisions --finding-hash {finding_hash} --candidate-hash {candidate_hash} --approve --actor human:<identity> --reason \"<why>\""
+        ),
+        format!(
+            "familiar-ai scope-decisions --finding-hash {finding_hash} --candidate-hash {candidate_hash} --reject --actor human:<identity> --reason \"<why>\""
+        ),
+    ]
+}
+
+/// PRD-083: one printable line per pending scope decision's exact approve
+/// and reject remedy, prefixed for whichever surface is asking. Lets a
+/// surface that has nothing else to say about a stalled backlog (e.g.
+/// `familiar-ai next` finding no eligible PRD) say why instead of reporting
+/// silence.
+pub fn scope_pause_notices(
+    pending_scope: &[familiar_ai_storage::ScopeDecision],
+    prefix: &str,
+) -> Vec<String> {
+    pending_scope
+        .iter()
+        .flat_map(|decision| {
+            let prd_id = decision.prd_id.clone();
+            scope_decision_commands(&decision.finding_hash, &decision.candidate_hash)
+                .into_iter()
+                .map(move |command| {
+                    format!("{prefix}: scope decision pending for {prd_id}: {command}")
+                })
+        })
+        .collect()
+}
+
 pub fn list_pending_human_gates(
     db: &Database,
     repository: &RepositoryIdentity,
     limit: usize,
 ) -> Result<Value, StewardshipError> {
-    let items = pending_human_gates(db.conn(), &repository.key, limit).map_err(storage)?;
+    let gates = pending_human_gates(db.conn(), &repository.key, limit).map_err(storage)?;
+    let pending_scope = OrchestrationRepository::new(db.conn())
+        .pending_scope_decisions(&repository.key)
+        .map_err(storage)?;
+    let items: Vec<Value> = gates
+        .into_iter()
+        .map(|gate| {
+            let scope_commands: Vec<String> = pending_scope
+                .iter()
+                .filter(|decision| decision.prd_id == gate.prd_id)
+                .flat_map(|decision| {
+                    scope_decision_commands(&decision.finding_hash, &decision.candidate_hash)
+                })
+                .collect();
+            let recovery_commands: Vec<String> = scope_commands
+                .into_iter()
+                .chain(gate.recovery_commands)
+                .collect();
+            json!({
+                "kind": gate.kind,
+                "session_id": gate.session_id,
+                "prd_id": gate.prd_id,
+                "prd_path": gate.prd_path,
+                "detail": gate.detail,
+                "recovery_commands": recovery_commands,
+            })
+        })
+        .collect();
     Ok(json!({
         "repository_key": repository.key,
         "items": items,
