@@ -10,6 +10,7 @@ use familiar_ai_core::{
     BootstrapApplyResult, Config, FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
 };
 use familiar_ai_daemon::drive::{drive, DriveSummary, DriveWarrant};
+use familiar_ai_daemon::onboard;
 use familiar_ai_daemon::plan::{
     approve as approve_plan, generate as generate_plan, print_summary, reject as reject_plan,
 };
@@ -89,6 +90,13 @@ enum Command {
         command: Option<PlanCommand>,
         /// Design documents supplied to the configured planner agent.
         design_docs: Vec<PathBuf>,
+    },
+    /// Onboard a repository: discover untrusted proposals, approve an
+    /// operator policy, validate the merged configuration, and run a
+    /// harmless fixture -- without changing Familiar code.
+    Onboard {
+        #[command(subcommand)]
+        command: OnboardCommand,
     },
     /// Query durable execution-era state (backlog, sessions, attempts,
     /// worktrees, review findings, budgets, delivery, recovery events, and
@@ -174,6 +182,29 @@ enum PlanCommand {
         #[arg(long)]
         reason: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum OnboardCommand {
+    /// Discover languages, build tools, PRD layout, protected paths, and
+    /// likely verification commands as untrusted proposals. Read-only;
+    /// grants no authority and writes nothing under `repositories_dir`.
+    Propose { repository: PathBuf },
+    /// Deterministically re-validate a human-authored answers file and, only
+    /// if it passes, write the generated repository policy.
+    Approve {
+        #[arg(long)]
+        answers: PathBuf,
+        /// Mandatory explicit human authority in the form human:<identity>.
+        #[arg(long)]
+        actor: String,
+    },
+    /// Validate the final merged policy without claiming a PRD or invoking
+    /// a model.
+    Validate,
+    /// Run a harmless fixture proving context, review isolation, reporting,
+    /// and the delivery boundary for an already-onboarded repository.
+    Fixture { repository: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -271,6 +302,10 @@ fn main() -> ExitCode {
             command,
             design_docs,
         } => match plan(command, &design_docs) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Onboard { command } => match onboard(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -1135,6 +1170,69 @@ fn plan(command: Option<PlanCommand>, design_docs: &[PathBuf]) -> Result<(), Str
                 &mut db,
             )?;
             println!("Batch {batch_id} rejected");
+        }
+    }
+    Ok(())
+}
+
+fn onboard(command: OnboardCommand) -> Result<(), String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    paths.ensure_dirs().map_err(|e| e.to_string())?;
+    let config_path = paths.config_dir.join("config.toml");
+    match command {
+        OnboardCommand::Propose { repository } => {
+            let root = repository
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", repository.display()))?;
+            let proposal = onboard::discover(&root)?;
+            print!("{}", onboard::render_proposal(&root, &proposal));
+            let written = onboard::write_proposal(&paths.state_dir, &root, &proposal)?;
+            println!(
+                "\nProposal written to {} (untrusted; grants no authority)",
+                written.display()
+            );
+        }
+        OnboardCommand::Approve { answers, actor } => {
+            let snapshot = onboard::approve(&config_path, &answers, &actor)?;
+            println!("repository={}", snapshot.worktree);
+            println!("generated={}", snapshot.generated_path.display());
+            println!("content_hash={}", snapshot.content_hash);
+            println!("actor={}", snapshot.actor);
+            println!("generated_at={}", snapshot.generated_at);
+            println!("diff:");
+            for line in &snapshot.diff {
+                println!("  {line}");
+            }
+        }
+        OnboardCommand::Validate => {
+            let summaries = onboard::validate(&config_path)?;
+            if summaries.is_empty() {
+                println!("no onboarded repositories");
+            }
+            for summary in summaries {
+                println!(
+                    "{}\treview={}\texecution_context={}\tdelivery={}",
+                    summary.worktree,
+                    summary.review_source,
+                    summary.execution_context_source,
+                    summary.delivery_mode
+                );
+            }
+        }
+        OnboardCommand::Fixture { repository } => {
+            let report = onboard::fixture(&paths, &repository)?;
+            println!("repository_key={}", report.repository_key);
+            println!("worktree={}", report.worktree.display());
+            println!("review_source={}", report.review_source);
+            println!(
+                "execution_context_source={}",
+                report.execution_context_source
+            );
+            println!("context={}", report.context_proof);
+            println!("isolation_worktree={}", report.isolation_worktree.display());
+            println!("verification_status={}", report.verification_status);
+            println!("delivery={}", report.delivery_summary);
+            println!("report={}", report.report_path.display());
         }
     }
     Ok(())

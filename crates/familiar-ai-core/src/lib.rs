@@ -18,6 +18,7 @@ pub use backlog::{
 };
 pub use bootstrap::*;
 pub use config::{
+    declared_repository_key, parse_repository_answers, serialize_repository_policy,
     AgentAdapterKind, AgentEffort, AgentEntryConfig, AgentPermissionMode, AgentsConfig,
     BudgetProfile, Config, DashboardConfig, DeliveryConfig, DeliveryMode, DriverConfig,
     DriverModelRouteConfig, ExecutionHistoryConfig, ExecutionPrice, InferenceConfig, InferenceMode,

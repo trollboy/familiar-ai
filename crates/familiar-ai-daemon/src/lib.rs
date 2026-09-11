@@ -1,6 +1,7 @@
 pub mod delivery;
 pub mod drive;
 pub mod launchd;
+pub mod onboard;
 pub mod plan;
 pub mod preflight;
 pub mod report;

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use figment::providers::{Env, Format, Serialized, Toml};
@@ -11,6 +11,14 @@ use crate::FamiliarError;
 pub struct Config {
     #[serde(default)]
     pub repositories: BTreeMap<String, RepositoryConfig>,
+    /// Directory holding one additional generated TOML file per onboarded
+    /// repository (see `familiar-ai onboard approve`), merged additively into
+    /// `repositories` on load. Relative values resolve against the directory
+    /// containing the loaded configuration file; absent means `repositories`
+    /// under that same directory. A repository key declared in both the main
+    /// file and a generated file, or in two generated files, refuses to load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories_dir: Option<PathBuf>,
     #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
@@ -2233,6 +2241,17 @@ impl Config {
         Ok(())
     }
 
+    /// Resolves the directory holding generated per-repository policy files,
+    /// relative to `config_dir` (the directory containing the loaded
+    /// `config.toml`) unless an absolute override is configured.
+    pub fn resolve_repositories_dir(&self, config_dir: &Path) -> PathBuf {
+        match &self.repositories_dir {
+            Some(dir) if dir.is_absolute() => dir.clone(),
+            Some(dir) => config_dir.join(dir),
+            None => config_dir.join("repositories"),
+        }
+    }
+
     pub fn repository(&self, canonical_worktree: &Path) -> RepositoryConfig {
         self.repositories
             .iter()
@@ -2244,6 +2263,18 @@ impl Config {
                     .map(|_| entry.clone())
             })
             .unwrap_or_default()
+    }
+
+    /// The literal `repositories` table key whose canonicalized value matches
+    /// `canonical_worktree`, if this repository has been onboarded.
+    pub fn repository_key(&self, canonical_worktree: &Path) -> Option<&str> {
+        self.repositories.iter().find_map(|(path, _)| {
+            Path::new(path)
+                .canonicalize()
+                .ok()
+                .filter(|p| p == canonical_worktree)
+                .map(|_| path.as_str())
+        })
     }
 
     pub fn effective_execution(&self, canonical_worktree: &Path) -> EffectiveExecutionConfig {
@@ -2304,26 +2335,64 @@ impl Config {
         }
         Ok(())
     }
-    pub fn load(config_path: Option<&Path>) -> crate::Result<Self> {
-        reject_stale_env()?;
+    /// Runs every load-time validation rule. Exposed so callers evaluating a
+    /// candidate configuration before it is written to disk (see
+    /// `familiar-ai onboard approve`) can reuse exactly the rules `load`
+    /// enforces.
+    pub fn validate(&self) -> crate::Result<()> {
+        self.validate_repositories()?;
+        self.validate_execution()?;
+        self.validate_preflight()?;
+        self.delivery.validate().map_err(FamiliarError::Config)?;
+        self.worker.validate().map_err(FamiliarError::Config)?;
+        Ok(())
+    }
+
+    /// Builds the defaults -> main file -> generated repository files ->
+    /// environment figment stack, refusing when a repository key is declared
+    /// in more than one source. Shared by `load` and `load_with_overrides` so
+    /// the merge and duplicate-key rule are defined exactly once.
+    fn merged_figment(config_path: Option<&Path>) -> crate::Result<Figment> {
         let mut figment = Figment::from(Serialized::defaults(Config::default()));
+        let mut seen_repository_keys = BTreeSet::new();
 
         if let Some(path) = config_path {
             if path.exists() {
+                seen_repository_keys = toml_repository_keys(path)?;
                 figment = figment.merge(Toml::file(path));
             }
         }
 
-        figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
+        if let Some(config_dir) = config_path.and_then(Path::parent) {
+            let peek: Config = figment
+                .clone()
+                .merge(Env::prefixed(ENV_PREFIX).split("__"))
+                .extract()
+                .map_err(|e| FamiliarError::Config(e.to_string()))?;
+            let repositories_dir = peek.resolve_repositories_dir(config_dir);
+            for generated in generated_repository_files(&repositories_dir)? {
+                for key in generated_repository_keys(&generated)? {
+                    if !seen_repository_keys.insert(key.clone()) {
+                        return Err(FamiliarError::Config(format!(
+                            "repository key {key:?} is declared in more than one configuration source (conflict at {})",
+                            generated.display()
+                        )));
+                    }
+                }
+                figment = figment.merge(Toml::file(&generated));
+            }
+        }
 
+        Ok(figment.merge(Env::prefixed(ENV_PREFIX).split("__")))
+    }
+
+    pub fn load(config_path: Option<&Path>) -> crate::Result<Self> {
+        reject_stale_env()?;
+        let figment = Self::merged_figment(config_path)?;
         let config: Self = figment
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
-        config.validate_repositories()?;
-        config.validate_execution()?;
-        config.validate_preflight()?;
-        config.delivery.validate().map_err(FamiliarError::Config)?;
-        config.worker.validate().map_err(FamiliarError::Config)?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -2332,26 +2401,133 @@ impl Config {
         overrides: figment::Figment,
     ) -> crate::Result<Self> {
         reject_stale_env()?;
-        let mut figment = Figment::from(Serialized::defaults(Config::default()));
-
-        if let Some(path) = config_path {
-            if path.exists() {
-                figment = figment.merge(Toml::file(path));
-            }
-        }
-
-        figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
-        figment = figment.merge(overrides);
-
+        let figment = Self::merged_figment(config_path)?.merge(overrides);
         let config: Self = figment
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
-        config.validate_repositories()?;
-        config.validate_execution()?;
-        config.validate_preflight()?;
-        config.delivery.validate().map_err(FamiliarError::Config)?;
-        config.worker.validate().map_err(FamiliarError::Config)?;
+        config.validate()?;
         Ok(config)
+    }
+}
+
+/// Non-recursive `*.toml` file listing, sorted for deterministic merge order.
+/// A missing directory is not an error: no repository has been onboarded yet.
+fn generated_repository_files(dir: &Path) -> crate::Result<Vec<PathBuf>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| FamiliarError::Config(format!("cannot read {}: {e}", dir.display())))?
+        .map(|entry| {
+            entry
+                .map(|e| e.path())
+                .map_err(|e| FamiliarError::Config(format!("cannot read {}: {e}", dir.display())))
+        })
+        .collect::<crate::Result<_>>()?;
+    files.retain(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"));
+    files.sort();
+    Ok(files)
+}
+
+fn parsed_toml_table(path: &Path) -> crate::Result<toml::value::Table> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| FamiliarError::Config(format!("cannot read {}: {e}", path.display())))?;
+    let value: toml::Value = text
+        .parse()
+        .map_err(|e| FamiliarError::Config(format!("{}: invalid TOML: {e}", path.display())))?;
+    value
+        .as_table()
+        .cloned()
+        .ok_or_else(|| FamiliarError::Config(format!("{}: must be a TOML table", path.display())))
+}
+
+/// Reads the `repositories` table keys declared by the main configuration
+/// file without deserializing it into `Config`, so duplicate keys can be
+/// detected before figment's last-merge-wins semantics would silently mask a
+/// conflict. The main file may declare any top-level section.
+fn toml_repository_keys(path: &Path) -> crate::Result<BTreeSet<String>> {
+    Ok(parsed_toml_table(path)?
+        .get("repositories")
+        .and_then(toml::Value::as_table)
+        .map(|repositories| repositories.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
+/// Same extraction for a generated per-repository file (see `familiar-ai
+/// onboard approve`), which may declare only a `repositories` table; any
+/// other top-level key refuses to load.
+fn generated_repository_keys(path: &Path) -> crate::Result<BTreeSet<String>> {
+    let table = parsed_toml_table(path)?;
+    let unexpected: Vec<&String> = table
+        .keys()
+        .filter(|key| key.as_str() != "repositories")
+        .collect();
+    if !unexpected.is_empty() {
+        return Err(FamiliarError::Config(format!(
+            "{}: generated repository policy files may declare only a [repositories] table; found {unexpected:?}",
+            path.display()
+        )));
+    }
+    Ok(table
+        .get("repositories")
+        .and_then(toml::Value::as_table)
+        .map(|repositories| repositories.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryAnswersDocument {
+    repositories: BTreeMap<String, RepositoryConfig>,
+}
+
+/// Parses an operator-authored onboarding answers document (see
+/// `familiar-ai onboard approve`) into exactly one repository worktree key
+/// and its candidate policy, using the same `RepositoryConfig` shape and
+/// `deny_unknown_fields` rules every other repository entry is held to.
+pub fn parse_repository_answers(text: &str) -> Result<(String, RepositoryConfig), String> {
+    let answers: RepositoryAnswersDocument =
+        toml::from_str(text).map_err(|e| format!("invalid answers document: {e}"))?;
+    if answers.repositories.len() != 1 {
+        return Err(format!(
+            "answers document must declare exactly one [repositories.\"<worktree>\"] entry; found {}",
+            answers.repositories.len()
+        ));
+    }
+    Ok(answers
+        .repositories
+        .into_iter()
+        .next()
+        .expect("checked len == 1"))
+}
+
+#[derive(Serialize)]
+struct RepositoryPolicyDocument<'a> {
+    repositories: BTreeMap<&'a str, &'a RepositoryConfig>,
+}
+
+/// Serializes exactly one `[repositories."<worktree>"]` entry as a standalone
+/// TOML document, the shape `familiar-ai onboard approve` writes into
+/// `repositories_dir`.
+pub fn serialize_repository_policy(
+    worktree: &str,
+    repository: &RepositoryConfig,
+) -> Result<String, String> {
+    let document = RepositoryPolicyDocument {
+        repositories: BTreeMap::from([(worktree, repository)]),
+    };
+    toml::to_string_pretty(&document).map_err(|e| e.to_string())
+}
+
+/// The single repository worktree key declared by a generated policy
+/// document's data section, if it is well-formed and declares exactly one.
+pub fn declared_repository_key(generated_toml: &str) -> Option<String> {
+    let value: toml::Value = generated_toml.parse().ok()?;
+    let repositories = value.get("repositories")?.as_table()?;
+    if repositories.len() == 1 {
+        repositories.keys().next().cloned()
+    } else {
+        None
     }
 }
 
@@ -2591,6 +2767,144 @@ format = "json"
         let config = Config::load(Some(tmp.path())).unwrap();
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, LogFormat::Json);
+    }
+
+    #[test]
+    fn repositories_dir_defaults_and_resolves_relative_to_config_dir() {
+        let config = Config::default();
+        assert_eq!(
+            config.resolve_repositories_dir(Path::new("/etc/familiar-ai")),
+            PathBuf::from("/etc/familiar-ai/repositories")
+        );
+        let overridden = Config {
+            repositories_dir: Some(PathBuf::from("policies")),
+            ..Config::default()
+        };
+        assert_eq!(
+            overridden.resolve_repositories_dir(Path::new("/etc/familiar-ai")),
+            PathBuf::from("/etc/familiar-ai/policies")
+        );
+        let absolute = Config {
+            repositories_dir: Some(PathBuf::from("/srv/repos")),
+            ..Config::default()
+        };
+        assert_eq!(
+            absolute.resolve_repositories_dir(Path::new("/etc/familiar-ai")),
+            PathBuf::from("/srv/repos")
+        );
+    }
+
+    #[test]
+    fn repositories_dir_merges_generated_files_additively() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), "").unwrap();
+        let repositories_dir = config_dir.join("repositories");
+        std::fs::create_dir_all(&repositories_dir).unwrap();
+        let worktree = home.path().join("project");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        std::fs::write(
+            repositories_dir.join("project.toml"),
+            format!(
+                "[repositories.{:?}]\nprofile = \"canonical\"\n",
+                worktree.display().to_string()
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load(Some(&config_dir.join("config.toml"))).unwrap();
+        assert_eq!(config.repositories.len(), 1);
+        assert!(config
+            .repositories
+            .contains_key(&worktree.display().to_string()));
+    }
+
+    #[test]
+    fn repositories_dir_refuses_key_declared_in_main_and_generated_file() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let worktree = home.path().join("project");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let key = worktree.display().to_string();
+
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!("[repositories.{key:?}]\nprofile = \"canonical\"\n"),
+        )
+        .unwrap();
+        let repositories_dir = config_dir.join("repositories");
+        std::fs::create_dir_all(&repositories_dir).unwrap();
+        std::fs::write(
+            repositories_dir.join("project.toml"),
+            format!("[repositories.{key:?}]\nprofile = \"canonical\"\n"),
+        )
+        .unwrap();
+
+        let error = Config::load(Some(&config_dir.join("config.toml")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("more than one configuration source"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn repositories_dir_refuses_two_generated_files_declaring_the_same_key() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), "").unwrap();
+        let worktree = home.path().join("project");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let key = worktree.display().to_string();
+        let repositories_dir = config_dir.join("repositories");
+        std::fs::create_dir_all(&repositories_dir).unwrap();
+        std::fs::write(
+            repositories_dir.join("a.toml"),
+            format!("[repositories.{key:?}]\nprofile = \"canonical\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            repositories_dir.join("b.toml"),
+            format!("[repositories.{key:?}]\nprofile = \"canonical\"\n"),
+        )
+        .unwrap();
+
+        let error = Config::load(Some(&config_dir.join("config.toml")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("more than one configuration source"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn repositories_dir_refuses_generated_file_with_stray_top_level_key() {
+        let home = tempfile::tempdir().unwrap();
+        let config_dir = home.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.toml"), "").unwrap();
+        let repositories_dir = config_dir.join("repositories");
+        std::fs::create_dir_all(&repositories_dir).unwrap();
+        std::fs::write(
+            repositories_dir.join("sneaky.toml"),
+            "[daemon]\nheartbeat_interval_secs = 1\n",
+        )
+        .unwrap();
+
+        let error = Config::load(Some(&config_dir.join("config.toml")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("may declare only a [repositories] table"),
+            "{error}"
+        );
+        assert!(error.contains("daemon"), "{error}");
     }
 
     #[test]
