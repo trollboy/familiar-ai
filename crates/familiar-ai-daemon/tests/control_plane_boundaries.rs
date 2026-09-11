@@ -50,12 +50,16 @@ fn claim_precedes_database_open_and_socket_binding_in_daemon_bootstrap() {
 
 #[test]
 fn legacy_cli_mutation_handlers_are_rendering_adapters_only() {
-    let cli = source("crates/familiar-ai-daemon/src/bin/familiar-ai.rs");
+    // PRD-076 moved these handlers out of the shared binary into per-domain
+    // `cli/*.rs` library modules; `run.rs` still holds resume_command/run
+    // back-to-back, while deliver_command and drive_command now each occupy
+    // their own single-function file.
+    let run_cli = source("crates/familiar-ai-daemon/src/cli/run.rs");
     let handlers = [
-        function(&cli, "fn resume_command", "fn scope_decisions"),
-        function(&cli, "fn deliver_command", "fn preflight_command"),
-        function(&cli, "fn run(prd_path", "fn handle_attached_review"),
-        function(&cli, "fn drive_command", "fn report_command"),
+        function(&run_cli, "fn resume_command", "fn run(prd_path").to_string(),
+        source("crates/familiar-ai-daemon/src/cli/deliver.rs"),
+        function(&run_cli, "fn run(prd_path", "fn handle_attached_review").to_string(),
+        source("crates/familiar-ai-daemon/src/cli/drive.rs"),
     ];
     for handler in handlers {
         for forbidden in [

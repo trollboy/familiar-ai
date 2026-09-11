@@ -1,4 +1,4 @@
-# Backlog Execution Plan — updated 2026-08-31
+# Backlog Execution Plan — updated 2026-09-01
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
 **Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
@@ -26,6 +26,7 @@ sign-off on scope-conformant work.
 | gate | 066, 067, 068 | complete 2026-08-31 |
 | 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | complete 2026-08-31 — **all nine retained; integrated manually**; [after-action](../wave3_afteraction_report.md) |
 | 4 | 032, 055, 056, 062 | complete 2026-08-31 — **cascade-then-manual again**; [after-action](../wave4_afteraction_report.md) |
+| gate | 076 | complete 2026-09-01 — scope modularization; see the regenerated rows below |
 
 The waves-3/4 caveat is the plan's dominant fact: Familiar has never
 integrated a multi-PRD wave autonomously (FAM-BUG-019/022). The delivered
@@ -60,28 +61,42 @@ exists to end that.
   verification gate can halt unattended runs. Owner: PRD-078's
   environment/verification work or a direct fix.
 
-**GATE — PRD-076 scope modularization** (owner-approved 2026-08-30):
-still required — the remaining product PRDs (058, 063, 072 especially)
-declare whole-crate scopes that would serialize waves 5–6. Regenerates
-the rows below as computed true rounds after amending the remaining
-PRDs' declarations.
+**GATE — PRD-076 scope modularization: complete.** `config.rs` (5164
+lines) became a `config/` module tree of 25 per-feature files re-exported
+unchanged; `docs/contracts/providers.md` became an index plus five
+domain documents (inference, billing sources, deploy targets, credential
+authentication, registry migration); `bin/familiar-ai.rs` (2563 lines)
+thinned to 468 lines of dispatch, with every subcommand's body moved into
+`crates/familiar-ai-daemon/src/cli/*.rs`. Every remaining pending PRD's
+`expected_files` was narrowed to the per-feature files it genuinely
+touches under this PRD's owner authorization. The rows below are not
+estimates: they are the output of `achievable_width()` — the same
+scope-overlap computation the runtime scheduler and PRD-066's
+authoring-time validator both use — run directly against the amended
+`docs/prds/*.md` front matter for each dependency-ready set. Two real
+residual bottlenecks remain and are named rather than hidden: the single
+`config/default.toml` data file (053 and 058 both extend it) and the
+single `config/providers.rs` module (059/060/061/063 each add a runtime
+kind to the same enum) — both are genuine coupling points a pure file
+split cannot remove without a semantic change, which is out of this
+PRD's scope.
 
 | Wave | PRDs | Graph width | Achievable width |
 |------|------|-------------|------------------|
 | bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
-| gate | 076 | 1 | 1 |
-| 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
-| 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
-| 7 | 071, 073 | 2 | 2 |
+| gate | 076 **done** | 1 | 1 |
+| 5 | 038, 053, 058 | 3 | **2** — 053↔058 conflict on `config/default.toml`; 038 is disjoint from both |
+| 6 | 059, 060, 061, 063, 072 | 5 | **2** — 059/060/061/063 form a 4-way clique on `config/providers.rs`; 072 is disjoint from all four |
+| 7 | 071, 073 | 2 | **2** — fully scope-disjoint |
 
 ## Critical path
 
-**077 → 076 → 058 → {059, 060, 061, 063} → {071, 073}** — 056 landing
-moved the control plane off the path; the raw runtime (058) is now the
-long pole, and it is ready the moment the gates clear. 038 (multi-repo
-acceptance — the forcing function that ends infrastructure work) and 053
-are dependency-ready NOW and must not keep slipping: schedule 038 in the
-first product session after the gates.
+**080 (last bug-gate item) → 058 → {059, 060, 061, 063} → {071, 073}** —
+with 076 done, the raw runtime (058) is the long pole and is ready the
+moment 080 clears. 038 (multi-repo acceptance — the forcing function that
+ends infrastructure work) and 053 are dependency-ready NOW and must not
+keep slipping: schedule 038 and 053 as wave 5 alongside 058 (achievable
+width 2, per the table above) in the first product session after 080.
 
 ## Scheduling guidance
 
