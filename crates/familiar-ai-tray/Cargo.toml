@@ -5,6 +5,14 @@ version = "0.1.0"
 license = "MIT"
 rust-version = "1.78"
 
+[features]
+default = []
+# Enabled transitively by familiar-ai-daemon's `tray` feature. Distinguishes
+# "someone actually wants the tray linked" from "this workspace member got
+# compiled because cargo build/test --workspace touches every member" — see
+# build.rs.
+enforce-native-deps = []
+
 [dependencies]
 familiar-ai-core = { path = "../familiar-ai-core" }
 familiar-ai-storage = { path = "../familiar-ai-storage" }
