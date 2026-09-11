@@ -1,6 +1,14 @@
 use chrono::Utc;
 use familiar_ai_core::FamiliarError;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+
+/// PRD-087: identifies the single sequenced allocator below that mints every
+/// `execution_checkpoint_events.event_id`. A checkpoint's identity is durable
+/// across attempts (FAM-BUG-037), so a later attempt legitimately revisits a
+/// phase it already recorded; the allocator's job is making sure that
+/// replay can never collide with — or drop — an earlier occurrence's event
+/// (FAM-BUG-039).
+pub const INVARIANT_CHECKPOINT_EVENT_SEQUENCE: &str = "checkpoint-event-sequence-allocator";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExecutionCheckpoint {
@@ -73,11 +81,18 @@ impl<'a> CheckpointRepository<'a> {
                     params![value.repository_key, value.prd_id, value.diff_hash],
                 )
                 .map_err(db)?;
+        } else {
+            // The created event is a singleton per durable checkpoint
+            // identity (not per re-freeze), so it is only minted the first
+            // time this (repository, prd) checkpoint comes into existence —
+            // through the same allocator every other event uses.
+            let (event_id, sequence) =
+                next_checkpoint_event_id(&transaction, &effective_id).map_err(db)?;
+            transaction.execute(
+                "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'checkpoint_created',NULL,?4,'implementation_checkpoint',?5)",
+                params![event_id, effective_id, sequence, value.phase, now],
+            ).map_err(db)?;
         }
-        transaction.execute(
-            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'checkpoint_created',NULL,?3,'implementation_checkpoint',?4)",
-            params![format!("{}:created", value.checkpoint_id), effective_id, value.phase, now],
-        ).map_err(db)?;
         transaction.commit().map_err(db)?;
         Ok(())
     }
@@ -190,19 +205,14 @@ impl<'a> CheckpointRepository<'a> {
             )));
         }
         // Checkpoint identity is durable across attempts (FAM-BUG-037), so a
-        // later attempt legitimately revisits a phase; the event id carries a
-        // per-checkpoint sequence to stay unique per occurrence, not per
-        // lifetime (FAM-BUG-039).
-        let sequence: i64 = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM execution_checkpoint_events WHERE checkpoint_id=?1",
-                params![checkpoint_id],
-                |row| row.get(0),
-            )
-            .map_err(db)?;
+        // later attempt legitimately revisits a phase; the allocator below
+        // gives the event id a per-checkpoint sequence so it stays unique
+        // per occurrence, not per lifetime (FAM-BUG-039).
+        let (event_id, sequence) =
+            next_checkpoint_event_id(&transaction, checkpoint_id).map_err(db)?;
         transaction.execute(
-            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,?4,?5,?6)",
-            params![format!("{checkpoint_id}:{phase}:{sequence}"), checkpoint_id, prior, phase, detail, now],
+            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,?5,?6,?7)",
+            params![event_id, checkpoint_id, sequence, prior, phase, detail, now],
         ).map_err(db)?;
         transaction.commit().map_err(db)?;
         Ok(())
@@ -210,7 +220,7 @@ impl<'a> CheckpointRepository<'a> {
 
     pub fn events(&self, checkpoint_id: &str) -> familiar_ai_core::Result<Vec<(String, String)>> {
         let mut statement = self.conn.prepare(
-            "SELECT resulting_phase,detail FROM execution_checkpoint_events WHERE checkpoint_id=?1 ORDER BY recorded_at,event_id",
+            "SELECT resulting_phase,detail FROM execution_checkpoint_events WHERE checkpoint_id=?1 ORDER BY recorded_at,sequence",
         ).map_err(db)?;
         let events = statement
             .query_map([checkpoint_id], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -219,6 +229,27 @@ impl<'a> CheckpointRepository<'a> {
             .map_err(db)?;
         Ok(events)
     }
+}
+
+/// The single sequenced allocator for `execution_checkpoint_events` ids
+/// (PRD-087, [`INVARIANT_CHECKPOINT_EVENT_SEQUENCE`]). Every writer of that
+/// table — this repository's own `put`/`transition`, the backlog
+/// completion path, and the driver's landing paths — mints its event
+/// through this one function instead of computing a sequence independently,
+/// so a checkpoint re-entered across occurrences can never collide with, or
+/// silently drop, an earlier occurrence's event (FAM-BUG-039). The sequence
+/// is computed from the durable `sequence` column (not a row count), so it
+/// stays monotonic even if a future recovery path ever removes an event.
+pub fn next_checkpoint_event_id(
+    transaction: &Transaction<'_>,
+    checkpoint_id: &str,
+) -> rusqlite::Result<(String, i64)> {
+    let sequence: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(sequence), -1) + 1 FROM execution_checkpoint_events WHERE checkpoint_id=?1",
+        params![checkpoint_id],
+        |row| row.get(0),
+    )?;
+    Ok((format!("{checkpoint_id}:{sequence}"), sequence))
 }
 
 fn map(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionCheckpoint> {
@@ -272,6 +303,99 @@ mod tests {
             test_evidence_json: "{}".into(),
             invalid_reason: None,
         }
+    }
+
+    /// PRD-087 AC4, invariant `checkpoint-event-sequence-allocator`: the
+    /// guarantee is asserted here, in the crate's own suite that runs in the
+    /// standard verification gate, rather than only in a scenario test.
+    ///
+    /// A checkpoint's identity is durable across attempts, so a later attempt
+    /// legitimately re-enters a phase it already recorded. Every event must
+    /// still get its own identifier and none may be lost.
+    #[test]
+    fn every_event_id_comes_from_the_sequenced_allocator_and_survives_reentry() {
+        let db = database();
+        let repository = CheckpointRepository::new(db.conn());
+        repository.put(&checkpoint("/repo/.git", "PRD-1")).unwrap();
+        let id = format!("/repo/.git:PRD-1");
+
+        // The FAM-BUG-039 shape: a later attempt revisits a phase this
+        // checkpoint already recorded. A transition to the phase already held
+        // is a no-op, so re-entry means cycling back through it.
+        for phase in ["reviewed", "implemented", "reviewed"] {
+            repository.transition(&id, phase, "reentered").unwrap();
+        }
+
+        let mut statement = db
+            .conn()
+            .prepare(
+                "SELECT event_id,sequence FROM execution_checkpoint_events \
+                 WHERE checkpoint_id=?1 ORDER BY sequence",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64)> = statement
+            .query_map([&id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        // One creation plus three re-entries, nothing dropped.
+        assert_eq!(
+            rows.len(),
+            4,
+            "{INVARIANT_CHECKPOINT_EVENT_SEQUENCE} violated: an occurrence was dropped"
+        );
+        let sequences: Vec<i64> = rows.iter().map(|(_, sequence)| *sequence).collect();
+        assert_eq!(
+            sequences,
+            vec![0, 1, 2, 3],
+            "{INVARIANT_CHECKPOINT_EVENT_SEQUENCE} violated: sequences are not contiguous per checkpoint"
+        );
+        let mut ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            rows.len(),
+            "{INVARIANT_CHECKPOINT_EVENT_SEQUENCE} violated: two occurrences share an identifier"
+        );
+    }
+
+    /// PRD-087 AC4 mutation regression for
+    /// `checkpoint-event-sequence-allocator`: removing the allocator means
+    /// minting an identifier some other way, which is exactly what produced
+    /// FAM-BUG-039. Doing that here must be refused by the constraint the
+    /// invariant installed, so the invariant cannot be quietly deleted
+    /// without a test going red.
+    #[test]
+    fn bypassing_the_allocator_is_refused_by_the_sequence_constraint() {
+        let db = database();
+        let repository = CheckpointRepository::new(db.conn());
+        repository.put(&checkpoint("/repo/.git", "PRD-1")).unwrap();
+        let id = format!("/repo/.git:PRD-1");
+        repository.transition(&id, "implemented", "first").unwrap();
+
+        let existing: i64 = db
+            .conn()
+            .query_row(
+                "SELECT MAX(sequence) FROM execution_checkpoint_events WHERE checkpoint_id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // The pre-invariant behaviour: pick an id by hand and reuse a
+        // sequence the allocator would never have handed out twice.
+        let bypassed = db.conn().execute(
+            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) \
+             VALUES(?1,?2,?3,'phase_transition',NULL,'implemented','bypassed','t')",
+            params![format!("{id}:hand-rolled"), id, existing],
+        );
+        assert!(
+            bypassed.is_err(),
+            "{INVARIANT_CHECKPOINT_EVENT_SEQUENCE} is not enforced: a hand-minted \
+             event reused sequence {existing} without the database refusing it"
+        );
     }
 
     #[test]

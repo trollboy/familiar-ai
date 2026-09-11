@@ -38,10 +38,16 @@ mod tests {
         assert_eq!(icon.rgba.len() as u32, icon.width * icon.height * 4);
     }
 
+    /// Pins the shipped asset so an accidental swap is caught. The pin read
+    /// 32x32 until it was checked against the file for the first time in a
+    /// long while: the asset became 512x512 in ddd3d7a and nothing noticed,
+    /// because this crate sits outside the workspace and its tests were never
+    /// part of any run. The tray host scales the icon, so 512 is fine — the
+    /// stale number was the defect, not the artwork.
     #[test]
     fn icon_has_expected_dimensions() {
         let icon = load_icon().unwrap();
-        assert_eq!(icon.width, 32);
-        assert_eq!(icon.height, 32);
+        assert_eq!(icon.width, 512);
+        assert_eq!(icon.height, 512);
     }
 }

@@ -9,6 +9,104 @@ pub struct ControlPlaneRepository<'a> {
     conn: &'a mut Connection,
 }
 
+/// One execution as an operator sees it in a list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExecutionRow {
+    pub execution_id: String,
+    pub project_id: String,
+    pub state: String,
+    pub mode: String,
+    /// The host-interpreted command. Never model-visible, but the operator
+    /// deciding whether to stop something needs to see what it is.
+    pub command_json: String,
+    pub worker_identity: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Executions for one project, newest first. Terminal states are included —
+/// an operator wants to see what just finished, not only what is live — and
+/// the caller decides what to show as stoppable.
+pub fn list_executions(
+    conn: &Connection,
+    project_id: &str,
+    limit: usize,
+) -> Result<Vec<ExecutionRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT execution_id,project_id,state,mode,command_json,worker_identity,\
+             created_at,updated_at FROM control_plane_executions \
+             WHERE project_id=?1 ORDER BY created_at DESC, execution_id DESC LIMIT ?2",
+        )
+        .map_err(db)?;
+    let rows = stmt
+        .query_map(params![project_id, limit as i64], |row| {
+            Ok(ExecutionRow {
+                execution_id: row.get(0)?,
+                project_id: row.get(1)?,
+                state: row.get(2)?,
+                mode: row.get(3)?,
+                command_json: row.get(4)?,
+                worker_identity: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(db)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db)
+}
+
+/// The registered state of a project (`active`, `paused`, `archived`), or
+/// `None` when it has never been registered with the control plane.
+pub fn project_state(conn: &Connection, project_id: &str) -> Result<Option<String>> {
+    let mut stmt = conn
+        .prepare("SELECT state FROM control_plane_projects WHERE project_id=?1")
+        .map_err(db)?;
+    let mut rows = stmt.query(params![project_id]).map_err(db)?;
+    match rows.next().map_err(db)? {
+        Some(row) => Ok(Some(row.get(0).map_err(db)?)),
+        None => Ok(None),
+    }
+}
+
+/// A durable, per-repository, cross-host driver lease record (PRD-091).
+/// Acquisition and expiry are computed from store-side time, never host
+/// wall-clock, per the recorded clock-skew assumption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseRecord {
+    pub repository_key: String,
+    pub host_identity: String,
+    pub process_identity: String,
+    pub holder_token: String,
+    pub acquired_at: String,
+    pub renewed_at: String,
+    pub expires_at: String,
+    pub lease_generation: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseAcquireOutcome {
+    /// A fresh acquisition or a takeover of an expired lease.
+    Acquired(LeaseRecord),
+    /// A live lease is held by someone else; named so the caller can report it.
+    Refused {
+        holder_host: String,
+        holder_process: String,
+        remaining_ms: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseRenewOutcome {
+    Renewed(LeaseRecord),
+    /// The caller no longer holds this lease — through expiry, an
+    /// out-of-band takeover, or a lease it never held. The current holder is
+    /// named when the store can identify one.
+    Lost {
+        current_holder: Option<(String, String)>,
+    },
+}
+
 impl<'a> ControlPlaneRepository<'a> {
     pub fn new(conn: &'a mut Connection) -> Self {
         Self { conn }
@@ -432,6 +530,221 @@ impl<'a> ControlPlaneRepository<'a> {
         self.conn.execute("INSERT OR IGNORE INTO control_plane_events(event_id,execution_id,kind,payload_json,created_at) VALUES(?1,?2,'late_worker_outcome',?3,datetime('now'))",params![format!("{execution}:late:{worker}:{attempt}"),execution,payload]).map_err(db)?;
         Ok(true)
     }
+
+    /// Acquire a fresh per-repository driver lease, or take over one whose
+    /// store-side expiry has already passed. A live lease held by anyone
+    /// else — including a different process on the same host — is refused
+    /// with the holder named and its remaining life reported. Concurrent
+    /// callers against the same store race safely: the immediate transaction
+    /// serializes them, so exactly one ever wins a given repository.
+    pub fn acquire_lease(
+        &mut self,
+        repository_key: &str,
+        host_identity: &str,
+        process_identity: &str,
+        holder_token: &str,
+        ttl_secs: i64,
+    ) -> Result<LeaseAcquireOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db)?;
+        let existing: Option<(String, String, f64)> = tx
+            .query_row(
+                "SELECT host_identity,process_identity,(julianday(expires_at)-julianday('now'))*86400.0
+                 FROM control_plane_leases WHERE repository_key=?1",
+                [repository_key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        let outcome = match existing {
+            None => {
+                insert_lease_row(
+                    &tx,
+                    repository_key,
+                    host_identity,
+                    process_identity,
+                    holder_token,
+                    ttl_secs,
+                    1,
+                )?;
+                insert_lease_event(
+                    &tx,
+                    repository_key,
+                    "acquired",
+                    None,
+                    None,
+                    Some(host_identity),
+                    Some(process_identity),
+                )?;
+                LeaseAcquireOutcome::Acquired(
+                    read_lease(&tx, repository_key)?.expect("lease just inserted"),
+                )
+            }
+            Some((holder_host, holder_process, remaining_secs)) if remaining_secs > 0.0 => {
+                LeaseAcquireOutcome::Refused {
+                    holder_host,
+                    holder_process,
+                    remaining_ms: (remaining_secs * 1000.0).round() as i64,
+                }
+            }
+            Some((prior_host, prior_process, _remaining_secs)) => {
+                let generation: i64 = tx
+                    .query_row(
+                        "SELECT lease_generation FROM control_plane_leases WHERE repository_key=?1",
+                        [repository_key],
+                        |r| r.get(0),
+                    )
+                    .map_err(db)?;
+                insert_lease_row(
+                    &tx,
+                    repository_key,
+                    host_identity,
+                    process_identity,
+                    holder_token,
+                    ttl_secs,
+                    generation + 1,
+                )?;
+                insert_lease_event(
+                    &tx,
+                    repository_key,
+                    "takeover",
+                    Some(&prior_host),
+                    Some(&prior_process),
+                    Some(host_identity),
+                    Some(process_identity),
+                )?;
+                LeaseAcquireOutcome::Acquired(
+                    read_lease(&tx, repository_key)?.expect("lease just taken over"),
+                )
+            }
+        };
+        tx.commit().map_err(db)?;
+        Ok(outcome)
+    }
+
+    /// Extend a held lease on a heartbeat. Any mismatch between the caller's
+    /// token and the store's current holder — or an expiry the caller failed
+    /// to renew ahead of — is durably recorded as a loss naming whoever the
+    /// store currently believes holds it, if anyone.
+    pub fn renew_lease(
+        &mut self,
+        repository_key: &str,
+        host_identity: &str,
+        process_identity: &str,
+        holder_token: &str,
+        ttl_secs: i64,
+    ) -> Result<LeaseRenewOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db)?;
+        let existing: Option<(String, String, String, f64)> = tx
+            .query_row(
+                "SELECT host_identity,process_identity,holder_token,(julianday(expires_at)-julianday('now'))*86400.0
+                 FROM control_plane_leases WHERE repository_key=?1",
+                [repository_key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        let outcome = match existing {
+            Some((_, _, token, remaining_secs))
+                if token == holder_token && remaining_secs > 0.0 =>
+            {
+                tx.execute(
+                    "UPDATE control_plane_leases SET renewed_at=datetime('now'),expires_at=datetime('now',?2),lease_generation=lease_generation+1 WHERE repository_key=?1",
+                    params![repository_key, format!("+{ttl_secs} seconds")],
+                )
+                .map_err(db)?;
+                LeaseRenewOutcome::Renewed(
+                    read_lease(&tx, repository_key)?.expect("lease just renewed"),
+                )
+            }
+            Some((current_host, current_process, token, _)) => {
+                let current_holder = if token == holder_token {
+                    None
+                } else {
+                    Some((current_host.clone(), current_process.clone()))
+                };
+                insert_lease_event(
+                    &tx,
+                    repository_key,
+                    "lost",
+                    Some(host_identity),
+                    Some(process_identity),
+                    current_holder.as_ref().map(|(h, _)| h.as_str()),
+                    current_holder.as_ref().map(|(_, p)| p.as_str()),
+                )?;
+                LeaseRenewOutcome::Lost { current_holder }
+            }
+            None => {
+                insert_lease_event(
+                    &tx,
+                    repository_key,
+                    "lost",
+                    Some(host_identity),
+                    Some(process_identity),
+                    None,
+                    None,
+                )?;
+                LeaseRenewOutcome::Lost {
+                    current_holder: None,
+                }
+            }
+        };
+        tx.commit().map_err(db)?;
+        Ok(outcome)
+    }
+
+    /// Release a held lease on clean shutdown. A no-op — never an error — if
+    /// the caller no longer holds it.
+    pub fn release_lease(&mut self, repository_key: &str, holder_token: &str) -> Result<bool> {
+        let tx = self.conn.transaction().map_err(db)?;
+        let holder: Option<(String, String)> = tx
+            .query_row(
+                "SELECT host_identity,process_identity FROM control_plane_leases WHERE repository_key=?1 AND holder_token=?2",
+                params![repository_key, holder_token],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        let Some((host, process)) = holder else {
+            tx.commit().map_err(db)?;
+            return Ok(false);
+        };
+        tx.execute(
+            "DELETE FROM control_plane_leases WHERE repository_key=?1 AND holder_token=?2",
+            params![repository_key, holder_token],
+        )
+        .map_err(db)?;
+        insert_lease_event(
+            &tx,
+            repository_key,
+            "released",
+            Some(&host),
+            Some(&process),
+            None,
+            None,
+        )?;
+        tx.commit().map_err(db)?;
+        Ok(true)
+    }
+
+    /// Read-only lease inspection: which host and process currently hold a
+    /// repository's lease, if any.
+    pub fn inspect_lease(&self, repository_key: &str) -> Result<Option<LeaseRecord>> {
+        self.conn
+            .query_row(
+                "SELECT repository_key,host_identity,process_identity,holder_token,acquired_at,renewed_at,expires_at,lease_generation
+                 FROM control_plane_leases WHERE repository_key=?1",
+                [repository_key],
+                lease_row,
+            )
+            .optional()
+            .map_err(db)
+    }
 }
 
 fn parse_mode(s: &str) -> ExecutionMode {
@@ -440,6 +753,78 @@ fn parse_mode(s: &str) -> ExecutionMode {
         "foreground_only" => ExecutionMode::ForegroundOnly,
         _ => ExecutionMode::Detached,
     }
+}
+
+fn lease_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LeaseRecord> {
+    Ok(LeaseRecord {
+        repository_key: r.get(0)?,
+        host_identity: r.get(1)?,
+        process_identity: r.get(2)?,
+        holder_token: r.get(3)?,
+        acquired_at: r.get(4)?,
+        renewed_at: r.get(5)?,
+        expires_at: r.get(6)?,
+        lease_generation: r.get(7)?,
+    })
+}
+
+fn read_lease(tx: &rusqlite::Transaction<'_>, repository_key: &str) -> Result<Option<LeaseRecord>> {
+    tx.query_row(
+        "SELECT repository_key,host_identity,process_identity,holder_token,acquired_at,renewed_at,expires_at,lease_generation
+         FROM control_plane_leases WHERE repository_key=?1",
+        [repository_key],
+        lease_row,
+    )
+    .optional()
+    .map_err(db)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_lease_row(
+    tx: &rusqlite::Transaction<'_>,
+    repository_key: &str,
+    host_identity: &str,
+    process_identity: &str,
+    holder_token: &str,
+    ttl_secs: i64,
+    generation: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO control_plane_leases(repository_key,host_identity,process_identity,holder_token,acquired_at,renewed_at,expires_at,lease_generation)
+         VALUES(?1,?2,?3,?4,datetime('now'),datetime('now'),datetime('now',?5),?6)
+         ON CONFLICT(repository_key) DO UPDATE SET host_identity=excluded.host_identity,process_identity=excluded.process_identity,
+           holder_token=excluded.holder_token,acquired_at=excluded.acquired_at,renewed_at=excluded.renewed_at,
+           expires_at=excluded.expires_at,lease_generation=excluded.lease_generation",
+        params![
+            repository_key,
+            host_identity,
+            process_identity,
+            holder_token,
+            format!("+{ttl_secs} seconds"),
+            generation
+        ],
+    )
+    .map_err(db)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_lease_event(
+    tx: &rusqlite::Transaction<'_>,
+    repository_key: &str,
+    kind: &str,
+    prior_host: Option<&str>,
+    prior_process: Option<&str>,
+    new_host: Option<&str>,
+    new_process: Option<&str>,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO control_plane_lease_events(repository_key,kind,prior_host_identity,prior_process_identity,new_host_identity,new_process_identity,detail,recorded_at)
+         VALUES(?1,?2,?3,?4,?5,?6,NULL,datetime('now'))",
+        params![repository_key, kind, prior_host, prior_process, new_host, new_process],
+    )
+    .map_err(db)?;
+    Ok(())
 }
 
 fn ensure_slot_pool(
@@ -620,4 +1005,219 @@ fn db(error: rusqlite::Error) -> FamiliarError {
 #[allow(dead_code)]
 fn _mode_name(mode: ExecutionMode) -> &'static str {
     mode.as_str()
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    use crate::Database;
+
+    fn migrated() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        db
+    }
+
+    #[test]
+    fn fresh_repository_lease_is_acquired_and_named() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        let outcome = repo
+            .acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        match outcome {
+            LeaseAcquireOutcome::Acquired(record) => {
+                assert_eq!(record.host_identity, "host-1");
+                assert_eq!(record.process_identity, "proc-1");
+                assert_eq!(record.lease_generation, 1);
+            }
+            other => panic!("expected acquisition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_lease_refuses_a_second_host_and_names_the_holder() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        repo.acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        let refused = repo
+            .acquire_lease("repo-a", "host-2", "proc-2", "token-2", 60)
+            .unwrap();
+        match refused {
+            LeaseAcquireOutcome::Refused {
+                holder_host,
+                holder_process,
+                remaining_ms,
+            } => {
+                assert_eq!(holder_host, "host-1");
+                assert_eq!(holder_process, "proc-1");
+                assert!(remaining_ms > 0);
+            }
+            other => panic!("expected refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expired_lease_is_taken_over_and_recorded_naming_both_holders() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        repo.acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        db.conn_mut()
+            .execute(
+                "UPDATE control_plane_leases SET expires_at=datetime('now','-1 seconds') WHERE repository_key='repo-a'",
+                [],
+            )
+            .unwrap();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        let outcome = repo
+            .acquire_lease("repo-a", "host-2", "proc-2", "token-2", 60)
+            .unwrap();
+        match outcome {
+            LeaseAcquireOutcome::Acquired(record) => {
+                assert_eq!(record.host_identity, "host-2");
+                assert_eq!(record.lease_generation, 2);
+            }
+            other => panic!("expected takeover acquisition, got {other:?}"),
+        }
+        let events: Vec<(String, Option<String>, Option<String>)> = {
+            let mut stmt = db
+                .conn()
+                .prepare("SELECT kind,prior_host_identity,new_host_identity FROM control_plane_lease_events WHERE repository_key='repo-a' ORDER BY event_id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            events,
+            vec![
+                ("acquired".into(), None, Some("host-1".into())),
+                (
+                    "takeover".into(),
+                    Some("host-1".into()),
+                    Some("host-2".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn renewal_extends_expiry_for_the_current_holder() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        repo.acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        let first_expiry = repo.inspect_lease("repo-a").unwrap().unwrap().expires_at;
+        db.conn_mut()
+            .execute(
+                "UPDATE control_plane_leases SET renewed_at=datetime('now','-30 seconds'),expires_at=datetime('now','-30 seconds','+60 seconds') WHERE repository_key='repo-a'",
+                [],
+            )
+            .unwrap();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        let outcome = repo
+            .renew_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        let renewed = match outcome {
+            LeaseRenewOutcome::Renewed(record) => record,
+            other => panic!("expected renewal, got {other:?}"),
+        };
+        assert!(renewed.expires_at >= first_expiry);
+    }
+
+    #[test]
+    fn renewal_after_supersession_is_refused_and_the_loss_is_recorded() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        repo.acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        // Simulate the mid-session loss: the store now names a different
+        // holder (an out-of-band takeover), independent of expiry.
+        db.conn_mut()
+            .execute(
+                "UPDATE control_plane_leases SET host_identity='host-2',process_identity='proc-2',holder_token='token-2' WHERE repository_key='repo-a'",
+                [],
+            )
+            .unwrap();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        let outcome = repo
+            .renew_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        match outcome {
+            LeaseRenewOutcome::Lost { current_holder } => {
+                assert_eq!(current_holder, Some(("host-2".into(), "proc-2".into())));
+            }
+            other => panic!("expected loss, got {other:?}"),
+        }
+        let lost_event: (String, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT kind,new_host_identity FROM control_plane_lease_events WHERE repository_key='repo-a' AND kind='lost' ORDER BY event_id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(lost_event, ("lost".into(), Some("host-2".into())));
+    }
+
+    #[test]
+    fn renewal_past_expiry_is_a_recorded_loss_even_for_the_uncontested_holder() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        repo.acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        db.conn_mut()
+            .execute(
+                "UPDATE control_plane_leases SET expires_at=datetime('now','-1 seconds') WHERE repository_key='repo-a'",
+                [],
+            )
+            .unwrap();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        let outcome = repo
+            .renew_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            LeaseRenewOutcome::Lost {
+                current_holder: None
+            }
+        ));
+    }
+
+    #[test]
+    fn release_frees_the_repository_for_a_fresh_acquisition() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        repo.acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        assert!(repo.release_lease("repo-a", "token-1").unwrap());
+        assert!(repo.inspect_lease("repo-a").unwrap().is_none());
+        let outcome = repo
+            .acquire_lease("repo-a", "host-2", "proc-2", "token-2", 60)
+            .unwrap();
+        assert!(matches!(outcome, LeaseAcquireOutcome::Acquired(_)));
+    }
+
+    #[test]
+    fn leases_are_independent_per_repository() {
+        let mut db = migrated();
+        let mut repo = ControlPlaneRepository::new(db.conn_mut());
+        repo.acquire_lease("repo-a", "host-1", "proc-1", "token-1", 60)
+            .unwrap();
+        let outcome = repo
+            .acquire_lease("repo-b", "host-2", "proc-2", "token-2", 60)
+            .unwrap();
+        assert!(matches!(outcome, LeaseAcquireOutcome::Acquired(_)));
+        assert!(matches!(
+            repo.inspect_lease("repo-a").unwrap(),
+            Some(ref r) if r.host_identity == "host-1"
+        ));
+        assert!(matches!(
+            repo.inspect_lease("repo-b").unwrap(),
+            Some(ref r) if r.host_identity == "host-2"
+        ));
+    }
 }

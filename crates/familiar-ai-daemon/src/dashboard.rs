@@ -40,6 +40,7 @@ pub async fn run_dashboard(
         .route("/stats", get(stats_endpoint))
         .route("/projects", get(projects))
         .route("/recent", get(recent))
+        .route("/stewardship/repositories", get(stewardship_repositories))
         .route("/stewardship/backlog", get(stewardship_backlog))
         .route("/stewardship/sessions", get(stewardship_sessions))
         .route(
@@ -228,6 +229,14 @@ fn stewardship_error_response(error: StewardshipError) -> Response {
             Json(json!({"error": message})),
         )
             .into_response(),
+    }
+}
+
+async fn stewardship_repositories(State(state): State<DashboardState>) -> Response {
+    let db = state.db.lock().unwrap();
+    match familiar_ai_daemon::stewardship::list_repositories(&db) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => stewardship_error_response(error),
     }
 }
 
@@ -564,27 +573,50 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
 <link rel="icon" type="image/png" href="/favicon.png">
 <title>Familiar Dashboard</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; background: #fafafa; color: #222; }
+  body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 2rem auto; padding: 0 1rem; background: #fafafa; color: #222; }
   h1 { border-bottom: 2px solid #333; padding-bottom: 0.5rem; }
   h2 { margin-top: 2rem; color: #555; }
+  h3 { margin: 1rem 0 0.4rem; font-size: 1rem; color: #555; }
   .card { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 1rem; margin: 0.5rem 0; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.5rem; }
   .stat { text-align: center; }
   .stat .num { font-size: 2rem; font-weight: bold; color: #2563eb; }
   .stat .label { font-size: 0.85rem; color: #777; }
   table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
+  th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; vertical-align: top; }
   th { background: #f5f5f5; font-weight: 600; }
   .ok { color: #16a34a; } .err { color: #dc2626; } .warn { color: #d97706; }
   .mono { font-family: monospace; font-size: 0.85rem; }
+  .muted { color: #777; }
+  .nowrap { white-space: nowrap; }
+  .attention { border-left: 4px solid #d97706; }
+  .attention h3 { margin-top: 0; color: #d97706; }
+  .pill { display: inline-block; padding: 0.05rem 0.45rem; border-radius: 10px; font-size: 0.75rem; background: #eef; color: #334; }
+  .pill.bad { background: #fde8e8; color: #a11; }
+  .pill.good { background: #e7f6ec; color: #161; }
+  button { font: inherit; padding: 0.25rem 0.7rem; border: 1px solid #bbb; border-radius: 4px; background: #fff; cursor: pointer; }
+  button:hover { background: #f0f0f0; }
+  select { font: inherit; padding: 0.25rem; }
+  pre { background: #f7f7f7; padding: 0.5rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; margin: 0.3rem 0; }
   #loading { text-align: center; padding: 2rem; color: #999; }
 </style>
 </head>
 <body>
 <h1>Familiar</h1>
-<div id="loading">Loading…</div>
+<div id="loading">Loading&hellip;</div>
 <div id="content" style="display:none">
   <div id="health-section"></div>
+
+  <h2>Stewardship</h2>
+  <div class="card">
+    Repository:
+    <select id="repo-select"><option>loading&hellip;</option></select>
+    <span id="repo-note" class="muted"></span>
+  </div>
+  <div id="gates-section"></div>
+  <div id="backlog-section"></div>
+  <div id="sessions-section"></div>
+
   <h2>Stats</h2>
   <div id="stats-section" class="grid"></div>
   <h2>Projects</h2>
@@ -593,13 +625,48 @@ const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   <div id="recent-section"></div>
 </div>
 <script>
+// Paths, reasons and agent-written detail strings all land in innerHTML, and
+// some of them are model output. Escape everything that is not markup we wrote.
+function esc(v) {
+  if (v === null || v === undefined) return '';
+  return String(v).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+function usd(micro) {
+  if (micro === null || micro === undefined) return '&mdash;';
+  return '$' + (micro / 1e6).toFixed(2);
+}
+function mins(ms) {
+  if (!ms) return '&mdash;';
+  const m = Math.floor(ms / 60000);
+  return m >= 60 ? Math.floor(m/60) + 'h ' + (m%60) + 'm' : m + 'm';
+}
+// A lockfile finding can enumerate every new crate in the graph, which is
+// hundreds of names. Left whole it makes one table row taller than the page.
+function clip(v, max) {
+  const s = String(v === null || v === undefined ? '' : v);
+  max = max || 200;
+  return s.length > max
+    ? '<span title="' + esc(s) + '">' + esc(s.slice(0, max)) + '&hellip;</span>'
+    : esc(s);
+}
+function when(ts) {
+  if (!ts) return '&mdash;';
+  const d = new Date(ts);
+  return isNaN(d) ? esc(ts) : d.toLocaleString();
+}
+async function getJSON(url) {
+  const r = await fetch(url);
+  const body = await r.json();
+  if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+
 async function load() {
   try {
     const [health, stats, projects, recent] = await Promise.all([
-      fetch('/health').then(r => r.json()),
-      fetch('/stats').then(r => r.json()),
-      fetch('/projects').then(r => r.json()),
-      fetch('/recent').then(r => r.json()),
+      getJSON('/health'), getJSON('/stats'), getJSON('/projects'), getJSON('/recent'),
     ]);
     document.getElementById('loading').style.display = 'none';
     document.getElementById('content').style.display = 'block';
@@ -607,58 +674,236 @@ async function load() {
     renderStats(stats);
     renderProjects(projects.projects || []);
     renderRecent(recent);
+    loadRepositories();
   } catch(e) {
     document.getElementById('loading').textContent = 'Failed to load: ' + e;
   }
 }
+
 function renderHealth(h) {
-  const llm = h.llm || {};
+  // The health endpoint reports `inference`, not `llm`. This card read `h.llm`
+  // for long enough that it showed "off" no matter what the router was doing.
+  const inf = h.inference || {};
+  const text = inf.text_primary || {};
+  const state = text.loaded ? (text.healthy ? 'healthy' : 'degraded') : 'off';
+  const cls = text.loaded ? (text.healthy ? 'ok' : 'warn') : 'muted';
   const el = document.getElementById('health-section');
-  el.innerHTML = `<div class="card">
-    <strong>Daemon</strong> v${h.version || '?'} (${h.git_sha || '?'}) &middot;
-    uptime ${Math.floor((h.daemon_uptime_secs||0)/60)}m &middot;
-    DB: <span class="${h.db_reachable?'ok':'err'}">${h.db_reachable?'OK':'unreachable'}</span> &middot;
-    LLM: <span class="${llm.healthy?'ok':llm.loaded?'warn':'err'}">${llm.loaded?(llm.healthy?'healthy':'degraded'):'off'}</span>
-    ${llm.backend?' ('+llm.backend+')':''}
-    ${llm.last_error?'<br><small class="err">'+llm.last_error+'</small>':''}
-  </div>`;
+  el.innerHTML = '<div class="card"><strong>Daemon</strong> v' + esc(h.version || '?') +
+    ' (' + esc(h.git_sha || '?') + ') &middot; uptime ' + Math.floor((h.daemon_uptime_secs||0)/60) + 'm' +
+    ' &middot; DB: <span class="' + (h.db_reachable?'ok':'err') + '">' + (h.db_reachable?'OK':'unreachable') + '</span>' +
+    ' &middot; inference: <span class="' + cls + '">' + esc(state) + '</span>' +
+    ' <span class="muted">(mode ' + esc(inf.text_mode || 'unknown') +
+    (text.backend_name ? ', ' + esc(text.backend_name) : '') + ')</span>' +
+    (text.last_error ? '<br><small class="err">' + esc(text.last_error) + '</small>' : '') +
+    '</div>';
 }
 function renderStats(s) {
-  const el = document.getElementById('stats-section');
-  const items = [
-    ['Projects', s.projects], ['Active', s.active_projects],
-    ['Summaries', s.file_summaries], ['Decisions', s.decisions],
-    ['Rollups', s.session_rollups],
-  ];
-  el.innerHTML = items.map(([l,n])=>`<div class="card stat"><div class="num">${n}</div><div class="label">${l}</div></div>`).join('');
+  const items = [['Projects', s.projects], ['Active', s.active_projects],
+    ['Summaries', s.file_summaries], ['Decisions', s.decisions], ['Rollups', s.session_rollups]];
+  document.getElementById('stats-section').innerHTML = items.map(
+    ([l,n]) => '<div class="card stat"><div class="num">' + esc(n) + '</div><div class="label">' + esc(l) + '</div></div>'
+  ).join('');
 }
 function renderProjects(ps) {
   const el = document.getElementById('projects-section');
-  if(!ps.length) { el.innerHTML='<div class="card">No projects yet.</div>'; return; }
-  el.innerHTML = `<table><tr><th>Name</th><th>Root</th><th>Files</th><th>Decisions</th><th>Rollups</th></tr>
-    ${ps.map(p=>`<tr><td>${p.name}</td><td class="mono">${p.repo_root}</td><td>${p.file_summaries}</td><td>${p.decisions}</td><td>${p.session_rollups}</td></tr>`).join('')}</table>`;
+  if(!ps.length) { el.innerHTML = '<div class="card muted">No watched projects. The watcher is a wave-one surface and is separate from the stewardship state above.</div>'; return; }
+  el.innerHTML = '<table><tr><th>Name</th><th>Root</th><th>Files</th><th>Decisions</th><th>Rollups</th></tr>' +
+    ps.map(p => '<tr><td>' + esc(p.name) + '</td><td class="mono">' + esc(p.repo_root) + '</td><td>' +
+      esc(p.file_summaries) + '</td><td>' + esc(p.decisions) + '</td><td>' + esc(p.session_rollups) + '</td></tr>').join('') +
+    '</table>';
 }
 function renderRecent(r) {
   const el = document.getElementById('recent-section');
   let html = '';
   if(r.recent_summaries && r.recent_summaries.length) {
-    html += '<h3>File Summaries</h3><table><tr><th>Path</th><th>Summary</th></tr>';
-    html += r.recent_summaries.slice(0,5).map(s=>`<tr><td class="mono">${s.path}</td><td>${s.summary.slice(0,120)}</td></tr>`).join('');
-    html += '</table>';
+    html += '<h3>File Summaries</h3><table><tr><th>Path</th><th>Summary</th></tr>' +
+      r.recent_summaries.slice(0,5).map(s => '<tr><td class="mono">' + esc(s.path) + '</td><td>' + esc(s.summary.slice(0,120)) + '</td></tr>').join('') + '</table>';
   }
   if(r.recent_decisions && r.recent_decisions.length) {
-    html += '<h3>Decisions</h3><table><tr><th>Title</th><th>Summary</th></tr>';
-    html += r.recent_decisions.slice(0,5).map(d=>`<tr><td>${d.title}</td><td>${d.summary.slice(0,120)}</td></tr>`).join('');
-    html += '</table>';
+    html += '<h3>Decisions</h3><table><tr><th>Title</th><th>Summary</th></tr>' +
+      r.recent_decisions.slice(0,5).map(d => '<tr><td>' + esc(d.title) + '</td><td>' + esc(d.summary.slice(0,120)) + '</td></tr>').join('') + '</table>';
   }
   if(r.recent_rollups && r.recent_rollups.length) {
-    html += '<h3>Session Rollups</h3><table><tr><th>Summary</th></tr>';
-    html += r.recent_rollups.slice(0,5).map(ro=>`<tr><td>${ro.summary.slice(0,200)}</td></tr>`).join('');
-    html += '</table>';
+    html += '<h3>Session Rollups</h3><table><tr><th>Summary</th></tr>' +
+      r.recent_rollups.slice(0,5).map(ro => '<tr><td>' + esc(ro.summary.slice(0,200)) + '</td></tr>').join('') + '</table>';
   }
-  if(!html) html = '<div class="card">No recent activity.</div>';
+  if(!html) html = '<div class="card muted">No recent activity.</div>';
   el.innerHTML = html;
 }
+
+// ---- stewardship -------------------------------------------------------
+// Every /stewardship route except /repositories is repository-scoped and
+// takes a mandatory `repo`, so the picker below is what makes the rest of
+// this section askable at all.
+let currentRepo = null;
+
+async function loadRepositories() {
+  const sel = document.getElementById('repo-select');
+  try {
+    const data = await getJSON('/stewardship/repositories');
+    const repos = data.repositories || [];
+    if(!repos.length) {
+      sel.innerHTML = '<option>none</option>';
+      document.getElementById('repo-note').textContent = ' — no repository has stewardship state yet.';
+      return;
+    }
+    sel.innerHTML = repos.map(r => '<option value="' + esc(r.path) + '">' + esc(r.path) + '</option>').join('');
+    sel.onchange = () => selectRepo(sel.value);
+    selectRepo(repos[0].path);
+  } catch(e) {
+    sel.innerHTML = '<option>error</option>';
+    document.getElementById('repo-note').textContent = ' — ' + e;
+  }
+}
+
+function selectRepo(path) {
+  currentRepo = path;
+  loadGates(); loadBacklog(); loadSessions();
+}
+function q(p) { return '?repo=' + encodeURIComponent(currentRepo) + (p || ''); }
+
+async function loadGates() {
+  const el = document.getElementById('gates-section');
+  el.innerHTML = '<div class="card muted">Loading gates&hellip;</div>';
+  try {
+    const data = await getJSON('/stewardship/gates' + q(''));
+    const items = data.items || [];
+    if(!items.length) {
+      el.innerHTML = '<div class="card"><h3>Waiting on you</h3><span class="ok">Nothing is blocked.</span></div>';
+      return;
+    }
+    // One PRD can stop several times for different reasons. Group by PRD so
+    // this reads as "what is stuck" rather than "how many times it stuck",
+    // and keep the recovery commands folded away — printed in full they run
+    // to several screens and push the rest of the page out of sight.
+    const groups = new Map();
+    items.forEach(g => {
+      const key = g.prd_path || g.prd_id;
+      if(!groups.has(key)) groups.set(key, { prd_id: g.prd_id, prd_path: g.prd_path, details: [], commands: [] });
+      const grp = groups.get(key);
+      const d = g.detail || g.kind;
+      if(!grp.details.includes(d)) grp.details.push(d);
+      (g.recovery_commands || []).forEach(c => { if(!grp.commands.includes(c)) grp.commands.push(c); });
+    });
+    const rows = Array.from(groups.values());
+    el.innerHTML = '<div class="card attention"><h3>Waiting on you &mdash; ' +
+      rows.length + ' PRD' + (rows.length === 1 ? '' : 's') + ', ' +
+      items.length + ' stopped attempt' + (items.length === 1 ? '' : 's') + '</h3>' +
+      '<table><tr><th>PRD</th><th>Why it stopped</th><th></th></tr>' +
+      rows.map((g,i) =>
+        '<tr><td><strong>' + esc(g.prd_id || '') + '</strong><br>' +
+        '<span class="mono muted nowrap">' + esc(g.prd_path) + '</span></td>' +
+        '<td>' + g.details.map(d => '<span class="pill bad">' + esc(d) + '</span>').join(' ') + '</td>' +
+        '<td><button onclick="toggleGate(' + i + ')">how to clear</button></td></tr>' +
+        '<tr><td colspan="3" id="gate-' + i + '" style="display:none"><pre>' +
+        g.commands.map(esc).join('\n') + '</pre></td></tr>').join('') +
+      '</table></div>';
+  } catch(e) { el.innerHTML = '<div class="card err">Gates failed: ' + esc(e.message) + '</div>'; }
+}
+
+function toggleGate(i) {
+  const c = document.getElementById('gate-' + i);
+  c.style.display = c.style.display === 'none' ? 'table-cell' : 'none';
+}
+
+async function loadBacklog() {
+  const el = document.getElementById('backlog-section');
+  el.innerHTML = '<div class="card muted">Loading backlog&hellip;</div>';
+  try {
+    // One page is a sample, not the whole backlog; say so rather than imply a total.
+    const data = await getJSON('/stewardship/backlog' + q('&limit=200'));
+    const items = data.items || [];
+    const counts = {};
+    items.forEach(i => { counts[i.status] = (counts[i.status] || 0) + 1; });
+    const open = items.filter(i => i.status !== 'completed');
+    el.innerHTML = '<div class="card"><h3>Backlog</h3>' +
+      (Object.keys(counts).length
+        ? Object.entries(counts).map(([s,n]) =>
+            '<span class="pill ' + (s === 'completed' ? 'good' : '') + '">' + esc(s) + ': ' + n + '</span> ').join('')
+        : '<span class="muted">empty</span>') +
+      (data.next_cursor ? ' <span class="muted">(first 200 shown)</span>' : '') +
+      (open.length
+        ? '<table style="margin-top:0.6rem"><tr><th>PRD</th><th>Status</th><th>Updated</th></tr>' +
+          open.slice(0,25).map(i => '<tr><td class="mono">' + esc(i.prd_path) + '</td><td>' + esc(i.status) +
+            '</td><td class="muted">' + when(i.updated_at) + '</td></tr>').join('') + '</table>'
+        : '<div class="muted" style="margin-top:0.5rem">Nothing open.</div>') +
+      '</div>';
+  } catch(e) { el.innerHTML = '<div class="card err">Backlog failed: ' + esc(e.message) + '</div>'; }
+}
+
+async function loadSessions() {
+  const el = document.getElementById('sessions-section');
+  el.innerHTML = '<div class="card muted">Loading sessions&hellip;</div>';
+  try {
+    const data = await getJSON('/stewardship/sessions' + q('&limit=10'));
+    const items = data.items || [];
+    if(!items.length) { el.innerHTML = '<div class="card"><h3>Sessions</h3><span class="muted">No drive sessions yet.</span></div>'; return; }
+    el.innerHTML = '<div class="card"><h3>Sessions</h3><table>' +
+      '<tr><th>Session</th><th>Started</th><th>Ended</th><th></th></tr>' +
+      items.map((s,i) =>
+        '<tr><td class="mono">' + esc(s.session_id.slice(0,28)) + '</td>' +
+        '<td class="muted">' + when(s.started_at) + '</td>' +
+        '<td class="muted">' + (s.ended_at ? when(s.ended_at) : '<span class="warn">running</span>') + '</td>' +
+        '<td><button onclick="toggleSession(' + i + ', \'' + esc(s.session_id) + '\')">details</button></td></tr>' +
+        '<tr><td colspan="4" id="sess-' + i + '" style="display:none"></td></tr>').join('') +
+      '</table></div>';
+  } catch(e) { el.innerHTML = '<div class="card err">Sessions failed: ' + esc(e.message) + '</div>'; }
+}
+
+async function toggleSession(i, sessionId) {
+  const cell = document.getElementById('sess-' + i);
+  if(cell.style.display !== 'none') { cell.style.display = 'none'; return; }
+  cell.style.display = 'table-cell';
+  cell.innerHTML = '<span class="muted">Loading&hellip;</span>';
+  const base = '/stewardship/sessions/' + encodeURIComponent(sessionId);
+  try {
+    const [attempts, budget, review] = await Promise.all([
+      getJSON(base + '/attempts' + q('&limit=50')),
+      getJSON(base + '/budget' + q('')),
+      getJSON(base + '/review' + q('&limit=50')),
+    ]);
+    const w = budget.warrant || {};
+    let html = '<strong>Budget</strong><br>' +
+      '<span class="pill">spent ' + usd(budget.known_cost_microusd) + '</span> ' +
+      '<span class="pill">' + esc(budget.known_cost_attempts) + ' priced attempts</span> ' +
+      (budget.unknown_cost_attempts ? '<span class="pill bad">' + esc(budget.unknown_cost_attempts) + ' unpriced</span> ' : '') +
+      '<span class="pill">warrant: ' + esc(w.max_prds) + ' PRDs / ' + mins(w.max_duration_ms) + '</span>';
+    if(w.prd_allowlist && w.prd_allowlist.length) {
+      html += ' <span class="muted mono">[' + w.prd_allowlist.map(esc).join(', ') + ']</span>';
+    }
+
+    const dispositions = {};
+    (review.items || []).forEach(r => { dispositions[r.prd_id] = r; });
+
+    html += '<br><strong style="display:inline-block;margin-top:0.6rem">Attempts</strong>' +
+      '<table><tr><th>#</th><th>PRD</th><th>Model</th><th>Outcome</th><th>Review</th><th>Cost</th><th>Took</th></tr>' +
+      (attempts.items || []).map(a => {
+        const rev = dispositions[a.prd_id];
+        const bad = a.outcome !== 'delivered' && a.outcome !== 'completed';
+        return '<tr><td>' + esc(a.sequence) + '</td><td class="mono">' + esc(a.prd_id) + '</td>' +
+          '<td>' + esc(a.model || '') + '</td>' +
+          '<td><span class="pill ' + (bad ? 'bad' : 'good') + '">' + esc(a.outcome) + '</span>' +
+          (a.retained_reason ? '<br><small class="muted">' + esc(a.retained_reason) + '</small>' : '') + '</td>' +
+          '<td>' + (rev ? esc(rev.disposition) +
+            (rev.blocking_findings && rev.blocking_findings.length
+              ? '<br><small class="err">' + rev.blocking_findings.length + ' blocking</small>' : '')
+            : '<span class="muted">&mdash;</span>') + '</td>' +
+          '<td>' + usd(a.known_cost_microusd) + '</td><td class="muted">' + mins(a.duration_ms) + '</td></tr>';
+      }).join('') + '</table>';
+
+    const blocking = (review.items || []).flatMap(r => (r.blocking_findings || []).map(f => [r.prd_id, f]));
+    if(blocking.length) {
+      html += '<strong style="display:inline-block;margin-top:0.6rem">Blocking review findings</strong>' +
+        '<table><tr><th>PRD</th><th>Path</th><th>Rule</th><th>Detail</th></tr>' +
+        blocking.slice(0,25).map(([prd,f]) =>
+          '<tr><td class="mono">' + esc(prd) + '</td><td class="mono">' + esc(f.path) + '</td>' +
+          '<td>' + esc(f.rule_id || f.decision) + '</td><td class="muted">' + clip(f.rule_detail) + '</td></tr>').join('') +
+        '</table>';
+    }
+    cell.innerHTML = html;
+  } catch(e) { cell.innerHTML = '<span class="err">Failed: ' + esc(e.message) + '</span>'; }
+}
+
 load();
 </script>
 </body>
@@ -694,7 +939,8 @@ mod tests {
             .route("/stats", get(stats_endpoint))
             .route("/projects", get(projects))
             .route("/recent", get(recent))
-            .route("/stewardship/backlog", get(stewardship_backlog))
+            .route("/stewardship/repositories", get(stewardship_repositories))
+        .route("/stewardship/backlog", get(stewardship_backlog))
             .route("/stewardship/sessions", get(stewardship_sessions))
             .route(
                 "/stewardship/sessions/{session_id}/attempts",
@@ -835,6 +1081,44 @@ mod tests {
         let (status, json) = request_json(&app, "/stewardship/backlog").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].as_str().unwrap().contains("repo"));
+    }
+
+    /// Without this route the dashboard cannot ask its own first question:
+    /// every other stewardship endpoint demands a `repo` the caller has no
+    /// way to discover.
+    #[tokio::test]
+    async fn stewardship_repositories_lists_known_repositories() {
+        let repo = temp_git_repo();
+        let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
+        let state = make_state();
+        {
+            let mut db = state.db.lock().unwrap();
+            let discovered = vec![familiar_ai_core::DiscoveredPrd {
+                id: familiar_ai_core::PrdId::new(1),
+                number: 1,
+                path: familiar_ai_core::RepositoryPath::new("docs/prds/PRD-1.md").unwrap(),
+                location: familiar_ai_core::PrdLocation::Active,
+                title: "One".into(),
+                dependencies: vec![],
+                metadata: familiar_ai_core::PrdMetadata::default(),
+                content_hash: "hash".into(),
+            }];
+            familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
+                .reconcile_and_snapshot(&identity, &discovered)
+                .unwrap();
+        }
+        let app = make_app(state);
+        let (status, json) = request_json(&app, "/stewardship/repositories").await;
+        assert_eq!(status, StatusCode::OK);
+        let items = json["repositories"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["repository_key"], identity.key);
+        // The path form is what the caller must hand back as `repo`, so the
+        // stored git-directory key is not good enough on its own.
+        assert_eq!(
+            items[0]["path"],
+            identity.key.strip_suffix("/.git").unwrap()
+        );
     }
 
     #[tokio::test]

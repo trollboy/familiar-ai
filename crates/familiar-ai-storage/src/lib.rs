@@ -12,7 +12,8 @@ pub use repos::accounting::{
     UsageSeriesPoint, UsageSeriesRequest,
 };
 pub use repos::backlog::{
-    list_entries as list_backlog_entries, list_recovery_events, BacklogEntryRow, RecoveryEventRow,
+    list_entries as list_backlog_entries, list_recovery_events, list_repository_keys,
+    BacklogEntryRow, RecoveryEventRow,
     SqliteBacklogRepository,
 };
 pub use repos::batch_review::{
@@ -20,9 +21,15 @@ pub use repos::batch_review::{
 };
 pub use repos::billing::{BillingRepository, BillingSource, BillingStatus, ProviderCostRow};
 pub use repos::bootstrap::SqliteBootstrapRepository;
-pub use repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
+pub use repos::checkpoint::{
+    next_checkpoint_event_id, CheckpointRepository, ExecutionCheckpoint,
+    INVARIANT_CHECKPOINT_EVENT_SEQUENCE,
+};
 pub use repos::config_decision::{ConfigDecision, ConfigDecisionRepository};
-pub use repos::control_plane::ControlPlaneRepository;
+pub use repos::control_plane::{
+    list_executions, project_state, ControlPlaneRepository, ExecutionRow, LeaseAcquireOutcome,
+    LeaseRecord, LeaseRenewOutcome,
+};
 pub use repos::decision::DecisionRepository;
 pub use repos::delivery::{
     DeliveryAuthorityDecision, DeliveryDecisionRow, DeliveryEffect, DeliveryRepository,
@@ -51,7 +58,7 @@ pub use repos::reservation::{
     AcquireOutcome, ReservationGrant, ReservationGrantItem, ReservationRepository,
     SettlementObservation, SettlementResult,
 };
-pub use repos::review::ReviewRepository;
+pub use repos::review::{ReviewRepository, INVARIANT_REVIEW_RECOVERY_TOLERANCE};
 pub use repos::session_rollup::SessionRollupRepository;
 pub use repos::stewardship::{
     budget_summary, pending_human_gates, review_findings_for_session, BudgetSummary, PendingGate,

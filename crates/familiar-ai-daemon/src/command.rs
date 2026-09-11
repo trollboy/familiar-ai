@@ -27,8 +27,11 @@ pub fn daemon_command_from_tray(cmd: TrayCommand) -> Option<DaemonCommand> {
         TrayCommand::PauseHeavyTasks => Some(DaemonCommand::PauseHeavyTasks),
         TrayCommand::ResumeHeavyTasks => Some(DaemonCommand::ResumeHeavyTasks),
         TrayCommand::Quit => Some(DaemonCommand::Quit),
-        // OpenSettings and OpenProject are handled by the tray itself via opener.
-        TrayCommand::OpenSettings | TrayCommand::OpenProject(_) => None,
+        // OpenSettings, OpenDashboard and OpenProject are handled by the tray
+        // itself via opener.
+        TrayCommand::OpenSettings
+        | TrayCommand::OpenDashboard(_)
+        | TrayCommand::OpenProject(_) => None,
     }
 }
 

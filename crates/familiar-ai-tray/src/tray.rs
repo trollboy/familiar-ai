@@ -4,14 +4,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tray_icon::TrayIconBuilder;
 
 use familiar_ai_core::config::TrayConfig;
 use familiar_ai_core::{AppStatus, FamiliarError, VersionInfo};
 use familiar_ai_storage::{Database, ProjectRepository};
 
-use crate::commands::TrayCommand;
+use crate::commands::{DashboardTarget, TrayCommand};
+use crate::data::DataSource;
 use crate::icon::load_tray_icon;
 use crate::menu::{build_tooltip, MenuItemSpec};
 
@@ -21,6 +22,17 @@ pub struct TrayApp {
     db: Arc<Mutex<Database>>,
     command_tx: mpsc::Sender<TrayCommand>,
     config_path: PathBuf,
+    /// How the dashboard is reached, or `None` when it is unreachable and the
+    /// menu item should be omitted entirely.
+    dashboard: Option<DashboardTarget>,
+    /// Answers the windows' queries. Absent in builds with no data behind the
+    /// tray, in which case the windows are never opened.
+    source: Option<Arc<dyn DataSource>>,
+    /// Flipped true once the daemon is shutting down. `gtk::main()` owns the
+    /// main thread and returns only when something calls `gtk::main_quit()`,
+    /// so without this the process outlives its own SIGTERM: the workers stop,
+    /// the icon stays in the tray, and the PID file is never removed.
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl TrayApp {
@@ -30,6 +42,9 @@ impl TrayApp {
         db: Arc<Mutex<Database>>,
         command_tx: mpsc::Sender<TrayCommand>,
         config_path: PathBuf,
+        dashboard: Option<DashboardTarget>,
+        source: Option<Arc<dyn DataSource>>,
+        shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             config,
@@ -37,6 +52,9 @@ impl TrayApp {
             db,
             command_tx,
             config_path,
+            dashboard,
+            source,
+            shutdown_rx,
         }
     }
 
@@ -84,12 +102,30 @@ impl TrayApp {
             let ids_for_loop = ids_arc.clone();
             let command_tx_for_loop = command_tx.clone();
             let config_path_for_loop = config_path.clone();
+            let shutdown_rx = self.shutdown_rx.clone();
+            let source_for_loop = self.source.clone();
             glib::source::timeout_add_local(Duration::from_millis(100), move || {
+                let mut quitting = false;
                 while let Ok(event) = menu_channel.try_recv() {
                     let ids = ids_for_loop.lock().unwrap();
                     if let Some(cmd) = ids.resolve(&event.id) {
-                        handle_command(cmd, &command_tx_for_loop, &config_path_for_loop);
+                        // Read before the move: handle_command consumes it.
+                        quitting |= matches!(cmd, TrayCommand::Quit);
+                        handle_command(
+                            cmd,
+                            &command_tx_for_loop,
+                            &config_path_for_loop,
+                            source_for_loop.as_ref(),
+                        );
                     }
+                }
+                // Either end of the shutdown can reach us: the user picked Quit
+                // from the menu, or the daemon is stopping on its own (SIGTERM).
+                // Both have to leave gtk::main(), which is what returns the main
+                // thread to the caller so the PID file is removed.
+                if quitting || *shutdown_rx.borrow() {
+                    gtk::main_quit();
+                    return glib::ControlFlow::Break;
                 }
                 glib::ControlFlow::Continue
             });
@@ -104,11 +140,14 @@ impl TrayApp {
                     let ids = ids_arc.lock().unwrap();
                     if let Some(cmd) = ids.resolve(&event.id) {
                         let should_quit = matches!(cmd, TrayCommand::Quit);
-                        handle_command(cmd, &command_tx, &config_path);
+                        handle_command(cmd, &command_tx, &config_path, self.source.as_ref());
                         if should_quit {
                             break;
                         }
                     }
+                }
+                if *self.shutdown_rx.borrow() {
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -130,7 +169,12 @@ impl TrayApp {
             .unwrap_or_default();
 
         let spec =
-            crate::menu::build_menu_spec(&status, &recent, self.config.recent_projects_count);
+            crate::menu::build_menu_spec(
+                &status,
+                &recent,
+                self.config.recent_projects_count,
+                self.dashboard.clone(),
+            );
         drop(recent);
 
         for item in spec {
@@ -189,6 +233,14 @@ impl TrayApp {
                     );
                     menu.append(&mi).ok();
                 }
+                MenuItemSpec::OpenDashboard { target } => {
+                    let mi = MenuItem::new("Open Dashboard", true, None);
+                    ids.insert(
+                        mi.id().clone(),
+                        TrayCommand::OpenDashboard(target.clone()),
+                    );
+                    menu.append(&mi).ok();
+                }
                 MenuItemSpec::OpenSettings => {
                     let mi = MenuItem::new("Settings", true, None);
                     ids.insert(mi.id().clone(), TrayCommand::OpenSettings);
@@ -241,13 +293,40 @@ impl Default for MenuIdMap {
     }
 }
 
-fn handle_command(cmd: TrayCommand, command_tx: &mpsc::Sender<TrayCommand>, config_path: &PathBuf) {
+fn handle_command(
+    cmd: TrayCommand,
+    command_tx: &mpsc::Sender<TrayCommand>,
+    config_path: &PathBuf,
+    source: Option<&Arc<dyn DataSource>>,
+) {
     match &cmd {
-        TrayCommand::OpenSettings => {
-            if let Err(e) = opener::open(config_path) {
-                tracing::warn!(error = %e, "failed to open settings file");
+        TrayCommand::OpenSettings => match source {
+            // A window beats dropping the user into a text editor, and it can
+            // still open the file for anything that has to persist.
+            #[cfg(target_os = "linux")]
+            Some(source) => {
+                crate::windows::open_settings_window(source.clone(), config_path.clone())
             }
-        }
+            _ => {
+                if let Err(e) = opener::open(config_path) {
+                    tracing::warn!(error = %e, "failed to open settings file");
+                }
+            }
+        },
+        TrayCommand::OpenDashboard(target) => match (target, source) {
+            #[cfg(target_os = "linux")]
+            (DashboardTarget::Window, Some(source)) => {
+                crate::windows::open_dashboard_window(source.clone())
+            }
+            (DashboardTarget::Web(url), _) => {
+                if let Err(e) = opener::open_browser(url) {
+                    tracing::warn!(error = %e, url = %url, "failed to open dashboard");
+                }
+            }
+            (DashboardTarget::Window, _) => {
+                tracing::warn!("dashboard window requested with no data source");
+            }
+        },
         TrayCommand::OpenProject(path) => {
             if let Err(e) = opener::open(path) {
                 tracing::warn!(error = %e, path = %path.display(), "failed to open project");

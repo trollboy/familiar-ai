@@ -198,6 +198,21 @@ pub struct PendingGate {
 /// independently at `limit`. This is a composite view over two collections,
 /// not a single cursor-paginated one; the caller sees the count returned and
 /// can lower `limit` for a smaller snapshot.
+/// The PRDs actually awaiting a human decision.
+///
+/// A stopped attempt is evidence that something *once* needed a decision, not
+/// that it still does. The backlog records what the human then decided:
+/// `completed` means they accepted or force-completed it, and that is the only
+/// status that settles the question. `pending` does NOT: it usually means the
+/// entry was released, but an attempt can also stop while the row is still
+/// pending and never claimed, leaving retained work behind — two PRDs in this
+/// repository are in exactly that state, with checkpoints at `implemented` and
+/// no status event ever recorded. Filtering `pending` hid them.
+///
+/// Without that filter this returned every attempt that ever ended in anything
+/// but success, so half of "waiting on you" was work already finished and the
+/// list read as a second, noisier copy of the backlog. A PRD with no backlog
+/// row at all is still reported: absence is not proof that it was settled.
 pub fn pending_human_gates(
     conn: &Connection,
     repository_key: &str,
@@ -209,7 +224,10 @@ pub fn pending_human_gates(
             .prepare(
                 "SELECT a.session_id,a.prd_id,a.prd_path,a.retained_reason,a.outcome \
                  FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id \
+                 LEFT JOIN backlog_prds b \
+                   ON b.prd_path=a.prd_path AND b.repository_key=s.repository_key \
                  WHERE s.repository_key=?1 AND (a.outcome IS NULL OR a.outcome<>'completed') \
+                   AND (b.status IS NULL OR b.status<>'completed') \
                  ORDER BY a.started_at DESC, a.sequence DESC LIMIT ?2",
             )
             .map_err(db)?;
@@ -243,9 +261,13 @@ pub fn pending_human_gates(
     {
         let mut stmt = conn
             .prepare(
-                "SELECT prd_id,prd_path,phase,invalid_reason FROM execution_checkpoints \
-                 WHERE repository_key=?1 AND phase IN ('blocked','invalid_checkpoint') \
-                 ORDER BY prd_id LIMIT ?2",
+                "SELECT c.prd_id,c.prd_path,c.phase,c.invalid_reason \
+                 FROM execution_checkpoints c \
+                 LEFT JOIN backlog_prds b \
+                   ON b.prd_path=c.prd_path AND b.repository_key=c.repository_key \
+                 WHERE c.repository_key=?1 AND c.phase IN ('blocked','invalid_checkpoint') \
+                   AND (b.status IS NULL OR b.status<>'completed') \
+                 ORDER BY c.prd_id LIMIT ?2",
             )
             .map_err(db)?;
         let rows = stmt
@@ -344,6 +366,91 @@ mod tests {
         assert_eq!(summary.repository_key, "/repo/.git");
 
         assert!(budget_summary(db.conn(), "nope").unwrap().is_none());
+    }
+
+    /// A stopped attempt whose PRD has since been completed is history, not a
+    /// decision waiting to be made. Before this filter, 8 of the 16 PRDs in
+    /// the owner's "waiting on you" list were already completed.
+    #[test]
+    fn pending_human_gates_omits_prds_whose_decision_was_already_made() {
+        let db = database();
+        let driver = DriverRepository::new(db.conn());
+        driver.open_session("session-1", "/repo/.git", "{}").unwrap();
+
+        // Same stopped outcome for all three; only the backlog status differs.
+        for (n, status) in [(1, "completed"), (2, "pending"), (3, "in_progress")] {
+            let path = format!("docs/prds/PRD-{n}.md");
+            let attempt = driver
+                .record_attempt_started("session-1", &format!("PRD-{n}"), &path, None)
+                .unwrap();
+            driver
+                .record_attempt_finished(
+                    "session-1",
+                    attempt,
+                    "retained",
+                    Some("scope_broadened"),
+                    None,
+                    Some(5),
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO backlog_prds (repository_key,prd_path,prd_number,content_hash,\
+                     status,discovered_at,last_seen_at,created_at,updated_at) \
+                     VALUES ('/repo/.git',?1,?2,'hash',?3,'t','t','t','t')",
+                    rusqlite::params![path, n as i64, status],
+                )
+                .unwrap();
+        }
+
+        let gates = pending_human_gates(db.conn(), "/repo/.git", 10).unwrap();
+        let mut prds: Vec<&str> = gates.iter().map(|g| g.prd_id.as_str()).collect();
+        prds.sort_unstable();
+        // `completed` is the only settled status. A `pending` row with a
+        // stopped attempt has usually been released, but it can equally be an
+        // entry that was never claimed and still holds retained work, so it
+        // stays visible rather than being assumed decided.
+        assert_eq!(prds, vec!["PRD-2", "PRD-3"]);
+    }
+
+    /// A blocked checkpoint for a PRD the human already completed is likewise
+    /// finished business.
+    #[test]
+    fn pending_human_gates_omits_blocked_checkpoints_for_settled_prds() {
+        let db = database();
+        let checkpoints = CheckpointRepository::new(db.conn());
+        checkpoints
+            .put(&ExecutionCheckpoint {
+                checkpoint_id: "cp-1".into(),
+                repository_key: "/repo/.git".into(),
+                prd_id: "PRD-1".into(),
+                prd_path: "docs/prds/PRD-1.md".into(),
+                execution_id: None,
+                phase: "blocked".into(),
+                base_revision: "deadbeef".into(),
+                worktree_path: "/state/worktrees/PRD-1".into(),
+                branch_name: None,
+                diff_hash: "sha256:abc".into(),
+                changed_files_json: "[]".into(),
+                agent_identity: "claude-code".into(),
+                usage_json: "{}".into(),
+                test_evidence_json: "{}".into(),
+                invalid_reason: None,
+            })
+            .unwrap();
+        assert_eq!(pending_human_gates(db.conn(), "/repo/.git", 10).unwrap().len(), 1);
+
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_prds (repository_key,prd_path,prd_number,content_hash,\
+                 status,discovered_at,last_seen_at,created_at,updated_at) \
+                 VALUES ('/repo/.git','docs/prds/PRD-1.md',1,'hash','completed','t','t','t','t')",
+                [],
+            )
+            .unwrap();
+        assert!(pending_human_gates(db.conn(), "/repo/.git", 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

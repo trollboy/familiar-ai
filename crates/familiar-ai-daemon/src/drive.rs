@@ -1876,9 +1876,15 @@ pub fn drive(
                                             "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2",
                                             rusqlite::params![now, checkpoint.checkpoint_id],
                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                        // A checkpoint completes at most once, so the fixed
+                                        // id + INSERT OR IGNORE stays idempotent across a
+                                        // retried landing; the sequence still comes from the
+                                        // single allocator (PRD-087) so this row is never a
+                                        // second, independently-numbered minting site.
+                                        let (_, sequence) = familiar_ai_storage::next_checkpoint_event_id(tx, &checkpoint.checkpoint_id).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
                                         tx.execute(
-                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
-                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
+                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,'completed',?5,?6)",
+                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, sequence, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
                                     }
                                     let changed = tx.execute(
@@ -2306,9 +2312,15 @@ pub fn drive(
                                                                             "UPDATE execution_checkpoints SET phase='completed',invalid_reason=NULL,updated_at=?1 WHERE checkpoint_id=?2",
                                                                             rusqlite::params![now, checkpoint.checkpoint_id],
                                                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
+                                                                        // A checkpoint completes at most once, so the fixed
+                                                                        // id + INSERT OR IGNORE stays idempotent across a
+                                                                        // retried landing; the sequence still comes from the
+                                                                        // single allocator (PRD-087) so this row is never a
+                                                                        // second, independently-numbered minting site.
+                                                                        let (_, sequence) = familiar_ai_storage::next_checkpoint_event_id(tx, &checkpoint.checkpoint_id).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
                                                                         tx.execute(
-                                                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
-                                                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
+                                                                            "INSERT OR IGNORE INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,'completed',?5,?6)",
+                                                                            rusqlite::params![format!("{}:completed", checkpoint.checkpoint_id), checkpoint.checkpoint_id, sequence, checkpoint.phase, format!("candidate={candidate} integration={merged}"), now],
                                                                         ).map_err(|e| BacklogStoreError::Storage(e.to_string()))?;
                                                                     }
                                                                     let changed = tx.execute(

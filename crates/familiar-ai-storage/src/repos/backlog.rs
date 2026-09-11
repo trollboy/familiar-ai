@@ -321,18 +321,18 @@ impl<'a> SqliteBacklogRepository<'a> {
                 "checkpoint {checkpoint_id} changed during approve-and-complete"
             )));
         }
-        let event_sequence: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM execution_checkpoint_events WHERE checkpoint_id=?1",
-                [&checkpoint_id],
-                |row| row.get(0),
-            )
-            .map_err(storage)?;
+        // PRD-087: mint through the single checkpoint-event allocator
+        // instead of computing a sequence independently here — a second,
+        // divergent copy of this exact pattern is the FAM-BUG-039 shape.
+        let (event_id, sequence) =
+            crate::repos::checkpoint::next_checkpoint_event_id(&tx, &checkpoint_id)
+                .map_err(storage)?;
         tx.execute(
-            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,'phase_transition',?3,'completed',?4,?5)",
+            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) VALUES(?1,?2,?3,'phase_transition',?4,'completed',?5,?6)",
             params![
-                format!("{checkpoint_id}:approved:{event_sequence}"),
+                event_id,
                 checkpoint_id,
+                sequence,
                 phase,
                 format!("approve_and_complete actor={actor} approved_hash={approved_diff_hash} commit={commit}"),
                 now
@@ -886,6 +886,25 @@ pub struct BacklogEntryRow {
 /// delivered to the caller (exclusive); an empty/absent cursor starts at the
 /// beginning. Callers reading more than `limit` rows continue with the last
 /// item's `prd_path` as the next cursor.
+/// Every repository this database holds stewardship state for, as raw
+/// `repository_key` values. The dashboard serves many repositories from one
+/// long-running process and its `repo` parameter is mandatory, so a caller
+/// with no repository in hand has no way to ask a first question without
+/// this. Drawn from both the backlog and the driver sessions because a
+/// repository can appear in either before it appears in both.
+pub fn list_repository_keys(conn: &Connection) -> familiar_ai_core::Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT repository_key FROM backlog_prds \
+             UNION \
+             SELECT repository_key FROM driver_sessions \
+             ORDER BY 1",
+        )
+        .map_err(db)?;
+    let rows = stmt.query_map([], |row| row.get(0)).map_err(db)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db)
+}
+
 pub fn list_entries(
     conn: &Connection,
     repository_key: &str,

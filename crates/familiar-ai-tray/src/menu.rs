@@ -1,6 +1,8 @@
 use familiar_ai_core::models::Project;
 use familiar_ai_core::AppStatus;
 
+use crate::commands::DashboardTarget;
+
 /// Logical menu item describing what should appear in the tray menu.
 /// This is a pure data structure, fully testable without any GUI.
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +15,9 @@ pub enum MenuItemSpec {
     RecentProjectsHeader,
     EmptyRecentProjects,
     OpenSettings,
+    /// Only present when the dashboard is actually reachable: an item that
+    /// opens a port nothing is listening on is worse than no item.
+    OpenDashboard { target: DashboardTarget },
     About,
     Quit,
 }
@@ -22,6 +27,7 @@ pub fn build_menu_spec(
     status: &AppStatus,
     recent_projects: &[Project],
     recent_count: usize,
+    dashboard: Option<DashboardTarget>,
 ) -> Vec<MenuItemSpec> {
     let mut items = Vec::new();
 
@@ -50,6 +56,13 @@ pub fn build_menu_spec(
     items.push(MenuItemSpec::PauseToggle { paused: false });
 
     items.push(MenuItemSpec::Separator);
+
+    // Dashboard — planned in vision.md 4.2 and missing until now, which left
+    // the dashboard and settings pages with no route in from the tray.
+    if let Some(target) = dashboard {
+        items.push(MenuItemSpec::OpenDashboard { target });
+        items.push(MenuItemSpec::Separator);
+    }
 
     // Recent projects
     items.push(MenuItemSpec::RecentProjectsHeader);
@@ -125,7 +138,7 @@ mod tests {
     #[test]
     fn empty_state_menu() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5);
+        let items = build_menu_spec(&status, &[], 5, None);
         // header(2) + sep + llm + pause + sep + recent_header + empty + sep + settings + about + sep + quit = 13
         assert_eq!(items.len(), 13);
         assert!(matches!(items[0], MenuItemSpec::Header(_)));
@@ -140,7 +153,7 @@ mod tests {
     #[test]
     fn llm_enabled_reflected() {
         let status = make_status(2, true, false);
-        let items = build_menu_spec(&status, &[], 5);
+        let items = build_menu_spec(&status, &[], 5, None);
         assert!(matches!(
             items[3],
             MenuItemSpec::LlmToggle { enabled: true }
@@ -155,7 +168,7 @@ mod tests {
             make_project(2, "beta", "/b"),
             make_project(3, "gamma", "/c"),
         ];
-        let items = build_menu_spec(&status, &projects, 5);
+        let items = build_menu_spec(&status, &projects, 5, None);
         let recent_count = items
             .iter()
             .filter(|i| matches!(i, MenuItemSpec::RecentProject { .. }))
@@ -169,7 +182,7 @@ mod tests {
         let projects: Vec<_> = (0..10)
             .map(|i| make_project(i, &format!("p{i}"), &format!("/p{i}")))
             .collect();
-        let items = build_menu_spec(&status, &projects, 5);
+        let items = build_menu_spec(&status, &projects, 5, None);
         let recent_count = items
             .iter()
             .filter(|i| matches!(i, MenuItemSpec::RecentProject { .. }))
@@ -180,7 +193,7 @@ mod tests {
     #[test]
     fn no_recent_projects_shows_empty() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5);
+        let items = build_menu_spec(&status, &[], 5, None);
         assert!(items.contains(&MenuItemSpec::EmptyRecentProjects));
         assert!(!items
             .iter()
@@ -190,7 +203,7 @@ mod tests {
     #[test]
     fn header_shows_project_count() {
         let status = make_status(7, true, true);
-        let items = build_menu_spec(&status, &[], 5);
+        let items = build_menu_spec(&status, &[], 5, None);
         let header = match &items[0] {
             MenuItemSpec::Header(s) => s.clone(),
             _ => panic!("expected header"),
@@ -210,15 +223,46 @@ mod tests {
     #[test]
     fn always_includes_quit() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5);
+        let items = build_menu_spec(&status, &[], 5, None);
         assert!(items.contains(&MenuItemSpec::Quit));
     }
 
     #[test]
     fn always_includes_settings_and_about() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5);
+        let items = build_menu_spec(&status, &[], 5, None);
         assert!(items.contains(&MenuItemSpec::OpenSettings));
         assert!(items.contains(&MenuItemSpec::About));
+    }
+
+    #[test]
+    fn dashboard_item_present_when_enabled() {
+        let status = make_status(0, false, false);
+        let items = build_menu_spec(&status, &[], 5, Some(DashboardTarget::Window));
+        assert!(items.contains(&MenuItemSpec::OpenDashboard {
+            target: DashboardTarget::Window,
+        }));
+
+        let items = build_menu_spec(
+            &status,
+            &[],
+            5,
+            Some(DashboardTarget::Web("http://127.0.0.1:9400".to_string())),
+        );
+        assert!(items.contains(&MenuItemSpec::OpenDashboard {
+            target: DashboardTarget::Web("http://127.0.0.1:9400".to_string()),
+        }));
+    }
+
+    /// An item that opens a port nothing is listening on is worse than no
+    /// item, so a disabled dashboard must leave the menu exactly as it was.
+    #[test]
+    fn dashboard_item_absent_when_disabled() {
+        let status = make_status(0, false, false);
+        let items = build_menu_spec(&status, &[], 5, None);
+        assert!(!items
+            .iter()
+            .any(|i| matches!(i, MenuItemSpec::OpenDashboard { .. })));
+        assert_eq!(items.len(), 13);
     }
 }

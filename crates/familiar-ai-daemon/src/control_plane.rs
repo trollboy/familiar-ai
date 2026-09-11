@@ -5,7 +5,9 @@ use familiar_ai_core::control_plane::{
     ExecutionRecord, ExecutionState, SchedulingPolicy, Submission, SubmissionAck,
 };
 use familiar_ai_core::{FamiliarError, Result};
-use familiar_ai_storage::{ControlPlaneRepository, Database};
+use familiar_ai_storage::{
+    ControlPlaneRepository, Database, LeaseAcquireOutcome, LeaseRecord, LeaseRenewOutcome,
+};
 use ring::{
     digest,
     rand::{SecureRandom, SystemRandom},
@@ -89,6 +91,34 @@ impl ControlPlaneService {
             after,
             limit.min(1000),
         )
+    }
+
+    /// Executions for one project. Observe authority, exactly like `observe`:
+    /// this is a read of what the project is doing.
+    pub fn executions(
+        &self,
+        scope: &CapabilityScope,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<familiar_ai_storage::ExecutionRow>> {
+        require(scope, Authority::Observe, project_id, None)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        familiar_ai_storage::list_executions(db.conn(), project_id, limit.min(200))
+    }
+
+    /// `active`, `paused`, `archived`, or `None` when the project has never
+    /// been registered. Distinguishing "not registered" from "active" matters:
+    /// a submission against an unregistered project cannot be scheduled.
+    pub fn project_state(&self, scope: &CapabilityScope, project_id: &str) -> Result<Option<String>> {
+        require(scope, Authority::Observe, project_id, None)?;
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        familiar_ai_storage::project_state(db.conn(), project_id)
     }
 
     pub fn claim_next(&self) -> Result<Option<String>> {
@@ -431,6 +461,77 @@ impl ControlPlaneService {
             warrant_json: repo.warrant_view(&execution)?,
             remaining_reservations_json: repo.reservation_view(&execution)?,
         })
+    }
+
+    /// Acquire this host's driver lease for a repository, or take over one
+    /// whose store-side expiry has already passed (PRD-091). A live lease
+    /// held by another host or process is refused, naming the holder and
+    /// its remaining life.
+    pub fn acquire_repository_lease(
+        &self,
+        repository_key: &str,
+        host_identity: &str,
+        process_identity: &str,
+        holder_token: &str,
+        ttl_secs: i64,
+    ) -> Result<LeaseAcquireOutcome> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        ControlPlaneRepository::new(db.conn_mut()).acquire_lease(
+            repository_key,
+            host_identity,
+            process_identity,
+            holder_token,
+            ttl_secs,
+        )
+    }
+
+    /// Renew a held repository lease on a heartbeat. A mismatch or an
+    /// unrenewed expiry is a loss, durably recorded and returned so the
+    /// caller stops driving.
+    pub fn renew_repository_lease(
+        &self,
+        repository_key: &str,
+        host_identity: &str,
+        process_identity: &str,
+        holder_token: &str,
+        ttl_secs: i64,
+    ) -> Result<LeaseRenewOutcome> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        ControlPlaneRepository::new(db.conn_mut()).renew_lease(
+            repository_key,
+            host_identity,
+            process_identity,
+            holder_token,
+            ttl_secs,
+        )
+    }
+
+    /// Release a held repository lease on clean shutdown.
+    pub fn release_repository_lease(
+        &self,
+        repository_key: &str,
+        holder_token: &str,
+    ) -> Result<bool> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        ControlPlaneRepository::new(db.conn_mut()).release_lease(repository_key, holder_token)
+    }
+
+    /// Read-only inspection of a repository's current lease holder, if any.
+    pub fn inspect_repository_lease(&self, repository_key: &str) -> Result<Option<LeaseRecord>> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| FamiliarError::Database("control-plane database lock poisoned".into()))?;
+        ControlPlaneRepository::new(db.conn_mut()).inspect_lease(repository_key)
     }
 
     pub fn report_agent_event(

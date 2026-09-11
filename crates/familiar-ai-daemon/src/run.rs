@@ -2933,18 +2933,13 @@ fn persist_accounting_observations(
     Ok(())
 }
 
+// PRD-087: repository identity is minted in exactly one place
+// (`familiar_ai_core::repository_path::git_common_directory`); this used to
+// be a third independent `--git-common-dir` computation (alongside backlog
+// discovery and per-repository config matching) kept in sync only by
+// convention.
 fn git_common_directory_evidence(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(output.stdout).ok()?;
-    std::fs::canonicalize(value.trim()).ok().map(|p| slash(&p))
+    familiar_ai_core::repository_path::git_common_directory(path)
 }
 
 fn terminal(

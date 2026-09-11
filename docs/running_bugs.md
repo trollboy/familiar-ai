@@ -1547,3 +1547,37 @@ reinstall the binary, then rerun the 076 drive.
   check id and the captured failure, hand it to the implementer, and
   re-verify. Failing that, the pause must not offer `[r]` when it cannot
   change the outcome.
+## 2026-09-05 — PRD-087: identity and event-sequence invariants
+
+Three invariants now enforce facts that previously existed only as prose or
+convention: **`repository-identity-single-mint`** (repository identity is
+computed by exactly one function, `familiar_ai_core::repository_path`, so
+identity derived inside a worktree resolves to that worktree's origin
+repository), **`checkpoint-event-sequence-allocator`** (every writer of
+`execution_checkpoint_events` mints its id and sequence through
+`familiar_ai_storage::next_checkpoint_event_id`, so a checkpoint re-entered
+across occurrences can never collide or drop an event), and
+**`review-recovery-schema-tolerance`** (review recovery accepts a cycle row
+written before `repository_key` existed, and records the tolerance in
+`identity_invariant_tolerances` rather than refusing or silently rewriting
+it). Each is pinned by a regression in
+`crates/familiar-ai-daemon/tests/durable_invariants.rs`, which also owns the
+linkage check below.
+
+### Invariant coverage ledger
+
+One line per prior entry in these three families: which invariant covers it
+now, or why it stays uncovered. This list is checked byte-for-byte against
+`durable_invariants.rs` so it cannot silently drift from the code.
+
+- FAM-BUG-040: covered by repository-identity-single-mint
+- FAM-BUG-037: covered by checkpoint-event-sequence-allocator
+- FAM-BUG-039: covered by checkpoint-event-sequence-allocator
+- FAM-BUG-032: covered by review-recovery-schema-tolerance
+- FAM-BUG-016: uncovered: PRD-id spelling identity (canonical vs zero-padded), not repository-origin identity
+- FAM-BUG-026: uncovered: migration tolerance for worker_specs recovery, a different recovery path than review recovery; already remediated by migration 051 itself
+- FAM-BUG-041: uncovered: checkpoint phase-value bug in the scope-approval write path, not event-id minting
+- FAM-BUG-035: uncovered: scope-decision enrollment policy, not identity or event-sequencing
+- FAM-BUG-051: uncovered: file-path prefix scope authority, deferred to PRD-093
+- FAM-BUG-018: uncovered: candidate-revision rebinding durability, not event-id minting
+- FAM-BUG-021: uncovered: checkpoint hash/candidate durability across remediation, not event-id minting
