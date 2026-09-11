@@ -65,6 +65,107 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Prefix/suffix of the opaque paging-handle string a bounded `run-command`
+/// result names and a later `read-file` call echoes back. It looks
+/// path-like for the model's benefit but is resolved against
+/// execution-scoped daemon-owned storage (`tool_output_retention_dir`),
+/// never against the worktree.
+const TOOL_OUTPUT_HANDLE_PREFIX: &str = ".familiar/tool-output/";
+const TOOL_OUTPUT_HANDLE_SUFFIX: &str = ".txt";
+
+fn tool_output_handle(call_id: &str) -> String {
+    format!("{TOOL_OUTPUT_HANDLE_PREFIX}{call_id}{TOOL_OUTPUT_HANDLE_SUFFIX}")
+}
+
+fn tool_output_call_id(path: &str) -> Option<&str> {
+    path.strip_prefix(TOOL_OUTPUT_HANDLE_PREFIX)
+        .and_then(|rest| rest.strip_suffix(TOOL_OUTPUT_HANDLE_SUFFIX))
+}
+
+/// Whether `call_id` is safe to resolve as a single path component beneath
+/// `tool_output_retention_dir`. A tool-output handle round-trips a
+/// model-supplied string (via `read-file`'s `path` argument) into this
+/// component, so it must never be able to contain a separator or a `.`/`..`
+/// segment — that is the entire difference between an opaque per-call
+/// identifier and a path-traversal payload like
+/// `.familiar/tool-output/../../../../etc/passwd.txt`.
+fn is_safe_retention_call_id(call_id: &str) -> bool {
+    !call_id.is_empty() && call_id != "." && call_id != ".." && !call_id.contains(['/', '\\', '\0'])
+}
+
+/// Creates (or validates) `dir` as a retention directory this process
+/// exclusively owns, then locks it down to owner-only access. `dir` sits
+/// under the shared, world-readable system temp directory
+/// (`tool_output_retention_dir`), keyed by a value any local process can
+/// derive (worktree root + execution id) — the directory's own permissions
+/// are the only barrier between one local user's retained tool output
+/// (build logs, environment echoes, anything a command printed) and every
+/// other local user, and the only defense against a hostile process
+/// pre-creating the exact path to hijack or block retention. `create_dir_all`
+/// alone is not enough: if the path already exists as a directory owned by
+/// someone else, it happily "succeeds" without ever telling us. So after
+/// creation this verifies the directory is actually a directory, is owned
+/// by this process's effective user, and is `chmod`-ed to `0700` — refusing
+/// (returning `false`, which the caller treats exactly like any other
+/// retention failure: fall back to the unbounded byte-capped result) unless
+/// every one of those holds.
+#[cfg(unix)]
+fn secure_retention_dir(dir: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let Ok(metadata) = std::fs::metadata(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() {
+        return false;
+    }
+    // SAFETY: `geteuid` takes no arguments, performs no memory access, and
+    // cannot fail.
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        return false;
+    }
+    if std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).is_err() {
+        return false;
+    }
+    let Ok(refreshed) = std::fs::metadata(dir) else {
+        return false;
+    };
+    refreshed.permissions().mode() & 0o777 == 0o700
+}
+
+#[cfg(not(unix))]
+fn secure_retention_dir(dir: &Path) -> bool {
+    std::fs::create_dir_all(dir).is_ok()
+}
+
+/// Writes retained tool output with owner-only (`0600`) file permissions on
+/// unix, so a file's brief existence at default (umask-derived) permissions
+/// is never a window where another local user in the same shared temp
+/// directory can read it.
+#[cfg(unix)]
+fn write_retention_file(path: &Path, content: &str) -> bool {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut file| file.write_all(content.as_bytes()))
+        .is_ok()
+}
+
+#[cfg(not(unix))]
+fn write_retention_file(path: &Path, content: &str) -> bool {
+    std::fs::write(path, content).is_ok()
+}
+
 fn random_hex() -> String {
     use ring::rand::{SecureRandom, SystemRandom};
     let mut bytes = [0u8; 16];
@@ -235,16 +336,109 @@ impl SandboxedToolExecutor {
         Ok(resolved)
     }
 
-    fn read_file(&self, call: &ValidatedCall) -> Result<ExecutionOutcome, ExecutionError> {
+    /// Daemon-owned, execution-scoped directory for retained (unbounded)
+    /// tool output — deliberately **outside** `worktree_root`. Writing it
+    /// inside the worktree would need write-scope authorization no
+    /// PRD-013 Expected Files entry could ever cover, and would introduce
+    /// untracked files into the very diff/expected-files evidence the
+    /// change under review is judged against. `pub` so tests can locate it
+    /// directly; the model never sees this path, only the opaque handle
+    /// string `tool_output_handle` produces.
+    pub fn tool_output_retention_dir(&self, execution_id: &str) -> PathBuf {
+        // Keyed by worktree root as well as execution id: an execution id
+        // is only unique within its own worktree's journal, so hashing
+        // both together (rather than execution id alone) keeps concurrent
+        // executions against different worktrees from ever colliding on
+        // the same retention directory.
+        let key =
+            sha256_hex(format!("{}\n{execution_id}", self.worktree_root.display()).as_bytes());
+        std::env::temp_dir()
+            .join("familiar-ai-tool-output")
+            .join(key)
+    }
+
+    /// Resolves the daemon-owned path for one call's retained tool output.
+    /// `call_id` is validated by `is_safe_retention_call_id` first: it
+    /// reaches here either as the loop's own `call.call_id` (the write side,
+    /// `run_command`) or as a model-supplied string extracted from a
+    /// `read-file` path (`tool_output_call_id`) — in both cases it must be
+    /// confined to a single path component before it is ever joined onto a
+    /// filesystem path, so this is the one place both call sites route
+    /// through rather than each doing its own (and possibly divergent)
+    /// check.
+    fn tool_output_retention_path(
+        &self,
+        execution_id: &str,
+        call_id: &str,
+    ) -> Result<PathBuf, ExecutionError> {
+        if !is_safe_retention_call_id(call_id) {
+            return Err(ExecutionError::Failed(format!(
+                "tool-output call id {call_id:?} is not a valid single path component"
+            )));
+        }
+        Ok(self
+            .tool_output_retention_dir(execution_id)
+            .join(format!("{call_id}.txt")))
+    }
+
+    fn read_file(
+        &self,
+        call: &ValidatedCall,
+        ctx: &AuthorityContext,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
         let path = call
             .arguments
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let resolved = self.resolve_within_worktree(path)?;
-        let content = std::fs::read_to_string(&resolved).map_err(|error| {
-            ExecutionError::Failed(format!("read-file {path:?} failed: {error}"))
-        })?;
+        // A retained-tool-output handle is an opaque identifier, not a real
+        // worktree-relative path: the bytes it names live in daemon-owned
+        // storage outside the worktree (see `tool_output_retention_dir`), so
+        // it is resolved there instead of through `resolve_within_worktree`.
+        // This diversion is only ever recognized while token discipline is
+        // enabled — it is the feature that hands a handle out in the first
+        // place — so with discipline off every `read-file` path resolves
+        // through `resolve_within_worktree` exactly as pre-PRD-072, and a
+        // genuine worktree file that happens to be named
+        // `.familiar/tool-output/<x>.txt` is never diverted.
+        let handle_call_id = self
+            .token_discipline
+            .enabled
+            .then(|| tool_output_call_id(path))
+            .flatten();
+        let content = if let Some(call_id) = handle_call_id {
+            let retention_dir = self.tool_output_retention_dir(&ctx.execution_id);
+            let retention_path = self.tool_output_retention_path(&ctx.execution_id, call_id)?;
+            // Defense in depth beyond the call-id charset validation inside
+            // `tool_output_retention_path`: the resolved file must still
+            // canonicalize to a location beneath the retention directory
+            // before any bytes are read from it.
+            let canonical_dir = retention_dir.canonicalize().map_err(|error| {
+                ExecutionError::Failed(format!(
+                    "read-file {path:?} failed: retained tool output not found: {error}"
+                ))
+            })?;
+            let canonical_path = retention_path.canonicalize().map_err(|error| {
+                ExecutionError::Failed(format!(
+                    "read-file {path:?} failed: retained tool output not found: {error}"
+                ))
+            })?;
+            if !canonical_path.starts_with(&canonical_dir) {
+                return Err(ExecutionError::Failed(format!(
+                    "read-file {path:?} failed: resolved outside its retention directory"
+                )));
+            }
+            std::fs::read_to_string(&canonical_path).map_err(|error| {
+                ExecutionError::Failed(format!(
+                    "read-file {path:?} failed: retained tool output not found: {error}"
+                ))
+            })?
+        } else {
+            let resolved = self.resolve_within_worktree(path)?;
+            std::fs::read_to_string(&resolved).map_err(|error| {
+                ExecutionError::Failed(format!("read-file {path:?} failed: {error}"))
+            })?
+        };
         if !self.token_discipline.enabled {
             return Ok(hash_outcome(content));
         }
@@ -333,16 +527,25 @@ impl SandboxedToolExecutor {
                 "apply-edit {path:?} failed: change_kind {change_kind:?} requires an existing file"
             )));
         }
-        let new_content = token_discipline::resolve_edit(current.as_deref(), form, payload)
+        let resolved_edit = token_discipline::resolve_edit(current.as_deref(), form, payload)
             .map_err(|error| {
                 ExecutionError::Failed(format!("apply-edit {path:?} failed: {error:?}"))
             })?;
+        // An idempotent replay (the anchor was already gone because this
+        // exact edit already landed) needs no write at all: the model MUST
+        // see this distinctly from a genuine write, never the same `wrote N
+        // bytes` text a diverged no-op could be confused with.
+        if resolved_edit.already_applied {
+            return Ok(hash_outcome(format!(
+                "apply-edit {path}: already applied, no bytes written (change_kind: {change_kind})"
+            )));
+        }
         if let Some(parent) = resolved.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 ExecutionError::Failed(format!("apply-edit {path:?} failed: {error}"))
             })?;
         }
-        std::fs::write(&resolved, &new_content).map_err(|error| {
+        std::fs::write(&resolved, &resolved_edit.content).map_err(|error| {
             ExecutionError::Failed(format!("apply-edit {path:?} failed: {error}"))
         })?;
         // Byte-for-byte with pre-PRD-072 behavior when discipline is off:
@@ -351,15 +554,19 @@ impl SandboxedToolExecutor {
         let result_text = if self.token_discipline.enabled {
             format!(
                 "wrote {} bytes to {path} (change_kind: {change_kind})",
-                new_content.len()
+                resolved_edit.content.len()
             )
         } else {
-            format!("wrote {} bytes to {path}", new_content.len())
+            format!("wrote {} bytes to {path}", resolved_edit.content.len())
         };
         Ok(hash_outcome(result_text))
     }
 
-    fn run_command(&self, call: &ValidatedCall) -> Result<ExecutionOutcome, ExecutionError> {
+    fn run_command(
+        &self,
+        call: &ValidatedCall,
+        ctx: &AuthorityContext,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
         let argv: Vec<String> = call
             .arguments
             .get("argv")
@@ -460,19 +667,35 @@ impl SandboxedToolExecutor {
         if self.token_discipline.enabled {
             let total_lines = combined.lines().count();
             if total_lines > self.token_discipline.tool_result_max_lines {
-                let handle = format!(".familiar/tool-output/{}.txt", call.call_id);
-                // Lossless retention: the full output lands in the
-                // worktree (the same durable artifact apply-edit's own
-                // writes live in, never the PRD-051 accounting ledger)
-                // before the bounded view is computed, so a failure to
-                // persist it never silently narrows what review evidence
-                // can recover.
-                if let Ok(handle_path) = self.resolve_within_worktree(&handle) {
-                    if let Some(parent) = handle_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
+                // Lossless retention is a *precondition* of bounding, not a
+                // best-effort side effect: the full output is durably
+                // persisted in daemon-owned storage outside the governed
+                // worktree (never as untracked bytes inside it, where it
+                // would need write-scope authorization no PRD-013 Expected
+                // Files entry could ever cover, and would pollute the
+                // worktree's own diff/expected-files evidence) before a
+                // paging handle naming it is ever handed to the model. If
+                // persistence fails for any reason — including a call id
+                // that fails `is_safe_retention_call_id`, or a retention
+                // directory this process cannot prove it owns exclusively
+                // (see `secure_retention_dir`) — the call falls back to the
+                // unbounded, byte-capped result instead of emitting a
+                // handle for a region that cannot actually be retrieved.
+                let retained = self
+                    .tool_output_retention_path(&ctx.execution_id, &call.call_id)
+                    .ok()
+                    .filter(|retention_path| {
+                        retention_path.parent().is_some_and(secure_retention_dir)
+                    })
+                    .is_some_and(|retention_path| write_retention_file(&retention_path, &combined));
+                if !retained {
+                    let mut fallback = combined;
+                    if fallback.len() > self.max_output_bytes {
+                        fallback.truncate(self.max_output_bytes);
                     }
-                    let _ = std::fs::write(&handle_path, &combined);
+                    return Ok(hash_outcome(fallback));
                 }
+                let handle = tool_output_handle(&call.call_id);
                 let window = ToolResultWindow {
                     max_lines: self.token_discipline.tool_result_max_lines,
                     head_lines: self.token_discipline.tool_result_head_lines,
@@ -495,13 +718,13 @@ impl ToolExecutor for SandboxedToolExecutor {
     fn execute(
         &mut self,
         call: &ValidatedCall,
-        _ctx: &AuthorityContext,
+        ctx: &AuthorityContext,
     ) -> Result<ExecutionOutcome, ExecutionError> {
         match call.capability {
-            CapabilityId::ReadFile => self.read_file(call),
+            CapabilityId::ReadFile => self.read_file(call, ctx),
             CapabilityId::SearchList => self.search_list(call),
             CapabilityId::ApplyEdit => self.apply_edit(call),
-            CapabilityId::RunCommand => self.run_command(call),
+            CapabilityId::RunCommand => self.run_command(call, ctx),
             // report-progress, submit-evidence, and request-escalation
             // never touch the filesystem or a subprocess: the tool journal
             // (intent + result, written by the loop core around this call)

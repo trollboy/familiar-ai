@@ -130,7 +130,14 @@ fn targeted_edit_replay_after_crash_reproduces_the_identical_file_state() {
     let second = executor.execute(&edit, &authority()).unwrap();
     let after_second = fs::read_to_string(temp.path().join("lib.rs")).unwrap();
     assert_eq!(after_second, after_first);
-    assert_eq!(first.result_hash, second.result_hash);
+    // The replay is reported distinctly from the first, genuine write — the
+    // model must never see a diverged (or, as here, already-applied) no-op
+    // reported the same way as `wrote N bytes`.
+    assert!(first.result_text.starts_with("wrote"));
+    assert!(second
+        .result_text
+        .contains("already applied, no bytes written"));
+    assert_ne!(first.result_hash, second.result_hash);
 }
 
 #[test]
@@ -161,10 +168,18 @@ fn bounded_command_result_shows_head_tail_and_retains_full_output_losslessly() {
     // of bounding it in the first place.
     assert!(!outcome.result_text.contains("line10"));
 
-    // Lossless retention: the full, untruncated output is durably readable
-    // from the handle path even though the model only saw a window of it.
-    let full =
-        fs::read_to_string(temp.path().join(".familiar/tool-output/call_paged.txt")).unwrap();
+    // Lossless retention lives in daemon-owned storage outside the
+    // governed worktree — never as untracked bytes inside it, where it
+    // would need write-scope authorization no PRD-013 Expected Files entry
+    // could ever cover, and would pollute the worktree's own
+    // diff/expected-files evidence.
+    assert!(!temp.path().join(".familiar").exists());
+    let full = fs::read_to_string(
+        executor
+            .tool_output_retention_dir("exec_1")
+            .join("call_paged.txt"),
+    )
+    .unwrap();
     for n in 1..=20 {
         assert!(
             full.contains(&format!("line{n}")),
@@ -173,9 +188,8 @@ fn bounded_command_result_shows_head_tail_and_retains_full_output_losslessly() {
     }
 
     // A worker can always retrieve any elided region through the handle:
-    // the same path is a valid read-file target (with the explicit range
-    // token discipline also requires once the handle file itself exceeds
-    // file_read_max_lines).
+    // the executor resolves the same opaque handle string as a read-file
+    // target even though it is not a real worktree-relative path.
     let page = call(
         CapabilityId::ReadFile,
         "call_page_2",
@@ -189,6 +203,40 @@ fn bounded_command_result_shows_head_tail_and_retains_full_output_losslessly() {
     // Lines 1-2 of the retained file are the "exit_status=..."/"stdout:"
     // preamble, so line N of stdout is retained-file line N+2.
     assert_eq!(outcome.result_text, "line10\nline11\nline12");
+}
+
+#[test]
+fn retention_write_failure_falls_back_to_unbounded_result_without_a_broken_handle() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+
+    // Force retention to fail: pre-create a plain file at the exact path
+    // the executor would otherwise create as this execution's retention
+    // directory. `execution_id` scopes this to `authority()`'s own
+    // "exec_1", so it cannot collide with any other test's retention
+    // writes running concurrently in the same process.
+    let retention_dir = executor.tool_output_retention_dir("exec_1");
+    fs::create_dir_all(retention_dir.parent().unwrap()).unwrap();
+    fs::write(&retention_dir, b"not a directory").unwrap();
+
+    let script: String = (1..=20).map(|n| format!("line{n}\\n")).collect();
+    let run = call(
+        CapabilityId::RunCommand,
+        "call_fail",
+        serde_json::json!({ "argv": ["printf", script] }),
+    );
+    let outcome = executor.execute(&run, &authority()).unwrap();
+
+    // Retention is a precondition of bounding: when the full output cannot
+    // be durably persisted, the call falls back to the unbounded (byte-
+    // capped) result rather than emitting a paging handle for a region
+    // that no longer exists.
+    assert!(!outcome.result_text.contains("lines elided"));
+    assert!(!outcome.result_text.contains(".familiar/tool-output"));
+    assert!(outcome.result_text.contains("line1\n"));
+    assert!(outcome.result_text.contains("line20"));
+
+    fs::remove_file(&retention_dir).ok();
 }
 
 #[test]
@@ -235,6 +283,90 @@ fn disabled_token_discipline_reproduces_pre_prd_behavior_byte_for_byte() {
     );
     let outcome = executor.execute(&read, &authority()).unwrap();
     assert_eq!(outcome.result_text, long_file);
+}
+
+#[test]
+fn tool_output_handle_path_traversal_is_rejected_not_diverted() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+
+    // A malicious `call_id` crafted to walk out of the retention directory
+    // and read an arbitrary `.txt`-suffixed file the daemon process can
+    // see. This must be refused with a diagnostic — never silently resolve
+    // outside `tool_output_retention_dir`.
+    let traversal = call(
+        CapabilityId::ReadFile,
+        "call_1",
+        serde_json::json!({
+            "path": ".familiar/tool-output/../../../../../../etc/passwd.txt",
+        }),
+    );
+    let error = executor.execute(&traversal, &authority()).unwrap_err();
+    match error {
+        ExecutionError::Failed(detail) => assert!(
+            !detail.contains("root:"),
+            "must never leak file content in the error, got: {detail}"
+        ),
+        other => panic!("expected ExecutionError::Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn tool_output_handle_diversion_is_inactive_when_token_discipline_is_disabled() {
+    let temp = tempfile::tempdir().unwrap();
+    // A genuine worktree file that happens to collide with the handle
+    // naming convention. With token discipline disabled, `read-file` MUST
+    // resolve it as an ordinary worktree-relative path (byte-for-byte
+    // pre-PRD-072 behavior) rather than diverting to retention storage.
+    fs::create_dir_all(temp.path().join(".familiar/tool-output")).unwrap();
+    fs::write(
+        temp.path().join(".familiar/tool-output/call_paged.txt"),
+        "genuine worktree contents",
+    )
+    .unwrap();
+    let mut executor = disabled_executor(temp.path().to_path_buf());
+
+    let read = call(
+        CapabilityId::ReadFile,
+        "call_1",
+        serde_json::json!({ "path": ".familiar/tool-output/call_paged.txt" }),
+    );
+    let outcome = executor.execute(&read, &authority()).unwrap();
+    assert_eq!(outcome.result_text, "genuine worktree contents");
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_tool_output_directory_and_file_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+
+    let script: String = (1..=20).map(|n| format!("line{n}\\n")).collect();
+    let run = call(
+        CapabilityId::RunCommand,
+        "call_perm",
+        serde_json::json!({ "argv": ["printf", script] }),
+    );
+    executor.execute(&run, &authority()).unwrap();
+
+    let retention_dir = executor.tool_output_retention_dir("exec_1");
+    let dir_mode = fs::metadata(&retention_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        dir_mode, 0o700,
+        "retained tool output lives under the shared system temp directory; \
+         its directory must be owner-only, not world- or group-readable"
+    );
+    let file_mode = fs::metadata(retention_dir.join("call_perm.txt"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        file_mode, 0o600,
+        "a retained tool-output file must be owner-only, not world- or group-readable"
+    );
 }
 
 #[test]
