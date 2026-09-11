@@ -171,6 +171,48 @@ impl<'a> CheckpointRepository<'a> {
         Ok(())
     }
 
+    /// Records a rebind: the candidate snapshot was recomputed and the
+    /// checkpoint now points at different content.
+    ///
+    /// PRD-084: an operator repair has to be auditable rather than a silent
+    /// overwrite, so both hashes, the actor and the reason go into the
+    /// checkpoint's own event trail — through the same sequenced allocator
+    /// every other event uses, so a rebind can never collide with a
+    /// transition recorded in the same occurrence.
+    pub fn record_rebind(
+        &self,
+        checkpoint_id: &str,
+        old_hash: &str,
+        new_hash: &str,
+        actor: &str,
+        reason: &str,
+    ) -> familiar_ai_core::Result<()> {
+        let transaction = self.conn.unchecked_transaction().map_err(db)?;
+        let (event_id, sequence) =
+            next_checkpoint_event_id(&transaction, checkpoint_id).map_err(db)?;
+        let detail = serde_json::json!({
+            "old_diff_hash": old_hash,
+            "new_diff_hash": new_hash,
+            "actor": actor,
+            "reason": reason,
+        })
+        .to_string();
+        let phase: String = transaction
+            .query_row(
+                "SELECT phase FROM execution_checkpoints WHERE checkpoint_id=?1",
+                [checkpoint_id],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        transaction.execute(
+            "INSERT INTO execution_checkpoint_events(event_id,checkpoint_id,sequence,event_type,prior_phase,resulting_phase,detail,recorded_at) \
+             VALUES(?1,?2,?3,'candidate_rebound',?4,?4,?5,?6)",
+            params![event_id, checkpoint_id, sequence, phase, detail, Utc::now().to_rfc3339()],
+        ).map_err(db)?;
+        transaction.commit().map_err(db)?;
+        Ok(())
+    }
+
     pub fn transition(
         &self,
         checkpoint_id: &str,
@@ -396,6 +438,55 @@ mod tests {
             "{INVARIANT_CHECKPOINT_EVENT_SEQUENCE} is not enforced: a hand-minted \
              event reused sequence {existing} without the database refusing it"
         );
+    }
+
+    /// PRD-084 AC4: an operator repair must be auditable rather than a silent
+    /// overwrite, so a rebind records both hashes with the actor and reason.
+    #[test]
+    fn a_rebind_records_both_hashes_with_its_actor_and_reason() {
+        let db = database();
+        let repository = CheckpointRepository::new(db.conn());
+        repository.put(&checkpoint("/repo/.git", "PRD-1")).unwrap();
+        let id = "/repo/.git:PRD-1";
+
+        repository
+            .record_rebind(
+                id,
+                "sha256:old",
+                "sha256:new",
+                "human:tester",
+                "fixed a dangling doc reference",
+            )
+            .unwrap();
+
+        let (event_type, detail): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT event_type,detail FROM execution_checkpoint_events \
+                 WHERE checkpoint_id=?1 AND event_type='candidate_rebound'",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("a rebind must leave a durable event");
+        assert_eq!(event_type, "candidate_rebound");
+        let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(detail["old_diff_hash"], "sha256:old");
+        assert_eq!(detail["new_diff_hash"], "sha256:new");
+        assert_eq!(detail["actor"], "human:tester");
+        assert_eq!(detail["reason"], "fixed a dangling doc reference");
+
+        // It goes through the same allocator as every other event, so a
+        // rebind cannot collide with a transition in the same occurrence.
+        repository.transition(id, "reviewed", "after the repair").unwrap();
+        let sequences: Vec<i64> = db
+            .conn()
+            .prepare("SELECT sequence FROM execution_checkpoint_events WHERE checkpoint_id=?1 ORDER BY sequence")
+            .unwrap()
+            .query_map(params![id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(sequences, vec![0, 1, 2]);
     }
 
     #[test]

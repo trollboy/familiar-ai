@@ -144,6 +144,41 @@ familiar-ai report                      # what happened overnight
 to start without one. Command-line flags may only *tighten* the configured
 warrant, never loosen it.
 
+### Operator repairs
+
+Three repairs that used to require the source tree and `cargo run --example`
+are shipped commands. Each writes durable orchestration state or consults the
+scheduler, so each demands an explicit human actor and a reason, and each
+refuses while the control-plane claim is live rather than racing a running
+driver.
+
+| Command | Repairs |
+|---|---|
+| `operator rebind` | `resume` refuses a candidate because a surgical edit moved its content away from the recorded hash |
+| `operator set-phase` | A checkpoint is stuck in a phase the pipeline will not advance |
+| `operator width` | An authored wave width disagrees with what the scheduler will actually admit |
+| `stewardship substance` | Which approval substance hashes this repository has durably approved |
+
+```sh
+# Rebind a checkpoint to its worktree's current content after a repair.
+familiar-ai operator rebind PRD-63 \
+  --actor human:you --reason "fixed a dangling doc reference blocking resume"
+
+# Move a stuck checkpoint through the audited transition API.
+familiar-ai operator set-phase <checkpoint-id> implemented \
+  --actor human:you --reason "verification passed out of band"
+
+# Ask the scheduler what it will actually admit, for the whole backlog or a subset.
+familiar-ai operator width PRD-63 PRD-72 \
+  --actor human:you --reason "sizing the next wave"
+
+# Read-only: the approval substance this repository has approved.
+familiar-ai stewardship substance
+```
+
+Both hashes, the actor and the reason are recorded on the checkpoint's own
+event trail, so a rebind is auditable rather than a silent overwrite.
+
 ---
 
 ## Configuration

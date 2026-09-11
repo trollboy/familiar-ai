@@ -10,6 +10,7 @@ use familiar_ai_daemon::cli::billing::BillingCommand;
 use familiar_ai_daemon::cli::control::ControlCommand;
 use familiar_ai_daemon::cli::onboard::OnboardCommand;
 use familiar_ai_daemon::cli::plan::PlanCommand;
+use familiar_ai_daemon::cli::operator::OperatorCommand;
 use familiar_ai_daemon::cli::stewardship::StewardshipCommand;
 use familiar_ai_daemon::cli::worker::WorkerCommand;
 
@@ -183,6 +184,13 @@ enum Command {
     Stewardship {
         #[command(subcommand)]
         command: StewardshipCommand,
+    },
+    /// Operator repairs: rebind a checkpoint, transition its phase, or ask
+    /// the scheduler its achievable width. Each requires an explicit human
+    /// actor and reason, and each refuses while a driver holds the claim.
+    Operator {
+        #[command(subcommand)]
+        command: OperatorCommand,
     },
 }
 
@@ -570,6 +578,12 @@ fn main() -> ExitCode {
         },
         Command::Worker { command } => {
             match familiar_ai_daemon::cli::worker::worker_command(command) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::Operator { command } => {
+            match familiar_ai_daemon::cli::operator::operator(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail(error),
             }

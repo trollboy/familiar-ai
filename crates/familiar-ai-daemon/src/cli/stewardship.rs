@@ -10,6 +10,12 @@ use super::shared::database;
 
 #[derive(Debug, Subcommand)]
 pub enum StewardshipCommand {
+    /// The approval substance hashes this repository has durably approved.
+    ///
+    /// Replaces the `probe_substance` example, which carried a hardcoded
+    /// repository path. Read-only, and scoped to the repository the command
+    /// is run in.
+    Substance,
     /// List the backlog graph.
     Backlog {
         #[arg(long)]
@@ -95,6 +101,15 @@ pub fn stewardship_command(command: StewardshipCommand) -> Result<(), String> {
     }
     let db = database()?;
     let value = match command {
+        StewardshipCommand::Substance => {
+            let approved = familiar_ai_storage::OrchestrationRepository::new(db.conn())
+                .approved_scope_findings(&repository.key)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({
+                "repository_key": repository.key,
+                "approved_substance_hashes": approved,
+            }))
+        }
         StewardshipCommand::Backlog {
             status,
             cursor,

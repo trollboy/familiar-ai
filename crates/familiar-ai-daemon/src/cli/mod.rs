@@ -17,6 +17,7 @@ pub mod deliver;
 pub mod drive;
 pub mod history;
 pub mod next;
+pub mod operator;
 pub mod onboard;
 pub mod plan;
 pub mod preflight;
