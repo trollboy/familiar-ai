@@ -1,4 +1,4 @@
-# Backlog Execution Plan — updated 2026-08-31
+# Backlog Execution Plan — updated 2026-09-01
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
 **Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
@@ -8,13 +8,15 @@ dependency-ready AND mutually scope-disjoint.**
 the first work of every session; "transferred to PRD-X" is valid only when
 PRD-X runs next; new bugs go to the top, never the end.
 
-**Approval:** All 15 pending PRDs (038, 053, 058–061, 063, 071–073,
-076–080) are approved for implementation. PRDs 077–080 are the bug-carrier
-family created 2026-08-31 from waves 3–4 after-action findings and run
-first under the bug policy. Every economy mechanism still defaults off and
-promotes only on a recorded PRD-051 measurement. This document is the
-owner's standing authorization: workers must not pause for per-PRD plan
-sign-off on scope-conformant work.
+**Approval:** All 15 PRDs (038, 053, 058–061, 063, 071–073, 076–080) named
+in this plan are approved for implementation; 076 landed 2026-09-01
+(narrowing 032, 038, 053, 058–061, 063, 071–073's `expected_files` under
+its own recorded authorization) and 14 remain pending. PRDs 077–080 are
+the bug-carrier family created 2026-08-31 from waves 3–4 after-action
+findings and run first under the bug policy. Every economy mechanism
+still defaults off and promotes only on a recorded PRD-051 measurement.
+This document is the owner's standing authorization: workers must not
+pause for per-PRD plan sign-off on scope-conformant work.
 
 ## Completed
 
@@ -26,6 +28,7 @@ sign-off on scope-conformant work.
 | gate | 066, 067, 068 | complete 2026-08-31 |
 | 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | complete 2026-08-31 — **all nine retained; integrated manually**; [after-action](../wave3_afteraction_report.md) |
 | 4 | 032, 055, 056, 062 | complete 2026-08-31 — **cascade-then-manual again**; [after-action](../wave4_afteraction_report.md) |
+| gate | 076 | complete 2026-09-01 — config.rs, providers.md, and the CLI binary split into per-feature files; wave 5–7 declarations amended and rows below regenerated from the scheduler's own `achievable_width` |
 
 The waves-3/4 caveat is the plan's dominant fact: Familiar has never
 integrated a multi-PRD wave autonomously (FAM-BUG-019/022). The delivered
@@ -60,28 +63,35 @@ exists to end that.
   verification gate can halt unattended runs. Owner: PRD-078's
   environment/verification work or a direct fix.
 
-**GATE — PRD-076 scope modularization** (owner-approved 2026-08-30):
-still required — the remaining product PRDs (058, 063, 072 especially)
-declare whole-crate scopes that would serialize waves 5–6. Regenerates
-the rows below as computed true rounds after amending the remaining
-PRDs' declarations.
+A wave row below is a **computed true round**: the PRD set is run through
+the scheduler's own conflict rules (`achievable_width` in
+`crates/familiar-ai-daemon/src/drive.rs`, the same function PRD-066's
+authoring-time validation calls) to produce a graph width (the raw
+candidate count) and an achievable width (the size of the largest
+mutually scope-disjoint subset — the actual number of PRDs from that row
+that may run simultaneously). Where achievable width is less than graph
+width, the named remaining conflicts are real and not fixed by PRD-076's
+scope (most commonly `config/default.toml`, a single data file every
+adapter/config PRD in the row must extend, or a genuinely shared config
+module/contract-domain file two PRDs both touch) — those PRDs still
+serialize within the row.
 
-| Wave | PRDs | Graph width | Achievable width |
-|------|------|-------------|------------------|
-| bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
-| gate | 076 | 1 | 1 |
-| 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
-| 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
-| 7 | 071, 073 | 2 | 2 |
+| Wave | PRDs | Graph width | Achievable width | Remaining conflicts |
+|------|------|-------------|-------------------|----------------------|
+| bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining | — |
+| 5 | 038, 053, 058 | 3 | 2 | 053↔058 share `crates/familiar-ai-daemon/src/run.rs` and `config/default.toml` |
+| 6 | 059, 060, 061, 063, 072 | 5 | 2 | 059/060/061/063 all share `docs/contracts/providers-inference.md` and `crates/familiar-ai-core/src/config/providers.rs` (059/060/061) — pick one adapter plus 072, which is disjoint from all four |
+| 7 | 071, 073 | 2 | 2 | none — fully disjoint |
 
 ## Critical path
 
-**077 → 076 → 058 → {059, 060, 061, 063} → {071, 073}** — 056 landing
-moved the control plane off the path; the raw runtime (058) is now the
-long pole, and it is ready the moment the gates clear. 038 (multi-repo
-acceptance — the forcing function that ends infrastructure work) and 053
-are dependency-ready NOW and must not keep slipping: schedule 038 in the
-first product session after the gates.
+**058 → {059, 060, 061, 063} → {071, 073}** — 056 landing moved the
+control plane off the path; the raw runtime (058) is now the long pole,
+and it is ready the moment 038/053 clear wave 5 with it (wave 5's
+achievable width of 2 means 058 runs alongside whichever of 038/053 it
+doesn't conflict with — 038 is disjoint from both 053 and 058). 038
+(multi-repo acceptance — the forcing function that ends infrastructure
+work) and 053 are dependency-ready NOW and must not keep slipping.
 
 ## Scheduling guidance
 
