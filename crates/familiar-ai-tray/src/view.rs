@@ -286,6 +286,74 @@ pub fn build_backlog_view(backlog: &Value) -> BacklogView {
     }
 }
 
+/// What the backlog looks like as work rather than as rows.
+///
+/// A count of "pending" invites you to add another pending item. The number
+/// that matters is how much can actually be started right now, which on a
+/// dependency graph with unfinished roots is a much smaller number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogSummary {
+    /// Open, unblocked, and its file still exists.
+    pub startable: usize,
+    /// Waiting on another PRD that is not finished.
+    pub blocked: usize,
+    /// Claimed, with work retained against it.
+    pub in_progress: usize,
+    /// Rows whose file has gone; nothing can be run from them.
+    pub missing: usize,
+}
+
+impl BacklogSummary {
+    /// The headline, ordered so the actionable number is read first.
+    pub fn headline(&self) -> String {
+        let mut parts = vec![format!(
+            "<b>{} startable</b>",
+            self.startable
+        )];
+        if self.blocked > 0 {
+            parts.push(format!("{} blocked", self.blocked));
+        }
+        if self.in_progress > 0 {
+            parts.push(format!("{} in progress", self.in_progress));
+        }
+        if self.missing > 0 {
+            parts.push(format!("{} missing", self.missing));
+        }
+        parts.join("  ·  ")
+    }
+}
+
+pub fn build_backlog_summary(
+    view: &BacklogView,
+    blockers: &[(String, Vec<Blocker>)],
+) -> BacklogSummary {
+    let mut summary = BacklogSummary {
+        startable: 0,
+        blocked: 0,
+        in_progress: 0,
+        missing: 0,
+    };
+    for row in &view.open {
+        if row.missing_since.is_some() {
+            summary.missing += 1;
+            continue;
+        }
+        if row.status == "in_progress" {
+            summary.in_progress += 1;
+            continue;
+        }
+        let waiting = blockers
+            .iter()
+            .any(|(path, list)| *path == row.prd_path && !list.is_empty());
+        if waiting {
+            summary.blocked += 1;
+        } else {
+            summary.startable += 1;
+        }
+    }
+    summary
+}
+
 // ---------------------------------------------------------------- sessions
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1657,6 +1725,73 @@ mod tests {
         assert!(reason.contains("PRD-1 (pending)"), "{reason}");
         // A dependency that cannot be found at all is named rather than hidden.
         assert!(reason.contains("PRD-9 (not found)"), "{reason}");
+    }
+
+    /// The point of the summary: "33 pending" invites a 34th, while
+    /// "5 startable" invites finishing something.
+    #[test]
+    fn the_summary_counts_work_not_rows() {
+        let row = |path: &str, status: &str, missing: bool| BacklogRow {
+            prd_path: path.into(),
+            status: status.into(),
+            updated_at: String::new(),
+            missing_since: missing.then(|| "2026-08-09".to_string()),
+        };
+        let view = BacklogView {
+            counts: vec![],
+            truncated: false,
+            open: vec![
+                row("free.md", "pending", false),
+                row("waiting.md", "pending", false),
+                row("claimed.md", "in_progress", false),
+                row("gone.md", "pending", true),
+                // A missing file outranks everything else: nothing can run.
+                row("gone-and-blocked.md", "pending", true),
+            ],
+        };
+        let blockers = vec![
+            (
+                "waiting.md".to_string(),
+                vec![Blocker {
+                    prd_id: "PRD-1".into(),
+                    status: "pending".into(),
+                }],
+            ),
+            (
+                "gone-and-blocked.md".to_string(),
+                vec![Blocker {
+                    prd_id: "PRD-1".into(),
+                    status: "pending".into(),
+                }],
+            ),
+        ];
+        let summary = build_backlog_summary(&view, &blockers);
+        assert_eq!(summary.startable, 1);
+        assert_eq!(summary.blocked, 1);
+        assert_eq!(summary.in_progress, 1);
+        assert_eq!(summary.missing, 2);
+
+        let headline = summary.headline();
+        assert!(headline.starts_with("<b>1 startable</b>"), "{headline}");
+        assert!(headline.contains("1 blocked"));
+    }
+
+    /// Nothing in the way anywhere: the headline should not be cluttered with
+    /// zeroes for categories that are empty.
+    #[test]
+    fn a_clean_backlog_reports_only_what_is_startable() {
+        let view = BacklogView {
+            counts: vec![],
+            truncated: false,
+            open: vec![BacklogRow {
+                prd_path: "a.md".into(),
+                status: "pending".into(),
+                updated_at: String::new(),
+                missing_since: None,
+            }],
+        };
+        let summary = build_backlog_summary(&view, &[]);
+        assert_eq!(summary.headline(), "<b>1 startable</b>");
     }
 
     #[test]

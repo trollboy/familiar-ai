@@ -1115,13 +1115,22 @@ fn backlog_tab(
         .unwrap_or_default();
 
     let root = vbox();
+    // The actionable number leads. A count of "pending" invites adding
+    // another pending item; "startable" invites finishing one.
+    let summary = view::build_backlog_summary(&v, &blockers);
+    root.pack_start(&markup(&summary.headline()), false, false, 0);
     let counts = v
         .counts
         .iter()
         .map(|(status, n)| format!("{}: {}", esc(status), n))
         .collect::<Vec<_>>()
         .join("   ");
-    root.pack_start(&markup(&format!("<b>{counts}</b>")), false, false, 0);
+    root.pack_start(
+        &markup(&format!("<small>{counts}</small>")),
+        false,
+        false,
+        0,
+    );
     if v.truncated {
         root.pack_start(&markup("<small>first 200 shown</small>"), false, false, 0);
     }
