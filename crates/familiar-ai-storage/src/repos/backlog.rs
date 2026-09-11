@@ -842,40 +842,19 @@ fn reconcile_prd(
     prd: &DiscoveredPrd,
     now: &str,
 ) -> Result<(), BacklogStoreError> {
-    // A PRD that moved — most often into the archived directory — is the same
-    // PRD at a new path, not a new one. Reconciliation is keyed by path, so
-    // without this the old path is left behind as a completed-but-missing row
-    // and the backlog grows a ghost on every archive. This repository had
-    // accumulated 25 of them, inflating "pending" by roughly 60%.
+    // A moved PRD leaves its old path behind as a missing row, and that is
+    // left alone deliberately.
     //
-    // Carry the existing row to the new path where the new path is still free,
-    // which preserves its status and history; then drop any same-numbered row
-    // that is still missing, which clears ghosts left by earlier moves. Status
-    // events live in their own table and are untouched either way.
-    tx.execute(
-        "UPDATE OR IGNORE backlog_prds SET prd_path=?3, missing_since=NULL \
-         WHERE repository_key=?1 AND prd_number=?2 AND prd_suffix IS ?4 \
-           AND prd_path<>?3 AND missing_since IS NOT NULL",
-        params![
-            repository.key,
-            prd.number.to_string(),
-            prd.path.as_str(),
-            prd.id.suffix().map(|c| c.to_string())
-        ],
-    )
-    .map_err(storage)?;
-    tx.execute(
-        "DELETE FROM backlog_prds \
-         WHERE repository_key=?1 AND prd_number=?2 AND prd_suffix IS ?4 \
-           AND prd_path<>?3 AND missing_since IS NOT NULL",
-        params![
-            repository.key,
-            prd.number.to_string(),
-            prd.path.as_str(),
-            prd.id.suffix().map(|c| c.to_string())
-        ],
-    )
-    .map_err(storage)?;
+    // Carrying the row to the new path or deleting it both look obvious and
+    // both are wrong: `backlog_status_events` and `backlog_bootstrap_items`
+    // hold foreign keys into `(repository_key, prd_path)`, so updating the
+    // path orphans the history and deleting the row is refused outright. An
+    // attempt at each aborted the whole reconciliation transaction and broke
+    // `next`, `run` and `drive`.
+    //
+    // Consolidating these rows needs the references to move with them — an
+    // ON UPDATE CASCADE, which is a migration and a piece of work in its own
+    // right, not something to slip into reconciliation.
     tx.execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,prd_suffix,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at)VALUES(?1,?2,?3,?4,?5,?6,?7,?7,NULL,?7,?7) ON CONFLICT(repository_key,prd_path) DO UPDATE SET prd_number=excluded.prd_number,prd_suffix=excluded.prd_suffix,content_hash=excluded.content_hash,last_seen_at=excluded.last_seen_at,missing_since=NULL",params![repository.key,prd.path.as_str(),prd.number.to_string(),prd.id.suffix().map(|c| c.to_string()),prd.content_hash,if prd.location == PrdLocation::Archived { "completed" } else { "pending" },now]).map_err(storage)?;
     if prd.location == PrdLocation::Archived {
         let old_status: String = tx
@@ -1683,20 +1662,31 @@ mod tests {
             .is_err());
     }
 
-    /// Archiving a finished PRD moved its file, and reconciliation keyed by
-    /// path left the old one behind as a completed-but-missing row. Twenty-five
-    /// of those had accumulated here, inflating the pending count by roughly
-    /// 60% and burying the real work.
+    /// Reconciliation must survive a row that other tables reference.
+    ///
+    /// `backlog_status_events` and `backlog_bootstrap_items` both have foreign
+    /// keys into `backlog_prds`, so any attempt to tidy an old row away aborts
+    /// the whole transaction and takes `next`, `run` and `drive` with it. A
+    /// first attempt at clearing moved-from rows did exactly that.
     #[test]
-    fn a_moved_prd_carries_its_row_instead_of_leaving_a_ghost() {
+    fn reconciliation_survives_rows_other_tables_reference() {
         let mut db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         {
             let mut storage = SqliteBacklogRepository::new(db.conn_mut());
             storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap();
+            // Give the row the history a real one accumulates.
+            storage
+                .connection
+                .execute(
+                    "INSERT INTO backlog_status_events(repository_key,prd_path,old_status,\
+                     new_status,actor,changed_at) VALUES(?1,?2,'pending','in_progress','human:x','t')",
+                    params![repo().key, prd().path.as_str()],
+                )
+                .unwrap();
         }
 
-        // The same PRD, archived: new path, same number.
+        // Archive it: the move must reconcile without tripping the key.
         let mut archived = prd();
         archived.path = RepositoryPath::new("docs/prds/done/PRD-009.md").unwrap();
         archived.location = PrdLocation::Archived;
@@ -1704,28 +1694,14 @@ mod tests {
             let mut storage = SqliteBacklogRepository::new(db.conn_mut());
             storage
                 .reconcile_and_snapshot(&repo(), &[archived])
-                .unwrap();
+                .expect("reconciliation must not fail on a referenced row");
         }
 
-        let rows: Vec<(String, String, Option<String>)> = db
-            .conn()
-            .prepare("SELECT prd_path,status,missing_since FROM backlog_prds WHERE repository_key=?1 ORDER BY prd_path")
-            .unwrap()
-            .query_map(params![repo().key], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(
-            rows.len(),
-            1,
-            "the move must carry the row, not leave a ghost: {rows:?}"
-        );
-        assert_eq!(rows[0].0, "docs/prds/done/PRD-009.md");
-        assert_eq!(rows[0].1, "completed", "archived is completed by location");
-        assert!(rows[0].2.is_none(), "the surviving row is present, not missing");
+        // And the run after it, which is where a broken transaction shows up.
+        let mut storage = SqliteBacklogRepository::new(db.conn_mut());
+        storage
+            .reconcile_and_snapshot(&repo(), &[prd()])
+            .expect("a second reconciliation must still succeed");
     }
 
     #[test]
