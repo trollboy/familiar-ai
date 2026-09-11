@@ -63,6 +63,9 @@ pub struct CoordinationRequest {
     pub reviewer: AgentAssignment,
     pub standard_reviewer: Option<AgentAssignment>,
     pub tier_policy: ReviewTierPolicy,
+    /// The task's declared PRD risk classes, composed with observed risk in
+    /// tier selection: either may only raise the selected tier.
+    pub declared_risk_classes: Vec<String>,
     pub contracts: Vec<BoundedDocument>,
     pub invariants: Vec<BoundedInvariant>,
     pub verification_plan: VerificationPlan,
@@ -178,6 +181,7 @@ impl ReviewCoordinator<'_> {
                 .scope_evaluations
                 .last()
                 .expect("scope evaluation just recorded"),
+            &request.declared_risk_classes,
         ));
         self.store
             .save_cycle(&cycle)
@@ -592,6 +596,7 @@ impl ReviewCoordinator<'_> {
                 &captured.changed_files,
                 captured.diff.byte_size,
                 &scope,
+                &request.declared_risk_classes,
             );
             request.reviewer = if selection.tier == ReviewTier::Standard {
                 standard_reviewer
@@ -1238,6 +1243,7 @@ mod tests {
             reviewer: assignment(AgentRole::Review, "review"),
             standard_reviewer: None,
             tier_policy: ReviewTierPolicy::default(),
+            declared_risk_classes: Vec::new(),
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {
@@ -1530,6 +1536,7 @@ mod tests {
             reviewer: assignment(AgentRole::Review, "review"),
             standard_reviewer: None,
             tier_policy: ReviewTierPolicy::default(),
+            declared_risk_classes: Vec::new(),
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {
@@ -1610,6 +1617,7 @@ mod tests {
             reviewer: assignment(AgentRole::Review, "review"),
             standard_reviewer: None,
             tier_policy: ReviewTierPolicy::default(),
+            declared_risk_classes: Vec::new(),
             contracts: vec![],
             invariants: vec![],
             verification_plan: VerificationPlan {

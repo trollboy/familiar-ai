@@ -194,6 +194,10 @@ pub struct SelectionRecord {
     pub rule: String,
     pub selected_worker: String,
     pub candidates: Vec<CandidateEvaluation>,
+    /// The declared risk classes and expected file count that produced this
+    /// selection, so it is reproducible from persisted inputs alone.
+    pub risk_classes: Vec<String>,
+    pub expected_file_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +381,8 @@ impl WorkerRegistry {
             },
             selected_worker: selected.id.clone(),
             candidates,
+            risk_classes: request.risk_classes.clone(),
+            expected_file_count: request.expected_file_count,
         })
     }
 }

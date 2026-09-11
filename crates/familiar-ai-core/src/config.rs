@@ -481,8 +481,10 @@ pub struct DriverConfig {
     /// Optional worktree parent. Empty uses the driver-owned state directory.
     #[serde(default)]
     pub worktree_root: String,
-    /// Ordered deterministic implementation routes. The first route whose
-    /// maximum scope count covers a PRD wins; no inference call selects it.
+    /// Retired: configuring this key is a validation error naming
+    /// `worker_registry.routing.rules` as the replacement. The field remains
+    /// parseable only so `Config::load` can name the offending key rather
+    /// than fail with an opaque unknown-field error.
     #[serde(default)]
     pub model_routes: Vec<DriverModelRouteConfig>,
     /// Finite implementation-stage token ceiling. Zero disables this ceiling.
@@ -543,22 +545,20 @@ impl DriverConfig {
                     .into(),
             );
         }
-        let mut prior = 0;
-        for (index, route) in self.model_routes.iter().enumerate() {
-            if route.max_expected_files == 0 || route.model.trim().is_empty() {
-                return Err(format!(
-                    "driver.model_routes[{index}] requires a positive max_expected_files and non-empty model"
-                ));
-            }
-            if index > 0 && route.max_expected_files <= prior {
-                return Err(
-                    "driver.model_routes must be ordered by increasing max_expected_files".into(),
-                );
-            }
-            prior = route.max_expected_files;
-        }
+        validate_model_routes_retired(&self.model_routes)?;
         Ok(())
     }
+}
+
+/// `driver.model_routes` is retired: the worker registry silently disabled it
+/// once configured, so it is now a validation error naming the replacement.
+fn validate_model_routes_retired(routes: &[DriverModelRouteConfig]) -> Result<(), String> {
+    if routes.is_empty() {
+        return Ok(());
+    }
+    Err(
+        "driver.model_routes is retired; configure worker_registry.routing.rules instead".into(),
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1032,6 +1032,11 @@ pub struct ReviewTierPolicyConfig {
     pub standard_reviewer_agent: ReviewAgentConfig,
     #[serde(default)]
     pub rules: Vec<ReviewTierRuleConfig>,
+    /// Declared PRD risk classes that force the Full tier regardless of
+    /// footprint rules. Each entry must be in the repository risk
+    /// vocabulary.
+    #[serde(default)]
+    pub full_review_risk_classes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1411,7 +1416,7 @@ impl Default for ReviewConfig {
 }
 
 impl ReviewConfig {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self, risk_vocabulary: &std::collections::BTreeSet<&str>) -> Result<(), String> {
         if !self.enabled {
             return Ok(());
         }
@@ -1498,6 +1503,18 @@ impl ReviewConfig {
         if let Some(policy) = &self.tier_policy {
             let mut ids = std::collections::BTreeSet::new();
             let mut signatures = std::collections::BTreeMap::new();
+            for class in &policy.full_review_risk_classes {
+                if class.trim().is_empty() {
+                    return Err(
+                        "tier_policy.full_review_risk_classes entries must be non-empty".into(),
+                    );
+                }
+                if !risk_vocabulary.contains(class.as_str()) {
+                    return Err(format!(
+                        "tier_policy.full_review_risk_classes names risk class '{class}' outside the configured vocabulary"
+                    ));
+                }
+            }
             let has_standard = policy
                 .rules
                 .iter()
@@ -2198,7 +2215,9 @@ impl Config {
                 }
             }
             if let Some(review) = &entry.review {
-                review.validate().map_err(|error| {
+                let repo_risk_vocabulary: std::collections::BTreeSet<&str> =
+                    entry.risk_vocabulary.iter().map(String::as_str).collect();
+                review.validate(&repo_risk_vocabulary).map_err(|error| {
                     FamiliarError::Config(format!("repositories.{worktree}.review: {error}"))
                 })?;
                 if let Some(agents) = &self.agents {
@@ -2283,18 +2302,22 @@ impl Config {
                 "[agents] and [worker_registry] are mutually exclusive".into(),
             ));
         }
-        self.review.validate().map_err(FamiliarError::Config)?;
+        validate_model_routes_retired(&self.driver.model_routes)
+            .map_err(FamiliarError::Config)?;
+        let risk_vocabulary: std::collections::BTreeSet<&str> = self
+            .repositories
+            .values()
+            .flat_map(|entry| entry.risk_vocabulary.iter().map(String::as_str))
+            .collect();
+        self.review
+            .validate(&risk_vocabulary)
+            .map_err(FamiliarError::Config)?;
         if let Some(agents) = &self.agents {
             agents
                 .validate(&self.review)
                 .map_err(FamiliarError::Config)?;
         }
         if let Some(registry) = &self.worker_registry {
-            let risk_vocabulary: std::collections::BTreeSet<&str> = self
-                .repositories
-                .values()
-                .flat_map(|entry| entry.risk_vocabulary.iter().map(String::as_str))
-                .collect();
             registry
                 .validate(&risk_vocabulary)
                 .map_err(FamiliarError::Config)?;

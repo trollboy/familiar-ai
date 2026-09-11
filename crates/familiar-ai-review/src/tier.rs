@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{ChangedFile, GitChangeKind, ScopeCheckResult, ScopeDecision, ScopeFileClass};
@@ -24,6 +26,10 @@ pub struct ReviewTierRule {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewTierPolicy {
     pub rules: Vec<ReviewTierRule>,
+    /// Declared PRD risk classes that force the Full tier regardless of
+    /// footprint rules. Composes with observed risk: either may only raise
+    /// the selected tier, never lower it.
+    pub full_review_risk_classes: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +54,7 @@ pub fn select_review_tier(
     files: &[ChangedFile],
     changed_bytes: u64,
     scope: &ScopeCheckResult,
+    declared_risk_classes: &[String],
 ) -> ReviewTierSelection {
     let mut kinds: Vec<_> = files.iter().map(|file| file.kind).collect();
     kinds.sort();
@@ -87,6 +94,17 @@ pub fn select_review_tier(
             tier: ReviewTier::Full,
             selecting_rule: None,
             reason: "unknown, ambiguous, or high-risk footprint".into(),
+            footprint,
+        };
+    }
+    if let Some(class) = declared_risk_classes
+        .iter()
+        .find(|class| policy.full_review_risk_classes.contains(class.as_str()))
+    {
+        return ReviewTierSelection {
+            tier: ReviewTier::Full,
+            selecting_rule: None,
+            reason: format!("declared risk class '{class}' forces Full review"),
             footprint,
         };
     }
@@ -189,6 +207,7 @@ mod tests {
             &[file()],
             10,
             &scope(ScopeFileClass::Test),
+            &[],
         );
         assert_eq!(selected.tier, ReviewTier::Full);
         assert_eq!(selected.selecting_rule, None);
@@ -199,10 +218,12 @@ mod tests {
         let selected = select_review_tier(
             &ReviewTierPolicy {
                 rules: vec![rule(ReviewTier::ChecksOnly)],
+                ..ReviewTierPolicy::default()
             },
             &[file()],
             10,
             &scope(ScopeFileClass::Test),
+            &[],
         );
         assert_eq!(selected.tier, ReviewTier::ChecksOnly);
         assert_eq!(selected.selecting_rule.as_deref(), Some("small-tests"));
@@ -216,12 +237,47 @@ mod tests {
         let selected = select_review_tier(
             &ReviewTierPolicy {
                 rules: vec![permissive],
+                ..ReviewTierPolicy::default()
             },
             &[file()],
             10,
             &scope(ScopeFileClass::Migration),
+            &[],
         );
         assert_eq!(selected.tier, ReviewTier::Full);
         assert_eq!(selected.selecting_rule, None);
+    }
+
+    #[test]
+    fn declared_high_risk_forces_full_over_matching_checks_only_rule() {
+        let selected = select_review_tier(
+            &ReviewTierPolicy {
+                rules: vec![rule(ReviewTier::ChecksOnly)],
+                full_review_risk_classes: BTreeSet::from(["security".to_string()]),
+            },
+            &[file()],
+            10,
+            &scope(ScopeFileClass::Test),
+            &["security".to_string()],
+        );
+        assert_eq!(selected.tier, ReviewTier::Full);
+        assert_eq!(selected.selecting_rule, None);
+        assert!(selected.reason.contains("security"));
+    }
+
+    #[test]
+    fn declared_risk_outside_full_review_classes_does_not_override_rule() {
+        let selected = select_review_tier(
+            &ReviewTierPolicy {
+                rules: vec![rule(ReviewTier::ChecksOnly)],
+                full_review_risk_classes: BTreeSet::from(["security".to_string()]),
+            },
+            &[file()],
+            10,
+            &scope(ScopeFileClass::Test),
+            &["cosmetic".to_string()],
+        );
+        assert_eq!(selected.tier, ReviewTier::ChecksOnly);
+        assert_eq!(selected.selecting_rule.as_deref(), Some("small-tests"));
     }
 }
