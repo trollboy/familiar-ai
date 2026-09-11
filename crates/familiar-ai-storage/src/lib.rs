@@ -24,7 +24,8 @@ pub use repos::bootstrap::SqliteBootstrapRepository;
 pub use repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
 pub use repos::config_decision::{ConfigDecision, ConfigDecisionRepository};
 pub use repos::control_plane::{
-    list_executions, project_state, ControlPlaneRepository, ExecutionRow,
+    list_executions, project_state, ControlPlaneRepository, ExecutionRow, LeaseAcquireOutcome,
+    LeaseRecord, LeaseRenewOutcome,
 };
 pub use repos::decision::DecisionRepository;
 pub use repos::delivery::{
