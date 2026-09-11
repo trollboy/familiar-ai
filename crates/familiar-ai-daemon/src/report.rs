@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use familiar_ai_review::ScopeDecision;
 use familiar_ai_storage::{
     AccountingRepository, CheckpointRepository, Database, DeliveryRepository, DriverAttempt,
-    ExecutionHistoryRepository, ReviewRepository,
+    ExecutionHistoryRepository, OrchestrationRepository, ReviewRepository,
 };
 use familiar_ai_storage::{DriverRepository, DriverSession};
 
@@ -56,6 +56,12 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
             .ok_or(ReportError::NoSession)?,
     };
     let attempts = sessions.attempts(&session.session_id).map_err(storage)?;
+    // PRD-083: a stopped attempt's only reachable continuations must never
+    // be release (throws the work away) or complete (bypasses every gate)
+    // when what actually stopped it is a decidable scope pause.
+    let pending_scope = OrchestrationRepository::new(db.conn())
+        .pending_scope_decisions(&session.repository_key)
+        .map_err(storage)?;
 
     let mut out = String::new();
     render_header(&mut out, &session);
@@ -69,7 +75,7 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
     render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
     render_reconciliation(db, &mut out, &session.repository_key)?;
-    render_judgment(&mut out, &session, &stopped);
+    render_judgment(&mut out, &session, &stopped, &pending_scope);
     Ok(familiar_ai_agent::redact_sensitive(out))
 }
 
@@ -504,7 +510,12 @@ fn amount_label(value: Option<i64>) -> String {
     }
 }
 
-fn render_judgment(out: &mut String, session: &DriverSession, stopped: &[&DriverAttempt]) {
+fn render_judgment(
+    out: &mut String,
+    session: &DriverSession,
+    stopped: &[&DriverAttempt],
+    pending_scope: &[familiar_ai_storage::ScopeDecision],
+) {
     let _ = writeln!(out, "\nNEEDS HUMAN JUDGMENT ({})", stopped.len());
     match session.termination_reason.as_deref() {
         Some("cost_unknown") => {
@@ -558,6 +569,21 @@ fn render_judgment(out: &mut String, session: &DriverSession, stopped: &[&Driver
     }
     for attempt in stopped.iter().take(MAX_LISTED_ATTEMPTS) {
         let _ = writeln!(out, "  {} {}", attempt.prd_id, attempt.prd_path);
+        // PRD-083: the exact approve/reject commands for this attempt's
+        // scope pause, hash-bound, precede release/complete — a scope
+        // decision is answered by deciding it, not by throwing the work
+        // away or bypassing every gate.
+        for decision in pending_scope
+            .iter()
+            .filter(|decision| decision.prd_id == attempt.prd_id)
+        {
+            for command in crate::stewardship::scope_decision_commands(
+                &decision.finding_hash,
+                &decision.candidate_hash,
+            ) {
+                let _ = writeln!(out, "    {command}");
+            }
+        }
         let _ = writeln!(
             out,
             "    familiar-ai backlog release {} --actor human:<you> --reason \"<why>\"",

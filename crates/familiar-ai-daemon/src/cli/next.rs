@@ -43,6 +43,12 @@ pub fn next() -> Result<(), String> {
             run.run_id, run.item_count, run.canonical_hash
         );
     }
+    // PRD-083: computed before `manager` borrows `db` mutably, so a "backlog
+    // is empty" error can still say why when the real blocker is a scope
+    // decision waiting on a human, not an actually-empty backlog.
+    let pending_scope = familiar_ai_storage::OrchestrationRepository::new(db.conn())
+        .pending_scope_decisions(&repository.key)
+        .map_err(|e| e.to_string())?;
     let store = SqliteBacklogRepository::new(db.conn_mut());
     let mut manager = BacklogManager::new(
         ProfiledFilesystemBacklogDiscovery {
@@ -50,7 +56,15 @@ pub fn next() -> Result<(), String> {
         },
         store,
     );
-    let selected = manager.next(&cwd).map_err(|e| e.to_string())?;
+    let selected = match manager.next(&cwd) {
+        Ok(selected) => selected,
+        Err(error) => {
+            for notice in crate::stewardship::scope_pause_notices(&pending_scope, "next") {
+                eprintln!("{notice}");
+            }
+            return Err(error.to_string());
+        }
+    };
     println!(
         "{}\t{}\t{}\t{}",
         selected.id,

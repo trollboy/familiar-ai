@@ -101,6 +101,13 @@ where
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    // PRD-083: a resumable checkpoint still waiting on a scope decision is
+    // not fully described by "resumable" -- name its exact approve/reject
+    // remedy here too, not only in the report or `stewardship gates`.
+    let pending_scope = familiar_ai_storage::OrchestrationRepository::new(db.conn())
+        .pending_scope_decisions(&repository.key)
+        .map_err(|error| error.to_string())?;
+    output.extend(scope_decision_lines(&candidates, &pending_scope));
     let (waves, blocked) = if prd == "all" {
         plan_waves(
             &candidates,
@@ -865,6 +872,34 @@ fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(out.stdout)
+}
+
+/// PRD-083: the exact approve/reject commands for any candidate still
+/// waiting on a scope decision, hash-bound and actor-placeholdered, never
+/// just a "resumable" status that hides the actual remedy. Pure and
+/// directly testable -- no database or git required.
+pub fn scope_decision_lines(
+    candidates: &[ResumeCandidate],
+    pending_scope: &[familiar_ai_storage::ScopeDecision],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for candidate in candidates {
+        for decision in pending_scope
+            .iter()
+            .filter(|decision| decision.prd_id == candidate.prd_id)
+        {
+            for command in crate::stewardship::scope_decision_commands(
+                &decision.finding_hash,
+                &decision.candidate_hash,
+            ) {
+                lines.push(format!(
+                    "{}\tscope-decision-pending\t{command}",
+                    candidate.prd_id
+                ));
+            }
+        }
+    }
+    lines
 }
 
 pub fn render(candidates: &[ResumeCandidate]) -> String {

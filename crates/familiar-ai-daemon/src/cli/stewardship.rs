@@ -59,7 +59,10 @@ pub enum StewardshipCommand {
     Budget { session_id: String },
     /// Show review disposition and blocking scope findings for one session.
     Review { session_id: String },
-    /// List stopped attempts and blocked checkpoints awaiting a human decision.
+    /// List stopped attempts and blocked checkpoints awaiting a human
+    /// decision. A gate blocked on a scope finding carries the exact
+    /// approve/reject `scope-decisions` commands for it, ahead of any
+    /// backlog release/complete continuation (PRD-083).
     Gates {
         #[arg(long, default_value_t = 20)]
         limit: usize,
