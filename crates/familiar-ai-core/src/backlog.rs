@@ -692,15 +692,13 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
         let worktree = git(&["rev-parse", "--show-toplevel"])?
             .canonicalize()
             .map_err(|e| BacklogError::Repository(format!("cannot canonicalize worktree: {e}")))?;
-        let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?
-            .canonicalize()
-            .map_err(|e| {
-                BacklogError::Repository(format!("cannot resolve Git common directory: {e}"))
-            })?;
-        let key = common
-            .to_str()
-            .ok_or_else(|| BacklogError::Repository("Git common directory is not UTF-8".into()))?
-            .replace('\\', "/");
+        // PRD-087: repository identity is minted in exactly one place
+        // (`repository_path::repository_origin_key`), so that identity
+        // derived while executing inside any worktree resolves to the same
+        // key as its origin repository. Do not reintroduce an independent
+        // `--git-common-dir` computation here.
+        let key = crate::repository_path::repository_origin_key(&cwd)
+            .map_err(|e| BacklogError::Repository(e.to_string()))?;
         Ok(RepositoryIdentity { worktree, key })
     }
 

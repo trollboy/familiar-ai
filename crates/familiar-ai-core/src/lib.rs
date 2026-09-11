@@ -34,7 +34,10 @@ pub use config::{
 };
 pub use error::{FamiliarError, Result};
 pub use paths::AppPaths;
-pub use repository_path::{CanonicalFileIdentity, PathIdentityError};
+pub use repository_path::{
+    git_common_directory, repository_origin_key, CanonicalFileIdentity, PathIdentityError,
+    RepositoryOriginError, INVARIANT_REPOSITORY_IDENTITY,
+};
 pub use reservation::{
     GrantMode, OwnerLiveness, OwnerLivenessEvidence, ReservationOwnerIdentity, ResourceRequest,
     ResourceType, UnknownConsumptionPolicy,

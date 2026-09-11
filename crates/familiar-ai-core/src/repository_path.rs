@@ -1,4 +1,67 @@
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
+/// The single minting site for repository origin identity (PRD-087).
+///
+/// Before this, three independent call sites shelled out to
+/// `git rev-parse --git-common-dir` and canonicalized the result: backlog
+/// discovery, per-repository config matching, and accounting evidence. They
+/// agreed only by the accident of being copy-pasted identically — nothing
+/// stopped one of them drifting (a missing `--path-format=absolute`, a
+/// different canonicalization order) and minting a different key for the
+/// same repository. Git's common directory is shared by every linked
+/// worktree of one repository, so this is what makes identity derived while
+/// executing inside a worktree resolve to that worktree's origin repository:
+/// every caller now goes through this one function instead of deriving it
+/// independently.
+pub const INVARIANT_REPOSITORY_IDENTITY: &str = "repository-identity-single-mint";
+
+#[derive(Debug, thiserror::Error)]
+pub enum RepositoryOriginError {
+    #[error("cannot run git: {0}")]
+    Exec(#[source] std::io::Error),
+    #[error("git rev-parse --git-common-dir failed: {0}")]
+    GitFailed(String),
+    #[error("git returned a non-UTF-8 path")]
+    NonUtf8,
+    #[error("cannot canonicalize git common directory: {0}")]
+    Canonicalize(#[source] std::io::Error),
+}
+
+/// The canonical Git common-directory identity of the repository containing
+/// `path`. Every worktree of one repository (the primary checkout and every
+/// `git worktree add` lease) shares the same common directory, so this is
+/// the sole definition of repository identity: two paths produce the same
+/// key if and only if they belong to the same repository.
+pub fn repository_origin_key(path: &Path) -> Result<String, RepositoryOriginError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .map_err(RepositoryOriginError::Exec)?;
+    if !output.status.success() {
+        return Err(RepositoryOriginError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    let value = String::from_utf8(output.stdout).map_err(|_| RepositoryOriginError::NonUtf8)?;
+    let canonical = Path::new(value.trim())
+        .canonicalize()
+        .map_err(RepositoryOriginError::Canonicalize)?;
+    canonical
+        .to_str()
+        .map(|s| s.replace('\\', "/"))
+        .ok_or(RepositoryOriginError::NonUtf8)
+}
+
+/// Advisory form of [`repository_origin_key`] for callers that treat "not a
+/// Git repository" (or git being unavailable) as `None` rather than a hard
+/// error — per-repository config matching and accounting evidence, neither
+/// of which own the repository's authoritative identity.
+pub fn git_common_directory(path: &Path) -> Option<String> {
+    repository_origin_key(path).ok()
+}
 
 /// The project-scoped, repository-relative identity of one file entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -152,7 +215,78 @@ fn verify_physical_containment(root: &Path, relative: &str) -> Result<(), PathId
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
     use tempfile::tempdir;
+
+    fn git(dir: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[test]
+    fn two_worktrees_of_one_repository_mint_the_same_origin_key() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.invalid"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("file"), "base").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+
+        let worktree_a = temp.path().join("wt-a");
+        let worktree_b = temp.path().join("wt-b");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt-a",
+                worktree_a.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt-b",
+                worktree_b.to_str().unwrap(),
+            ],
+        );
+
+        let main_key = repository_origin_key(&repo).unwrap();
+        let key_a = repository_origin_key(&worktree_a).unwrap();
+        let key_b = repository_origin_key(&worktree_b).unwrap();
+        assert_eq!(
+            main_key, key_a,
+            "worktree a must resolve the origin repository's identity"
+        );
+        assert_eq!(
+            main_key, key_b,
+            "worktree b must resolve the origin repository's identity"
+        );
+
+        // The advisory wrapper is the same single minting site, not a
+        // second independent computation.
+        assert_eq!(git_common_directory(&worktree_a), Some(key_a));
+        assert_eq!(git_common_directory(&worktree_b), Some(key_b));
+    }
+
+    #[test]
+    fn non_repository_path_is_advisory_none_not_a_panic() {
+        let temp = tempdir().unwrap();
+        assert!(git_common_directory(temp.path()).is_none());
+        assert!(repository_origin_key(temp.path()).is_err());
+    }
 
     #[test]
     fn relative_normalization_is_idempotent() {

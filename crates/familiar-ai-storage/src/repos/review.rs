@@ -6,6 +6,15 @@ use familiar_ai_review::{
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// PRD-087: a recovery path either accepts the schema its own rows were
+/// written under, or migrates them forward with a recorded migration —
+/// refusing your own history is neither. `recover_incomplete` below is the
+/// recovery path that owns pre-`repository_key` review cycles (FAM-BUG-032);
+/// every row it tolerates instead of refusing gets one row in
+/// `identity_invariant_tolerances`, so the tolerance is a durable fact, not
+/// only a code comment.
+pub const INVARIANT_REVIEW_RECOVERY_TOLERANCE: &str = "review-recovery-schema-tolerance";
+
 pub struct ReviewRepository<'a> {
     conn: &'a Connection,
 }
@@ -116,7 +125,9 @@ impl<'a> ReviewRepository<'a> {
             // wedge every future attempt at startup (FAM-BUG-032).
             let updated = serde_json::to_string(&cycle)
                 .map_err(|e| FamiliarError::Database(e.to_string()))?;
-            self.conn
+            let predates_repository_key = cycle.repository_key.is_empty();
+            let transaction = self.conn.unchecked_transaction().map_err(db)?;
+            transaction
                 .execute(
                     "UPDATE review_cycles SET state=?2,disposition=?3,cycle_json=?4,ended_at=?5 WHERE cycle_id=?1",
                     params![
@@ -128,6 +139,18 @@ impl<'a> ReviewRepository<'a> {
                     ],
                 )
                 .map_err(db)?;
+            if predates_repository_key {
+                transaction.execute(
+                    "INSERT INTO identity_invariant_tolerances(invariant,table_name,row_key,detail,recorded_at) VALUES(?1,'review_cycles',?2,?3,?4)",
+                    params![
+                        INVARIANT_REVIEW_RECOVERY_TOLERANCE,
+                        id,
+                        "recovered cycle predates repository_key; interrupted in place rather than refused or rewritten through save_cycle",
+                        Utc::now().to_rfc3339()
+                    ],
+                ).map_err(db)?;
+            }
+            transaction.commit().map_err(db)?;
             count += 1;
         }
         Ok(count)
@@ -552,6 +575,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(evidence, 1);
+        // PRD-087: tolerating this pre-invariant row is a recorded fact, not
+        // a silent pass.
+        let (invariant, row_key): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT invariant,row_key FROM identity_invariant_tolerances WHERE table_name='review_cycles'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(invariant, INVARIANT_REVIEW_RECOVERY_TOLERANCE);
+        assert_eq!(row_key, "legacy-keyless");
         // Idempotent: interrupted cycles are terminal for recovery.
         assert_eq!(repository.recover_incomplete().unwrap(), 0);
     }

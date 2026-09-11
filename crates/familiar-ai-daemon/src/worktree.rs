@@ -9,6 +9,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// The origin repository's identity key for a worktree lease. A worktree
+/// never derives repository identity independently: this delegates to the
+/// single minting site (PRD-087), so a lease created here and the primary
+/// checkout it was created from resolve to the same key.
+pub fn origin_repository_key(worktree: &Path) -> Option<String> {
+    familiar_ai_core::repository_path::git_common_directory(worktree)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeOwnership {
     pub session_id: String,
@@ -189,6 +197,12 @@ impl WorktreeLease {
         &self.branch
     }
 
+    /// The origin repository's identity key, as seen from inside this
+    /// worktree (PRD-087).
+    pub fn origin_repository_key(&self) -> Option<String> {
+        origin_repository_key(self.path())
+    }
+
     pub fn heartbeat(&mut self) -> io::Result<()> {
         self.ownership.heartbeat_at = chrono::Utc::now().to_rfc3339();
         persist(&self.ownership_path, &self.ownership)
@@ -308,6 +322,47 @@ mod tests {
         let record: WorktreeOwnership =
             serde_json::from_slice(&fs::read(&lease.ownership_path).unwrap()).unwrap();
         assert_eq!(record.state, "retained");
+    }
+
+    #[test]
+    fn lease_origin_repository_key_matches_the_repository_it_was_created_from() {
+        // PRD-087: identity derived while executing inside a worktree must
+        // resolve to that worktree's origin repository, not something
+        // worktree-specific.
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(repo.join("file"), "base").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-qm", "base"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        let state = temp.path().join("state");
+        let lease_a = WorktreeLease::create(&repo, &state, "session-a", "PRD-1").unwrap();
+        let lease_b = WorktreeLease::create(&repo, &state, "session-b", "PRD-1").unwrap();
+        let repo_key = familiar_ai_core::repository_path::git_common_directory(&repo).unwrap();
+        assert_eq!(lease_a.origin_repository_key(), Some(repo_key.clone()));
+        assert_eq!(lease_b.origin_repository_key(), Some(repo_key));
     }
 
     #[test]
