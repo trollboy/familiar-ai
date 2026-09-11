@@ -1,0 +1,183 @@
+{
+  "repositories": {},
+  "providers": {},
+  "artifacts": {},
+  "auth_profiles": {},
+  "daemon": {
+    "pid_file": null,
+    "socket_path": null,
+    "heartbeat_interval_secs": 60,
+    "global_concurrency_ceiling": 1,
+    "default_project_concurrency_ceiling": 1,
+    "health_timeout_ms": 5000
+  },
+  "logging": {
+    "level": "info",
+    "file": null,
+    "format": "pretty"
+  },
+  "database": {
+    "path": null
+  },
+  "watcher": {
+    "enabled": true,
+    "paths": [],
+    "debounce_ms": 1000,
+    "ignore_patterns": [
+      "target/**",
+      "node_modules/**"
+    ],
+    "respect_gitignore": true
+  },
+  "tray": {
+    "enabled": true,
+    "recent_projects_count": 5
+  },
+  "summary": {
+    "enabled": true,
+    "staleness_threshold_secs": 86400,
+    "flush_interval_secs": 3,
+    "max_file_size_bytes": 1048576,
+    "max_pending_files": 10000,
+    "per_file_quiet_ms": 1500
+  },
+  "rollup": {
+    "enabled": true,
+    "default_limit": 20,
+    "max_rollup_tokens": 4000,
+    "max_rollup_chars": 50000
+  },
+  "packer": {
+    "default_profile": "balanced",
+    "hard_ceiling_tokens": 15000
+  },
+  "dashboard": {
+    "enabled": false,
+    "bind_address": "127.0.0.1:9400"
+  },
+  "inference": {
+    "text": {
+      "mode": "disabled",
+      "provider": "disabled",
+      "builtin_model": "qwen2.5:3b",
+      "builtin_url": "http://127.0.0.1:11434/v1",
+      "remote_url": null,
+      "remote_api_key": null,
+      "fallback_enabled": true,
+      "prefer_privacy": false,
+      "prefer_cost_savings": true,
+      "max_input_chars": 16000,
+      "max_concurrent_requests": 4,
+      "request_timeout_secs": 60
+    },
+    "embedding": {
+      "provider": "disabled",
+      "builtin_model": "nomic-embed-text",
+      "builtin_url": "http://127.0.0.1:11434/v1",
+      "remote_url": null,
+      "remote_api_key": null,
+      "fallback_enabled": true,
+      "max_concurrent_requests": 4,
+      "request_timeout_secs": 60
+    }
+  },
+  "execution_history": {
+    "pricing": {},
+    "price_schedules": {},
+    "subscriptions": {}
+  },
+  "execution_context": {
+    "hard_ceiling_tokens": null,
+    "repository_map_enabled": false,
+    "prompt_cache_enabled": true
+  },
+  "review": {
+    "enabled": false,
+    "max_review_attempts": 3,
+    "max_remediation_attempts": 2,
+    "max_total_tokens": 0,
+    "max_total_cost_microusd": 0,
+    "max_total_duration_ms": 0,
+    "allow_isolated_same_model_fallback": false,
+    "allowed_paths": [],
+    "prohibited_changes": [],
+    "scope": {
+      "allow_prd_expected_file_expansion": false,
+      "declaration_mode": "expected_or_configured",
+      "file_classes": {
+        "dependency_manifest": "human_review",
+        "dependency_lockfile": "human_review",
+        "migration": "human_review",
+        "configuration": "human_review",
+        "test": "allow_when_expected",
+        "generated_artifact": "human_review"
+      },
+      "classification": []
+    },
+    "verification": [],
+    "implementation_agent": {
+      "adapter_id": "",
+      "agent_id": "",
+      "provider": null,
+      "model": null
+    },
+    "reviewer_agent": {
+      "adapter_id": "",
+      "agent_id": "",
+      "provider": null,
+      "model": null
+    },
+    "max_package_bytes": 1000000,
+    "max_package_tokens": 250000,
+    "max_evidence_bytes": 16000000,
+    "max_verification_log_bytes": 256000
+  },
+  "driver": {
+    "max_prds_per_session": 0,
+    "max_session_cost_microusd": 0,
+    "max_session_tokens": 0,
+    "max_session_duration_ms": 0,
+    "max_concurrency": 1,
+    "isolated_worktrees": false,
+    "max_parallel_components": 1,
+    "worktree_root": "",
+    "model_routes": [],
+    "max_implementation_tokens": 0
+  },
+  "worker": {
+    "label": "ai.familiar.worker",
+    "restart_throttle_secs": 10,
+    "max_prds_per_run": 1
+  },
+  "preflight": {
+    "commands": [],
+    "required_environment": []
+  },
+  "delivery": {
+    "mode": "disabled",
+    "enabled": false,
+    "max_deliveries_per_session": 0,
+    "command_timeout_ms": 1800000,
+    "remote": "",
+    "base": "",
+    "provider_argv": [],
+    "auto_merge": false,
+    "staging_environment": "",
+    "deploy_argv": [],
+    "smoke_argv": [],
+    "rollback_argv": [],
+    "comment_blockers": false,
+    "required_checks": [],
+    "migration_gate_argv": [],
+    "credential_references": [],
+    "poc_warrant": null,
+    "review_gate": null,
+    "targets": {}
+  },
+  "compression": {
+    "output_registers": {},
+    "input_providers": {},
+    "experiment_label": null,
+    "experiment_lane": null
+  }
+}

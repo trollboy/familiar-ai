@@ -20,6 +20,12 @@ use familiar_ai_storage::{
     Database, ExecutionHistoryRepository, SqliteBacklogRepository, SqliteBootstrapRepository,
 };
 
+#[path = "../cli/mod.rs"]
+mod cli;
+use cli::billing::BillingCommand;
+use cli::config::ConfigCommand;
+use cli::worker::WorkerCommand;
+
 #[derive(Debug, Parser)]
 #[command(name = "familiar-ai", about = "Familiar command-line interface")]
 struct Cli {
@@ -216,18 +222,6 @@ enum ControlCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum BillingCommand {
-    /// Cached status only; never contacts a provider.
-    Status,
-    /// Explicitly contact configured organization billing sources.
-    Collect {
-        source: Option<String>,
-        #[arg(long)]
-        month: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum CompressCommand {
     OutputEnable {
         stage: String,
@@ -253,168 +247,6 @@ enum CompressCommand {
         #[arg(long, requires = "lane")]
         actor: Option<String>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum ConfigCommand {
-    Provider {
-        #[command(subcommand)]
-        command: ProviderCommand,
-    },
-    Model {
-        #[command(subcommand)]
-        command: ModelCommand,
-    },
-    Artifact {
-        #[command(subcommand)]
-        command: ArtifactCommand,
-    },
-    /// Migrate legacy configuration sections to supported replacements.
-    Migrate {
-        #[command(subcommand)]
-        command: ConfigMigrateCommand,
-    },
-    /// Show durable configuration mutation decisions.
-    History {
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
-    /// Approve or revoke the exact current familiar.toml snapshot.
-    Project {
-        #[command(subcommand)]
-        command: ProjectConfigCommand,
-    },
-    /// Show the approval-aware three-layer configuration with provenance.
-    Show {
-        #[arg(long)]
-        effective: bool,
-        #[arg(long, default_value = ".")]
-        repository: PathBuf,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ArtifactCommand {
-    /// Probe and register externally prepared identity-bearing files.
-    Register {
-        alias: String,
-        root: PathBuf,
-        #[arg(long = "file", required = true)]
-        files: Vec<PathBuf>,
-        /// JSON object of identity-bearing configuration.
-        #[arg(long, default_value = "{}")]
-        identity: String,
-        /// JSON provenance record; omitted fields remain explicitly unknown.
-        #[arg(long, default_value = "{}")]
-        provenance: String,
-        #[arg(long)]
-        base: Option<String>,
-        #[arg(long = "adapter")]
-        adapters: Vec<String>,
-        #[arg(long)]
-        merged: bool,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    /// Record a legacy/runtime-only alias as degraded and unverified.
-    RegisterAlias {
-        alias: String,
-        runtime_alias: String,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    List,
-    Show {
-        alias: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ConfigMigrateCommand {
-    /// Losslessly migrate [agents] to the worker registry.
-    Agents {
-        #[arg(long)]
-        actor: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ProjectConfigCommand {
-    Approve {
-        #[arg(long, default_value = ".")]
-        repository: PathBuf,
-        #[arg(long)]
-        actor: String,
-    },
-    Revoke {
-        #[arg(long, default_value = ".")]
-        repository: PathBuf,
-        #[arg(long)]
-        actor: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ProviderCommand {
-    Add {
-        name: String,
-        #[arg(long, default_value = "inference")]
-        kind: String,
-        #[arg(long)]
-        mode: Option<String>,
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long)]
-        auth: Option<String>,
-        #[arg(long)]
-        via: Option<String>,
-        #[arg(long)]
-        recipe: Option<String>,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    Remove {
-        name: String,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    Verify {
-        name: String,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    List {
-        #[arg(long)]
-        refresh: bool,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    /// Bind a declared environment name to a machine-local provider.
-    Bind {
-        role: String,
-        provider: String,
-        #[arg(long, default_value = ".")]
-        repository: PathBuf,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ModelCommand {
-    Enable {
-        model: String,
-        #[arg(long, value_delimiter = ',', num_args = 1..)]
-        capabilities: Vec<String>,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    Disable {
-        model: String,
-        #[arg(long)]
-        actor: Option<String>,
-    },
-    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -582,34 +414,6 @@ enum BacklogCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum WorkerCommand {
-    /// Install and start the native per-user supervisor definition.
-    Install { repository: PathBuf },
-    /// Stop and remove the definition, preserving logs, database, and history.
-    Uninstall { repository: PathBuf },
-    /// Show native supervisor state and every validation blocker.
-    Status { repository: PathBuf },
-    /// Validate the platform and definition without installing or claiming work.
-    Validate { repository: PathBuf },
-    /// Run a harmless fail-once fixture proving restart recovery and one report.
-    Test,
-    /// Generate a launchd plist using this exact executable.
-    Plist {
-        repository: PathBuf,
-        #[arg(long)]
-        label: String,
-        #[arg(long)]
-        output: PathBuf,
-    },
-    /// launchd entry point: run one configured warrant and emit its report.
-    Run {
-        repository: PathBuf,
-        #[arg(long, default_value_t = 1)]
-        max_prds: u64,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum BootstrapCommand {
     Status,
     Rollback {
@@ -656,11 +460,11 @@ fn main() -> ExitCode {
                 Err(error) => fail(error),
             }
         }
-        Command::Config { command } => match config_command(command) {
+        Command::Config { command } => match cli::config::run(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
-        Command::Billing { command } => match billing_command(command) {
+        Command::Billing { command } => match cli::billing::run(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -772,7 +576,7 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
-        Command::Worker { command } => match worker_command(command) {
+        Command::Worker { command } => match cli::worker::run(command) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
@@ -785,118 +589,6 @@ fn main() -> ExitCode {
             Err(error) => fail(error),
         },
     }
-}
-
-fn config_command(command: ConfigCommand) -> Result<(), String> {
-    use familiar_ai_daemon::config_cli::{execute, ConfigAction};
-    let action = match command {
-        ConfigCommand::Provider { command } => match command {
-            ProviderCommand::Add {
-                name,
-                kind,
-                mode,
-                host,
-                auth,
-                via,
-                recipe,
-                actor,
-            } => ConfigAction::ProviderAdd {
-                name,
-                kind,
-                mode,
-                host,
-                auth,
-                via,
-                recipe,
-                actor,
-            },
-            ProviderCommand::Remove { name, actor } => ConfigAction::ProviderRemove { name, actor },
-            ProviderCommand::Verify { name, actor } => ConfigAction::ProviderVerify { name, actor },
-            ProviderCommand::List { refresh, actor } => {
-                ConfigAction::ProviderList { refresh, actor }
-            }
-            ProviderCommand::Bind {
-                role,
-                provider,
-                repository,
-                actor,
-            } => ConfigAction::ProviderBind {
-                repository,
-                role,
-                provider,
-                actor,
-            },
-        },
-        ConfigCommand::Model { command } => match command {
-            ModelCommand::Enable {
-                model,
-                capabilities,
-                actor,
-            } => ConfigAction::ModelEnable {
-                model,
-                capabilities,
-                actor,
-            },
-            ModelCommand::Disable { model, actor } => ConfigAction::ModelDisable { model, actor },
-            ModelCommand::List => ConfigAction::ModelList,
-        },
-        ConfigCommand::Artifact { command } => match command {
-            ArtifactCommand::Register {
-                alias,
-                root,
-                files,
-                identity,
-                provenance,
-                base,
-                adapters,
-                merged,
-                actor,
-            } => ConfigAction::ArtifactRegister {
-                alias,
-                root,
-                files,
-                identity,
-                provenance,
-                base,
-                adapters,
-                merged,
-                actor,
-            },
-            ArtifactCommand::RegisterAlias {
-                alias,
-                runtime_alias,
-                actor,
-            } => ConfigAction::ArtifactRegisterAlias {
-                alias,
-                runtime_alias,
-                actor,
-            },
-            ArtifactCommand::List => ConfigAction::ArtifactList,
-            ArtifactCommand::Show { alias } => ConfigAction::ArtifactShow { alias },
-        },
-        ConfigCommand::Migrate { command } => match command {
-            ConfigMigrateCommand::Agents { actor } => ConfigAction::MigrateAgents { actor },
-        },
-        ConfigCommand::History { limit } => ConfigAction::History { limit },
-        ConfigCommand::Project { command } => match command {
-            ProjectConfigCommand::Approve { repository, actor } => {
-                ConfigAction::ProjectApprove { repository, actor }
-            }
-            ProjectConfigCommand::Revoke { repository, actor } => {
-                ConfigAction::ProjectRevoke { repository, actor }
-            }
-        },
-        ConfigCommand::Show {
-            effective,
-            repository,
-        } => {
-            if !effective {
-                return Err("config show currently requires --effective".into());
-            }
-            ConfigAction::ShowEffective { repository }
-        }
-    };
-    execute(action)
 }
 
 fn control_command(command: ControlCommand) -> Result<(), String> {
@@ -1011,86 +703,6 @@ fn expect_ok(response: familiar_ai_daemon::local_transport::ControlResponse) -> 
     match response {
         familiar_ai_daemon::local_transport::ControlResponse::Error(e) => Err(e),
         _ => Ok(()),
-    }
-}
-
-fn billing_command(command: BillingCommand) -> Result<(), String> {
-    use chrono::{Datelike, NaiveDate, Utc};
-    use familiar_ai_core::config::EndpointProviderKind;
-    let context = familiar_ai_daemon::config_cli::ConfigContext::resolve()?;
-    let config = Config::load(Some(&context.config_path)).map_err(|e| e.to_string())?;
-    let db = Database::open(&config.database.resolve_path(&context.data_dir))
-        .map_err(|e| e.to_string())?;
-    db.run_migrations().map_err(|e| e.to_string())?;
-    let repo = familiar_ai_storage::BillingRepository::new(db.conn());
-    match command {
-        BillingCommand::Status => {
-            let statuses = repo.statuses().map_err(|e| e.to_string())?;
-            if statuses.is_empty() {
-                println!("no operator-bound billing sources; local-estimate-only coverage");
-                return Ok(());
-            }
-            for row in statuses {
-                let stale = row
-                    .last_success
-                    .as_deref()
-                    .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-                    .map(|v| {
-                        Utc::now()
-                            .signed_duration_since(v.with_timezone(&Utc))
-                            .num_hours()
-                    })
-                    .map(|h| format!("{h}h"))
-                    .unwrap_or_else(|| "never".into());
-                println!("{} organization=\"{}\" last_success={} staleness={} coverage={}..{} failure={}",row.source_name,row.organization_name,row.last_success.as_deref().unwrap_or("never"),stale,row.window_start.as_deref().unwrap_or("none"),row.window_end.as_deref().unwrap_or("none"),row.last_failure.as_deref().unwrap_or("none"));
-            }
-            Ok(())
-        }
-        BillingCommand::Collect { source, month } => {
-            let today = Utc::now().date_naive();
-            let first = if let Some(month) = month {
-                NaiveDate::parse_from_str(&format!("{month}-01"), "%Y-%m-%d")
-                    .map_err(|_| "--month must be YYYY-MM".to_string())?
-            } else {
-                today.with_day(1).unwrap()
-            };
-            if first > today {
-                return Err("cannot collect a future billing month".into());
-            }
-            let next = if first.month() == 12 {
-                NaiveDate::from_ymd_opt(first.year() + 1, 1, 1).unwrap()
-            } else {
-                NaiveDate::from_ymd_opt(first.year(), first.month() + 1, 1).unwrap()
-            };
-            let end = next.min(today);
-            if end <= first {
-                return Err("the current daily bucket is not complete; no authoritative window is available yet".into());
-            }
-            let start = format!("{}T00:00:00Z", first.format("%Y-%m-%d"));
-            let end = format!("{}T00:00:00Z", end.format("%Y-%m-%d"));
-            let selected = config
-                .providers
-                .iter()
-                .filter(|(name, p)| {
-                    p.kind == EndpointProviderKind::Billing
-                        && source
-                            .as_deref()
-                            .map_or(true, |wanted| wanted == name.as_str())
-                })
-                .collect::<Vec<_>>();
-            if selected.is_empty() {
-                return Err(source.map_or_else(
-                    || "no operator-bound billing sources".into(),
-                    |v| format!("unknown billing source '{v}'"),
-                ));
-            }
-            for (name, provider) in selected {
-                let added =
-                    familiar_ai_daemon::billing::collect(name, provider, &start, &end, &repo)?;
-                println!("{name}: complete {start}..{end}, {added} new revisions");
-            }
-            Ok(())
-        }
     }
 }
 
@@ -1305,144 +917,6 @@ fn continue_scope_decision(
     familiar_ai_daemon::drive::continue_scope_approved_candidate(db, repository, &target, config)
 }
 
-fn worker_command(command: WorkerCommand) -> Result<(), String> {
-    match command {
-        WorkerCommand::Install { repository } => {
-            let (spec, repository, paths) = worker_spec(&repository)?;
-            let changed =
-                familiar_ai_daemon::supervisor::install(&spec, &repository, &paths.log_dir)?;
-            println!(
-                "installed={} changed={} definition={}",
-                spec.label,
-                changed,
-                spec.definition.display()
-            );
-            Ok(())
-        }
-        WorkerCommand::Uninstall { repository } => {
-            let (spec, _, _) = worker_spec(&repository)?;
-            let removed = familiar_ai_daemon::supervisor::uninstall(&spec)?;
-            println!(
-                "uninstalled={} removed={} durable_history=preserved",
-                spec.label, removed
-            );
-            Ok(())
-        }
-        WorkerCommand::Status { repository } => {
-            let (spec, repository, _) = worker_spec(&repository)?;
-            let status = familiar_ai_daemon::supervisor::status(&spec, &repository);
-            println!(
-                "backend={:?}\ninstalled={}\ndefinition={}\nstate={}",
-                status.backend,
-                status.installed,
-                status.definition.display(),
-                status.supervisor_state
-            );
-            for blocker in &status.blockers {
-                println!("blocker={blocker}");
-            }
-            if status.blockers.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("worker has {} blocker(s)", status.blockers.len()))
-            }
-        }
-        WorkerCommand::Validate { repository } => {
-            let (spec, repository, _) = worker_spec(&repository)?;
-            familiar_ai_daemon::supervisor::validate(&spec, &repository)
-                .map_err(|v| v.join("; "))?;
-            println!(
-                "valid=true backend={:?} definition={}",
-                spec.backend,
-                spec.definition.display()
-            );
-            Ok(())
-        }
-        WorkerCommand::Test => {
-            // Detection is deliberately first: unsupported hosts cannot even
-            // begin the fixture, much less claim production work.
-            let backend = familiar_ai_daemon::supervisor::detect()?;
-            let root = std::env::temp_dir()
-                .join(format!("familiar-ai-worker-fixture-{}", std::process::id()));
-            let first = familiar_ai_daemon::supervisor::run_fixture(&root);
-            if first.is_ok() {
-                return Err("fixture did not request its failure restart".into());
-            }
-            let result = familiar_ai_daemon::supervisor::run_fixture(&root)?;
-            let again = familiar_ai_daemon::supervisor::run_fixture(&root)?;
-            std::fs::remove_dir_all(&root).map_err(|e| format!("cannot clean fixture: {e}"))?;
-            if result != again {
-                return Err("fixture recovery was not idempotent".into());
-            }
-            println!("backend={backend:?} {result}");
-            Ok(())
-        }
-        WorkerCommand::Plist {
-            repository,
-            label,
-            output,
-        } => {
-            let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-            let repository = repository
-                .canonicalize()
-                .map_err(|error| error.to_string())?;
-            let paths = AppPaths::resolve().map_err(|error| error.to_string())?;
-            std::fs::create_dir_all(&paths.log_dir).map_err(|error| error.to_string())?;
-            let toolchain_path = std::env::var("PATH")
-                .map_err(|_| "PATH is required to generate a launchd worker plist".to_owned())?;
-            let rendered = familiar_ai_daemon::launchd::plist(
-                &label,
-                &executable,
-                &repository,
-                &paths.log_dir.join(format!("{label}.stdout.log")),
-                &paths.log_dir.join(format!("{label}.stderr.log")),
-                &toolchain_path,
-                10,
-                1,
-            )?;
-            std::fs::write(&output, rendered).map_err(|error| error.to_string())?;
-            println!("plist={}", output.display());
-            Ok(())
-        }
-        WorkerCommand::Run {
-            repository,
-            max_prds,
-        } => {
-            std::env::set_current_dir(&repository).map_err(|error| error.to_string())?;
-            let summary = drive_command(Some(max_prds), None, None, None, None, Vec::new())?;
-            report_command(Some(&summary.session_id))?;
-            if summary.termination.worker_should_restart() {
-                return Err(format!(
-                    "worker session {} requires supervisor restart after {}",
-                    summary.session_id,
-                    summary.termination.as_str()
-                ));
-            }
-            Ok(())
-        }
-    }
-}
-
-fn worker_spec(
-    repository: &std::path::Path,
-) -> Result<(familiar_ai_daemon::supervisor::Spec, PathBuf, AppPaths), String> {
-    // Platform detection must happen before canonicalization/config loading so
-    // unsupported platforms fail before any work-like activity.
-    familiar_ai_daemon::supervisor::detect()?;
-    let executable = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let repository = repository
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve repository {}: {e}", repository.display()))?;
-    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
-    let config = effective_repository_config(&paths, &repository)?;
-    let spec =
-        familiar_ai_daemon::supervisor::spec(&executable, &repository, &paths, &config.worker)?;
-    Ok((spec, repository, paths))
-}
-
 fn deliver_command(ownership_record: &std::path::Path, to: Option<&str>) -> Result<(), String> {
     match familiar_ai_daemon::delivery::execute_configured(ownership_record, to)? {
         familiar_ai_daemon::delivery::ConfiguredDeliveryOutcome::Environment {
@@ -1635,7 +1109,7 @@ fn handle_attached_review(
     }
 }
 
-fn drive_command(
+pub(crate) fn drive_command(
     max_prds: Option<u64>,
     max_cost_microusd: Option<u64>,
     max_duration_ms: Option<u64>,
@@ -1667,7 +1141,7 @@ fn drive_command(
 }
 
 /// Read-only: renders recorded rows and constructs no agents.
-fn report_command(session_id: Option<&str>) -> Result<(), String> {
+pub(crate) fn report_command(session_id: Option<&str>) -> Result<(), String> {
     let db = database()?;
     let rendered =
         familiar_ai_daemon::report::render(&db, session_id).map_err(|e| e.to_string())?;
@@ -2234,7 +1708,7 @@ fn database() -> Result<Database, String> {
     Ok(db)
 }
 
-fn effective_repository_config(
+pub(crate) fn effective_repository_config(
     paths: &AppPaths,
     repository: &std::path::Path,
 ) -> Result<Config, String> {

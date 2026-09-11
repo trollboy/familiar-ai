@@ -1,8 +1,16 @@
-# Backlog Execution Plan — updated 2026-08-31
+# Backlog Execution Plan — updated 2026-09-01 (PRD-076)
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
-**Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
-dependency-ready AND mutually scope-disjoint.**
+**Definition (owner's): a wave (equivalently, a round) is a batch of PRDs
+runnable simultaneously — dependency-ready AND mutually scope-disjoint.**
+Scope-disjoint is not a judgment call: it is the scheduler's own
+`achievable_width` partition (`crates/familiar-ai-daemon/src/drive.rs`) —
+two PRDs conflict exactly when a declared expected-file scope entry overlaps
+another's (exact-file equality, or directory-prefix containment either way),
+except `crates/familiar-ai-storage/migrations/`, which is always exempt
+(PRD-066 owns per-PRD migration numbering). The rows below are that
+function's actual output against this document's declared `expected_files`,
+not an estimate.
 **Policy: bugs preempt the backlog** (owner, 2026-08-31): open
 `docs/running_bugs.md` entries outrank all planned work; bug remediation is
 the first work of every session; "transferred to PRD-X" is valid only when
@@ -14,7 +22,11 @@ family created 2026-08-31 from waves 3–4 after-action findings and run
 first under the bug policy. Every economy mechanism still defaults off and
 promotes only on a recorded PRD-051 measurement. This document is the
 owner's standing authorization: workers must not pause for per-PRD plan
-sign-off on scope-conformant work.
+sign-off on scope-conformant work. **PRD-076's approval is also this
+document's standing authorization to narrow the `expected_files` of every
+PRD listed below** to the per-feature module/contract/CLI files the config,
+provider-contract, and CLI-binary splits created; each amended PRD's new
+content hash reconciles as a normal document update.
 
 ## Completed
 
@@ -60,28 +72,45 @@ exists to end that.
   verification gate can halt unattended runs. Owner: PRD-078's
   environment/verification work or a direct fix.
 
-**GATE — PRD-076 scope modularization** (owner-approved 2026-08-30):
-still required — the remaining product PRDs (058, 063, 072 especially)
-declare whole-crate scopes that would serialize waves 5–6. Regenerates
-the rows below as computed true rounds after amending the remaining
-PRDs' declarations.
+**GATE — PRD-076 scope modularization: COMPLETE 2026-09-01.** `config.rs`
+became `crates/familiar-ai-core/src/config/` (per-feature modules,
+re-exported, proven behavior-preserving by a pinned-fixture equivalence
+test); `docs/contracts/providers.md` became an index over
+`providers-{inference,billing,deploy-targets,credentials,registry-migration}.md`;
+`bin/familiar-ai.rs` thinned to dispatch, with `billing`, `config`, and
+`worker` subcommand implementations moved to `crates/familiar-ai-daemon/src/cli/`.
+Every pending PRD below declares the narrowed per-feature file it actually
+needs instead of the four shared surfaces. The rows below are
+`achievable_width`'s computed output against those narrowed declarations —
+not the pre-076 estimate.
 
-| Wave | PRDs | Graph width | Achievable width |
-|------|------|-------------|------------------|
-| bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
-| gate | 076 | 1 | 1 |
-| 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
-| 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
-| 7 | 071, 073 | 2 | 2 |
+| Round | PRDs (dependency-ready) | Graph width | Achievable width | Conflict driving the gap |
+|-------|--------------------------|-------------|-------------------|---------------------------|
+| bug gate | 077, 078, 079 **done** → 080 folded into round 1 below | — | — | — |
+| 1 | 038, 053, 058, 080 | 4 | **2** | 053, 058, 080 pairwise conflict on `crates/familiar-ai-daemon/src/` (058's whole-directory scope), `crates/familiar-ai-storage/src/repos/`, and `crates/familiar-ai-storage/src/repos/orchestration.rs`; 038 conflicts with none. Run `{038, 058}` first — it unlocks the most follow-on work. |
+| 2 | 053, 059, 060, 061, 063, 072, 080 | 7 | **2** | 059/060/061/063/072 form a five-way clique on `crates/familiar-ai-agent/src/`, `crates/familiar-ai-llm/src/`, and (for the four adapters) `docs/contracts/providers-inference.md` + `crates/familiar-ai-core/src/config/providers.rs` + `config/default.toml` — none of those are surfaces PRD-076 split. 053 also conflicts with the four adapters via `config/default.toml`. Run `{059, 080}` — 059 unlocks 071. |
+| 3 | 053, 060, 061, 063, 071, 072 | 6 | **3** | Same agent/llm clique among 060/061/063/072. 071 and 053 are disjoint from everything else in this round. Run `{053, 071, 072}`. |
+| 4 | 060, 061, 063 | 3 | **1** | Full clique (agent/src, llm/src, providers-inference.md, config/providers.rs, config/default.toml) — this is the real remaining serialization point, and it is **out of PRD-076's declared scope**: narrowing `crates/familiar-ai-agent/src/` and `crates/familiar-ai-llm/src/` per adapter would be a PRD-059/060/061/063-owned follow-on, mirroring how PRD-076 left `billing.rs`'s per-provider split to PRD-052/054. Run `{060}`. |
+| 5 | 061, 063 | 2 | **1** | Same clique, one member down. Run `{061}`. |
+| 6 | 063 | 1 | **1** | Last clique member. Completing it unlocks 073. |
+| 7 | 073 | 1 | **1** | Only PRD left; nothing to conflict with. |
+
+Rounds 4–7 are genuinely width-1 — not because PRD-076 failed to recover
+concurrency, but because the four raw-inference adapters share mutable code
+(`crates/familiar-ai-agent/src/`, `crates/familiar-ai-llm/src/`) that this
+PRD's scope explicitly does not touch (see Scope: "no new features, no
+semantic changes"). Rounds 1–3 are the actual recovery this PRD delivers:
+three real rounds of width 2–3 replace what was previously a flat
+twenty-three-round, width-one chain end to end.
 
 ## Critical path
 
-**077 → 076 → 058 → {059, 060, 061, 063} → {071, 073}** — 056 landing
-moved the control plane off the path; the raw runtime (058) is now the
-long pole, and it is ready the moment the gates clear. 038 (multi-repo
-acceptance — the forcing function that ends infrastructure work) and 053
-are dependency-ready NOW and must not keep slipping: schedule 038 in the
-first product session after the gates.
+**077 → 076 → {038, 058} → {059, 080} → {053, 071, 072} → 060 → 061 → 063 → 073**
+— 056 landing moved the control plane off the path; the raw runtime (058)
+is still the long pole, and it is now ready. 038 (multi-repo acceptance —
+the forcing function that ends infrastructure work) is dependency-ready now
+and must not keep slipping: it runs in round 1, not deferred behind the
+adapter family.
 
 ## Scheduling guidance
 
