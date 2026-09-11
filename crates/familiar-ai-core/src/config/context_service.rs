@@ -54,18 +54,9 @@ pub struct EffectiveExecutionConfig {
 
 /// The canonical Git common-directory identity of a worktree — the same key
 /// `FilesystemBacklogDiscovery::resolve` computes — or None when the path is
-/// not inside a Git repository (or git is unavailable).
+/// not inside a Git repository (or git is unavailable). PRD-087: this used
+/// to be an independent computation kept in sync with the backlog copy only
+/// by comment; it now delegates to the single minting site.
 pub(super) fn git_common_directory(path: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(output.stdout).ok()?;
-    let canonical = Path::new(value.trim()).canonicalize().ok()?;
-    Some(canonical.to_str()?.replace('\\', "/"))
+    crate::repository_path::git_common_directory(path)
 }
