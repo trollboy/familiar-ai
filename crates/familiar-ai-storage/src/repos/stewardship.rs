@@ -202,10 +202,12 @@ pub struct PendingGate {
 ///
 /// A stopped attempt is evidence that something *once* needed a decision, not
 /// that it still does. The backlog records what the human then decided:
-/// `completed` means they accepted or force-completed it, `pending` means they
-/// released it and the work was discarded. Both are settled, so both are
-/// filtered out; `in_progress` and `blocked` are not, and neither is a PRD
-/// with no backlog row — this excludes only what can be shown to be decided.
+/// `completed` means they accepted or force-completed it, and that is the only
+/// status that settles the question. `pending` does NOT: it usually means the
+/// entry was released, but an attempt can also stop while the row is still
+/// pending and never claimed, leaving retained work behind — two PRDs in this
+/// repository are in exactly that state, with checkpoints at `implemented` and
+/// no status event ever recorded. Filtering `pending` hid them.
 ///
 /// Without that filter this returned every attempt that ever ended in anything
 /// but success, so half of "waiting on you" was work already finished and the
@@ -225,7 +227,7 @@ pub fn pending_human_gates(
                  LEFT JOIN backlog_prds b \
                    ON b.prd_path=a.prd_path AND b.repository_key=s.repository_key \
                  WHERE s.repository_key=?1 AND (a.outcome IS NULL OR a.outcome<>'completed') \
-                   AND (b.status IS NULL OR b.status NOT IN ('completed','pending')) \
+                   AND (b.status IS NULL OR b.status<>'completed') \
                  ORDER BY a.started_at DESC, a.sequence DESC LIMIT ?2",
             )
             .map_err(db)?;
@@ -264,7 +266,7 @@ pub fn pending_human_gates(
                  LEFT JOIN backlog_prds b \
                    ON b.prd_path=c.prd_path AND b.repository_key=c.repository_key \
                  WHERE c.repository_key=?1 AND c.phase IN ('blocked','invalid_checkpoint') \
-                   AND (b.status IS NULL OR b.status NOT IN ('completed','pending')) \
+                   AND (b.status IS NULL OR b.status<>'completed') \
                  ORDER BY c.prd_id LIMIT ?2",
             )
             .map_err(db)?;
@@ -366,8 +368,8 @@ mod tests {
         assert!(budget_summary(db.conn(), "nope").unwrap().is_none());
     }
 
-    /// A stopped attempt whose PRD the human has since settled is history, not
-    /// a decision waiting to be made. Before this filter, 8 of the 16 PRDs in
+    /// A stopped attempt whose PRD has since been completed is history, not a
+    /// decision waiting to be made. Before this filter, 8 of the 16 PRDs in
     /// the owner's "waiting on you" list were already completed.
     #[test]
     fn pending_human_gates_omits_prds_whose_decision_was_already_made() {
@@ -402,8 +404,13 @@ mod tests {
         }
 
         let gates = pending_human_gates(db.conn(), "/repo/.git", 10).unwrap();
-        let prds: Vec<&str> = gates.iter().map(|g| g.prd_id.as_str()).collect();
-        assert_eq!(prds, vec!["PRD-3"], "only the undecided PRD is waiting");
+        let mut prds: Vec<&str> = gates.iter().map(|g| g.prd_id.as_str()).collect();
+        prds.sort_unstable();
+        // `completed` is the only settled status. A `pending` row with a
+        // stopped attempt has usually been released, but it can equally be an
+        // entry that was never claimed and still holds retained work, so it
+        // stays visible rather than being assumed decided.
+        assert_eq!(prds, vec!["PRD-2", "PRD-3"]);
     }
 
     /// A blocked checkpoint for a PRD the human already completed is likewise
