@@ -109,6 +109,71 @@ fn fresh_database_selects_active_work_after_archived_dependency() {
     assert_eq!(archived, ("completed".into(), 0));
 }
 
+/// Archiving a PRD that already carries history must not break the next run.
+///
+/// `backlog_status_events` holds a foreign key into
+/// `backlog_prds(repository_key, prd_path)`, so any attempt to tidy the
+/// moved-from row away — by deleting it or by moving its path — aborts the
+/// reconciliation transaction and takes `next`, `run` and `drive` with it. A
+/// change that did exactly that shipped to main, because the unit fixtures
+/// had no history to violate and nothing ran the command itself.
+#[test]
+fn archiving_a_prd_with_history_leaves_next_working() {
+    let repo = git_repo();
+    let database = repo.path().join("state/familiar.db");
+    fs::create_dir_all(repo.path().join("docs/prds/done")).unwrap();
+    fs::write(
+        repo.path().join("docs/prds/PRD-001.md"),
+        "# PRD-001: Moves later\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join("docs/prds/PRD-002.md"),
+        "# PRD-002: Remaining\n",
+    )
+    .unwrap();
+
+    // First run registers both and gives PRD-001 the history a claimed PRD
+    // accumulates.
+    assert!(next_command(&repo, &database).output().unwrap().status.success());
+    {
+        let db = familiar_ai_storage::Database::open(&database).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_status_events(repository_key,prd_path,old_status,new_status,\
+                 actor,changed_at) SELECT repository_key,prd_path,'pending','in_progress',\
+                 'human:tester','t' FROM backlog_prds WHERE prd_path='docs/prds/PRD-001.md'",
+                [],
+            )
+            .unwrap();
+    }
+
+    // Archive it: same PRD, new path, history still pointing at the old one.
+    fs::rename(
+        repo.path().join("docs/prds/PRD-001.md"),
+        repo.path().join("docs/prds/done/PRD-001.md"),
+    )
+    .unwrap();
+
+    let output = next_command(&repo, &database).output().unwrap();
+    assert!(
+        output.status.success(),
+        "next must survive archiving a PRD that has history: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // And the run after it, which is where an aborted transaction surfaces.
+    let output = next_command(&repo, &database).output().unwrap();
+    assert!(
+        output.status.success(),
+        "the run after an archive must also succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        b"PRD-2\tdocs/prds/PRD-002.md\tpending\tRemaining\n"
+    );
+}
+
 #[test]
 fn next_reports_categorized_backlog_failures_on_stderr_only() {
     let repo = git_repo();
