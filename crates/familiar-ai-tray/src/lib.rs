@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod icon;
 pub mod menu;
+pub mod sysdeps;
 pub mod tray;
 
 pub use commands::TrayCommand;

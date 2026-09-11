@@ -632,9 +632,17 @@ fn run_with_tray_feature_but_disabled(state: DaemonState) -> ExitCode {
     };
 
     runtime.block_on(async {
+        let mut termination = TerminationSignals::register().expect("register termination signals");
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_command_tx, command_rx) = mpsc::channel::<DaemonCommand>(64);
-        daemon_run(&state, command_rx, shutdown_tx, shutdown_rx).await;
+        daemon_run(
+            &state,
+            &mut termination,
+            command_rx,
+            shutdown_tx,
+            shutdown_rx,
+        )
+        .await;
         if let Err(e) = remove_pid_file(&state.pid_path) {
             tracing::warn!(error = %e, "failed to remove pid file");
         }

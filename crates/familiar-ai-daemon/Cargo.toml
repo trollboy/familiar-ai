@@ -14,8 +14,8 @@ name = "familiar-ai"
 path = "src/bin/familiar-ai.rs"
 
 [features]
-default = ["tray"]
-tray = ["dep:familiar-ai-tray"]
+default = []
+tray = ["dep:familiar-ai-tray", "familiar-ai-tray/enforce-native-deps"]
 
 [dependencies]
 familiar-ai-agent = { path = "../familiar-ai-agent" }

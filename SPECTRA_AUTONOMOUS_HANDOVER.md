@@ -146,7 +146,7 @@ At minimum run:
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
-cargo build --release --no-default-features -p familiar-ai-daemon --bin familiar-ai
+cargo build --release -p familiar-ai-daemon --bin familiar-ai
 ```
 
 Before touching Spectra, verify `familiar-ai report`, `history`, and `usage`

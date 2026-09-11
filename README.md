@@ -117,8 +117,11 @@ kernel ≥ 5.13 or macOS, and at least one coding agent CLI on `PATH`
 git clone git@github.com:trollboy/familiar-ai.git
 cd familiar-ai
 
-# Build the CLI. --no-default-features skips the tray feature.
-cargo build --release --no-default-features -p familiar-ai-daemon --bin familiar-ai
+# Build the CLI. Default features build clean on Linux and macOS with no
+# system packages beyond a C toolchain (needed by `ring`) and Rust stable —
+# the tray is opt-in (see "Optional: the tray" below), not a default.
+# PRD-092:PARITY
+cargo build --release -p familiar-ai-daemon --bin familiar-ai
 install -m755 target/release/familiar-ai ~/.local/bin/
 
 # Point it at a repository containing docs/prds/*.md
@@ -143,6 +146,22 @@ familiar-ai report                      # what happened overnight
 `drive` **requires** a finite warrant (PRD count, cost, or duration) and refuses
 to start without one. Command-line flags may only *tighten* the configured
 warrant, never loosen it.
+
+---
+
+## Optional: the tray
+
+The `familiar-ai-daemon` service binary can show a system tray icon. It is an
+opt-in Cargo feature, not part of the default build:
+
+```bash
+cargo build --release -p familiar-ai-daemon --bin familiar-ai-daemon --features tray
+```
+
+On Linux this additionally requires `libgtk-3-dev` and `libxdo-dev`; enabling
+the feature without them fails at configure time naming the missing package,
+not with a linker error at the end of the build. Nothing beyond the default
+build's C toolchain and Rust stable is required to leave the tray disabled.
 
 ---
 
@@ -196,7 +215,7 @@ A Rust workspace of fourteen crates. The wave-two execution path is
 | `familiar-ai-daemon` | `run`, `drive`, `report`, the `familiar-ai` binary |
 | `familiar-ai-context` / `-tokens` | Context compilation with hard token ceilings |
 | `familiar-ai-llm` | OpenAI-compatible backends (Ollama, vLLM, LM Studio, OpenRouter) |
-| `familiar-ai-mcp` / `-summary` / `-watcher` / `-tray` | Wave-one memory surface (dormant w.r.t. the autopilot) |
+| `familiar-ai-mcp` / `-summary` / `-watcher` / `-tray` | Wave-one memory surface (dormant w.r.t. the autopilot); `-tray` is behind the opt-in `tray` feature |
 | `familiar-ai-logging` / `-testutil` | Tracing setup; shared test fixtures |
 
 ### Key concepts
@@ -246,17 +265,44 @@ is identical everywhere:
 
 ```bash
 docker compose build test
-docker compose run --rm test cargo test --workspace --no-default-features
+docker compose run --rm test cargo test --workspace
 docker compose run --rm test cargo fmt --all -- --check
 docker compose run --rm test cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Host commands are for repository inspection and version control only.
 
+`./scripts/gate-build.sh` is the same default-feature build the Docker image
+and a host install use — see [One build command everywhere](#one-build-command-everywhere).
+
 Known environment quirks: the tester image excludes `.git/`, so a handful of
 git-dependent tests fail there by design; `rustfmt`/`clippy` need
-`rustup component add` at container runtime; the default `tray` feature has a
-pre-existing compile error, hence `--no-default-features`.
+`rustup component add` at container runtime.
+
+### One build command everywhere
+
+Every documented build invocation uses the default feature set — none carry a
+workaround flag. Four scripts hold that:
+
+| Script | Proves |
+|---|---|
+| `scripts/gate-build.sh` | The default feature set builds on Linux with `cargo build -p familiar-ai-daemon --bin familiar-ai`, no flags |
+| `scripts/check-no-workaround-flags.sh` | No README, `scripts/`, or operator-doc invocation carries `--no-default-features` without a declared reason |
+| `scripts/check-feature-parity.sh` | The Dockerfile, README install command, and gate build resolve the same feature set |
+| `scripts/measure-build-time.sh` | Clean and incremental build wall-clock stay under a declared per-platform ceiling |
+
+Run any of them with `--help`. `check-no-workaround-flags.sh` and
+`measure-build-time.sh` also take `--selftest`, which pins their behaviour
+against fixed cases (a declared-reason exemption; the recorded macOS
+build-speed pathology) without needing to reproduce either on demand.
+
+`crates/familiar-ai-daemon/tests/gate_scripts.rs` runs `gate-build.sh`,
+`check-no-workaround-flags.sh`, and `check-feature-parity.sh` for real
+(plus each script's `--selftest`, and `measure-build-time.sh --selftest`),
+so `cargo test -p familiar-ai-daemon` / `cargo test --workspace` fail if any
+of them regress — no separate CI job or human reminder required.
+`measure-build-time.sh`'s real timing run stays a manual/CI-scheduled
+check, since it takes minutes and its pass/fail depends on host speed.
 
 ### Contributing
 

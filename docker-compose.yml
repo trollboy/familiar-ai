@@ -16,7 +16,7 @@ services:
       target: tester
     working_dir: /app
     command: >
-      cargo llvm-cov test --workspace --no-fail-fast --no-default-features
+      cargo llvm-cov test --workspace --no-fail-fast
     volumes:
       - cargo-cache:/usr/local/cargo/registry
 
