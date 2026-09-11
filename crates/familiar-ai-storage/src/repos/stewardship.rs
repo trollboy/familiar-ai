@@ -142,13 +142,40 @@ pub fn review_findings_for_session(
 /// neither is right, and the command that *is* right (`scope-decisions`) was
 /// never named, so the only advertised ways forward were destructive. The
 /// destructive pair is still offered, but last, and only after the remedy.
-fn recovery_for(detail: &str, prd_id: &str, prd_path: &str) -> Vec<String> {
+/// The commands that will actually do something for this stop.
+///
+/// `pending_decisions` is the number of scope findings still awaiting a
+/// verdict. It matters because the advice used to be generated from the stop
+/// reason alone: any `scope_*` stop printed "run the numbered picker" whether
+/// or not the picker had anything to ask. On this repository that produced
+/// exactly that — four PRDs told to run a picker while every one of their
+/// 22 findings was already approved, so the one command the operator was
+/// pointed at would have opened an empty list.
+/// How many scope findings for this PRD still await a verdict.
+///
+/// A read rather than an assumption: the advice is only useful if it reflects
+/// what is actually outstanding.
+fn pending_for(conn: &Connection, repository_key: &str, prd_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM scope_decisions \
+         WHERE repository_key=?1 AND prd_id=?2 AND decision IS NULL",
+        params![repository_key, prd_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
+}
+
+fn recovery_for(
+    detail: &str,
+    prd_id: &str,
+    prd_path: &str,
+    pending_decisions: i64,
+) -> Vec<String> {
     let mut commands = Vec::new();
-    if detail.starts_with("scope_") {
-        commands.push(
-            "familiar-ai scope-decisions   # numbered picker; approve or reject each finding"
-                .to_string(),
-        );
+    if detail.starts_with("scope_") && pending_decisions > 0 {
+        commands.push(format!(
+            "familiar-ai scope-decisions   # numbered picker; {pending_decisions} finding(s) awaiting a verdict"
+        ));
     }
     if matches!(
         detail,
@@ -252,7 +279,7 @@ pub fn pending_human_gates(
                 kind: "stopped_attempt".into(),
                 session_id: Some(session_id),
                 prd_id: prd_id.clone(),
-                recovery_commands: recovery_for(&detail, &prd_id, &prd_path),
+                recovery_commands: recovery_for(&detail, &prd_id, &prd_path, pending_for(conn, repository_key, &prd_id)),
                 prd_path,
                 detail,
             });
@@ -371,6 +398,78 @@ mod tests {
     /// A stopped attempt whose PRD has since been completed is history, not a
     /// decision waiting to be made. Before this filter, 8 of the 16 PRDs in
     /// the owner's "waiting on you" list were already completed.
+    /// The advice used to be generated from the stop reason alone, so every
+    /// `scope_*` stop said "run the numbered picker" whether or not the
+    /// picker had anything to ask.
+    #[test]
+    fn scope_advice_appears_only_when_a_finding_actually_awaits_a_verdict() {
+        let db = database();
+        let driver = DriverRepository::new(db.conn());
+        driver.open_session("session-1", "/repo/.git", "{}").unwrap();
+        let attempt = driver
+            .record_attempt_started("session-1", "PRD-1", "docs/prds/PRD-1.md", None)
+            .unwrap();
+        driver
+            .record_attempt_finished(
+                "session-1",
+                attempt,
+                "retained",
+                Some("scope_broadened"),
+                None,
+                Some(5),
+            )
+            .unwrap();
+
+        // Nothing pending: the picker would open an empty list, so it is not
+        // offered.
+        let gates = pending_human_gates(db.conn(), "/repo/.git", 10).unwrap();
+        assert!(
+            !gates[0]
+                .recovery_commands
+                .iter()
+                .any(|c| c.contains("scope-decisions")),
+            "advice offered a picker with nothing to pick: {:?}",
+            gates[0].recovery_commands
+        );
+
+        // One finding awaiting a verdict: now it is the first thing offered.
+        // The decision references a real checkpoint, as the schema requires.
+        CheckpointRepository::new(db.conn())
+            .put(&ExecutionCheckpoint {
+                checkpoint_id: "cp-1".into(),
+                repository_key: "/repo/.git".into(),
+                prd_id: "PRD-1".into(),
+                prd_path: "docs/prds/PRD-1.md".into(),
+                execution_id: None,
+                phase: "implemented".into(),
+                base_revision: "deadbeef".into(),
+                worktree_path: "/state/worktrees/PRD-1".into(),
+                branch_name: None,
+                diff_hash: "sha256:abc".into(),
+                changed_files_json: "[]".into(),
+                agent_identity: "claude-code".into(),
+                usage_json: "{}".into(),
+                test_evidence_json: "{}".into(),
+                invalid_reason: None,
+            })
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO scope_decisions(finding_hash,repository_key,checkpoint_id,prd_id,\
+                 candidate_hash,finding_json,decision,created_at) \
+                 VALUES('f1','/repo/.git','cp-1','PRD-1','c1','{}',NULL,'t')",
+                [],
+            )
+            .unwrap();
+        let gates = pending_human_gates(db.conn(), "/repo/.git", 10).unwrap();
+        let scope_line = gates[0]
+            .recovery_commands
+            .iter()
+            .find(|c| c.contains("scope-decisions"))
+            .expect("a pending finding must offer the picker");
+        assert!(scope_line.contains("1 finding(s)"), "{scope_line}");
+    }
+
     #[test]
     fn pending_human_gates_omits_prds_whose_decision_was_already_made() {
         let db = database();

@@ -208,7 +208,31 @@ impl WorktreeLease {
         persist(&self.ownership_path, &self.ownership)
     }
 
+    /// Retain the candidate's source and drop its build cache.
+    ///
+    /// Retention is deliberate: a stopped attempt's work has to survive for a
+    /// human to decide on. Its `target/` does not. Keeping both meant 23
+    /// retained worktrees held 250GB while the work actually worth keeping was
+    /// 101MB — 0.04% of the bytes — and the obvious way to reclaim that space
+    /// would have destroyed three PRDs' uncommitted work.
+    ///
+    /// A failure to remove the cache is reported but never fails retention:
+    /// losing disk is recoverable, losing the candidate is not.
     pub fn mark_retained(&mut self) -> io::Result<()> {
+        let target = self.path().join("target");
+        if target.exists() {
+            match fs::remove_dir_all(&target) {
+                Ok(()) => tracing::info!(
+                    worktree = %self.path().display(),
+                    "removed the retained candidate's build cache; its source is kept"
+                ),
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    worktree = %self.path().display(),
+                    "could not remove the retained candidate's build cache"
+                ),
+            }
+        }
         self.mark_state("retained")
     }
 
@@ -322,6 +346,62 @@ mod tests {
         let record: WorktreeOwnership =
             serde_json::from_slice(&fs::read(&lease.ownership_path).unwrap()).unwrap();
         assert_eq!(record.state, "retained");
+    }
+
+    /// Retaining a candidate keeps the work and drops the build cache.
+    ///
+    /// Keeping both is what let 23 retained worktrees reach 250GB while the
+    /// source worth keeping was 101MB, and made reclaiming that space a
+    /// threat to three PRDs' uncommitted work.
+    #[test]
+    fn retaining_a_candidate_keeps_its_source_and_drops_its_build_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(repo.join("file"), "base").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-qm", "base"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        let state = temp.path().join("state");
+        let mut lease = WorktreeLease::create(&repo, &state, "session", "PRD-1").unwrap();
+
+        // A build leaves a target directory behind, and an edit leaves work.
+        fs::create_dir_all(lease.path().join("target/debug")).unwrap();
+        fs::write(lease.path().join("target/debug/artifact"), vec![0u8; 4096]).unwrap();
+        fs::write(lease.path().join("file"), "the candidate's work").unwrap();
+
+        lease.mark_retained().unwrap();
+
+        assert!(
+            !lease.path().join("target").exists(),
+            "the build cache must not be retained with the candidate"
+        );
+        assert_eq!(
+            fs::read_to_string(lease.path().join("file")).unwrap(),
+            "the candidate's work",
+            "the work itself must survive retention"
+        );
     }
 
     #[test]
