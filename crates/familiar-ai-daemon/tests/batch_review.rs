@@ -490,6 +490,9 @@ fn build_batch_reviewer_resolves_a_repository_scoped_enablement() {
         auth_profile: Some("anthropic-batch".into()),
         capability_profile: None,
         runtime_config: None,
+        // PRD-063 added local-worker configuration; a remote batch worker
+        // declares none.
+        local: None,
         executable: None,
         capabilities: vec![],
         fresh_process_isolation: true,

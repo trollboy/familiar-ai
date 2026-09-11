@@ -12,6 +12,7 @@ pub mod driver;
 pub mod execution_history;
 pub mod file_summary;
 pub mod lifecycle;
+pub mod local_telemetry;
 pub mod model_artifact;
 pub mod orchestration;
 pub mod planner;

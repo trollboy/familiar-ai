@@ -1393,6 +1393,7 @@ fn model_enable(
         auth_profile: None,
         capability_profile: None,
         runtime_config: None,
+        local: None,
         executable: None,
         capabilities: parsed,
         fresh_process_isolation: true,

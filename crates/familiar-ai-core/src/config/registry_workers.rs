@@ -243,6 +243,175 @@ pub struct OllamaRuntimeConfig {
     pub host: Option<String>,
 }
 
+/// PRD-063 local worker `RuntimeId` vocabulary. A local worker is
+/// `provider = "local"` plus one of these runtimes; the same artifact under
+/// two different runtimes is two distinct workers for routing, telemetry,
+/// and empirical history (PRD-057 discipline extended to local hardware).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LocalRuntimeKind {
+    Unsloth,
+    Ollama,
+}
+
+impl LocalRuntimeKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsloth => "unsloth",
+            Self::Ollama => "ollama",
+        }
+    }
+
+    /// Whether this runtime exposes the metadata/digests needed to verify a
+    /// serving endpoint's claimed model against a registered PRD-062
+    /// artifact. A runtime without this stays degraded-unverified rather
+    /// than ever inferring a match from the model name alone.
+    pub const fn supports_artifact_digest(self) -> bool {
+        matches!(self, Self::Ollama)
+    }
+}
+
+/// Endpoint trust is explicit and derived, never operator-declared, so it
+/// can never silently drift from the endpoint it describes (PRD-063).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LocalEndpointTrustConfig {
+    Loopback,
+    Lan,
+    Remote,
+}
+
+fn extract_host(base_url: &str) -> &str {
+    let without_scheme = base_url.split("://").nth(1).unwrap_or(base_url);
+    let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        authority.rsplit_once(':').map_or(authority, |(h, _)| h)
+    }
+}
+
+/// Classifies a local endpoint's trust class straight from its URL host:
+/// loopback, private/link-local (LAN), or everything else (Remote — the
+/// stricter default for anything Familiar cannot positively classify as
+/// private).
+pub fn classify_local_endpoint_trust(base_url: &str) -> LocalEndpointTrustConfig {
+    let host = extract_host(base_url);
+    if host.eq_ignore_ascii_case("localhost") || host == "::1" {
+        return LocalEndpointTrustConfig::Loopback;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) if v4.octets()[0] == 127 => LocalEndpointTrustConfig::Loopback,
+        Ok(std::net::IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            if o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254)
+            {
+                LocalEndpointTrustConfig::Lan
+            } else {
+                LocalEndpointTrustConfig::Remote
+            }
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let first = v6.segments()[0];
+            if v6.is_loopback() {
+                LocalEndpointTrustConfig::Loopback
+            } else if (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80 {
+                LocalEndpointTrustConfig::Lan
+            } else {
+                LocalEndpointTrustConfig::Remote
+            }
+        }
+        Err(_) => LocalEndpointTrustConfig::Remote,
+    }
+}
+
+/// The PRD-063 endpoint profile: where the runtime is reached and how it is
+/// trusted. Authentication, when required, is the generic
+/// `RegistryWorkerConfig.auth_profile` BYO-Auth reference shared by every
+/// worker kind — never a duplicate credential surface here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalEndpointConfig {
+    pub base_url: String,
+    #[serde(default)]
+    pub tls: bool,
+}
+
+impl LocalEndpointConfig {
+    pub fn trust(&self) -> LocalEndpointTrustConfig {
+        classify_local_endpoint_trust(&self.base_url)
+    }
+
+    /// Whether `base_url`'s scheme is actually `https`. `tls` is validated
+    /// against this rather than trusted as an independent operator
+    /// declaration — a mismatched declaration is a configuration error, not
+    /// silently ignored.
+    pub fn base_url_uses_https(&self) -> bool {
+        self.base_url
+            .split("://")
+            .next()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+    }
+}
+
+/// The PRD-063 hardware/resource profile: what PRD-064 typed reservations
+/// local execution must acquire before running. Every field absent means
+/// unmeasured/unbounded-by-Familiar, never zero or unlimited by assumption;
+/// absent thermal/power ceilings mean the platform exposes no such sensor
+/// (recorded as unknown, never assumed safe).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct LocalResourceProfileConfig {
+    pub accelerator_memory_mb: Option<u64>,
+    pub system_memory_mb: Option<u64>,
+    pub concurrent_inference_slots: Option<u64>,
+    pub model_loading_slots: Option<u64>,
+    pub exclusive_runtime: bool,
+    pub thermal_ceiling_celsius: Option<u64>,
+    pub power_ceiling_watts: Option<u64>,
+}
+
+/// The complete PRD-063 local addition to a PRD-057 worker spec: which
+/// runtime, where it is reached, and what hardware it reserves. Present
+/// only when `RegistryWorkerConfig.provider == LOCAL_PROVIDER`.
+///
+/// Declaring this block validates a worker spec and makes it addressable
+/// (`familiar_ai_agent::local_worker::LocalInferenceAdapter`, the PRD-064
+/// reservation glue in `familiar_ai_daemon::local_worker_runtime`, and the
+/// PRD-051 telemetry sink all exist and are exercised end-to-end by their
+/// own fake-endpoint test suites). It does **not** yet make the entry
+/// reachable from `familiar_ai_daemon::run`'s worker-selection/execution
+/// path: that path (`build_agent`/`AdapterFactories`, keyed by
+/// `familiar_ai_core::config::AgentAdapterKind`) only knows the CLI-driven
+/// adapters (`codex`, `claude-code`, `ollama`-via-Codex-harness). Routing a
+/// `provider = "local"` entry into a real execution is deferred to a
+/// follow-up change, matching the identical, pre-existing state of every
+/// other PRD-058 raw-runtime adapter in this workspace (Anthropic, OpenAI,
+/// xAI: fully implemented and tested, none reachable from production
+/// dispatch either). Until that follow-up lands,
+/// `familiar_ai_daemon::run::resolved_worker_plan` fails closed rather than
+/// silently misdispatching: a selected worker declaring this block returns
+/// an explicit `Err` before any `CodingAgent` is built, because its
+/// `runtime` (e.g. `"ollama"`) can otherwise collide with an unrelated
+/// pre-existing CLI-driven adapter id of the same name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalWorkerConfig {
+    pub runtime_kind: LocalRuntimeKind,
+    pub endpoint: LocalEndpointConfig,
+    #[serde(default)]
+    pub resources: LocalResourceProfileConfig,
+}
+
+/// The `provider` value every PRD-063 local worker uses. Distinct from
+/// which `[providers.<name>]` inference entry (if any) discovered the
+/// endpoint — a local worker's routing/telemetry identity is its full
+/// spec, not a provider directory entry.
+pub const LOCAL_PROVIDER: &str = "local";
+
 impl WorkerCapabilityConfig {
     /// The canonical serialized spelling — identical to the serde kebab-case
     /// form and to what the CLI accepts, so display output always round-trips
@@ -281,6 +450,10 @@ pub struct RegistryWorkerConfig {
     /// add their own closed adapter-owned type when their adapter is added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_config: Option<OllamaRuntimeConfig>,
+    /// The PRD-063 local worker endpoint/hardware profile. Present only for
+    /// `provider = "local"` workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalWorkerConfig>,
     #[serde(default)]
     pub executable: Option<String>,
     #[serde(default)]
@@ -458,6 +631,7 @@ impl WorkerRegistryConfig {
             auth_profile: None,
             capability_profile: None,
             runtime_config: None,
+            local: None,
             executable: entry.executable.clone(),
             capabilities,
             fresh_process_isolation: true,
@@ -537,6 +711,56 @@ impl WorkerRegistryConfig {
             }
             if worker.runtime_config.is_some() && worker.runtime_id()? != "ollama" {
                 return Err(format!("worker_registry.workers.{id}.runtime_config is owned only by the ollama adapter"));
+            }
+            if worker.local.is_some() && worker.runtime_config.is_some() {
+                return Err(format!(
+                    "worker_registry.workers.{id} local and runtime_config are mutually exclusive"
+                ));
+            }
+            // `local` is the PRD-063 opt-in marker: declaring it requires
+            // provider = "local" and internal consistency, but the reverse
+            // is not required — `provider = "local"` is an ordinary free
+            // string other worker kinds (e.g. a Codex-harness worker
+            // labeled "local" for a cheap on-box model) may already use
+            // for unrelated reasons, and this validation must not surprise
+            // them.
+            if let Some(local) = &worker.local {
+                if worker.provider != LOCAL_PROVIDER {
+                    return Err(format!(
+                        "worker_registry.workers.{id} local requires provider = \"{LOCAL_PROVIDER}\""
+                    ));
+                }
+                if worker.runtime_id()? != local.runtime_kind.as_str() {
+                    return Err(format!(
+                        "worker_registry.workers.{id} local.runtime_kind must match runtime"
+                    ));
+                }
+                if local.endpoint.base_url.trim().is_empty() {
+                    return Err(format!(
+                        "worker_registry.workers.{id} local.endpoint.base_url must not be empty"
+                    ));
+                }
+                if local.endpoint.trust() != LocalEndpointTrustConfig::Loopback {
+                    if worker.auth_profile.is_none() {
+                        return Err(format!(
+                            "worker_registry.workers.{id} non-loopback local endpoints require auth_profile"
+                        ));
+                    }
+                    // A credential is never sent in cleartext to a
+                    // non-loopback host: both the declared `tls` flag and
+                    // the URL's own scheme must say so, so the credential
+                    // can never travel over plaintext by a mismatched or
+                    // ignored declaration.
+                    if !local.endpoint.tls || !local.endpoint.base_url_uses_https() {
+                        return Err(format!(
+                            "worker_registry.workers.{id} non-loopback local endpoints require tls = true and an https:// base_url"
+                        ));
+                    }
+                } else if local.endpoint.tls && !local.endpoint.base_url_uses_https() {
+                    return Err(format!(
+                        "worker_registry.workers.{id} local.endpoint.tls = true requires an https:// base_url"
+                    ));
+                }
             }
             if let Some(profile) = &worker.capability_profile {
                 if !self.capability_profiles.contains_key(profile) {
@@ -679,5 +903,203 @@ impl AgentsConfig {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod local_worker_tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_trust_classifies_loopback_lan_and_remote() {
+        for (url, expected) in [
+            ("http://127.0.0.1:11434", LocalEndpointTrustConfig::Loopback),
+            ("http://localhost:11434", LocalEndpointTrustConfig::Loopback),
+            ("http://[::1]:11434", LocalEndpointTrustConfig::Loopback),
+            ("http://192.168.1.20:11434", LocalEndpointTrustConfig::Lan),
+            ("http://10.0.0.5:11434", LocalEndpointTrustConfig::Lan),
+            (
+                "https://models.example.com:11434",
+                LocalEndpointTrustConfig::Remote,
+            ),
+            ("http://8.8.8.8:11434", LocalEndpointTrustConfig::Remote),
+        ] {
+            assert_eq!(classify_local_endpoint_trust(url), expected, "{url}");
+        }
+    }
+
+    fn local_worker(
+        provider: &str,
+        runtime: &str,
+        local: Option<LocalWorkerConfig>,
+        auth_profile: Option<&str>,
+    ) -> RegistryWorkerConfig {
+        RegistryWorkerConfig {
+            adapter: None,
+            provider: provider.into(),
+            model: "llama3".into(),
+            runtime: Some(runtime.into()),
+            model_artifact: None,
+            auth_profile: auth_profile.map(str::to_owned),
+            capability_profile: None,
+            runtime_config: None,
+            local,
+            executable: None,
+            capabilities: vec![WorkerCapabilityConfig::Implementation],
+            fresh_process_isolation: true,
+            context_tokens: 0,
+            estimated_cost_microusd: None,
+            available: true,
+            effort: None,
+            permission_mode: None,
+            extra_args: vec![],
+        }
+    }
+
+    fn registry(worker: RegistryWorkerConfig) -> WorkerRegistryConfig {
+        WorkerRegistryConfig {
+            workers: BTreeMap::from([("w".to_owned(), worker)]),
+            capability_profiles: BTreeMap::new(),
+            routing: WorkerRoutingConfig::default(),
+        }
+    }
+
+    fn loopback_local(kind: LocalRuntimeKind) -> LocalWorkerConfig {
+        LocalWorkerConfig {
+            runtime_kind: kind,
+            endpoint: LocalEndpointConfig {
+                base_url: "http://127.0.0.1:11434".into(),
+                tls: false,
+            },
+            resources: LocalResourceProfileConfig::default(),
+        }
+    }
+
+    #[test]
+    fn valid_loopback_local_worker_passes() {
+        let worker = local_worker(
+            LOCAL_PROVIDER,
+            "ollama",
+            Some(loopback_local(LocalRuntimeKind::Ollama)),
+            None,
+        );
+        registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn provider_local_without_a_local_profile_is_an_ordinary_free_string() {
+        // `provider = "local"` is an unremarkable free string other worker
+        // kinds already use for unrelated reasons (e.g. a Codex-harness
+        // worker labeled "local" for a cheap on-box model); declaring the
+        // PRD-063 `local` profile is opt-in, never implied by the string.
+        let worker = local_worker(LOCAL_PROVIDER, "ollama", None, None);
+        registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn local_profile_requires_local_provider() {
+        let worker = local_worker(
+            "not-local",
+            "ollama",
+            Some(loopback_local(LocalRuntimeKind::Ollama)),
+            None,
+        );
+        let error = registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(error.contains("requires provider"), "{error}");
+    }
+
+    #[test]
+    fn local_runtime_kind_must_match_declared_runtime() {
+        let worker = local_worker(
+            LOCAL_PROVIDER,
+            "unsloth",
+            Some(loopback_local(LocalRuntimeKind::Ollama)),
+            None,
+        );
+        let error = registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(error.contains("runtime_kind must match runtime"), "{error}");
+    }
+
+    #[test]
+    fn non_loopback_endpoint_requires_auth_profile() {
+        let mut local = loopback_local(LocalRuntimeKind::Ollama);
+        local.endpoint.base_url = "https://gpu-box.lan:11434".into();
+        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), None);
+        let error = registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(error.contains("require auth_profile"), "{error}");
+
+        let mut local = loopback_local(LocalRuntimeKind::Ollama);
+        local.endpoint.base_url = "https://gpu-box.lan:11434".into();
+        local.endpoint.tls = true;
+        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), Some("gpu-box"));
+        registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn non_loopback_endpoint_requires_tls_true_and_https_scheme() {
+        // auth_profile present but plaintext http:// base_url: refused, even
+        // though `tls` defaults to false and would otherwise pass unnoticed.
+        let mut local = loopback_local(LocalRuntimeKind::Ollama);
+        local.endpoint.base_url = "http://gpu-box.lan:11434".into();
+        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), Some("gpu-box"));
+        let error = registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(error.contains("tls = true and an https"), "{error}");
+
+        // auth_profile and https:// base_url, but the declared `tls` flag
+        // was left false: the flag is load-bearing, not decorative.
+        let mut local = loopback_local(LocalRuntimeKind::Ollama);
+        local.endpoint.base_url = "https://gpu-box.lan:11434".into();
+        local.endpoint.tls = false;
+        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), Some("gpu-box"));
+        let error = registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(error.contains("tls = true and an https"), "{error}");
+    }
+
+    #[test]
+    fn declared_tls_true_must_match_an_https_scheme() {
+        let mut local = loopback_local(LocalRuntimeKind::Ollama);
+        local.endpoint.tls = true;
+        let worker = local_worker(LOCAL_PROVIDER, "ollama", Some(local), None);
+        let error = registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(error.contains("requires an https:// base_url"), "{error}");
+    }
+
+    #[test]
+    fn local_and_runtime_config_are_mutually_exclusive() {
+        let mut worker = local_worker(
+            LOCAL_PROVIDER,
+            "ollama",
+            Some(loopback_local(LocalRuntimeKind::Ollama)),
+            None,
+        );
+        worker.runtime_config = Some(OllamaRuntimeConfig::default());
+        let error = registry(worker)
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(error.contains("mutually exclusive"), "{error}");
+    }
+
+    #[test]
+    fn artifact_digest_support_is_closed_per_runtime() {
+        assert!(LocalRuntimeKind::Ollama.supports_artifact_digest());
+        assert!(!LocalRuntimeKind::Unsloth.supports_artifact_digest());
     }
 }

@@ -206,6 +206,7 @@ fn ollama_registry_entry_uses_existing_codex_oss_adapter() {
         auth_profile: None,
         capability_profile: None,
         runtime_config: None,
+        local: None,
         executable: None,
         capabilities: vec![familiar_ai_core::config::WorkerCapabilityConfig::Implementation],
         fresh_process_isolation: true,

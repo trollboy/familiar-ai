@@ -205,6 +205,7 @@ mod tests {
             auth_profile: None,
             capability_profile: None,
             runtime_config: None,
+            local: None,
             executable: executable.map(str::to_owned),
             capabilities: vec![WorkerCapabilityConfig::Implementation],
             fresh_process_isolation: true,

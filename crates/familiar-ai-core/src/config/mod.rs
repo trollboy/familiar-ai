@@ -1387,6 +1387,7 @@ output_microusd_per_million = 300
             auth_profile: None,
             capability_profile: None,
             runtime_config: None,
+            local: None,
             executable: None,
             capabilities: vec![WorkerCapabilityConfig::Implementation],
             fresh_process_isolation: true,
