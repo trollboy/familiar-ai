@@ -50,13 +50,20 @@ fn claim_precedes_database_open_and_socket_binding_in_daemon_bootstrap() {
 
 #[test]
 fn legacy_cli_mutation_handlers_are_rendering_adapters_only() {
-    let cli = source("crates/familiar-ai-daemon/src/bin/familiar-ai.rs");
-    let handlers = [
-        function(&cli, "fn resume_command", "fn scope_decisions"),
-        function(&cli, "fn deliver_command", "fn preflight_command"),
-        function(&cli, "fn run(prd_path", "fn handle_attached_review"),
-        function(&cli, "fn drive_command", "fn report_command"),
-    ];
+    // These handlers were extracted from the former monolithic
+    // src/bin/familiar-ai.rs into per-domain modules under
+    // src/bin/cli/; the boundary this test enforces (no inlined
+    // shared-service concerns) travels with them.
+    let resume = source("crates/familiar-ai-daemon/src/bin/cli/resume.rs");
+    let deliver = source("crates/familiar-ai-daemon/src/bin/cli/deliver.rs");
+    let run_module = source("crates/familiar-ai-daemon/src/bin/cli/run.rs");
+    let run = function(
+        &run_module,
+        "pub fn run(prd_path",
+        "pub(crate) fn handle_attached_review",
+    );
+    let drive = source("crates/familiar-ai-daemon/src/bin/cli/drive.rs");
+    let handlers = [resume.as_str(), deliver.as_str(), run, drive.as_str()];
     for handler in handlers {
         for forbidden in [
             "Database::open",

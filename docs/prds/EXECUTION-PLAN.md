@@ -60,28 +60,58 @@ exists to end that.
   verification gate can halt unattended runs. Owner: PRD-078's
   environment/verification work or a direct fix.
 
-**GATE — PRD-076 scope modularization** (owner-approved 2026-08-30):
-still required — the remaining product PRDs (058, 063, 072 especially)
-declare whole-crate scopes that would serialize waves 5–6. Regenerates
-the rows below as computed true rounds after amending the remaining
-PRDs' declarations.
+**GATE — PRD-076 scope modularization: COMPLETE 2026-09-01.** `config.rs`
+is now a `config/` module tree (`providers.rs`, `registry.rs`, `driver.rs`,
+`review.rs`, `execution.rs`, `delivery.rs`, `daemon.rs`, `inference.rs`,
+and others), re-exported unchanged; `docs/contracts/providers.md` is now
+`docs/contracts/providers/` (an index plus `inference-providers.md`,
+`credential-authentication.md`, `registry-migration.md`); the CLI binary
+is dispatch-only with subcommand bodies under
+`crates/familiar-ai-daemon/src/bin/cli/` (that path, not `src/cli/`, because
+`src/cli.rs` was already taken by the unrelated `familiar-ai-daemon` binary's
+own tiny `Cli` struct; a binary's `mod cli;` resolves inside its own
+`src/bin/` directory). Every pending PRD's `expected_files`
+is amended below to the narrowed forms this authorizes; the row widths
+are the scheduler's own `achievable_width` computation
+(`crates/familiar-ai-daemon/src/drive.rs`) against those amended
+declarations — not an estimate — pinned in
+`crates/familiar-ai-review/tests/scope_narrowing.rs`.
+
+**Wave definition, restated so it cannot drift again:** a row below is one
+wave only if every PRD in it is *simultaneously* dependency-ready AND
+mutually scope-disjoint under the scheduler's conflict rule (identical
+exact files conflict; a directory conflicts with anything nested under
+it; `crates/familiar-ai-storage/migrations/` is exempt per PRD-066's
+own-numbering safety). "Achievable width" is the largest such
+mutually-disjoint subset the scheduler can actually admit at once, not
+the count of dependency-ready PRDs (that count is "graph width").
 
 | Wave | PRDs | Graph width | Achievable width |
 |------|------|-------------|------------------|
 | bug gate | 077, 078, 079 **done** → 080 (last) | 4 | 1 remaining |
-| gate | 076 | 1 | 1 |
-| 5 | 038, 053, 058 | 3 | ~2 (all three are dependency-ready today) |
-| 6 | 059, 060, 061, 063, 072 | 5 | ~3–4 post-076 (per-adapter files disjoint) |
-| 7 | 071, 073 | 2 | 2 |
+| gate | 076 **done 2026-09-01** | 1 | 1 |
+| 5 | 038, 053, 058 | 3 | **2** — 038 is disjoint from both 053 and 058; 053 and 058 still collide on `crates/familiar-ai-daemon/src/` (058's own whole-directory declaration) and `config/default.toml` — narrowing those two is 058's own call to make if it wants to co-run with 053, the same standing offer PRD-066 gave 052/054 over `billing.rs` |
+| 6 | 059, 060, 061, 063, 072 | 5 | **1** — `docs/contracts/providers.md` and `crates/familiar-ai-core/src/config.rs` no longer collide (each PRD now owns a distinct contract file and, for 072, a distinct config module), but all five still share whole-directory declarations of `crates/familiar-ai-agent/src/` and `crates/familiar-ai-llm/src/`; PRD-076's scope was the four named surfaces (config, contracts, CLI, test/repo dirs), not every crate's `src/`, so this pair remains each PRD's own opportunity to narrow into per-adapter files (`agent/src/anthropic.rs`, `llm/src/backends/anthropic_http.rs`, etc.) if a future session wants this wave wider than 1 |
+| 7 | 071, 073 | 2 | **2** — fully disjoint after narrowing (`review.rs`/`accounting.rs`-style repo files, distinct CLI and config modules, distinct test files) |
+
+This is a real reduction (from a ~23-PRD width-one chain to four rounds
+with two achieving width 2) but falls short of the PRD-076 objective's
+"nine rounds of width two to five" for wave 6 specifically, because that
+estimate assumed per-adapter disjointness in `crates/familiar-ai-agent/src/`
+and `crates/familiar-ai-llm/src/` that PRD-076's authorized scope does not
+reach. Recorded here rather than smoothed over, per the plan's own
+"tell the truth" mandate.
 
 ## Critical path
 
-**077 → 076 → 058 → {059, 060, 061, 063} → {071, 073}** — 056 landing
-moved the control plane off the path; the raw runtime (058) is now the
-long pole, and it is ready the moment the gates clear. 038 (multi-repo
-acceptance — the forcing function that ends infrastructure work) and 053
-are dependency-ready NOW and must not keep slipping: schedule 038 in the
-first product session after the gates.
+**077 → 076 (done) → 058 → {059, 060, 061, 063 — serialized at width 1
+until they narrow `agent/src`/`llm/src` themselves} → {071, 073}** — 056
+landing moved the control plane off the path; the raw runtime (058) is
+now the long pole, and it is ready the moment the gates clear. 038
+(multi-repo acceptance — the forcing function that ends infrastructure
+work) and 053 are dependency-ready NOW and must not keep slipping:
+schedule 038 in the first product session after the gates, alongside one
+of {053, 058} at width 2.
 
 ## Scheduling guidance
 
