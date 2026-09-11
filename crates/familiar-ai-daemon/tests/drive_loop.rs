@@ -330,6 +330,7 @@ fn legacy_prd_document_scope_routes_and_persists_the_derived_file_count() {
         auth_profile: None,
         capability_profile: None,
         runtime_config: None,
+        local: None,
         executable: Some(worker.to_string_lossy().into_owned()),
         capabilities: vec![
             WorkerCapabilityConfig::Implementation,
