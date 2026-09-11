@@ -188,14 +188,22 @@ Both targeted forms resolve to the same primitive
 (`familiar_ai_agent::token_discipline::apply_targeted_edit`): each block's
 anchor is located in the file's current content and swapped for its
 replacement, atomically across every block in the call — if any anchor is
-missing (and its replacement is not already present) or matches more than
-once, the whole call is refused with a named `AnchorDivergence` diagnostic
-and the file is left untouched. **Never a silent misapply.** If an anchor
-is absent but the replacement is already present, the edit is treated as
-already applied: a resumed loop replaying an identical call after a crash
-between the write landing on disk and its journal result being recorded
-reproduces the identical file state instead of failing closed on its own
-prior write. Whole-file replacement remains available for new files and
+missing and its replacement does not occur **exactly once** in its place,
+or the anchor matches more than once, the whole call is refused with a
+named `AnchorDivergence` diagnostic and the file is left untouched. This is
+a content heuristic, not a positional or journal-based one, so it is
+deliberately conservative: a replacement string that occurs zero times, or
+more than once (a common token like `}` already present elsewhere in the
+file for unrelated reasons), can never be mistaken for an already-applied
+replay. **Never a silent misapply.** If an anchor is absent but the
+replacement occurs exactly once, the edit is treated as already applied: a
+resumed loop replaying an identical call after a crash between the write
+landing on disk and its journal result being recorded reproduces the
+identical file state instead of failing closed on its own prior write, and
+`apply-edit`'s result is reported distinctly (`already applied, no bytes
+written`) rather than the same `wrote N bytes` text a genuine write
+produces — a diverged no-op is never reported as a successful write.
+Whole-file replacement remains available for new files and
 genuine full rewrites and is not gated behind `change_kind`; it is only
 *labeled* as such in the tool's own evidence record, so a ledger query can
 attribute output volume to edit form. Targeted edits create no path around
@@ -214,15 +222,25 @@ both forms regardless of file size.
 count (`familiar_ai_llm::token_discipline::bound_tool_result`), and
 `read-file` beyond `file_read_max_lines` refuses with a diagnostic
 requiring an explicit `start_line`/`end_line` range rather than silently
-truncating. Bounding is lossless: before a command result is windowed, its
-full untruncated output is written to a worktree-scoped path
-(`.familiar/tool-output/<call_id>.txt`) — the same durable artifact class
-`apply-edit`'s own writes live in, never the PRD-051 accounting ledger —
-and that path is named in the bounded result as a paging handle a worker
-retrieves through `read-file` with an explicit range. Disabled reproduces
-pre-PRD-072 behavior exactly: `run-command` output is truncated only by
-the raw `max_output_bytes` safety cap, and `read-file` returns the whole
-file unconditionally.
+truncating. Retention is lossless and is a *precondition* of bounding, not
+a best-effort side effect: before a command result is windowed, its full
+untruncated output is durably persisted in daemon-owned storage keyed by
+execution and worktree identity — deliberately **outside** the governed
+worktree, never as untracked bytes inside it, where it would need
+write-scope authorization no PRD-013 Expected Files entry could ever
+cover, and would pollute the worktree's own diff/expected-files evidence.
+The bounded result names an opaque paging-handle string
+(`.familiar/tool-output/<call_id>.txt`) that a worker retrieves through
+`read-file` with an explicit range — the executor recognizes this handle
+shape and resolves it against the retained-output store rather than
+against the worktree, so it never needs to be, and never is, a real
+worktree-relative path. If the retained output cannot be durably persisted
+for any reason, the call fails closed on bounding: it falls back to the
+unbounded, byte-capped result rather than ever emitting a handle naming a
+region that cannot actually be retrieved. Disabled reproduces pre-PRD-072
+behavior exactly: `run-command` output is truncated only by the raw
+`max_output_bytes` safety cap, and `read-file` returns the whole file
+unconditionally.
 
 **Ledger attribution.** PRD-051 usage observations carry
 `edit_form_id`/`edit_form_version` and

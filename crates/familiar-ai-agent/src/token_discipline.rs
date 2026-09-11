@@ -150,6 +150,18 @@ pub fn parse_unified_diff_blocks(payload: &str) -> Result<Vec<SearchReplaceBlock
     Ok(blocks)
 }
 
+/// The result of [`apply_targeted_edit`]: the resolved content plus whether
+/// every block in the call was an idempotent replay (its anchor was already
+/// gone because the edit had already landed), meaning `content` is
+/// byte-identical to the input and no write is actually needed. A caller
+/// MUST surface `already_applied` distinctly from a genuine write — never
+/// report a replayed no-op the same way as `wrote N bytes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedEdit {
+    pub content: String,
+    pub already_applied: bool,
+}
+
 /// Applies every block atomically against `current`: each block's anchor is
 /// located and swapped for its replacement in sequence against a working
 /// copy. If any block's anchor is missing (and its replacement is not
@@ -157,11 +169,22 @@ pub fn parse_unified_diff_blocks(payload: &str) -> Result<Vec<SearchReplaceBlock
 /// and `current` is returned untouched by the caller — never a partial
 /// apply. An anchor matching more than once is refused as ambiguous rather
 /// than guessing which occurrence the model meant.
+///
+/// The idempotent-replay check is a content heuristic, not a positional or
+/// journal-based one, so it is deliberately conservative: a missing anchor
+/// is only treated as "already applied" when its `replace` text occurs
+/// **exactly once** in the working copy. A `replace` string that occurs
+/// zero times, or more than once (e.g. a common token like `}` that already
+/// exists elsewhere in the file for unrelated reasons), cannot be
+/// distinguished from a genuinely stale hunk and is refused as
+/// `AnchorDivergence` — never silently skipped and reported as a
+/// successful write.
 pub fn apply_targeted_edit(
     current: &str,
     blocks: &[SearchReplaceBlock],
-) -> Result<String, EditError> {
+) -> Result<AppliedEdit, EditError> {
     let mut working = current.to_string();
+    let mut wrote_any_block = false;
     for (index, block) in blocks.iter().enumerate() {
         if block.search.is_empty() {
             return Err(EditError::MalformedEdit {
@@ -172,11 +195,15 @@ pub fn apply_targeted_edit(
         match occurrences {
             1 => {
                 working = working.replacen(block.search.as_str(), &block.replace, 1);
+                wrote_any_block = true;
             }
             0 => {
-                let already_applied =
-                    !block.replace.is_empty() && working.contains(block.replace.as_str());
-                if !already_applied {
+                let replacement_occurrences = if block.replace.is_empty() {
+                    0
+                } else {
+                    working.matches(block.replace.as_str()).count()
+                };
+                if replacement_occurrences != 1 {
                     return Err(EditError::AnchorDivergence {
                         detail: format!(
                             "edit {index}: anchor text not found in current content (search: {:?})",
@@ -187,9 +214,11 @@ pub fn apply_targeted_edit(
                 // Idempotent replay: a crash between this write landing on
                 // disk and its journal result being recorded means the
                 // model may reissue the identical call. The anchor is gone
-                // because this edit already happened; leave `working`
-                // untouched and continue so replay reproduces the same
-                // final file state.
+                // because this edit already happened, and the replacement
+                // occurs exactly once, so this block is (as far as a
+                // content check can confirm) a replay of its own prior
+                // write; leave `working` untouched and continue so replay
+                // reproduces the same final file state.
             }
             n => {
                 return Err(EditError::AnchorDivergence {
@@ -201,7 +230,10 @@ pub fn apply_targeted_edit(
             }
         }
     }
-    Ok(working)
+    Ok(AppliedEdit {
+        content: working,
+        already_applied: !wrote_any_block,
+    })
 }
 
 fn truncate_for_diagnostic(text: &str) -> String {
@@ -215,15 +247,20 @@ fn truncate_for_diagnostic(text: &str) -> String {
 
 /// Resolves the `apply-edit` tool call's `content` payload against the
 /// file's current content (`None` for a file that does not yet exist) into
-/// the bytes to write. Whole-file resolution is a pure passthrough — byte-
-/// for-byte identical to PRD-058 behavior when `change_kind` is absent.
+/// the bytes to write, plus whether the call was an idempotent replay that
+/// needs no write at all. Whole-file resolution is a pure passthrough —
+/// byte-for-byte identical to PRD-058 behavior when `change_kind` is absent
+/// — and is never treated as a replay: it always applies.
 pub fn resolve_edit(
     current: Option<&str>,
     form: EditForm,
     payload: &str,
-) -> Result<String, EditError> {
+) -> Result<AppliedEdit, EditError> {
     match form {
-        EditForm::WholeFile => Ok(payload.to_string()),
+        EditForm::WholeFile => Ok(AppliedEdit {
+            content: payload.to_string(),
+            already_applied: false,
+        }),
         EditForm::SearchReplace => {
             let blocks = parse_search_replace_blocks(payload)?;
             apply_targeted_edit(current.unwrap_or_default(), &blocks)
@@ -255,10 +292,12 @@ mod tests {
     #[test]
     fn whole_file_is_pure_passthrough() {
         let result = resolve_edit(Some("old"), EditForm::WholeFile, "new").unwrap();
-        assert_eq!(result, "new");
+        assert_eq!(result.content, "new");
+        assert!(!result.already_applied);
         // Even with no current content (new file), whole-file passes through.
         let result = resolve_edit(None, EditForm::WholeFile, "new").unwrap();
-        assert_eq!(result, "new");
+        assert_eq!(result.content, "new");
+        assert!(!result.already_applied);
     }
 
     #[test]
@@ -266,7 +305,8 @@ mod tests {
         let current = "fn main() {\n    old();\n}\n";
         let payload = r#"[{"search":"old();","replace":"new();"}]"#;
         let result = resolve_edit(Some(current), EditForm::SearchReplace, payload).unwrap();
-        assert_eq!(result, "fn main() {\n    new();\n}\n");
+        assert_eq!(result.content, "fn main() {\n    new();\n}\n");
+        assert!(!result.already_applied);
     }
 
     #[test]
@@ -289,12 +329,30 @@ mod tests {
     fn search_replace_is_idempotent_on_replay() {
         // Simulates a resumed loop replaying the identical call after the
         // write already landed on disk: the anchor is gone, but the
-        // replacement is present, so replay reproduces the same content
-        // rather than failing closed.
+        // replacement is present exactly once, so replay reproduces the
+        // same content rather than failing closed, and is reported as such.
         let already_applied = "fn main() {\n    new();\n}\n";
         let payload = r#"[{"search":"old();","replace":"new();"}]"#;
         let result = resolve_edit(Some(already_applied), EditForm::SearchReplace, payload).unwrap();
-        assert_eq!(result, already_applied);
+        assert_eq!(result.content, already_applied);
+        assert!(result.already_applied);
+    }
+
+    #[test]
+    fn search_replace_rejects_stale_anchor_when_replacement_occurs_elsewhere() {
+        // The anchor ("stale();") is genuinely absent — this hunk never
+        // applied to this file at all — but its replacement text ("}")
+        // already occurs (twice, here) for reasons unrelated to this edit.
+        // A heuristic that only checks "does this text appear anywhere"
+        // would misidentify this as an already-applied replay and silently
+        // skip a genuinely stale hunk; requiring exactly one occurrence
+        // catches it instead.
+        let current = "fn a() {\n}\nfn b() {\n}\n";
+        let payload = r#"[{"search":"stale();","replace":"}"}]"#;
+        let error = resolve_edit(Some(current), EditForm::SearchReplace, payload).unwrap_err();
+        assert!(matches!(error, EditError::AnchorDivergence { .. }));
+        // Never a silent misapply: content is untouched by the caller since
+        // resolve_edit returned an error rather than a resolved edit.
     }
 
     #[test]
@@ -311,7 +369,8 @@ mod tests {
         let current = "line1\nold_line\nline3\n";
         let diff = "@@ -1,3 +1,3 @@\n line1\n-old_line\n+new_line\n line3\n";
         let result = resolve_edit(Some(current), EditForm::UnifiedDiff, diff).unwrap();
-        assert_eq!(result, "line1\nnew_line\nline3\n");
+        assert_eq!(result.content, "line1\nnew_line\nline3\n");
+        assert!(!result.already_applied);
     }
 
     #[test]
