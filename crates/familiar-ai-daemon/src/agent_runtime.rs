@@ -486,13 +486,25 @@ impl SandboxedToolExecutor {
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        // The walk is rooted at, and reported relative to, the *canonical*
+        // root. `resolve_within_worktree` already hands back a canonical
+        // path, so stripping against a non-canonical `worktree_root` would
+        // fail and fall back to emitting absolute host paths for an
+        // ordinary in-worktree search whenever the configured root itself
+        // traverses a symlink.
+        let canonical_root = self.worktree_root.canonicalize().map_err(|error| {
+            ExecutionError::Failed(format!(
+                "worktree root {:?} could not be resolved: {error}",
+                self.worktree_root
+            ))
+        })?;
         let root = if subpath.is_empty() {
-            self.worktree_root.clone()
+            canonical_root.clone()
         } else {
             self.resolve_within_worktree(subpath)?
         };
         let mut matches = Vec::new();
-        collect_matches(&root, &self.worktree_root, query, &mut matches, 500);
+        collect_matches(&root, &canonical_root, query, &mut matches, 500);
         Ok(hash_outcome(matches.join("\n")))
     }
 
@@ -791,9 +803,25 @@ fn canonicalize_partial(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
+/// Walks `dir`, collecting worktree-relative paths whose spelling contains
+/// `query`. Containment is enforced on every entry, not only on the root the
+/// walk was handed (PRD-081): `read_dir` yields symlinks and `is_dir` follows
+/// them, so an unchecked walk descends straight out of the worktree through a
+/// `run-command`-created link and enumerates filenames the worker was never
+/// authorized to see — the read-side escape `resolve_within_worktree` closes
+/// for `read-file`, reopened one directory level down.
+///
+/// Two rules keep it closed. An entry that resolves outside `canonical_root`
+/// is skipped rather than failing the whole search: an escaping link is the
+/// repository's business, and refusing to list an otherwise legitimate tree
+/// because one entry points outward would deny the capability rather than
+/// contain it. And no symlink is ever *traversed*, even one resolving inside
+/// — matching how git treats a link as a leaf rather than a door, and
+/// removing the unbounded recursion a `ln -s . loop` would otherwise get when
+/// `query` matches nothing and `limit` is therefore never reached.
 fn collect_matches(
     dir: &Path,
-    worktree_root: &Path,
+    canonical_root: &Path,
     query: &str,
     out: &mut Vec<String>,
     limit: usize,
@@ -810,16 +838,32 @@ fn collect_matches(
         if out.len() >= limit {
             return;
         }
+        // Only a symlink can leave a contained directory; a plain entry is
+        // contained by construction. Paying `canonicalize` for links alone
+        // leaves the ordinary walk as cheap as it was. An unreadable entry
+        // is treated as a link and therefore never traversed — fail closed.
+        let is_symlink = path
+            .symlink_metadata()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(true);
+        if is_symlink {
+            let Ok(resolved) = path.canonicalize() else {
+                continue;
+            };
+            if !resolved.starts_with(canonical_root) {
+                continue;
+            }
+        }
         let relative = path
-            .strip_prefix(worktree_root)
+            .strip_prefix(canonical_root)
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        if path.is_dir() {
+        if !is_symlink && path.is_dir() {
             if relative.split('/').next_back() == Some(".git") {
                 continue;
             }
-            collect_matches(&path, worktree_root, query, out, limit);
+            collect_matches(&path, canonical_root, query, out, limit);
         } else if relative.contains(query) {
             out.push(relative);
         }

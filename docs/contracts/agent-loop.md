@@ -271,6 +271,17 @@ sanitization every other observation follows.
   a relative, `..`-free path reach outside the worktree; it does not close
   the residual TOCTOU window where a component is replaced by a symlink
   between this check and the filesystem call that follows it.
+- Containment is a property of the capability set, not of one function:
+  `read-file`, `apply-edit`, `search-list`'s subpath and `run-command`'s
+  working directory all resolve through that one chokepoint and refuse an
+  escaping path identically. A refusal is decided before any file is opened
+  for writing, so a rejected `apply-edit` leaves its target byte-identical.
+  `search-list` is contained twice over, because its recursive walk reaches
+  the filesystem without passing an argument through the chokepoint: an
+  entry resolving outside the canonical root is omitted from the listing
+  rather than failing the search, and no symlink is traversed even when it
+  resolves inside (a link is a leaf, as it is to git — which also bounds the
+  walk against a cycle).
 - Network access for tool commands is deny-by-default
   (`agent_runtime.sandbox.network_allowed`, default `false`).
 - Cancellation and timeout kill the tool's process group (reusing the
