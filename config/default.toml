@@ -486,3 +486,30 @@ generated_artifact = "human_review"
 # tool_result_head_lines = 100
 # tool_result_tail_lines = 100
 # file_read_max_lines = 2000
+
+# PRD-073: warm local model residency. The daemon holds configured local
+# serving processes loaded between executions so consecutive local calls
+# share one model load and a warm prefix cache. Off by default in two
+# independent places — this section's `enabled` and each resident's own —
+# because holding gigabytes of weights resident is an operator resource
+# commitment, never something Familiar infers.
+[model_residency]
+# enabled = false
+# max_residents = 1
+# memory_ceiling_mb = 16384          # unset means only max_residents bounds residency
+# health_interval_secs = 30
+# max_restarts = 2
+
+# One resident per model artifact, keyed however the operator names it.
+# `worker` must be a worker_registry.workers entry declaring both a PRD-063
+# [..local] profile and a PRD-062 model_artifact. `launch` is the serving
+# command, argv-style, executed directly with no shell: Familiar never
+# guesses how a local runtime is started. Prefer
+# `familiar-ai model-residency enable`, which validates and records a
+# decision row, over hand-editing this section.
+# [model_residency.residents.llama3]
+# enabled = false
+# worker = "llama3-ollama"
+# launch = ["ollama", "serve"]
+# memory_mb = 8192                   # required whenever memory_ceiling_mb is set
+# ready_timeout_secs = 60

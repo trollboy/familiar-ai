@@ -14,6 +14,7 @@ pub mod file_summary;
 pub mod lifecycle;
 pub mod local_telemetry;
 pub mod model_artifact;
+pub mod model_residency;
 pub mod orchestration;
 pub mod planner;
 pub mod probation;

@@ -128,6 +128,10 @@ pub struct Config {
     /// no existing harness-driven execution behavior.
     #[serde(default)]
     pub agent_runtime: AgentRuntimeConfig,
+    /// PRD-073 warm local model residency. Defaults off: absent or disabled
+    /// keeps exactly PRD-063's per-call endpoint behavior.
+    #[serde(default)]
+    pub model_residency: ModelResidencyConfig,
 }
 
 /// The configuration environment prefix.
@@ -210,6 +214,9 @@ impl Config {
             .map_err(FamiliarError::Config)?;
         self.agent_runtime
             .validate()
+            .map_err(FamiliarError::Config)?;
+        self.model_residency
+            .validate(self.worker_registry.as_ref())
             .map_err(FamiliarError::Config)?;
         Ok(())
     }

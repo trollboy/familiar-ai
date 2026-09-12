@@ -1838,7 +1838,7 @@ fn stamp_value(table: &mut Table, key: &str, command: &str, actor: &str, at: &st
     }
 }
 
-fn actor(supplied: Option<&str>) -> Result<String, String> {
+pub(crate) fn actor(supplied: Option<&str>) -> Result<String, String> {
     let value = supplied
         .map(str::to_owned)
         .or_else(|| {

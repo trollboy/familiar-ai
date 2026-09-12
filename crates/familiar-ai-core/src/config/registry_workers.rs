@@ -412,6 +412,190 @@ pub struct LocalWorkerConfig {
 /// spec, not a provider directory entry.
 pub const LOCAL_PROVIDER: &str = "local";
 
+/// PRD-073 warm local model residency: which PRD-062 artifacts the PRD-056
+/// daemon may keep loaded between executions, and the ceilings that bound
+/// them.
+///
+/// Residency is **off by default** in two independent places — the global
+/// `enabled` flag and each resident's own `enabled` flag — because holding
+/// gigabytes of weights resident is an operator resource commitment, never
+/// something Familiar infers from a worker merely existing. A declared but
+/// disabled resident is configuration, not activation (the same discipline
+/// PRD-063's `local_allocation_policies.enabled` applies to cost).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ModelResidencyConfig {
+    /// The master switch. False means the daemon starts no resident server,
+    /// holds none, and routes exactly as PRD-063 does today.
+    pub enabled: bool,
+    /// How many residents may be held at once. LRU eviction fires at this
+    /// ceiling.
+    pub max_residents: u32,
+    /// Total declared resident memory ceiling. Absent means only
+    /// `max_residents` bounds residency — never an assumed byte budget.
+    pub memory_ceiling_mb: Option<u64>,
+    /// How often the daemon probes each resident for liveness.
+    pub health_interval_secs: u64,
+    /// How many times one resident may be restarted after a failed health
+    /// probe before it is marked failed with a named reason.
+    pub max_restarts: u32,
+    /// Declared residents, keyed by an operator-chosen resident key.
+    pub residents: BTreeMap<String, ResidentModelConfig>,
+}
+
+impl Default for ModelResidencyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_residents: 1,
+            memory_ceiling_mb: None,
+            health_interval_secs: 30,
+            max_restarts: 2,
+            residents: BTreeMap::new(),
+        }
+    }
+}
+
+/// One declared resident: a `worker_registry.workers` entry that must carry
+/// a PRD-063 `local` profile, plus the exact command that serves it.
+///
+/// `launch` is an explicit operator declaration and never derived from
+/// `runtime_kind`. Familiar does not know how any given installation starts
+/// `ollama` or `unsloth` — guessing a command line would fabricate operator
+/// intent and break silently whenever a serving runtime changes its CLI, so
+/// an empty `launch` is a configuration error rather than a default.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct ResidentModelConfig {
+    /// Per-artifact opt-in. Declaring the entry is not enabling it.
+    pub enabled: bool,
+    /// The `worker_registry.workers` key this resident serves.
+    pub worker: String,
+    /// Program and arguments, argv-style. Never shell-interpreted.
+    pub launch: Vec<String>,
+    /// This resident's declared memory footprint. Required whenever
+    /// `memory_ceiling_mb` is set: a resident of unknown size cannot be
+    /// admitted against a byte budget without inventing its size.
+    pub memory_mb: Option<u64>,
+    /// How long to wait for a freshly launched server to answer a health
+    /// probe before the launch is a recorded failure.
+    pub ready_timeout_secs: u64,
+}
+
+impl Default for ResidentModelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            worker: String::new(),
+            launch: Vec::new(),
+            memory_mb: None,
+            ready_timeout_secs: 60,
+        }
+    }
+}
+
+/// The residency ceiling a candidate would breach, named so the daemon's
+/// eviction record and the operator's error message use one vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidencyCeiling {
+    Count,
+    Memory,
+}
+
+impl ResidencyCeiling {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Count => "count-ceiling",
+            Self::Memory => "memory-ceiling",
+        }
+    }
+}
+
+impl ModelResidencyConfig {
+    /// The residents actually eligible to be held: the global switch and the
+    /// resident's own switch must both be on.
+    pub fn active_residents(&self) -> impl Iterator<Item = (&String, &ResidentModelConfig)> {
+        let enabled = self.enabled;
+        self.residents
+            .iter()
+            .filter(move |(_, resident)| enabled && resident.enabled)
+    }
+
+    pub fn is_active(&self, key: &str) -> bool {
+        self.enabled && self.residents.get(key).is_some_and(|entry| entry.enabled)
+    }
+
+    /// Validates residency against the worker registry it references. A
+    /// resident naming an absent worker, a worker with no PRD-063 `local`
+    /// profile, or a worker with no PRD-062 `model_artifact` is refused:
+    /// residency must never load something the artifact registry does not
+    /// know (PRD-047/PRD-062 enablement).
+    pub fn validate(&self, registry: Option<&WorkerRegistryConfig>) -> Result<(), String> {
+        if self.enabled && self.max_residents == 0 {
+            return Err(
+                "model_residency.max_residents must be at least 1 when residency is enabled".into(),
+            );
+        }
+        if self.enabled && self.health_interval_secs == 0 {
+            return Err("model_residency.health_interval_secs must be greater than zero".into());
+        }
+        for (key, resident) in &self.residents {
+            validate_identifier("model_residency.residents", key)?;
+            if resident.worker.trim().is_empty() {
+                return Err(format!(
+                    "model_residency.residents.{key} must name a worker_registry.workers entry"
+                ));
+            }
+            if resident.launch.is_empty() || resident.launch[0].trim().is_empty() {
+                return Err(format!(
+                    "model_residency.residents.{key}.launch must declare the serving command; \
+                     Familiar never guesses how a local runtime is started"
+                ));
+            }
+            if resident.ready_timeout_secs == 0 {
+                return Err(format!(
+                    "model_residency.residents.{key}.ready_timeout_secs must be greater than zero"
+                ));
+            }
+            if self.memory_ceiling_mb.is_some() && resident.memory_mb.is_none() {
+                return Err(format!(
+                    "model_residency.residents.{key}.memory_mb is required while \
+                     model_residency.memory_ceiling_mb is set: a resident of unknown \
+                     size cannot be admitted against a byte budget"
+                ));
+            }
+            let worker = registry
+                .and_then(|registry| registry.workers.get(&resident.worker))
+                .ok_or_else(|| {
+                    format!(
+                        "model_residency.residents.{key}.worker '{}' is not a configured \
+                         worker_registry.workers entry",
+                        resident.worker
+                    )
+                })?;
+            if worker.local.is_none() {
+                return Err(format!(
+                    "model_residency.residents.{key}.worker '{}' declares no PRD-063 \
+                     local profile; only a local serving endpoint can be held resident",
+                    resident.worker
+                ));
+            }
+            if !worker
+                .model_artifact
+                .as_ref()
+                .is_some_and(|artifact| !artifact.trim().is_empty())
+            {
+                return Err(format!(
+                    "model_residency.residents.{key}.worker '{}' declares no model_artifact; \
+                     residency never loads a model outside the PRD-062 artifact registry",
+                    resident.worker
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl WorkerCapabilityConfig {
     /// The canonical serialized spelling — identical to the serde kebab-case
     /// form and to what the CLI accepts, so display output always round-trips

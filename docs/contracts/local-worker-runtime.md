@@ -18,12 +18,16 @@ NOT**, and **MAY** are to be interpreted as described by RFC 2119.
 
 ## Scope and non-goals
 
-- Phase 1 (this implementation): externally managed OpenAI-compatible local
-  endpoints, two `RuntimeId`s (`ollama`, `unsloth`) over one neutral
-  transport. Process-managed lifecycle (Familiar launching and supervising
-  a server), MLX-native/llama.cpp-direct backends, and operator allocation
-  policies beyond the disabled-by-default mechanism described below are
+- Phase 1 (PRD-063): externally managed OpenAI-compatible local endpoints,
+  two `RuntimeId`s (`ollama`, `unsloth`) over one neutral transport.
+  MLX-native/llama.cpp-direct backends and operator allocation policies
+  beyond the disabled-by-default mechanism described below remain
   explicitly backlogged.
+- Process-managed lifecycle — Familiar launching and supervising a serving
+  process so it outlives one execution — was backlogged by PRD-063 and is
+  now owned by PRD-073, specified in [Residency](#residency-prd-073) below.
+  It changes nothing above: a resident server is reached over the same
+  transport, by the same worker identity, with the same telemetry.
 - Real hardware telemetry (accelerator/CPU utilization sensors, thermal and
   power ceilings) is platform-dependent and not probed by this
   implementation; every such field is typed `Option` and stays absent
@@ -334,6 +338,144 @@ carry no cost field to compare against a hosted worker's dollar figure in
 the first place. Acceptance-rate and remediation metrics for local workers
 come from the ordinary PRD-032 evidence pipeline, not from this adapter.
 
+## Residency (PRD-073)
+
+A serving process that dies with each execution forfeits its prefix/KV
+cache and reloads gigabytes per call. PRD-073 lets the PRD-056 daemon hold
+configured serving processes between executions
+(`familiar_ai_daemon::model_residency`), so consecutive calls against one
+resident model share a single load.
+
+Residency changes no worker identity, routing, accounting, or reservation
+semantics. A resident server is the same worker, reached over the same
+OpenAI-compatible transport, at the endpoint the worker already declares.
+
+### Configuration
+
+Residency is declared in one global `[model_residency]` section, and is
+**off in two independent places**: the section's own `enabled` flag and
+each resident's. A declared resident is configuration, never activation.
+
+```toml
+[model_residency]
+enabled = true
+max_residents = 2
+memory_ceiling_mb = 16384
+health_interval_secs = 30
+max_restarts = 2
+
+[model_residency.residents.llama3]
+enabled = true
+worker = "llama3-ollama"
+launch = ["ollama", "serve"]
+memory_mb = 8192
+ready_timeout_secs = 60
+```
+
+`familiar_ai_core::config::ModelResidencyConfig::validate` enforces, before
+any byte is written, that `worker` names a configured
+`worker_registry.workers` entry, that the entry declares a PRD-063 `local`
+profile **and** a PRD-062 `model_artifact`, that `launch` is non-empty, and
+that a resident declares `memory_mb` whenever `memory_ceiling_mb` is set —
+a resident of unknown size cannot be admitted against a byte budget without
+inventing its size.
+
+`launch` is an operator declaration and **MUST NOT** be derived from
+`runtime_kind`. Familiar does not know how a given installation starts
+`ollama` or `unsloth`; guessing would fabricate operator intent and break
+silently whenever a serving runtime changes its CLI. The argv is executed
+directly — no shell, no interpolation.
+
+Enabling and disabling residency go through `familiar-ai model-residency
+enable|disable`, which use PRD-047's audited configuration boundary:
+probe-before-persist, comment-preserving edit, and a `config_decisions` row
+per mutation. The CLI never starts or stops a process — the daemon owns
+residents, and reconciles the running set to the configuration at its next
+health interval, stopping and recording any resident the configuration no
+longer enables.
+
+### The artifact gate
+
+Residency **MUST NOT** load a model the PRD-062 artifact registry does not
+know. Beyond the configuration-time checks, `ensure_resident` refuses at
+load time when the worker's `model_artifact` has no `model_artifacts` row,
+returning `NotResident { reason: "artifact-not-registered:<id>" }` without
+launching anything.
+
+### Budgets and eviction
+
+`max_residents` bounds how many servers are held; `memory_ceiling_mb`, when
+set, bounds their summed declared footprint. Admitting a resident that
+breaches either ceiling evicts least-recently-used residents until it fits,
+each eviction stopping the server and writing an `evicted` row naming the
+ceiling (`count-ceiling` or `memory-ceiling`). A resident whose own
+`memory_mb` exceeds the ceiling can never fit and is refused outright
+rather than evicting everything and failing anyway.
+
+### Health, bounded restart, loud failure
+
+Every `health_interval_secs` the daemon probes each resident. The probe
+**MUST** fail both for a process that has exited and for one that is alive
+but no longer answering — both forfeit residency. A failed probe writes a
+`health-failed` row; the resident is then restarted at most `max_restarts`
+times, each successful restart writing a `restarted` row with its 1-based
+attempt number and minting a **new** `server_identity` (the process that
+served the previous call is not this process). Past the budget the resident
+is stopped, removed, and marked failed with the named reason
+`health-restart-exhausted`.
+
+A failed resident is **never silently relaunched**. Subsequent calls return
+`NotResident` carrying that reason, so a fall back to per-call loading is
+always an explicit, recorded degradation — never an unexplained tax.
+
+### Residency in the record
+
+Migration 073 adds `model_residency_events`, append-only like every other
+durable record here (`no_update`/`no_delete` triggers), with a closed event
+vocabulary: `loaded`, `stopped`, `evicted`, `restarted`, `failed`,
+`health-failed`. Every event except `loaded` carries a named `reason` —
+enforced by `CHECK` constraint, not convention. A healthy resident writes
+**no** row: the table records what the daemon did and what went wrong, and
+a row per healthy interval would bury exactly those events.
+
+The same migration attributes residency to the ledger:
+
+- `local_worker_telemetry` gains `residency_state` (`cold`/`warm`),
+  `resident_server_identity`, and `cache_evidence`, so PRD-063's latency,
+  load time and utilization figures — and the operator-allocation estimates
+  built on them — partition by warmth. Rows predating residency keep `NULL`:
+  honestly unknown, never backfilled as `cold`.
+- `usage_observation_residency` attaches the same three facts to a PRD-051
+  `usage_observations` row by id, exactly as `cost_estimates` does.
+  Residency is a local-execution-only fact, so it attaches rather than
+  widening the ledger insert every hosted adapter shares.
+
+### Cache evidence is measured, never inferred
+
+`residency_state` and `cache_evidence` are independent facts
+(`familiar_ai_llm::residency`):
+
+| Residency state | Runtime reported | `cache_evidence` |
+|---|---|---|
+| cold | anything | `cold-load` |
+| warm | `cache_read_tokens > 0` | `warm-hit` |
+| warm | `cache_read_tokens == 0` | `warm-miss` |
+| warm | nothing | `unknown` + stated reason |
+
+A warm process does **not** imply a cache hit, and a runtime that reports
+no cache accounting leaves the evidence `unknown` with a recorded reason —
+a `CHECK` constraint refuses an `unknown` with no reason. A cold call is
+`cold-load` regardless of any reported cache figure: there was no resident
+cache to hit, so such a figure describes something else and is never
+laundered into a hit.
+
+### Off by default means identical
+
+With residency disabled the manager holds nothing and writes nothing, and
+`ResidencyDirectory::resolve` returns the worker's own configured endpoint,
+`cold`, with no server identity — byte-identical to the behavior specified
+above this section.
+
 ## Test harness
 
 `crates/familiar-ai-llm/src/local_runtime.rs` unit-tests the wire protocol
@@ -351,6 +493,16 @@ dedicated coverage for mid-run memory pressure (honest overrun) and
 endpoint disappearance (held reservation, zero fabricated attempts).
 `crates/familiar-ai-daemon/src/local_worker_runtime.rs` additionally
 unit-tests unknown-capacity refusal/conservative-serialization and a
-concurrent reservation race over an exclusive-runtime pool. No test in any
-of these files performs, or is able to perform, real model execution or
-any network beyond a loopback fake.
+concurrent reservation race over an exclusive-runtime pool.
+
+`crates/familiar-ai-daemon/tests/model_residency.rs` covers PRD-073 against
+a fake launcher whose loads, stops and probe failures are directly
+observable: one load across consecutive calls and across drive sessions,
+LRU eviction at the count and memory ceilings, bounded restart ending in a
+recorded failure with no silent degradation, the artifact gate, the
+disable/shutdown stop records, append-only enforcement, the audited
+configuration mutations, and the off-by-default routing identity. Its two
+end-to-end cases drive the real PRD-058 loop against a `wiremock` loopback
+endpoint to classify real reported usage as `warm-hit`, `warm-miss`, or
+`unknown`. No test in any of these files performs, or is able to perform,
+real model execution or any network beyond a loopback fake.

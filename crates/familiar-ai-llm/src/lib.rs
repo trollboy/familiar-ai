@@ -16,6 +16,7 @@ pub mod heuristics;
 pub mod local_runtime;
 pub mod manager;
 pub mod openai_api;
+pub mod residency;
 pub mod router;
 pub mod token_discipline;
 pub mod types;

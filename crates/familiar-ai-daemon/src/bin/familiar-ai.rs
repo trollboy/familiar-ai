@@ -53,6 +53,11 @@ enum Command {
         #[command(subcommand)]
         command: BatchReviewCommand,
     },
+    /// Hold configured local model artifacts loaded between executions.
+    ModelResidency {
+        #[command(subcommand)]
+        command: ModelResidencyCommand,
+    },
     /// Show repository project-configuration approval and binding state.
     Status {
         #[arg(long, default_value = ".")]
@@ -219,6 +224,47 @@ enum CompressCommand {
         lane: Option<String>,
         #[arg(long, requires = "lane")]
         actor: Option<String>,
+    },
+}
+
+/// PRD-073 warm local model residency. Residency is off until an operator
+/// enables it here, and every mutation is an audited configuration decision.
+#[derive(Debug, Subcommand)]
+enum ModelResidencyCommand {
+    /// Hold one local worker's model artifact resident between executions.
+    Enable {
+        /// Resident key: how this resident is named in configuration and in
+        /// every durable residency record.
+        key: String,
+        /// The `worker_registry.workers` entry to serve. It must declare a
+        /// PRD-063 local profile and a PRD-062 model artifact.
+        #[arg(long)]
+        worker: String,
+        /// The serving command, one `--launch` per argv element. Required:
+        /// Familiar never guesses how a local runtime is started, and the
+        /// argv is executed directly rather than through a shell.
+        #[arg(long = "launch", required = true)]
+        launch: Vec<String>,
+        /// This resident's declared memory footprint. Required whenever a
+        /// memory ceiling is configured.
+        #[arg(long)]
+        memory_mb: Option<u64>,
+        /// How long a freshly launched server may take to answer.
+        #[arg(long, default_value_t = 60)]
+        ready_timeout_secs: u64,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Stop holding a resident. The daemon stops the server and records it.
+    Disable {
+        key: String,
+        #[arg(long)]
+        actor: Option<String>,
+    },
+    /// Show residency configuration and recorded lifecycle events.
+    Status {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -425,6 +471,37 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
+        Command::ModelResidency { command } => {
+            match familiar_ai_daemon::cli::model_residency::execute(match command {
+                ModelResidencyCommand::Enable {
+                    key,
+                    worker,
+                    launch,
+                    memory_mb,
+                    ready_timeout_secs,
+                    actor,
+                } => familiar_ai_daemon::cli::model_residency::ResidencyAction::Enable {
+                    key,
+                    worker,
+                    launch,
+                    memory_mb,
+                    ready_timeout_secs,
+                    actor,
+                },
+                ModelResidencyCommand::Disable { key, actor } => {
+                    familiar_ai_daemon::cli::model_residency::ResidencyAction::Disable {
+                        key,
+                        actor,
+                    }
+                }
+                ModelResidencyCommand::Status { limit } => {
+                    familiar_ai_daemon::cli::model_residency::ResidencyAction::Status { limit }
+                }
+            }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
         Command::Billing { command } => {
             match familiar_ai_daemon::cli::billing::billing_command(command) {
                 Ok(()) => ExitCode::SUCCESS,

@@ -78,6 +78,16 @@ pub struct LocalTelemetryRow<'a> {
     pub failure_kind: Option<&'a str>,
     pub energy_wh: Option<f64>,
     pub energy_measurement_provenance: Option<&'a str>,
+    /// PRD-073: whether this run's serving process was already loaded
+    /// (`warm`) or had to be loaded for it (`cold`). `None` is the honest
+    /// record for an execution that predates residency or ran with
+    /// residency disabled — never backfilled as `cold`.
+    pub residency_state: Option<&'a str>,
+    /// The resident server instance that served this run, when one did.
+    pub resident_server_identity: Option<&'a str>,
+    /// What the serving runtime reported about its prefix cache. `unknown`
+    /// where it reports nothing; never inferred from residency state.
+    pub cache_evidence: Option<&'a str>,
 }
 
 /// Newtype so `LocalTelemetryRow` can `#[derive(Default)]` even though the
@@ -145,8 +155,9 @@ impl<'a> LocalTelemetryRepository<'a> {
                 uncached_input_tokens,cache_read_tokens,cache_write_tokens,output_tokens,reasoning_output_tokens,
                 wall_time_ms,time_to_first_token_ms,tokens_per_second,load_time_ms,peak_memory_mb,
                 accelerator_utilization_pct,cpu_utilization_pct,retries,failure_kind,
-                energy_wh,energy_measurement_provenance,recorded_at
-            ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
+                energy_wh,energy_measurement_provenance,recorded_at,
+                residency_state,resident_server_identity,cache_evidence
+            ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)",
             params![
                 telemetry_id,
                 row.execution_id,
@@ -175,6 +186,9 @@ impl<'a> LocalTelemetryRepository<'a> {
                 row.energy_wh,
                 row.energy_measurement_provenance,
                 Utc::now().to_rfc3339(),
+                row.residency_state,
+                row.resident_server_identity,
+                row.cache_evidence,
             ],
         ).map_err(db)?;
         Ok(telemetry_id)
@@ -349,6 +363,9 @@ mod tests {
             failure_kind: None,
             energy_wh: None,
             energy_measurement_provenance: None,
+            residency_state: None,
+            resident_server_identity: None,
+            cache_evidence: None,
         }
     }
 

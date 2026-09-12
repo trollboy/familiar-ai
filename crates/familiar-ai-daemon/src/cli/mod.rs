@@ -16,6 +16,7 @@ pub mod control;
 pub mod deliver;
 pub mod drive;
 pub mod history;
+pub mod model_residency;
 pub mod next;
 pub mod operator;
 pub mod onboard;
