@@ -40,12 +40,12 @@ fn call(capability: CapabilityId, call_id: &str, arguments: serde_json::Value) -
 }
 
 fn enabled_executor(worktree_root: std::path::PathBuf) -> SandboxedToolExecutor {
-    SandboxedToolExecutor {
+    SandboxedToolExecutor::new(
         worktree_root,
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 1 << 20,
-        token_discipline: TokenDisciplineConfig {
+        no_sandbox(),
+        2_000,
+        1 << 20,
+        TokenDisciplineConfig {
             enabled: true,
             targeted_edit_threshold_bytes: 10,
             tool_result_max_lines: 10,
@@ -53,17 +53,19 @@ fn enabled_executor(worktree_root: std::path::PathBuf) -> SandboxedToolExecutor 
             tool_result_tail_lines: 3,
             file_read_max_lines: 5,
         },
-    }
+    )
+    .unwrap()
 }
 
 fn disabled_executor(worktree_root: std::path::PathBuf) -> SandboxedToolExecutor {
-    SandboxedToolExecutor {
+    SandboxedToolExecutor::new(
         worktree_root,
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 1 << 20,
-        token_discipline: TokenDisciplineConfig::default(),
-    }
+        no_sandbox(),
+        2_000,
+        1 << 20,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap()
 }
 
 #[test]

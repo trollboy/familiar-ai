@@ -109,13 +109,14 @@ async fn full_loop_persists_through_the_shared_agent_runtime_pipeline() {
     let authorizer =
         write_scope_authorizer_from_prd(SAMPLE_PRD, vec![CapabilityId::ApplyEdit], &no_sandbox())
             .unwrap();
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: temp.path().to_path_buf(),
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+    let mut executor = SandboxedToolExecutor::new(
+        temp.path(),
+        no_sandbox(),
+        2_000,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
     let adapter = OpenAiInferenceAdapter::new(
         "sk-test",
@@ -226,13 +227,14 @@ async fn provider_response_identity_and_resolved_model_enrich_the_ledger() {
 
     let authorizer = write_scope_authorizer_from_prd(SAMPLE_PRD, vec![], &no_sandbox()).unwrap();
     let temp = tempfile::tempdir().unwrap();
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: temp.path().to_path_buf(),
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+    let mut executor = SandboxedToolExecutor::new(
+        temp.path(),
+        no_sandbox(),
+        2_000,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
     let adapter = OpenAiInferenceAdapter::new(
         "sk-test",

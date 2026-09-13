@@ -25,6 +25,7 @@ use familiar_ai_agent::token_discipline::{self, EditForm};
 #[cfg(unix)]
 use familiar_ai_agent::{finish_watchdog, spawn_watchdog};
 use familiar_ai_core::config::{AgentRuntimeSandboxConfig, TokenDisciplineConfig};
+use familiar_ai_core::error::FamiliarError;
 use familiar_ai_llm::token_discipline::{
     bound_tool_result, file_read_requirement, slice_lines, FileReadRequirement, ToolResultWindow,
 };
@@ -140,6 +141,32 @@ fn secure_retention_dir(dir: &Path) -> bool {
 #[cfg(not(unix))]
 fn secure_retention_dir(dir: &Path) -> bool {
     std::fs::create_dir_all(dir).is_ok()
+}
+
+/// The store root every execution-scoped retention directory is created
+/// beneath. `create_dir_all` would otherwise bring this intermediate
+/// directory into existence at the ambient umask and never look at it
+/// again — which is the same hole `secure_retention_dir` closes one level
+/// down, since a local user who owns the *parent* can rename or replace the
+/// execution directory inside it no matter how that directory's own bits
+/// are set. So the root is secured by exactly the same rules before
+/// anything is created under it.
+///
+/// Keyed by effective uid so two daemons running as different users on one
+/// host get separate roots rather than contending for one, where whichever
+/// created it first would own it and the other's retention would fail
+/// closed forever. A hostile local user can still squat either name in a
+/// sticky temp directory; the ownership check turns that into a fallback to
+/// the unbounded byte-capped result, never a write into a directory someone
+/// else controls.
+fn tool_output_store_root() -> PathBuf {
+    #[cfg(unix)]
+    // SAFETY: `geteuid` takes no arguments, performs no memory access, and
+    // cannot fail.
+    let name = format!("familiar-ai-tool-output-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let name = "familiar-ai-tool-output".to_string();
+    std::env::temp_dir().join(name)
 }
 
 /// Writes retained tool output with owner-only (`0600`) file permissions on
@@ -284,7 +311,16 @@ fn hash_outcome(result_text: String) -> ExecutionOutcome {
 /// killed by process group at the deadline (matching the isolation layer
 /// used elsewhere in this crate for harness subprocesses).
 pub struct SandboxedToolExecutor {
-    pub worktree_root: PathBuf,
+    /// The worktree root in **canonical** form, resolved once by `new` and
+    /// private precisely so nothing can leave it in any other form. Every
+    /// containment comparison, every prefix-relative computation, and
+    /// `run-command`'s default working directory are measured against this
+    /// one value. A configured root that traverses a symlink (macOS
+    /// `TMPDIR` under `/var` resolving through `/private/var` is the
+    /// ordinary case) shares no textual prefix with the resolved paths the
+    /// capabilities actually open, so a second, non-canonical copy of the
+    /// root is a consistency hazard with no legitimate use.
+    worktree_root: PathBuf,
     pub sandbox: AgentRuntimeSandboxConfig,
     pub command_timeout_ms: u64,
     pub max_output_bytes: usize,
@@ -294,6 +330,38 @@ pub struct SandboxedToolExecutor {
 }
 
 impl SandboxedToolExecutor {
+    /// Canonicalizes the worktree root once, here, rather than on every
+    /// tool call, and fails if it cannot be resolved. The root must
+    /// therefore exist before an executor confined to it is built — the
+    /// correct ordering regardless, since a worktree is leased and created
+    /// before any tool runs against it.
+    pub fn new(
+        worktree_root: impl AsRef<Path>,
+        sandbox: AgentRuntimeSandboxConfig,
+        command_timeout_ms: u64,
+        max_output_bytes: usize,
+        token_discipline: TokenDisciplineConfig,
+    ) -> familiar_ai_core::Result<Self> {
+        let configured = worktree_root.as_ref();
+        let worktree_root = configured.canonicalize().map_err(|error| {
+            FamiliarError::Config(format!(
+                "worktree root {configured:?} could not be resolved: {error}"
+            ))
+        })?;
+        Ok(Self {
+            worktree_root,
+            sandbox,
+            command_timeout_ms,
+            max_output_bytes,
+            token_discipline,
+        })
+    }
+
+    /// The canonical worktree root this executor is confined to.
+    pub fn worktree_root(&self) -> &Path {
+        &self.worktree_root
+    }
+
     /// The single chokepoint every filesystem-touching capability resolves
     /// its path through. Containment is decided on the *resolved* path —
     /// the joined path with every symlink followed, canonicalized against
@@ -318,17 +386,11 @@ impl SandboxedToolExecutor {
                 "path {relative:?} is not a safe worktree-relative path"
             )));
         }
-        let canonical_root = self.worktree_root.canonicalize().map_err(|error| {
-            ExecutionError::Failed(format!(
-                "worktree root {:?} could not be resolved: {error}",
-                self.worktree_root
-            ))
-        })?;
         let joined = self.worktree_root.join(relative);
         let resolved = canonicalize_partial(&joined).map_err(|error| {
             ExecutionError::Failed(format!("path {relative:?} could not be resolved: {error}"))
         })?;
-        if !resolved.starts_with(&canonical_root) {
+        if !resolved.starts_with(&self.worktree_root) {
             return Err(ExecutionError::Failed(format!(
                 "path {relative:?} escapes the worktree root"
             )));
@@ -349,12 +411,12 @@ impl SandboxedToolExecutor {
         // is only unique within its own worktree's journal, so hashing
         // both together (rather than execution id alone) keeps concurrent
         // executions against different worktrees from ever colliding on
-        // the same retention directory.
+        // the same retention directory. The root hashed here is the
+        // canonical one `new` resolved, so two spellings of the same
+        // worktree key the same store rather than two.
         let key =
             sha256_hex(format!("{}\n{execution_id}", self.worktree_root.display()).as_bytes());
-        std::env::temp_dir()
-            .join("familiar-ai-tool-output")
-            .join(key)
+        tool_output_store_root().join(key)
     }
 
     /// Resolves the daemon-owned path for one call's retained tool output.
@@ -379,6 +441,24 @@ impl SandboxedToolExecutor {
         Ok(self
             .tool_output_retention_dir(execution_id)
             .join(format!("{call_id}.txt")))
+    }
+
+    /// Removes one execution's retained tool output. This is the stated end
+    /// of the retention lifecycle (`docs/contracts/agent-loop.md`): a
+    /// paging handle is only useful while the loop that produced it is
+    /// still running, so the driver of a raw-runtime loop calls this once
+    /// the run's evidence is durable and the model can no longer page.
+    ///
+    /// It is a floor, not the only bound. The store is deliberately outside
+    /// the worktree, under the host's temp directory, so retained output
+    /// cannot accumulate inside a worktree for that worktree's life even if
+    /// this is never called — an un-discarded execution's directory is
+    /// reaped by the host exactly like any other temp state. Best-effort by
+    /// construction: a removal that fails leaves owner-only-readable bytes
+    /// in a temp directory, which is not a condition worth failing a
+    /// completed run over.
+    pub fn discard_retained_tool_output(&self, execution_id: &str) {
+        let _ = std::fs::remove_dir_all(self.tool_output_retention_dir(execution_id));
     }
 
     fn read_file(
@@ -486,25 +566,19 @@ impl SandboxedToolExecutor {
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        // The walk is rooted at, and reported relative to, the *canonical*
-        // root. `resolve_within_worktree` already hands back a canonical
-        // path, so stripping against a non-canonical `worktree_root` would
-        // fail and fall back to emitting absolute host paths for an
-        // ordinary in-worktree search whenever the configured root itself
-        // traverses a symlink.
-        let canonical_root = self.worktree_root.canonicalize().map_err(|error| {
-            ExecutionError::Failed(format!(
-                "worktree root {:?} could not be resolved: {error}",
-                self.worktree_root
-            ))
-        })?;
+        // The walk is rooted at, and reported relative to, the canonical
+        // root `new` resolved — the same value `resolve_within_worktree`
+        // hands back a path already measured against. Stripping against a
+        // second, non-canonical copy of the root would fail and fall back
+        // to emitting absolute host paths for an ordinary in-worktree
+        // search whenever the configured root itself traverses a symlink.
         let root = if subpath.is_empty() {
-            canonical_root.clone()
+            self.worktree_root.clone()
         } else {
             self.resolve_within_worktree(subpath)?
         };
         let mut matches = Vec::new();
-        collect_matches(&root, &canonical_root, query, &mut matches, 500);
+        collect_matches(&root, &self.worktree_root, query, &mut matches, 500);
         Ok(hash_outcome(matches.join("\n")))
     }
 
@@ -614,6 +688,8 @@ impl SandboxedToolExecutor {
             .and_then(|v| v.as_str())
         {
             Some(sub) => self.resolve_within_worktree(sub)?,
+            // The canonical root, the same form a resolved subpath comes
+            // back in — never a second, configured spelling of it.
             None => self.worktree_root.clone(),
         };
 
@@ -697,7 +773,11 @@ impl SandboxedToolExecutor {
                     .tool_output_retention_path(&ctx.execution_id, &call.call_id)
                     .ok()
                     .filter(|retention_path| {
-                        retention_path.parent().is_some_and(secure_retention_dir)
+                        // Root first: an execution directory created inside a
+                        // parent someone else owns is theirs to replace, however
+                        // its own bits are set.
+                        secure_retention_dir(&tool_output_store_root())
+                            && retention_path.parent().is_some_and(secure_retention_dir)
                     })
                     .is_some_and(|retention_path| write_retention_file(&retention_path, &combined));
                 if !retained {
