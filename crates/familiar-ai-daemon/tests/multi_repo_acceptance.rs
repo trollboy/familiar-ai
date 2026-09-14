@@ -916,12 +916,23 @@ impl ScriptedRunner {
 }
 
 impl CommandRunner for ScriptedRunner {
-    fn run(&self, _directory: &Path, argv: &[String]) -> Result<Output, String> {
+    fn run(
+        &self,
+        _directory: &Path,
+        argv: &[String],
+        _env: &[(String, String)],
+    ) -> Result<Output, String> {
         self.calls.lock().unwrap().push(argv.to_vec());
         let is_view = argv.iter().any(|value| value == "view");
+        // PRD-095 identity preflight: report the declared account so these
+        // tests keep exercising the delivery path rather than stopping at
+        // the identity gate.
+        let is_probe = argv.iter().any(|value| value == "whoami");
         Ok(Output {
             status: std::process::ExitStatus::from_raw(0),
-            stdout: if is_view {
+            stdout: if is_probe {
+                b"steward-bot\n".to_vec()
+            } else if is_view {
                 b"37\n".to_vec()
             } else {
                 Vec::new()
@@ -961,6 +972,13 @@ fn delivery_fixture(mode: DeliveryMode) -> (tempfile::TempDir, PathBuf, Delivery
         deploy_argv: vec!["deploy".into()],
         smoke_argv: vec!["smoke".into()],
         rollback_argv: vec!["rollback".into()],
+        identity: Some(familiar_ai_core::config::DeliveryIdentityConfig {
+            author_name: "Steward".into(),
+            author_email: "steward@example.invalid".into(),
+            forge_account: "steward-bot".into(),
+            provider_env: Default::default(),
+            account_probe_argv: vec!["provider".into(), "whoami".into()],
+        }),
         ..DeliveryConfig::default()
     };
     (temp, ownership, policy)
@@ -970,7 +988,7 @@ fn delivery_fixture(mode: DeliveryMode) -> (tempfile::TempDir, PathBuf, Delivery
 fn manual_reviewed_pr_delivery_stops_before_merge_or_deploy() {
     let (_temp, ownership, policy) = delivery_fixture(DeliveryMode::ReviewedPrManual);
     let runner = ScriptedRunner::new();
-    let delivered = deliver_with(&ownership, &policy, &runner).unwrap();
+    let delivered = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(delivered.phase, "awaiting_merge_authority");
     assert_eq!(delivered.pr_number, Some(37));
     let calls = runner.calls.lock().unwrap();
@@ -1011,7 +1029,7 @@ fn poc_self_approval_delivers_within_its_warrant_and_never_targets_production() 
     // (no human gate blocks it, unlike reviewed-PR manual mode).
     policy.validate().unwrap();
     let runner = ScriptedRunner::new();
-    let delivered = deliver_with(&ownership, &policy, &runner).unwrap();
+    let delivered = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(delivered.phase, "staging_verified");
 }
 
@@ -1036,7 +1054,7 @@ fn review_gated_automatic_delivery_preserves_separation_evidence() {
     assert!(collapsed.validate().unwrap_err().contains("three distinct"));
 
     let runner = ScriptedRunner::new();
-    let delivered = deliver_with(&ownership, &policy, &runner).unwrap();
+    let delivered = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(delivered.phase, "staging_verified");
 
     let db = Database::open_in_memory().unwrap();
@@ -1184,9 +1202,9 @@ fn repeating_a_completed_delivery_never_repeats_pr_merge_or_deploy_effects() {
         ..policy
     };
     let runner = ScriptedRunner::new();
-    let first = deliver_with(&ownership, &policy, &runner).unwrap();
+    let first = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(first.phase, "staging_verified");
-    let second = deliver_with(&ownership, &policy, &runner).unwrap();
+    let second = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(second.phase, "staging_verified");
 
     let calls = runner.calls.lock().unwrap();

@@ -2062,8 +2062,11 @@ pub fn drive(
                                     lease.start_heartbeat(Duration::from_secs(
                                         config.daemon.heartbeat_interval_secs.max(1),
                                     ));
-                                let delivery_result =
-                                    crate::delivery::deliver(lease.ownership_path(), policy);
+                                let delivery_result = crate::delivery::deliver(
+                                    lease.ownership_path(),
+                                    policy,
+                                    &repository.key,
+                                );
                                 let delivery_heartbeat_failed = delivery_heartbeat.failed();
                                 drop(delivery_heartbeat);
                                 if delivery_heartbeat_failed {
@@ -2488,6 +2491,7 @@ pub fn drive(
                                                             match crate::delivery::deliver(
                                                                 escalation_tree.ownership_path(),
                                                                 policy,
+                                                                &repository.key,
                                                             ) {
                                                                 Ok(delivery) => {
                                                                     delivered =

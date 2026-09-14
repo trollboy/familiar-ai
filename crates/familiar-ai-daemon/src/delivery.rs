@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
+use familiar_ai_core::config::DeliveryIdentityConfig;
 use familiar_ai_core::{
     AppPaths, BacklogDiscovery, Config, DeliveryConfig, DeliveryMode, EndpointProviderKind,
     FilesystemBacklogDiscovery,
@@ -111,7 +112,7 @@ pub fn execute_configured(
             revision: result.revision,
         });
     }
-    deliver(ownership_record, policy).map(ConfiguredDeliveryOutcome::Standard)
+    deliver(ownership_record, policy, &repository.key).map(ConfiguredDeliveryOutcome::Standard)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,7 +128,15 @@ pub struct DeliveryJournal {
 }
 
 pub trait CommandRunner {
-    fn run(&self, directory: &Path, argv: &[String]) -> Result<Output, String>;
+    /// `env` is applied to this invocation only (PRD-095). It carries the
+    /// declared identity's adapter selection, never a credential, and is
+    /// per-invocation precisely so no identity state outlives the call.
+    fn run(
+        &self,
+        directory: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+    ) -> Result<Output, String>;
 }
 
 pub struct ProcessRunner {
@@ -143,16 +152,26 @@ impl ProcessRunner {
 }
 
 impl CommandRunner for ProcessRunner {
-    fn run(&self, directory: &Path, argv: &[String]) -> Result<Output, String> {
+    fn run(
+        &self,
+        directory: &Path,
+        argv: &[String],
+        env: &[(String, String)],
+    ) -> Result<Output, String> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| "delivery command argv is empty".to_owned())?;
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .current_dir(directory)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let mut child = command
             .spawn()
             .map_err(|error| format!("cannot launch {program:?}: {error}"))?;
         let mut stdout = child
@@ -206,17 +225,27 @@ impl CommandRunner for ProcessRunner {
     }
 }
 
-pub fn deliver(ownership_path: &Path, policy: &DeliveryConfig) -> Result<DeliveryJournal, String> {
+pub fn deliver(
+    ownership_path: &Path,
+    policy: &DeliveryConfig,
+    repository: &str,
+) -> Result<DeliveryJournal, String> {
     deliver_with(
         ownership_path,
         policy,
+        repository,
         &ProcessRunner::new(policy.command_timeout_ms),
     )
 }
 
+/// `repository` is the repository key the policy was resolved for. It is a
+/// parameter rather than a field because the identity diagnostics (PRD-095)
+/// have to name *which* repository failed to declare an identity, and one
+/// daemon session serves several.
 pub fn deliver_with(
     ownership_path: &Path,
     policy: &DeliveryConfig,
+    repository: &str,
     runner: &dyn CommandRunner,
 ) -> Result<DeliveryJournal, String> {
     policy.validate()?;
@@ -235,6 +264,10 @@ pub fn deliver_with(
         }
     }
     reject_production_commands(policy)?;
+    // PRD-095: resolved before the first authoring command runs, so a
+    // repository that declares no identity fails before it writes a commit
+    // rather than after.
+    let identity = declared_identity(policy, repository)?;
     let ownership: WorktreeOwnership = serde_json::from_slice(
         &fs::read(ownership_path)
             .map_err(|error| format!("cannot read ownership record: {error}"))?,
@@ -302,11 +335,19 @@ pub fn deliver_with(
             }
             checked_owned(runner, &journal.worktree, &policy.migration_gate_argv)?;
         }
+        // PRD-095: `-c` sets author and committer for this invocation alone.
+        // Nothing writes global, system, or repository git configuration, so
+        // two concurrent deliveries under different identities cannot
+        // interfere with each other.
         checked(
             runner,
             &journal.worktree,
             &[
                 "git",
+                "-c",
+                &format!("user.name={}", identity.author_name),
+                "-c",
+                &format!("user.email={}", identity.author_email),
                 "commit",
                 "-m",
                 &format!("feat: implement {}", journal.prd_id),
@@ -326,6 +367,15 @@ pub fn deliver_with(
     }
 
     if phase_before(&journal.phase, "published") {
+        // PRD-095 preflight. The branch is already on the remote by now, so
+        // this is the last point where a wrong identity is still cheap: it
+        // costs a diagnostic instead of a pull request opened by the wrong
+        // account, or an opaque provider error that names neither identity
+        // nor permission.
+        let selection = provider_env(identity);
+        if let Err(error) = verify_forge_account(runner, &journal.worktree, identity, repository) {
+            return fail_journal(&journal_path, journal, "identity_mismatch", error);
+        }
         let create = provider_argv(
             policy,
             &[
@@ -338,18 +388,19 @@ pub fn deliver_with(
                 &branch,
             ],
         );
-        if let Err(error) = checked_owned(runner, &journal.worktree, &create) {
+        if let Err(error) = checked_owned_env(runner, &journal.worktree, &create, &selection) {
             journal.detail = Some(format!(
                 "PR create returned: {error}; checking for existing PR"
             ));
         }
-        let view = checked_owned(
+        let view = checked_owned_env(
             runner,
             &journal.worktree,
             &provider_argv(
                 policy,
                 &["pr", "view", &branch, "--json", "number", "--jq", ".number"],
             ),
+            &selection,
         )?;
         journal.pr_number = String::from_utf8_lossy(&view.stdout).trim().parse().ok();
         journal.phase = "published".into();
@@ -644,7 +695,7 @@ fn run_effect(
             "delivery previously stopped; operator intervention required".into()
         }));
     }
-    let output = runner.run(directory, argv);
+    let output = runner.run(directory, argv, &[]);
     match output {
         Ok(output) => {
             let mut retained = output.stdout.clone();
@@ -742,6 +793,75 @@ fn provider_argv(policy: &DeliveryConfig, values: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// PRD-095. The declared identity, or a fail-closed diagnostic naming the
+/// repository. Absence is refused rather than defaulted: authoring or
+/// publishing under whatever account the daemon's environment happens to
+/// carry is wrong silently, and only on a machine with one account is it
+/// accidentally right.
+fn declared_identity<'a>(
+    policy: &'a DeliveryConfig,
+    repository: &str,
+) -> Result<&'a DeliveryIdentityConfig, String> {
+    policy.identity.as_ref().ok_or_else(|| {
+        format!(
+            "repository {repository} declares no delivery identity; refusing to author or \
+             publish under the daemon's ambient account. Configure \
+             [repositories.\"{repository}\".delivery.identity] with author_name, author_email, \
+             forge_account, and account_probe_argv."
+        )
+    })
+}
+
+/// Identity selection applied to one provider-adapter invocation. Sorted for
+/// a deterministic recorded order, which the no-global-mutation test reads.
+fn provider_env(identity: &DeliveryIdentityConfig) -> Vec<(String, String)> {
+    identity
+        .provider_env
+        .iter()
+        .map(|(name, value): (&String, &String)| (name.clone(), value.clone()))
+        .collect()
+}
+
+/// PRD-095 preflight. Asks the adapter which account it actually resolves to
+/// and refuses to publish unless that is the declared one. Runs *before* the
+/// journal advances past `pushed`, so a wrong identity costs a diagnostic
+/// rather than a branch on the remote and a half-written journal.
+fn verify_forge_account(
+    runner: &dyn CommandRunner,
+    directory: &Path,
+    identity: &DeliveryIdentityConfig,
+    repository: &str,
+) -> Result<(), String> {
+    let env = provider_env(identity);
+    let probe = checked_owned_env(runner, directory, &identity.account_probe_argv, &env).map_err(
+        |error| {
+            format!(
+                "cannot confirm the publishing account for repository {repository} \
+                 (declared {declared}): {error}",
+                declared = identity.forge_account
+            )
+        },
+    )?;
+    let observed = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+    if observed == identity.forge_account {
+        return Ok(());
+    }
+    // The motivating failure: an account without write access returns an
+    // opaque provider error that names neither identity nor permission. Say
+    // both here so the operator is never left reading a 500 for a
+    // configuration mistake.
+    Err(format!(
+        "publishing identity mismatch for repository {repository}: declared {declared}, \
+         adapter resolves to {observed}. Publication refused; no pull request was created.",
+        declared = identity.forge_account,
+        observed = if observed.is_empty() {
+            "<nothing>"
+        } else {
+            &observed
+        }
+    ))
+}
+
 fn phase_before(current: &str, target: &str) -> bool {
     fn rank(value: &str) -> u8 {
         match value {
@@ -773,7 +893,16 @@ fn checked_owned(
     directory: &Path,
     values: &[String],
 ) -> Result<Output, String> {
-    let output = runner.run(directory, values)?;
+    checked_owned_env(runner, directory, values, &[])
+}
+
+fn checked_owned_env(
+    runner: &dyn CommandRunner,
+    directory: &Path,
+    values: &[String],
+    env: &[(String, String)],
+) -> Result<Output, String> {
+    let output = runner.run(directory, values, env)?;
     if output.status.success() {
         Ok(output)
     } else {
@@ -843,12 +972,20 @@ mod tests {
     }
 
     impl CommandRunner for FakeRunner {
-        fn run(&self, _directory: &Path, argv: &[String]) -> Result<Output, String> {
+        fn run(
+            &self,
+            _directory: &Path,
+            argv: &[String],
+            _env: &[(String, String)],
+        ) -> Result<Output, String> {
             self.calls.lock().unwrap().push(argv.to_vec());
             let is_smoke = argv.first().is_some_and(|value| value == "smoke");
             let is_deploy = argv.first().is_some_and(|value| value == "deploy");
             let is_view = argv.get(2).is_some_and(|value| value == "view");
             let is_staged = argv.get(1).is_some_and(|value| value == "diff");
+            // PRD-095 identity preflight: report the declared account so the
+            // existing delivery assertions keep exercising the whole path.
+            let is_probe = argv.get(1).is_some_and(|value| value == "api");
             Ok(Output {
                 status: std::process::ExitStatus::from_raw(
                     if (self.fail_smoke && is_smoke) || (self.fail_deploy && is_deploy) {
@@ -857,7 +994,9 @@ mod tests {
                         0
                     },
                 ),
-                stdout: if is_view {
+                stdout: if is_probe {
+                    b"steward-bot\n".to_vec()
+                } else if is_view {
                     b"42\n".to_vec()
                 } else if is_staged {
                     self.staged.as_bytes().to_vec()
@@ -878,7 +1017,12 @@ mod tests {
     struct ExpiredCloudRunner;
 
     impl CommandRunner for ExpiredCloudRunner {
-        fn run(&self, _directory: &Path, _argv: &[String]) -> Result<Output, String> {
+        fn run(
+            &self,
+            _directory: &Path,
+            _argv: &[String],
+            _env: &[(String, String)],
+        ) -> Result<Output, String> {
             Ok(Output {
                 status: std::process::ExitStatus::from_raw(1 << 8),
                 stdout: vec![],
@@ -919,6 +1063,19 @@ mod tests {
             smoke_argv: vec!["smoke".into()],
             rollback_argv: vec!["rollback".into()],
             comment_blockers: true,
+            identity: Some(familiar_ai_core::config::DeliveryIdentityConfig {
+                author_name: "Familiar".into(),
+                author_email: "familiar@example.invalid".into(),
+                forge_account: "steward-bot".into(),
+                provider_env: Default::default(),
+                account_probe_argv: vec![
+                    "gh".into(),
+                    "api".into(),
+                    "user".into(),
+                    "--jq".into(),
+                    ".login".into(),
+                ],
+            }),
             review_gate: Some(familiar_ai_core::ReviewGateConfig {
                 implementer: "impl".into(),
                 reviewer: "review".into(),
@@ -938,7 +1095,7 @@ mod tests {
             fail_smoke: false,
             staged: "src/lib.rs\n",
         };
-        let result = deliver_with(&ownership, &policy, &runner).unwrap();
+        let result = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
         assert_eq!(result.phase, "staging_verified");
         let calls = runner.calls.lock().unwrap();
         let checks = calls
@@ -962,7 +1119,7 @@ mod tests {
             fail_smoke: true,
             staged: "src/lib.rs\n",
         };
-        assert!(deliver_with(&ownership, &policy, &runner).is_err());
+        assert!(deliver_with(&ownership, &policy, "repo", &runner).is_err());
         let calls = runner.calls.lock().unwrap();
         assert!(calls.iter().any(|call| call[0] == "rollback"));
         assert!(calls.iter().any(|call| call.contains(&"comment".into())));
@@ -981,7 +1138,7 @@ mod tests {
             fail_smoke: false,
             staged: "src/lib.rs\n",
         };
-        let error = deliver_with(&ownership, &policy, &runner).unwrap_err();
+        let error = deliver_with(&ownership, &policy, "repo", &runner).unwrap_err();
         assert!(error.contains("staging deploy failed"));
         assert!(error.contains("rollback passed"));
         let calls = runner.calls.lock().unwrap();
@@ -998,8 +1155,8 @@ mod tests {
             fail_smoke: false,
             staged: "src/lib.rs\n",
         };
-        assert!(deliver_with(&ownership, &policy, &runner).is_err());
-        assert!(deliver_with(&ownership, &policy, &runner).is_err());
+        assert!(deliver_with(&ownership, &policy, "repo", &runner).is_err());
+        assert!(deliver_with(&ownership, &policy, "repo", &runner).is_err());
         let calls = runner.calls.lock().unwrap();
         assert_eq!(
             calls
@@ -1034,7 +1191,7 @@ mod tests {
             fail_smoke: false,
             staged: "src/lib.rs\n",
         };
-        let result = deliver_with(&ownership, &policy, &runner).unwrap();
+        let result = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
         assert_eq!(result.phase, "awaiting_merge_authority");
         let calls = runner.calls.lock().unwrap();
         assert!(!calls.iter().any(|call| call.contains(&"merge".into())));
@@ -1053,7 +1210,7 @@ mod tests {
             fail_smoke: false,
             staged: "src/lib.rs\n",
         };
-        assert!(deliver_with(&ownership, &policy, &runner)
+        assert!(deliver_with(&ownership, &policy, "repo", &runner)
             .unwrap_err()
             .contains("production"));
         assert!(runner.calls.lock().unwrap().is_empty());
@@ -1068,7 +1225,7 @@ mod tests {
             fail_smoke: false,
             staged: "internal/store/migrations/001.sql\n",
         };
-        assert!(deliver_with(&ownership, &policy, &runner)
+        assert!(deliver_with(&ownership, &policy, "repo", &runner)
             .unwrap_err()
             .contains("no automatic database rollback"));
         let calls = runner.calls.lock().unwrap();
@@ -1081,7 +1238,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runner = ProcessRunner::new(20);
         let error = runner
-            .run(temp.path(), &["/bin/sleep".into(), "5".into()])
+            .run(temp.path(), &["/bin/sleep".into(), "5".into()], &[])
             .unwrap_err();
         assert!(error.contains("exceeded delivery command timeout"));
     }
