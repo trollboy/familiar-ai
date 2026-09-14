@@ -9,8 +9,9 @@ session or Familiar). Everything below was verified on Linux only.
 - PR **#8**, based on PR **#7** (`prd-081-resolved-path-worktree-containment`),
   *not* on `main`. PRD-081 is not merged; 082's defect 4 is about code that
   only exists on that branch. Merging #8 means merging #7 too.
-- PRD file is archived at `docs/prds/done/PRD-082.md` (same-commit archive,
-  matching how PRD-081 and PRD-071 were done).
+- PRD file stays at `docs/prds/PRD-082.md`. `docs/prds` is the todo queue; a
+  PRD moves to `done/` only when the owner declares the work complete, as its
+  own `chore: archive …` commit. Do not archive it as part of implementing it.
 
 ## What shipped, and what was already fixed before it
 
