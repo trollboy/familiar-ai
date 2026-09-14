@@ -366,6 +366,26 @@ async fn daemon_run(
         shutdown_rx.clone(),
     ));
 
+    // Spawn the PRD-073 residency manager. Like the batch poller it exits
+    // immediately when residency is disabled, which is the default, so a
+    // workspace that configures none pays nothing and routes exactly as
+    // PRD-063 does. The manager owns the resident serving processes for the
+    // daemon's lifetime, which is what lets residency span drive sessions.
+    let residency_manager = std::sync::Arc::new(std::sync::Mutex::new(
+        familiar_ai_daemon::model_residency::ResidencyManager::new(
+            state.config.model_residency.clone(),
+            std::sync::Arc::new(
+                familiar_ai_daemon::model_residency::ProcessResidentLauncher::default(),
+            ),
+        ),
+    ));
+    let residency_handle = tokio::spawn(familiar_ai_daemon::model_residency::run(
+        state.db.clone(),
+        residency_manager.clone(),
+        state.config.clone(),
+        shutdown_rx.clone(),
+    ));
+
     // Spawn heartbeat
     let heartbeat_status = state.status.clone();
     let interval = state.config.daemon.heartbeat_interval_secs;
@@ -459,6 +479,12 @@ async fn daemon_run(
         // than adding another sequential timeout to the shutdown path.
         async {
             let _ = tokio::time::timeout(DRAIN, batch_review_handle).await;
+        },
+        // PRD-073 residency stops its resident servers on the shutdown
+        // signal and records each stop; draining it concurrently keeps that
+        // inside the one shutdown timeout.
+        async {
+            let _ = tokio::time::timeout(DRAIN, residency_handle).await;
         },
         watcher_drain,
         summary_drain,

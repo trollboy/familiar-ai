@@ -45,8 +45,12 @@ use familiar_ai_core::{
     GrantMode, ReservationOwnerIdentity, ResourceRequest, ResourceType, UnknownConsumptionPolicy,
 };
 use familiar_ai_llm::local_runtime::ArtifactVerificationOutcome;
+use familiar_ai_llm::residency::{CacheEvidence, ResidencyState};
 use familiar_ai_storage::repos::local_telemetry::{
     LocalArtifactVerificationState, LocalTelemetryRepository, LocalTelemetryRow,
+};
+use familiar_ai_storage::repos::model_residency::{
+    CacheEvidenceRecord, ModelResidencyRepository, ObservationResidency, ResidencyStateRecord,
 };
 use familiar_ai_storage::repos::reservation::{
     AcquireOutcome, ReservationRepository, SettlementObservation, SettlementResult,
@@ -373,6 +377,71 @@ pub struct LocalRunMeasurements {
     pub energy_measurement_provenance: Option<String>,
 }
 
+/// PRD-073 residency attribution for one local run: whether an already
+/// loaded serving process took the call, which process it was, and what
+/// that runtime reported about its prefix cache. Absent entirely for an
+/// execution that ran with residency disabled — recorded as unknown, never
+/// backfilled as `cold`.
+#[derive(Debug, Clone)]
+pub struct LocalResidencyAttribution<'a> {
+    pub residency_state: ResidencyState,
+    pub resident_server_identity: Option<&'a str>,
+    pub cache_evidence: CacheEvidence,
+}
+
+impl<'a> LocalResidencyAttribution<'a> {
+    /// Derives the attribution from a residency decision and whatever usage
+    /// the serving runtime actually reported. Cache evidence is classified,
+    /// never assumed: see [`CacheEvidence::classify`].
+    pub fn from_usage(
+        residency_state: ResidencyState,
+        resident_server_identity: Option<&'a str>,
+        usage: &familiar_ai_llm::attempt::UsageCategories,
+    ) -> Self {
+        Self {
+            residency_state,
+            resident_server_identity,
+            cache_evidence: CacheEvidence::classify(residency_state, usage),
+        }
+    }
+
+    fn state_record(&self) -> ResidencyStateRecord {
+        match self.residency_state {
+            ResidencyState::Cold => ResidencyStateRecord::Cold,
+            ResidencyState::Warm => ResidencyStateRecord::Warm,
+        }
+    }
+
+    fn evidence_record(&self) -> CacheEvidenceRecord {
+        match self.cache_evidence {
+            CacheEvidence::ColdLoad => CacheEvidenceRecord::ColdLoad,
+            CacheEvidence::WarmMiss => CacheEvidenceRecord::WarmMiss,
+            CacheEvidence::WarmHit => CacheEvidenceRecord::WarmHit,
+            CacheEvidence::Unknown { .. } => CacheEvidenceRecord::Unknown,
+        }
+    }
+}
+
+/// Attaches PRD-073 residency attribution to a PRD-051 usage observation so
+/// the ledger — and PRD-063's operator-allocation estimates built on it —
+/// can partition latency and utilization by whether the model was already
+/// warm.
+pub fn attach_observation_residency(
+    repo: &ModelResidencyRepository<'_>,
+    observation_id: &str,
+    attribution: &LocalResidencyAttribution<'_>,
+) -> familiar_ai_core::Result<()> {
+    repo.attach_to_observation(
+        observation_id,
+        &ObservationResidency {
+            residency_state: attribution.state_record(),
+            resident_server_identity: attribution.resident_server_identity,
+            cache_evidence: attribution.evidence_record(),
+            cache_evidence_reason: attribution.cache_evidence.reason(),
+        },
+    )
+}
+
 /// `retries` is supplied by the caller, never derived from
 /// `outcome.attempts`: the PRD-058 loop mints one attempt per submission,
 /// including every ordinary multi-turn tool-call round trip, so
@@ -393,6 +462,7 @@ pub fn persist_local_telemetry(
     measurements: &LocalRunMeasurements,
     outcome: &RunOutcome,
     retries: u32,
+    residency: Option<&LocalResidencyAttribution<'_>>,
 ) -> familiar_ai_core::Result<String> {
     let usage = outcome.attempts.iter().fold(
         Default::default(),
@@ -433,6 +503,9 @@ pub fn persist_local_telemetry(
         failure_kind: failure_kind_for(outcome.stop_reason),
         energy_wh: measurements.energy_wh,
         energy_measurement_provenance: measurements.energy_measurement_provenance.as_deref(),
+        residency_state: residency.map(|value| value.residency_state.as_str()),
+        resident_server_identity: residency.and_then(|value| value.resident_server_identity),
+        cache_evidence: residency.map(|value| value.cache_evidence.as_str()),
     };
     repo.record_telemetry(&row)
 }
@@ -850,6 +923,7 @@ mod tests {
             &measurements,
             &outcome,
             0,
+            None,
         )
         .unwrap();
         let rows = repo.telemetry_for_execution("exec_1").unwrap();
@@ -891,6 +965,7 @@ mod tests {
             &measurements,
             &outcome,
             0,
+            None,
         )
         .unwrap();
         let retries: u32 = db

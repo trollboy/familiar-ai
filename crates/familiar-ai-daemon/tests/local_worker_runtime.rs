@@ -281,6 +281,7 @@ async fn full_pipeline_reserves_runs_commits_and_records_telemetry() {
         },
         &outcome,
         0,
+        None,
     )
     .unwrap();
     let rows = telemetry_repo.telemetry_for_execution("exec_1").unwrap();
