@@ -24,7 +24,12 @@ impl RecordingRunner {
 }
 
 impl CommandRunner for RecordingRunner {
-    fn run(&self, _directory: &Path, argv: &[String]) -> Result<Output, String> {
+    fn run(
+        &self,
+        _directory: &Path,
+        argv: &[String],
+        _env: &[(String, String)],
+    ) -> Result<Output, String> {
         self.calls.lock().unwrap().push(argv.to_vec());
         Err("injected network partition".into())
     }
@@ -56,6 +61,13 @@ fn fixture() -> (tempfile::TempDir, PathBuf, DeliveryConfig) {
         remote: "origin".into(),
         base: "main".into(),
         provider_argv: vec!["provider".into()],
+        identity: Some(familiar_ai_core::config::DeliveryIdentityConfig {
+            author_name: "Steward".into(),
+            author_email: "steward@example.invalid".into(),
+            forge_account: "steward-bot".into(),
+            provider_env: Default::default(),
+            account_probe_argv: vec!["provider".into(), "whoami".into()],
+        }),
         ..DeliveryConfig::default()
     };
     (temp, ownership, policy)
@@ -66,7 +78,7 @@ fn corrupt_delivery_journal_runs_no_external_command() {
     let (_temp, ownership, policy) = fixture();
     fs::write(ownership.with_extension("delivery.json"), b"{truncated").unwrap();
     let runner = RecordingRunner::new();
-    let error = deliver_with(&ownership, &policy, &runner).unwrap_err();
+    let error = deliver_with(&ownership, &policy, "repo", &runner).unwrap_err();
     assert!(error.contains("invalid delivery journal"));
     assert!(runner.calls.lock().unwrap().is_empty());
 }
@@ -91,7 +103,7 @@ fn published_delivery_resume_skips_prior_external_effects() {
     )
     .unwrap();
     let runner = RecordingRunner::new();
-    let resumed = deliver_with(&ownership, &policy, &runner).unwrap();
+    let resumed = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(resumed.phase, "awaiting_merge_authority");
     assert!(runner.calls.lock().unwrap().is_empty());
 }
@@ -167,7 +179,12 @@ struct AmbiguousCreateRunner {
 }
 
 impl CommandRunner for AmbiguousCreateRunner {
-    fn run(&self, _directory: &Path, argv: &[String]) -> Result<Output, String> {
+    fn run(
+        &self,
+        _directory: &Path,
+        argv: &[String],
+        _env: &[(String, String)],
+    ) -> Result<Output, String> {
         self.calls.lock().unwrap().push(argv.to_vec());
         let is_create = argv.iter().any(|value| value == "create");
         if is_create {
@@ -175,9 +192,13 @@ impl CommandRunner for AmbiguousCreateRunner {
             return Err("response lost after provider accepted create".into());
         }
         let is_view = argv.iter().any(|value| value == "view");
+        // PRD-095 identity preflight.
+        let is_probe = argv.iter().any(|value| value == "whoami");
         Ok(Output {
             status: std::process::ExitStatus::from_raw(0),
-            stdout: if is_view {
+            stdout: if is_probe {
+                b"steward-bot\n".to_vec()
+            } else if is_view {
                 b"37\n".to_vec()
             } else {
                 Vec::new()
@@ -195,12 +216,12 @@ fn ambiguous_pr_create_is_reconciled_without_repeating_external_effects() {
         provider_effects: Mutex::new(0),
     };
 
-    let delivered = deliver_with(&ownership, &policy, &runner).unwrap();
+    let delivered = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(delivered.phase, "awaiting_merge_authority");
     assert_eq!(delivered.pr_number, Some(37));
     let calls_after_ambiguous_result = runner.calls.lock().unwrap().len();
 
-    let resumed = deliver_with(&ownership, &policy, &runner).unwrap();
+    let resumed = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(resumed.phase, "awaiting_merge_authority");
     assert_eq!(
         runner.calls.lock().unwrap().len(),
@@ -225,13 +246,22 @@ struct CommentCaptureRunner {
 }
 
 impl CommandRunner for CommentCaptureRunner {
-    fn run(&self, _directory: &Path, argv: &[String]) -> Result<Output, String> {
+    fn run(
+        &self,
+        _directory: &Path,
+        argv: &[String],
+        _env: &[(String, String)],
+    ) -> Result<Output, String> {
         self.calls.lock().unwrap().push(argv.to_vec());
         let is_view = argv.iter().any(|value| value == "view");
+        // PRD-095 identity preflight.
+        let is_probe = argv.iter().any(|value| value == "whoami");
         let is_checks = argv.iter().any(|value| value == "checks");
         Ok(Output {
             status: std::process::ExitStatus::from_raw(if is_checks { 1 << 8 } else { 0 }),
-            stdout: if is_view {
+            stdout: if is_probe {
+                b"steward-bot\n".to_vec()
+            } else if is_view {
                 b"37\n".to_vec()
             } else {
                 Vec::new()
@@ -274,7 +304,7 @@ fn hostile_provider_output_is_redacted_from_reports_database_rows_and_comments()
     let runner = CommentCaptureRunner {
         calls: Mutex::new(Vec::new()),
     };
-    assert!(deliver_with(&ownership, &policy, &runner).is_err());
+    assert!(deliver_with(&ownership, &policy, "repo", &runner).is_err());
     let report = familiar_ai_daemon::report::render(&db, None).unwrap();
     std::env::remove_var("SECURITY_BURN_IN_DURABLE_CANARY");
 
