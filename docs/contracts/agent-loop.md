@@ -242,6 +242,37 @@ behavior exactly: `run-command` output is truncated only by the raw
 `max_output_bytes` safety cap, and `read-file` returns the whole file
 unconditionally.
 
+**Retention permissions and lifecycle (PRD-082).** The retained-output store
+is keyed by a value any local process can derive (canonical worktree root
+plus execution id) and sits under the host's shared, world-readable temp
+directory, so its own permission bits are the entire barrier between one
+local user's retained tool output — verbatim command output from a worker
+that has been reading the repository — and every other local user. The
+executor therefore never lets the ambient umask decide: the retention
+directory is created, verified to be a directory owned by this process's
+effective uid, and `chmod`-ed to `0700` before anything is written into it,
+and each retained file is opened `0600` so it never exists even briefly at
+umask-derived permissions. The store root those per-execution directories
+are created inside gets the identical treatment and is keyed by effective
+uid, because a parent another local user owns is a parent that can replace
+what sits under it however that child's own bits are set. Any of those
+checks failing is a retention failure like any other, and falls back to the
+unbounded, byte-capped result.
+
+Retention ends with the execution, not with the worktree. A paging handle is
+only useful while the loop that produced it is still running, so the driver
+of a raw-runtime loop calls
+`SandboxedToolExecutor::discard_retained_tool_output` once the run's
+evidence is durable and the model can no longer page; that removes the
+execution-scoped directory and everything in it. That call is a floor rather
+than the only bound: because the store is deliberately outside the worktree,
+an execution whose retention is never discarded — a crashed daemon, say —
+leaves owner-only-readable bytes in the host's temp directory to be reaped
+like any other temp state, and can never accumulate inside a worktree for
+that worktree's life. Retained output is *not* durable review evidence and
+nothing may treat it as such: evidence that must outlive the run is the
+PRD-051 ledger and the loop evidence `persist_run_outcome` writes.
+
 **Ledger attribution.** PRD-051 usage observations carry
 `edit_form_id`/`edit_form_version` and
 `truncation_config_id`/`truncation_config_version`, mirroring migration

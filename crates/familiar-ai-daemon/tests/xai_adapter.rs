@@ -113,13 +113,14 @@ async fn xai_wire_round_trip_persists_journal_evidence_and_usage_ledger() {
     let authorizer =
         write_scope_authorizer_from_prd(SAMPLE_PRD, vec![CapabilityId::ApplyEdit], &no_sandbox())
             .unwrap();
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: worktree.clone(),
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+    let mut executor = SandboxedToolExecutor::new(
+        worktree.clone(),
+        no_sandbox(),
+        2_000,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
     let adapter = xai_adapter(&server, "XAI_DAEMON_TEST_KEY_1").await;
 

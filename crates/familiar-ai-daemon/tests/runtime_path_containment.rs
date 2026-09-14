@@ -55,12 +55,12 @@ fn call(capability: CapabilityId, call_id: &str, arguments: serde_json::Value) -
 }
 
 fn enabled_executor(worktree_root: std::path::PathBuf) -> SandboxedToolExecutor {
-    SandboxedToolExecutor {
+    SandboxedToolExecutor::new(
         worktree_root,
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 1 << 20,
-        token_discipline: TokenDisciplineConfig {
+        no_sandbox(),
+        2_000,
+        1 << 20,
+        TokenDisciplineConfig {
             enabled: true,
             targeted_edit_threshold_bytes: 10,
             tool_result_max_lines: 10,
@@ -68,7 +68,8 @@ fn enabled_executor(worktree_root: std::path::PathBuf) -> SandboxedToolExecutor 
             tool_result_tail_lines: 3,
             file_read_max_lines: 5,
         },
-    }
+    )
+    .unwrap()
 }
 
 /// The confirmed HIGH. `escape/secret.txt` is not absolute and holds no `..`
@@ -475,21 +476,81 @@ fn read_file_still_refuses_parent_traversal_and_absolute_paths() {
     }
 }
 
-/// Retention advertises a paging handle to the model. The write that backs
-/// that handle currently discards its error (`let _ = fs::write(..)`) and the
-/// handle is emitted regardless — so the model can be handed a pointer to a
-/// file that was never created, which is precisely the silent narrowing the
-/// surrounding comment claims cannot happen.
+/// PRD-082 defect 4: the executor must hold exactly one form of its root.
+/// A configured root that traverses a symlink shares no textual prefix with
+/// the resolved paths the capabilities actually open, so any second copy of
+/// the root — the stored spelling — disagrees with the one containment is
+/// decided against. Two spellings of the same worktree must therefore be
+/// indistinguishable to the executor in every root-derived value.
+///
+/// This is the case the PRD notes does not reproduce under a bare `tempfile`
+/// root on Linux (it canonicalizes to itself) and does on macOS, where
+/// `TMPDIR` resolves through `/private/var`. Planting the symlink explicitly
+/// reproduces it on either.
 #[test]
-#[ignore = "PRD-082: fails until containment/retention is fixed; removing this attribute is an acceptance criterion"]
+fn a_symlinked_root_spelling_is_indistinguishable_from_its_canonical_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let real = temp.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("inside.txt"), "ok\n").unwrap();
+    // `link/` and `real/` are the same directory spelled two ways.
+    symlink(&real, temp.path().join("link")).unwrap();
+
+    let canonical = real.canonicalize().unwrap();
+    let via_link = enabled_executor(temp.path().join("link"));
+    let via_real = enabled_executor(real.clone());
+
+    assert_eq!(
+        via_link.worktree_root(),
+        canonical,
+        "the root was stored in its configured form rather than canonicalized once"
+    );
+    assert_eq!(via_link.worktree_root(), via_real.worktree_root());
+    assert_eq!(
+        via_link.tool_output_retention_dir(&authority().execution_id),
+        via_real.tool_output_retention_dir(&authority().execution_id),
+        "one worktree spelled two ways keyed two retention stores"
+    );
+
+    // And the root a path is *made relative to* is that same single form:
+    // stripping a resolved path against the configured spelling would fail
+    // and leak absolute host paths into an ordinary in-worktree search.
+    let mut via_link = via_link;
+    let outcome = via_link
+        .execute(
+            &call(
+                CapabilityId::SearchList,
+                "c_symlinked_root",
+                serde_json::json!({ "query": "inside" }),
+            ),
+            &authority(),
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.result_text, "inside.txt",
+        "search-list reported a path measured against a different root form"
+    );
+}
+
+/// Retention backs the paging handle a bounded result advertises. If the
+/// retention write fails, the handle must not be emitted — otherwise the
+/// model is handed a pointer to a file that was never created, which is
+/// precisely the silent narrowing the runtime claims cannot happen.
+///
+/// The handle string *looks* like `.familiar/tool-output/<id>.txt`, but it
+/// is opaque: the bytes live in daemon-owned storage outside the worktree
+/// (`tool_output_retention_dir`), so occupying that name inside the worktree
+/// would not make retention fail at all. Retention is blocked where it
+/// actually happens — a regular file sitting on the retention directory's
+/// own path, which no `create_dir_all` can turn into a directory.
+#[test]
 fn a_failed_retention_write_never_advertises_an_unresolvable_handle() {
     let temp = tempfile::tempdir().unwrap();
-    // Occupy `.familiar/tool-output` with a regular file so that both
-    // create_dir_all and the subsequent write fail.
-    fs::create_dir_all(temp.path().join(".familiar")).unwrap();
-    fs::write(temp.path().join(".familiar/tool-output"), "blocker").unwrap();
-
     let mut executor = enabled_executor(temp.path().to_path_buf());
+    let blocker = executor.tool_output_retention_dir(&authority().execution_id);
+    fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    let _ = fs::remove_dir_all(&blocker);
+    fs::write(&blocker, "blocker").unwrap();
     let script: String = (1..=20).map(|n| format!("line{n}\\n")).collect();
     let outcome = executor.execute(
         &call(
@@ -511,19 +572,29 @@ fn a_failed_retention_write_never_advertises_an_unresolvable_handle() {
         ),
         Err(other) => panic!("unexpected error {other:?}"),
     }
+
+    // The blocker sits in shared temp storage, not under `temp`, so dropping
+    // the worktree does not reap it.
+    let _ = fs::remove_file(&blocker);
 }
 
 /// Retained tool output is verbatim command output from a worker that has
-/// read the repository. It currently inherits the ambient umask, so on a
-/// multi-user host it lands group- and world-readable — and `worktree_root`
-/// is operator-configurable, so it need not sit under `$HOME` at all.
+/// read the repository — build logs, test output, whatever the command
+/// printed. It must never inherit the ambient umask: the store sits under
+/// the shared, world-readable system temp directory at a path any local
+/// process can derive, so the directory's and the file's own permission bits
+/// are the entire barrier between one local user's retained output and every
+/// other local user on the host.
 #[test]
-#[ignore = "PRD-082: fails until containment/retention is fixed; removing this attribute is an acceptance criterion"]
 fn retained_tool_output_is_not_readable_by_other_users() {
     use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().unwrap();
     let mut executor = enabled_executor(temp.path().to_path_buf());
+    let retained = executor
+        .tool_output_retention_dir(&authority().execution_id)
+        .join("c_perms.txt");
+    let _ = fs::remove_dir_all(retained.parent().unwrap());
     let script: String = (1..=20).map(|n| format!("line{n}\\n")).collect();
     executor
         .execute(
@@ -536,7 +607,6 @@ fn retained_tool_output_is_not_readable_by_other_users() {
         )
         .unwrap();
 
-    let retained = temp.path().join(".familiar/tool-output/c_perms.txt");
     assert!(
         retained.exists(),
         "expected retained output at {retained:?}"
@@ -558,5 +628,25 @@ fn retained_tool_output_is_not_readable_by_other_users() {
         file_mode & 0o077,
         0,
         "retained output is readable by other users (mode {file_mode:o})"
+    );
+
+    // The store root the execution directory is created inside, too: a
+    // parent another user owns is a parent that can replace what is under
+    // it, however the execution directory's own bits are set.
+    let store_root = retained.parent().unwrap().parent().unwrap();
+    let root_mode = fs::metadata(store_root).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        root_mode & 0o077,
+        0,
+        "retention store root {store_root:?} is accessible to other users (mode {root_mode:o})"
+    );
+
+    // The store is outside the worktree, so dropping `temp` does not reap it.
+    // `discard_retained_tool_output` is the stated end of the retention
+    // lifecycle; exercise it here rather than leaving temp state behind.
+    executor.discard_retained_tool_output(&authority().execution_id);
+    assert!(
+        !retained.exists(),
+        "discarding retained output left {retained:?} behind"
     );
 }

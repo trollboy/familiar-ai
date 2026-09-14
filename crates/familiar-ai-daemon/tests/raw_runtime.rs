@@ -69,13 +69,14 @@ async fn full_round_trip_persists_journal_evidence_and_usage_ledger() {
     let authorizer =
         write_scope_authorizer_from_prd(SAMPLE_PRD, vec![CapabilityId::ApplyEdit], &no_sandbox())
             .unwrap();
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: worktree.clone(),
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+    let mut executor = SandboxedToolExecutor::new(
+        worktree.clone(),
+        no_sandbox(),
+        2_000,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
     let adapter = FakeInferenceAdapter::new(vec![
@@ -260,13 +261,14 @@ async fn write_outside_expected_files_is_refused_before_any_effect() {
     let authorizer =
         write_scope_authorizer_from_prd(SAMPLE_PRD, vec![CapabilityId::ApplyEdit], &no_sandbox())
             .unwrap();
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: worktree.clone(),
-        sandbox: no_sandbox(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+    let mut executor = SandboxedToolExecutor::new(
+        worktree.clone(),
+        no_sandbox(),
+        2_000,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
     let adapter = FakeInferenceAdapter::new(vec![ScriptedTurn {
@@ -349,13 +351,14 @@ async fn allowlisted_command_executes_and_denylisted_command_is_refused() {
         allowed_commands: sandbox.allowed_commands.clone(),
         network_allowed: false,
     };
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: worktree.clone(),
-        sandbox: sandbox.clone(),
-        command_timeout_ms: 2_000,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+    let mut executor = SandboxedToolExecutor::new(
+        worktree.clone(),
+        sandbox.clone(),
+        2_000,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
     let adapter = FakeInferenceAdapter::new(vec![ScriptedTurn {
@@ -438,13 +441,14 @@ async fn denylisted_command_is_refused_before_any_process_ever_launches() {
         allowed_commands: sandbox.allowed_commands.clone(),
         network_allowed: false,
     };
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: worktree.clone(),
+    let mut executor = SandboxedToolExecutor::new(
+        worktree.clone(),
         sandbox,
-        command_timeout_ms: 2_000,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+        2_000,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
     let marker = worktree.join("should-not-exist");
@@ -530,13 +534,14 @@ async fn command_timeout_kills_the_process_group_instead_of_waiting_it_out() {
         allowed_commands: sandbox.allowed_commands.clone(),
         network_allowed: false,
     };
-    let mut executor = SandboxedToolExecutor {
-        worktree_root: worktree,
+    let mut executor = SandboxedToolExecutor::new(
+        worktree,
         sandbox,
-        command_timeout_ms: 150,
-        max_output_bytes: 4096,
-        token_discipline: TokenDisciplineConfig::default(),
-    };
+        150,
+        4096,
+        TokenDisciplineConfig::default(),
+    )
+    .unwrap();
     let mut journal = SqliteToolJournal::new(db.conn(), "exec_1");
 
     let adapter = FakeInferenceAdapter::new(vec![ScriptedTurn {
