@@ -1547,6 +1547,12 @@ reinstall the binary, then rerun the 076 drive.
   check id and the captured failure, hand it to the implementer, and
   re-verify. Failing that, the pause must not offer `[r]` when it cannot
   change the outcome.
+- **Queued as:** PRD-096 (`docs/prds/PRD-096.md`, status `draft`, awaiting
+  owner approval). The routing fix is mostly wiring: `RemediationRequest`
+  already carries a `verification_failures` field that every call site
+  passes `vec![]`, and the remediation loop already bounds attempts and
+  reserves budget. One open design question is carried in the PRD — whether
+  a failed required check deserves its own `FindingCategory`.
 
 ### FAM-BUG-055 — A hard link walks straight out of the worktree
 
