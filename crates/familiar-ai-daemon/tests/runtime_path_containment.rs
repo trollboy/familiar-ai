@@ -236,6 +236,221 @@ fn apply_edit_refuses_a_dangling_symlink_intermediate_component() {
     );
 }
 
+/// The full chain the PRD describes, with no symlink planted by the test
+/// harness: the worker creates the link itself through `run-command` and then
+/// reaches through it. This is the only test here where the link is made by
+/// the same authority that later tries to use it, which is the actual threat
+/// model — `ln -s` is reachable whenever it is allowlisted.
+#[test]
+fn a_worker_cannot_read_through_a_symlink_it_created_with_run_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("secret.txt"), "TOP SECRET\n").unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    executor.sandbox.allowed_commands.push("ln".into());
+
+    let planted = executor
+        .execute(
+            &call(
+                CapabilityId::RunCommand,
+                "c_plant",
+                serde_json::json!({
+                    "argv": ["ln", "-s", outside.path().to_str().unwrap(), "escape"],
+                }),
+            ),
+            &authority(),
+        )
+        .expect("creating a symlink is an allowed command, not the thing being refused");
+    let _ = planted;
+    assert!(
+        temp.path().join("escape").symlink_metadata().is_ok(),
+        "the worker's own run-command should have planted the link"
+    );
+
+    let result = executor.execute(
+        &call(
+            CapabilityId::ReadFile,
+            "c_read_planted",
+            serde_json::json!({ "path": "escape/secret.txt" }),
+        ),
+        &authority(),
+    );
+    match result {
+        Err(ExecutionError::Failed(_)) => {}
+        Ok(outcome) => panic!(
+            "a worker read through a link it planted itself: {}",
+            outcome.result_text
+        ),
+        Err(other) => panic!("expected ExecutionError::Failed, got {other:?}"),
+    }
+
+    // And the write direction of the same planted link.
+    let result = executor.execute(
+        &call(
+            CapabilityId::ApplyEdit,
+            "c_write_planted",
+            serde_json::json!({
+                "path": "escape/secret.txt",
+                "change_kind": "whole-file",
+                "content": "OVERWRITTEN\n",
+            }),
+        ),
+        &authority(),
+    );
+    assert!(
+        matches!(result, Err(ExecutionError::Failed(_))),
+        "apply-edit through a self-planted link must be refused, got {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+        "TOP SECRET\n",
+        "a file outside the worktree was modified through a self-planted link"
+    );
+}
+
+/// Criterion 2 names `search-list` alongside read-file and apply-edit. Its
+/// *argument* goes through the chokepoint, so `path: "escape"` is refused —
+/// but the recursive walk behind it is a second way to reach the filesystem,
+/// and `is_dir()` follows symlinks. Containment has to survive the walk, not
+/// only the argument.
+#[test]
+fn search_list_refuses_an_escaping_subpath_argument() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("id_rsa"), "PRIVATE KEY\n").unwrap();
+    symlink(outside.path(), temp.path().join("escape")).unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::SearchList,
+            "c_search_arg",
+            serde_json::json!({ "query": "", "path": "escape" }),
+        ),
+        &authority(),
+    );
+
+    assert!(
+        matches!(result, Err(ExecutionError::Failed(_))),
+        "search-list must refuse an escaping subpath exactly as read-file does, got {result:?}"
+    );
+}
+
+/// The walk itself. `search-list` with no `path` starts at the worktree root,
+/// which is contained — and then descends through `escape` into another
+/// directory entirely, handing the model the names of files it can never
+/// legitimately reach. Filenames are not file contents, but an SSH key's
+/// existence and location is exactly the reconnaissance containment exists to
+/// deny.
+#[test]
+fn search_list_does_not_enumerate_through_an_escaping_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("id_rsa"), "PRIVATE KEY\n").unwrap();
+    fs::create_dir(outside.path().join("nested")).unwrap();
+    fs::write(outside.path().join("nested/token.txt"), "tok\n").unwrap();
+    symlink(outside.path(), temp.path().join("escape")).unwrap();
+    fs::write(temp.path().join("inside.txt"), "ok\n").unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let outcome = executor
+        .execute(
+            &call(
+                CapabilityId::SearchList,
+                "c_search_walk",
+                serde_json::json!({ "query": "" }),
+            ),
+            &authority(),
+        )
+        .expect("a search rooted at the worktree root is itself legitimate");
+
+    assert!(
+        outcome.result_text.contains("inside.txt"),
+        "the contained tree must still be listed: {}",
+        outcome.result_text
+    );
+    assert!(
+        !outcome.result_text.contains("id_rsa"),
+        "search-list enumerated a file outside the worktree: {}",
+        outcome.result_text
+    );
+    assert!(
+        !outcome.result_text.contains("token.txt"),
+        "search-list recursed outside the worktree: {}",
+        outcome.result_text
+    );
+}
+
+/// Containment must not be mistaken for refusing every link. A symlink whose
+/// target is inside the worktree is usable, so it stays listed; what it must
+/// not do is turn the walk into an unbounded one.
+#[test]
+fn search_list_lists_a_contained_symlink_without_looping_on_a_cycle() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("real.txt"), "ok\n").unwrap();
+    symlink(temp.path().join("real.txt"), temp.path().join("link.txt")).unwrap();
+    // `loop -> .` is contained, and traversing it would never terminate for a
+    // query that matches nothing.
+    symlink(temp.path(), temp.path().join("loop")).unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let outcome = executor
+        .execute(
+            &call(
+                CapabilityId::SearchList,
+                "c_search_cycle",
+                serde_json::json!({ "query": "zzz-matches-nothing" }),
+            ),
+            &authority(),
+        )
+        .expect("a cycle inside the worktree must not hang or crash the walk");
+    assert_eq!(outcome.result_text, "");
+
+    let outcome = executor
+        .execute(
+            &call(
+                CapabilityId::SearchList,
+                "c_search_contained_link",
+                serde_json::json!({ "query": "link.txt" }),
+            ),
+            &authority(),
+        )
+        .unwrap();
+    assert!(
+        outcome.result_text.contains("link.txt"),
+        "a symlink resolving inside the worktree stays visible: {}",
+        outcome.result_text
+    );
+}
+
+/// Criterion 2 also names `run-command`'s working directory. Nothing runs
+/// here: the refusal must land before the process is spawned.
+#[test]
+fn run_command_refuses_an_escaping_working_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), temp.path().join("escape")).unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::RunCommand,
+            "c_cwd",
+            serde_json::json!({
+                "argv": ["printf", "hello"],
+                "working_directory": "escape",
+            }),
+        ),
+        &authority(),
+    );
+
+    assert!(
+        matches!(result, Err(ExecutionError::Failed(_))),
+        "run-command must refuse an escaping working directory, got {result:?}"
+    );
+}
+
 /// The lexical guard closes plain parent traversal today. Containment is
 /// about to be rewritten around canonicalization, so pin the existing
 /// behaviour to keep the rewrite from reopening it.
