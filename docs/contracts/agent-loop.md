@@ -282,6 +282,15 @@ sanitization every other observation follows.
   rather than failing the search, and no symlink is traversed even when it
   resolves inside (a link is a leaf, as it is to git — which also bounds the
   walk against a cycle).
+- A **hard link is refused** wherever containment must be proven. A hard
+  link is not a symlink — the link *is* the file, so canonicalization
+  returns the in-worktree path and the checks above all pass while the bytes
+  belong to a file that was never granted. Because the kernel offers no
+  inode-to-paths lookup, a link count above one makes containment
+  *undecidable* rather than merely unchecked, so a regular file with
+  `nlink > 1` is refused at the chokepoint even when every one of its names
+  happens to be inside the worktree. Git cannot represent a hard link at
+  all, so no legitimate checkout content depends on one.
 - Network access for tool commands is deny-by-default
   (`agent_runtime.sandbox.network_allowed`, default `false`).
 - Cancellation and timeout kill the tool's process group (reusing the

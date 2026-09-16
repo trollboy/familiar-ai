@@ -333,6 +333,7 @@ impl SandboxedToolExecutor {
                 "path {relative:?} escapes the worktree root"
             )));
         }
+        refuse_unprovable_hard_link(&resolved, relative)?;
         Ok(resolved)
     }
 
@@ -751,6 +752,51 @@ impl ToolExecutor for SandboxedToolExecutor {
             ))),
         }
     }
+}
+
+/// Refuses a regular file whose containment cannot be *proven*, which for a
+/// hard link means any file carrying more than one name.
+///
+/// A hard link is not a symlink, and that is exactly why resolved-path
+/// containment does not see it: the link *is* the file, so `canonicalize`
+/// returns the in-worktree path and `symlink_metadata` reports an ordinary
+/// regular file. Every check above passes, and the bytes still belong to a
+/// file the worker was never granted — `ln` without `-s` is reachable
+/// wherever `ln` is allowlisted, and `fs.protected_hardlinks` does not help
+/// because it only refuses to link a file the caller does not own, while the
+/// daemon's uid owns its own `~/.ssh`.
+///
+/// The rule is soundness, not suspicion. `nlink == 1` means the file has
+/// exactly one name, and that name is the one just proven inside the root:
+/// contained, demonstrably. `nlink > 1` means other names exist, and no
+/// portable syscall enumerates them — the kernel offers no inode-to-paths
+/// lookup — so containment is *undecidable* rather than merely unchecked.
+/// Undecidable fails closed.
+///
+/// This does refuse a hard link whose every name happens to be inside the
+/// worktree. That costs nothing real: git cannot represent a hard link at
+/// all — it stores two independent blobs — so no legitimate checkout content
+/// depends on one, and a shared inode is precisely the uncontained alias this
+/// function exists to deny.
+///
+/// Only regular files are considered. A directory cannot be hard-linked, and
+/// a symlink's own link count says nothing about where it points (that is
+/// already settled by canonicalization above).
+fn refuse_unprovable_hard_link(resolved: &Path, relative: &str) -> Result<(), ExecutionError> {
+    use std::os::unix::fs::MetadataExt;
+
+    // A leaf that does not exist yet (an `apply-edit` creating a new file)
+    // has no link count to inspect and nothing to alias.
+    let Ok(metadata) = resolved.symlink_metadata() else {
+        return Ok(());
+    };
+    if metadata.file_type().is_file() && metadata.nlink() > 1 {
+        return Err(ExecutionError::Failed(format!(
+            "path {relative:?} is a hard link with {} names; containment cannot be proven",
+            metadata.nlink()
+        )));
+    }
+    Ok(())
 }
 
 /// Canonicalizes `path`, following every symlink, even when its leaf (and
