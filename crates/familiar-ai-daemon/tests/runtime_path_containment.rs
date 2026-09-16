@@ -451,9 +451,181 @@ fn run_command_refuses_an_escaping_working_directory() {
     );
 }
 
+/// A hard link is not a symlink, and that is the whole problem: the link *is*
+/// the file, so `canonicalize` hands back the in-worktree path and
+/// `symlink_metadata` reports an ordinary regular file. Every resolved-path
+/// check PRD-081 installed passes it, and the bytes come from outside the
+/// worktree all the same.
+///
+/// `fs.protected_hardlinks` does not save us — it only refuses to link a file
+/// the caller does not own, and the daemon's uid owns its own `~/.ssh`. `ln`
+/// without `-s` is a hard link, and `ln` is exactly the command the runtime's
+/// own tests allowlist.
+#[test]
+fn read_file_refuses_a_hard_link_to_a_file_outside_the_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("id_rsa");
+    fs::write(&secret, "PRIVATE KEY BYTES\n").unwrap();
+    fs::hard_link(&secret, temp.path().join("innocent.txt")).unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::ReadFile,
+            "c_hardlink_read",
+            serde_json::json!({ "path": "innocent.txt" }),
+        ),
+        &authority(),
+    );
+
+    match result {
+        Err(ExecutionError::Failed(_)) => {}
+        Ok(outcome) => panic!(
+            "read-file returned bytes from outside the worktree through a hard link: {}",
+            outcome.result_text
+        ),
+        Err(other) => panic!("expected ExecutionError::Failed, got {other:?}"),
+    }
+}
+
+/// The write direction of the same hole, and the severe one: a hard link
+/// turns `apply-edit` into an arbitrary-file overwrite for anything the
+/// daemon's uid owns.
+#[test]
+fn apply_edit_refuses_to_write_through_a_hard_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    fs::write(&victim, "ORIGINAL\n").unwrap();
+    fs::hard_link(&victim, temp.path().join("innocent.txt")).unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::ApplyEdit,
+            "c_hardlink_write",
+            serde_json::json!({
+                "path": "innocent.txt",
+                "change_kind": "whole-file",
+                "content": "OVERWRITTEN\n",
+            }),
+        ),
+        &authority(),
+    );
+
+    assert!(
+        matches!(result, Err(ExecutionError::Failed(_))),
+        "apply-edit through a hard link must be refused, got {result:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "ORIGINAL\n",
+        "a file outside the worktree was modified through a hard link"
+    );
+}
+
+/// A hard link whose every name happens to be inside the worktree is refused
+/// too, and that is deliberate rather than collateral.
+///
+/// Containment here is decided by soundness, not by suspicion. `nlink == 1`
+/// proves the file has exactly one name and that name is the resolved,
+/// contained one. `nlink > 1` means other names exist and no portable syscall
+/// enumerates them — the kernel offers no inode-to-paths lookup — so whether
+/// a second name sits outside the root is *undecidable*, not merely
+/// unchecked. Undecidable fails closed.
+///
+/// The cost is nil in practice: git cannot represent a hard link at all (it
+/// stores two independent blobs), so nothing in a legitimate checkout depends
+/// on one. This test exists to pin the refusal as intended behaviour, so a
+/// later "fix" does not quietly reopen the escape by special-casing it.
+#[test]
+fn a_hard_link_is_refused_even_when_every_name_is_inside_the_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("real.txt"), "INSIDE\n").unwrap();
+    fs::hard_link(temp.path().join("real.txt"), temp.path().join("alias.txt")).unwrap();
+    // A genuinely single-named file: linking `real.txt` raised *its* link
+    // count too, so the original is no more provable than its alias.
+    fs::write(temp.path().join("ordinary.txt"), "ORDINARY\n").unwrap();
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    for path in ["alias.txt", "real.txt"] {
+        let result = executor.execute(
+            &call(
+                CapabilityId::ReadFile,
+                "c_hardlink_inside",
+                serde_json::json!({ "path": path }),
+            ),
+            &authority(),
+        );
+        let Err(ExecutionError::Failed(message)) = result else {
+            panic!("a multiply-named file cannot be proven contained, got {result:?}");
+        };
+        assert!(
+            message.contains(path) && message.contains("hard link"),
+            "the refusal must say which path and why, got {message:?}"
+        );
+    }
+
+    // This is a link-count rule, not a ban on reading ordinary files.
+    let outcome = executor
+        .execute(
+            &call(
+                CapabilityId::ReadFile,
+                "c_hardlink_ordinary",
+                serde_json::json!({ "path": "ordinary.txt" }),
+            ),
+            &authority(),
+        )
+        .expect("a file with one name is provably contained");
+    assert!(
+        outcome.result_text.contains("ORDINARY"),
+        "an ordinary file must stay readable: {}",
+        outcome.result_text
+    );
+}
+
+/// `collect_matches` recurses once per directory level with no depth bound.
+/// `limit` only short-circuits once *matches* accumulate, so a query that
+/// matches nothing descends to the bottom of whatever tree exists. A Rust
+/// stack overflow aborts the process — uncatchable, and it takes the daemon
+/// down with it — so this is a worker-triggerable crash, not a slow search.
+#[test]
+fn search_list_survives_a_pathologically_deep_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut deep = temp.path().to_path_buf();
+    for _ in 0..2_000 {
+        deep = deep.join("d");
+    }
+    if fs::create_dir_all(&deep).is_err() {
+        // A filesystem that refuses the depth outright cannot exhibit the bug.
+        return;
+    }
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::SearchList,
+            "c_deep_walk",
+            serde_json::json!({ "query": "zzz-matches-nothing" }),
+        ),
+        &authority(),
+    );
+
+    assert!(
+        result.is_ok(),
+        "a deep tree must bound the walk, not abort the process: {result:?}"
+    );
+}
+
 /// The lexical guard closes plain parent traversal today. Containment is
 /// about to be rewritten around canonicalization, so pin the existing
 /// behaviour to keep the rewrite from reopening it.
+///
+/// Criterion 4 of PRD-081 requires the diagnostic to *name* the offending
+/// path, so assert on the message and not merely on the error variant: a
+/// refusal that said only "refused" would satisfy `matches!` while losing the
+/// one fact an operator needs.
 #[test]
 fn read_file_still_refuses_parent_traversal_and_absolute_paths() {
     let temp = tempfile::tempdir().unwrap();
@@ -468,9 +640,12 @@ fn read_file_still_refuses_parent_traversal_and_absolute_paths() {
             ),
             &authority(),
         );
+        let Err(ExecutionError::Failed(message)) = result else {
+            panic!("path {path:?} must be refused, got {result:?}");
+        };
         assert!(
-            matches!(result, Err(ExecutionError::Failed(_))),
-            "path {path:?} must be refused, got {result:?}"
+            message.contains(&format!("{path:?}")),
+            "the refusal must name the offending path {path:?}, got {message:?}"
         );
     }
 }

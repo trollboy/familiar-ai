@@ -73,6 +73,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 const TOOL_OUTPUT_HANDLE_PREFIX: &str = ".familiar/tool-output/";
 const TOOL_OUTPUT_HANDLE_SUFFIX: &str = ".txt";
 
+/// Directory levels `search-list` will descend before it stops. Deep enough
+/// that no real checkout reaches it (a vendored `node_modules` bottoms out
+/// around 15), shallow enough that the recursion cannot exhaust the stack —
+/// which aborts the process rather than unwinding, so this is a crash bound
+/// and not a politeness limit.
+const MAX_WALK_DEPTH: usize = 64;
+
 fn tool_output_handle(call_id: &str) -> String {
     format!("{TOOL_OUTPUT_HANDLE_PREFIX}{call_id}{TOOL_OUTPUT_HANDLE_SUFFIX}")
 }
@@ -333,6 +340,7 @@ impl SandboxedToolExecutor {
                 "path {relative:?} escapes the worktree root"
             )));
         }
+        refuse_unprovable_hard_link(&resolved, relative)?;
         Ok(resolved)
     }
 
@@ -504,7 +512,7 @@ impl SandboxedToolExecutor {
             self.resolve_within_worktree(subpath)?
         };
         let mut matches = Vec::new();
-        collect_matches(&root, &canonical_root, query, &mut matches, 500);
+        collect_matches(&root, &canonical_root, query, &mut matches, 500, 0);
         Ok(hash_outcome(matches.join("\n")))
     }
 
@@ -753,6 +761,51 @@ impl ToolExecutor for SandboxedToolExecutor {
     }
 }
 
+/// Refuses a regular file whose containment cannot be *proven*, which for a
+/// hard link means any file carrying more than one name.
+///
+/// A hard link is not a symlink, and that is exactly why resolved-path
+/// containment does not see it: the link *is* the file, so `canonicalize`
+/// returns the in-worktree path and `symlink_metadata` reports an ordinary
+/// regular file. Every check above passes, and the bytes still belong to a
+/// file the worker was never granted — `ln` without `-s` is reachable
+/// wherever `ln` is allowlisted, and `fs.protected_hardlinks` does not help
+/// because it only refuses to link a file the caller does not own, while the
+/// daemon's uid owns its own `~/.ssh`.
+///
+/// The rule is soundness, not suspicion. `nlink == 1` means the file has
+/// exactly one name, and that name is the one just proven inside the root:
+/// contained, demonstrably. `nlink > 1` means other names exist, and no
+/// portable syscall enumerates them — the kernel offers no inode-to-paths
+/// lookup — so containment is *undecidable* rather than merely unchecked.
+/// Undecidable fails closed.
+///
+/// This does refuse a hard link whose every name happens to be inside the
+/// worktree. That costs nothing real: git cannot represent a hard link at
+/// all — it stores two independent blobs — so no legitimate checkout content
+/// depends on one, and a shared inode is precisely the uncontained alias this
+/// function exists to deny.
+///
+/// Only regular files are considered. A directory cannot be hard-linked, and
+/// a symlink's own link count says nothing about where it points (that is
+/// already settled by canonicalization above).
+fn refuse_unprovable_hard_link(resolved: &Path, relative: &str) -> Result<(), ExecutionError> {
+    use std::os::unix::fs::MetadataExt;
+
+    // A leaf that does not exist yet (an `apply-edit` creating a new file)
+    // has no link count to inspect and nothing to alias.
+    let Ok(metadata) = resolved.symlink_metadata() else {
+        return Ok(());
+    };
+    if metadata.file_type().is_file() && metadata.nlink() > 1 {
+        return Err(ExecutionError::Failed(format!(
+            "path {relative:?} is a hard link with {} names; containment cannot be proven",
+            metadata.nlink()
+        )));
+    }
+    Ok(())
+}
+
 /// Canonicalizes `path`, following every symlink, even when its leaf (and
 /// possibly several of its trailing components) does not exist yet: it
 /// walks up to the deepest ancestor that does exist, canonicalizes that
@@ -819,13 +872,26 @@ fn canonicalize_partial(path: &Path) -> std::io::Result<PathBuf> {
 /// — matching how git treats a link as a leaf rather than a door, and
 /// removing the unbounded recursion a `ln -s . loop` would otherwise get when
 /// `query` matches nothing and `limit` is therefore never reached.
+///
+/// Those two rules bound *cycles*; they do not bound *depth*, and an ordinary
+/// acyclic tree is enough to exhaust the stack. `limit` only short-circuits
+/// once matches accumulate, so a query matching nothing recurses once per
+/// directory level all the way down — and a Rust stack overflow aborts the
+/// process rather than unwinding, taking the daemon with it. `mkdir -p` plus
+/// one `search-list` is the whole exploit, so `depth` caps the descent
+/// explicitly: below `MAX_WALK_DEPTH` the walk behaves as before, and at the
+/// cap it stops descending rather than dying.
 fn collect_matches(
     dir: &Path,
     canonical_root: &Path,
     query: &str,
     out: &mut Vec<String>,
     limit: usize,
+    depth: usize,
 ) {
+    if depth >= MAX_WALK_DEPTH {
+        return;
+    }
     if out.len() >= limit {
         return;
     }
@@ -863,7 +929,7 @@ fn collect_matches(
             if relative.split('/').next_back() == Some(".git") {
                 continue;
             }
-            collect_matches(&path, canonical_root, query, out, limit);
+            collect_matches(&path, canonical_root, query, out, limit, depth + 1);
         } else if relative.contains(query) {
             out.push(relative);
         }
