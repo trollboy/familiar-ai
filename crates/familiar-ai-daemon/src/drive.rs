@@ -2833,9 +2833,15 @@ mod tests {
                 "preflight",
             )
             .unwrap();
+        // The point of this test is that a *later* tick sees a phase written
+        // by a *different* connection — not that it sees it within some
+        // number of milliseconds. Joining the writer before asserting keeps
+        // the cross-connection visibility the test exists to prove while
+        // removing every wall-clock assumption: the previous version raced a
+        // 25ms writer against a 75ms sleep, which held on an idle machine and
+        // lost under full-suite parallel load, failing in a required gate.
         let update_path = database_path.clone();
         let updater = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(25));
             let database = Database::open(&update_path).unwrap();
             DriverRepository::new(database.conn())
                 .record_attempt_diagnostics(
@@ -2850,12 +2856,11 @@ mod tests {
                 )
                 .unwrap();
         });
-        std::thread::sleep(Duration::from_millis(75));
+        updater.join().unwrap();
         assert_eq!(
             durable_attempt_phase(&database_path, "timed", sequence),
             "review_complete"
         );
-        updater.join().unwrap();
     }
 
     #[test]

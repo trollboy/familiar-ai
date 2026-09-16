@@ -1610,6 +1610,44 @@ reinstall the binary, then rerun the 076 drive.
   real checkout reaches it, shallow enough that recursion cannot exhaust
   the stack. Pinned by a regression that builds a 2000-level tree.
 
+### FAM-BUG-057 — Heartbeat regression races the wall clock
+
+- **Status:** FIXED 2026-09-16 — committed in `359225d`
+- **Found:** 2026-09-16, running the full workspace suite while verifying
+  PRD-081. Failed once during `cargo test --workspace`, passed 6/6 when
+  run in isolation.
+- **Detail:** `progress_heartbeat_observes_latest_durable_phase_on_later_tick`
+  raced a 25ms writer thread against a 75ms sleep
+  (`drive.rs:2836-2856`). The margin holds on an idle machine and loses
+  under full-suite parallel load.
+- **Why it matters:** a flake in a required verification gate is a session
+  killer — the same class as FAM-BUG-033, where one flaky probe burned an
+  entire drive session at preflight. It is also the exact failure mode
+  that makes a green suite untrustworthy as evidence.
+- **Fix:** the test proves a later tick observes a phase written by a
+  *different connection*; it never needed to prove that within some number
+  of milliseconds. Joining the writer before asserting keeps the
+  cross-connection visibility and removes every wall-clock assumption.
+- **Evidence:** with the original code, raising the writer's delay to
+  400ms — what CPU contention does — fails deterministically
+  (`left: "preflight", right: "review_complete"`). With the join and that
+  same 400ms delay still injected, it passes 8/8 and no longer sleeps.
+
+### FAM-BUG-058 — Unreproduced `security_burn_in` failure under suite load
+
+- **Status:** Open — observed once, not reproduced, cause unknown
+- **Found:** 2026-09-16, same full-suite run as FAM-BUG-057.
+- **Detail:** `familiar-ai-agent`'s `security_burn_in` target reported
+  `3 passed; 1 failed` during a `cargo test --workspace` run. Which of the
+  four failed was not captured before the run was superseded.
+- **Not diagnosed:** the target passes 4/4 in isolation, and 6/6 under
+  48-way synthetic CPU load on a 24-core box. The tests spawn shell
+  fixtures under `timeout_ms: Some(2_000)`, so a load-induced timeout is
+  plausible and so is the ETXTBSY class of FAM-BUG-033 — but neither is
+  evidenced, and this entry deliberately stops short of naming a cause.
+- **Next step:** capture the failing test name and its output the next
+  time a workspace run reports it; do not "fix" it before then.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or
