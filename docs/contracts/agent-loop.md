@@ -281,7 +281,10 @@ sanitization every other observation follows.
   entry resolving outside the canonical root is omitted from the listing
   rather than failing the search, and no symlink is traversed even when it
   resolves inside (a link is a leaf, as it is to git — which also bounds the
-  walk against a cycle).
+  walk against a cycle). The walk is additionally capped at
+  `MAX_WALK_DEPTH` levels: the no-traverse rule bounds cycles but not depth,
+  and an ordinary deep tree recursing per level exhausts the stack, which
+  aborts the process rather than unwinding.
 - A **hard link is refused** wherever containment must be proven. A hard
   link is not a symlink — the link *is* the file, so canonicalization
   returns the in-worktree path and the checks above all pass while the bytes

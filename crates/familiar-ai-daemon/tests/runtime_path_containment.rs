@@ -585,6 +585,39 @@ fn a_hard_link_is_refused_even_when_every_name_is_inside_the_worktree() {
     );
 }
 
+/// `collect_matches` recurses once per directory level with no depth bound.
+/// `limit` only short-circuits once *matches* accumulate, so a query that
+/// matches nothing descends to the bottom of whatever tree exists. A Rust
+/// stack overflow aborts the process — uncatchable, and it takes the daemon
+/// down with it — so this is a worker-triggerable crash, not a slow search.
+#[test]
+fn search_list_survives_a_pathologically_deep_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut deep = temp.path().to_path_buf();
+    for _ in 0..2_000 {
+        deep = deep.join("d");
+    }
+    if fs::create_dir_all(&deep).is_err() {
+        // A filesystem that refuses the depth outright cannot exhibit the bug.
+        return;
+    }
+
+    let mut executor = enabled_executor(temp.path().to_path_buf());
+    let result = executor.execute(
+        &call(
+            CapabilityId::SearchList,
+            "c_deep_walk",
+            serde_json::json!({ "query": "zzz-matches-nothing" }),
+        ),
+        &authority(),
+    );
+
+    assert!(
+        result.is_ok(),
+        "a deep tree must bound the walk, not abort the process: {result:?}"
+    );
+}
+
 /// The lexical guard closes plain parent traversal today. Containment is
 /// about to be rewritten around canonicalization, so pin the existing
 /// behaviour to keep the rewrite from reopening it.
