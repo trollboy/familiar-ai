@@ -1547,6 +1547,69 @@ reinstall the binary, then rerun the 076 drive.
   check id and the captured failure, hand it to the implementer, and
   re-verify. Failing that, the pause must not offer `[r]` when it cannot
   change the outcome.
+
+### FAM-BUG-055 — A hard link walks straight out of the worktree
+
+- **Status:** FIXED 2026-09-16 — committed in `9debdcc`
+- **Found:** 2026-09-16, adversarially reviewing PR #7 (PRD-081) before
+  merge. Confirmed by probe against the merged tree, both directions.
+- **Detail:** PRD-081 decided containment on the *resolved* path, which
+  closes the symlink escape completely and the hard-link escape not at
+  all. A hard link is not a symlink — the link *is* the file — so
+  `canonicalize` returns the in-worktree path and `symlink_metadata`
+  reports an ordinary regular file. Every check PRD-081 installed passes
+  it.
+
+  ```
+  read-file  {"path": "innocent.txt"} -> "PRIVATE KEY BYTES"
+  apply-edit {"path": "innocent.txt"} -> a file outside the worktree
+                                        now reads "OVERWRITTEN"
+  ```
+
+- **Why it matters:** identical in class and severity to the hole PRD-081
+  was written to close. The write side turns `apply-edit` into an
+  arbitrary-file overwrite for anything the daemon's uid owns, which is
+  the blast-radius assumption scope policy, review gates and the merge
+  queue all rest on. `fs.protected_hardlinks` is not a mitigation: it
+  refuses only to link a file the caller does not own, and the daemon's
+  uid owns its own `~/.ssh`. `ln` without `-s` is a hard link, and `ln`
+  is the command the runtime's own containment test allowlists.
+- **Fix:** refuse a regular file with `nlink > 1` at the chokepoint.
+  `nlink == 1` *proves* the file has one name and that name is the
+  resolved, contained one; `nlink > 1` means other names exist and no
+  portable syscall enumerates them, so containment is undecidable rather
+  than unchecked. Undecidable fails closed. This also refuses a hard link
+  whose every name is inside the worktree — deliberate, pinned by its own
+  test, and costless because git cannot represent a hard link at all.
+- **Note:** the merged PRD-081 contract text asserted containment more
+  confidently than the code earned. `docs/contracts/agent-loop.md` now
+  names this refusal alongside the residual TOCTOU window.
+
+### FAM-BUG-056 — `search-list` aborts the daemon on a deep tree
+
+- **Status:** FIXED 2026-09-16 — committed in `05f44f6`
+- **Found:** 2026-09-16, same review as FAM-BUG-055.
+- **Detail:** `collect_matches` recurses once per directory level with no
+  depth bound. `limit` only short-circuits once *matches* accumulate, so
+  a query matching nothing descends to the bottom of whatever tree
+  exists. A Rust stack overflow aborts rather than unwinding:
+
+  ```
+  search-list {"query": "zzz-matches-nothing"}
+  -> thread has overflowed its stack
+  -> fatal runtime error: stack overflow, aborting  (signal 6, SIGABRT)
+  ```
+
+- **Why it matters:** `mkdir -p` plus one `search-list` is the whole
+  exploit and both are capabilities a worker already has. It is a crash,
+  not a slow search — uncatchable, and it takes the daemon with it.
+- **Consequence for the record:** PRD-081's commit message claimed the
+  no-traverse rule "bounds the walk". It bounds *cycles*; depth was
+  still open. A claim in a commit message is an assertion, not evidence.
+- **Fix:** `MAX_WALK_DEPTH = 64` caps the descent — deep enough that no
+  real checkout reaches it, shallow enough that recursion cannot exhaust
+  the stack. Pinned by a regression that builds a 2000-level tree.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or
