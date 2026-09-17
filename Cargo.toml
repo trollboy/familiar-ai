@@ -16,8 +16,6 @@ members = [
     "crates/familiar-ai-watcher",
     "crates/familiar-ai-testutil",
     "crates/familiar-ai-daemon",
-]
-exclude = [
     "crates/familiar-ai-tray",
 ]
 

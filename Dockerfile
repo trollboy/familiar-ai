@@ -7,6 +7,13 @@ RUN cargo build --release --no-default-features --bin familiar-ai-daemon
 # Stage 2: Test (used by docker compose test service)
 FROM rust:1.88-bookworm AS tester
 WORKDIR /app
+# familiar-ai-tray is a workspace member, so `--workspace` compiles it here
+# regardless of the daemon's feature flags. It links GTK and the Ayatana
+# indicator; without these the gate fails at configure time rather than
+# quietly skipping the crate, which is the whole point of un-excluding it.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libgtk-3-dev libayatana-appindicator3-dev \
+    && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-llvm-cov
 RUN rustup component add llvm-tools-preview
 # The drive's merge queue commits during integration; without an identity

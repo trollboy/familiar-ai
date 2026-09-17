@@ -36,6 +36,10 @@ pub struct TrayApp {
 }
 
 impl TrayApp {
+    // Every argument is a distinct collaborator the tray holds for its whole
+    // life; collapsing them into a parameter struct would only move the same
+    // eight names one indirection away.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: TrayConfig,
         status: Arc<Mutex<AppStatus>>,
@@ -168,13 +172,12 @@ impl TrayApp {
             .list_active_projects()
             .unwrap_or_default();
 
-        let spec =
-            crate::menu::build_menu_spec(
-                &status,
-                &recent,
-                self.config.recent_projects_count,
-                self.dashboard.clone(),
-            );
+        let spec = crate::menu::build_menu_spec(
+            &status,
+            &recent,
+            self.config.recent_projects_count,
+            self.dashboard.clone(),
+        );
         drop(recent);
 
         for item in spec {
@@ -235,10 +238,7 @@ impl TrayApp {
                 }
                 MenuItemSpec::OpenDashboard { target } => {
                     let mi = MenuItem::new("Open Dashboard", true, None);
-                    ids.insert(
-                        mi.id().clone(),
-                        TrayCommand::OpenDashboard(target.clone()),
-                    );
+                    ids.insert(mi.id().clone(), TrayCommand::OpenDashboard(target.clone()));
                     menu.append(&mi).ok();
                 }
                 MenuItemSpec::OpenSettings => {

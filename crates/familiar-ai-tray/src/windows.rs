@@ -9,7 +9,7 @@
 //! [`crate::view`] as plain data with tests; the code below only lays it out.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -243,7 +243,7 @@ fn inference_tab(source: Arc<dyn DataSource>) -> gtk::Widget {
 fn config_tab(
     source: Arc<dyn DataSource>,
     parent: &gtk::Window,
-    config_path: &PathBuf,
+    config_path: &Path,
 ) -> gtk::Widget {
     let document = match source.query(Query::ConfigDocument) {
         Ok(v) => v,
@@ -256,7 +256,7 @@ fn config_tab(
 
 /// The path of the file being edited, plus a way into a text editor for the
 /// parts a form cannot express.
-fn config_header(document: &Value, config_path: &PathBuf, note: Option<&str>) -> gtk::Box {
+fn config_header(document: &Value, config_path: &Path, note: Option<&str>) -> gtk::Box {
     let root = vbox();
     let line = gtk::Box::new(gtk::Orientation::Horizontal, PAD);
     let path_shown = document
@@ -272,7 +272,10 @@ fn config_header(document: &Value, config_path: &PathBuf, note: Option<&str>) ->
     );
     let open_file = gtk::Button::with_label("Open in editor");
     {
-        let config_path = config_path.clone();
+        // The closure outlives this call, so it needs an owned path. With the
+        // old `&PathBuf` parameter `.clone()` deref'd to `PathBuf::clone` and
+        // happened to give one; on `&Path` it would only copy the reference.
+        let config_path = config_path.to_path_buf();
         open_file.connect_clicked(move |_| {
             if let Err(e) = opener::open(&config_path) {
                 tracing::warn!(error = %e, "failed to open settings file");
@@ -476,7 +479,9 @@ fn config_form_widget(
                 notify(&parent, gtk::MessageType::Info, "Nothing has changed.");
                 return;
             }
-            let refresh = refresh.clone().unwrap_or_else(|| Rc::new(RefCell::new(None)));
+            let refresh = refresh
+                .clone()
+                .unwrap_or_else(|| Rc::new(RefCell::new(None)));
             run_action(
                 source.clone(),
                 Action::SaveConfig { edits },
@@ -539,19 +544,17 @@ fn run_connection_test(
     button.set_sensitive(false);
     let result = result.clone();
     let button = button.clone();
-    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
-        match rx.try_recv() {
-            Ok(outcome) => {
-                button.set_sensitive(true);
-                result.set_text(&describe_test(outcome));
-                gtk::glib::ControlFlow::Break
-            }
-            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                button.set_sensitive(true);
-                result.set_text("Test failed: worker stopped");
-                gtk::glib::ControlFlow::Break
-            }
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+        Ok(outcome) => {
+            button.set_sensitive(true);
+            result.set_text(&describe_test(outcome));
+            gtk::glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            button.set_sensitive(true);
+            result.set_text("Test failed: worker stopped");
+            gtk::glib::ControlFlow::Break
         }
     });
 }
@@ -671,10 +674,7 @@ pub fn open_dashboard_window(source: Arc<dyn DataSource>) {
                     &runs_tab(source.clone(), &repo, &refresh, &win),
                     Some(&tab("Runs")),
                 );
-                notebook.append_page(
-                    &sessions_tab(source.clone(), &repo),
-                    Some(&tab("Sessions")),
-                );
+                notebook.append_page(&sessions_tab(source.clone(), &repo), Some(&tab("Sessions")));
                 notebook.append_page(
                     &project_settings_tab(source.clone(), &repo, &refresh, &win),
                     Some(&tab("Settings")),
@@ -819,17 +819,15 @@ fn gates_tab(
         // options, not the syntax for typing them.
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, PAD / 2);
         buttons_group.add_widget(&actions);
-        for (text, build) in [
-            ("Re-drive", 0u8),
-            ("Release", 1u8),
-            ("Force-complete", 2u8),
-        ] {
+        for (text, build) in [("Re-drive", 0u8), ("Release", 1u8), ("Force-complete", 2u8)] {
             let button = gtk::Button::with_label(text);
             button.set_tooltip_text(Some(match build {
                 0 => "Run this PRD again from its retained candidate.",
                 1 => "Return it to pending and discard the retained work.",
-                _ => "Mark it completed without its gates being satisfied. Does not \
-                      merge, deliver or verify anything.",
+                _ => {
+                    "Mark it completed without its gates being satisfied. Does not \
+                      merge, deliver or verify anything."
+                }
             }));
             let source = source.clone();
             let repo_owned = repo.to_string();
@@ -904,9 +902,7 @@ fn gates_tab(
         // reason, though, not from what is actually outstanding.
         if !group.recovery_commands.is_empty() {
             let expander = gtk::Expander::new(None);
-            expander.set_label_widget(Some(&markup(
-                "<small>equivalent commands</small>",
-            )));
+            expander.set_label_widget(Some(&markup("<small>equivalent commands</small>")));
             let commands = markup(&format!(
                 "<tt><small>{}</small></tt>",
                 esc(&group.recovery_commands.join("\n"))
@@ -1367,7 +1363,13 @@ fn session_detail_widget(source: &dyn DataSource, repo: &str, session_id: &str) 
         let outcome = view::attempt_outcome_markup(a);
         let review_cell = view::attempt_review_markup(a);
         grid.attach(&label(&a.sequence.to_string()), 0, line, 1, 1);
-        grid.attach(&markup(&format!("<tt>{}</tt>", esc(&a.prd_id))), 1, line, 1, 1);
+        grid.attach(
+            &markup(&format!("<tt>{}</tt>", esc(&a.prd_id))),
+            1,
+            line,
+            1,
+            1,
+        );
         grid.attach(&label(&a.model), 2, line, 1, 1);
         grid.attach(&markup(&outcome), 3, line, 1, 1);
         grid.attach(&markup(&review_cell), 4, line, 1, 1);
@@ -1377,12 +1379,7 @@ fn session_detail_widget(source: &dyn DataSource, repo: &str, session_id: &str) 
     body.pack_start(&grid, false, false, 0);
 
     if !v.findings.is_empty() {
-        body.pack_start(
-            &markup("<b>Blocking review findings</b>"),
-            false,
-            false,
-            0,
-        );
+        body.pack_start(&markup("<b>Blocking review findings</b>"), false, false, 0);
         for f in &v.findings {
             body.pack_start(
                 &markup(&format!(
@@ -1456,7 +1453,12 @@ fn confirm(parent: &gtk::Window, action: Action) -> Option<Action> {
         0,
     );
     if let Some(warning) = warning {
-        content.pack_start(&markup(&format!("<i>{}</i>", esc(warning))), false, false, 0);
+        content.pack_start(
+            &markup(&format!("<i>{}</i>", esc(warning))),
+            false,
+            false,
+            0,
+        );
     }
 
     let actor = gtk::Entry::new();
@@ -1612,14 +1614,15 @@ fn show_prd_text(source: &dyn DataSource, repo: &str, prd_path: &str, parent: &g
     view.set_monospace(true);
     view.set_left_margin(PAD);
     view.set_right_margin(PAD);
-    view.buffer().map(|buffer| buffer.set_text(&text));
+    if let Some(buffer) = view.buffer() {
+        buffer.set_text(&text);
+    }
     let content = dialog.content_area();
     content.pack_start(&scrolled(&view), true, true, 0);
     dialog.show_all();
     dialog.run();
     dialog.close();
 }
-
 
 /// Asks the providers what models they serve, and adds anything new to the
 /// model dropdowns once the answers arrive.

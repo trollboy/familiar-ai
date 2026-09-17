@@ -813,6 +813,7 @@ version = "0.1.0"
 name = "familiar-ai-tray"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "familiar-ai-core",
  "familiar-ai-storage",
  "glib",
@@ -821,6 +822,7 @@ dependencies = [
  "muda",
  "opener",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tray-icon",

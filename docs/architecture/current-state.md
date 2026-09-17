@@ -52,7 +52,7 @@ The workspace is divided into narrowly scoped crates:
 - `familiar-llm`: inference lifecycle, routing, fallback, health checks, and OpenAI-compatible HTTP support.
 - `familiar-mcp`: JSON-RPC/MCP transport and context tools.
 - `familiar-daemon`: orchestration, workers, dashboard, shutdown, and tray integration.
-- `familiar-tray`: native tray UI, excluded from the formal workspace but optionally used by the daemon.
+- `familiar-tray`: native tray UI, a workspace member since 2026-09-17, still an optional (default-on) daemon dependency.
 - `familiar-tokens`: approximate token counting and truncation.
 - `familiar-logging` and `familiar-testutil`: infrastructure support.
 
@@ -361,11 +361,11 @@ This falls substantially short of the examples in the product vision.
 
 ## Areas That Appear Overengineered
 
-- Ten workspace crates plus a separately excluded tray crate are a lot of package boundaries for the present code size and maturity. `familiar-tokens`, `familiar-logging`, and `familiar-testutil` could plausibly be modules until they gain independent consumers.
+- Sixteen workspace crates are a lot of package boundaries for the present code size and maturity. `familiar-tokens`, `familiar-logging`, and `familiar-testutil` could plausibly be modules until they gain independent consumers.
 - The async `Storage` trait anticipates remote storage, caches, vector services, and PostgreSQL even though the product explicitly aims to remain a lightweight local companion. It adds indirection without solving the current blocking-SQLite problem.
 - The inference subsystem has managers, factories, health types, router policies, four manager slots, fallback topology, classify and embed operations, heuristics, connection testing, and a settings page, while the main summary pipeline does not use inference at all.
 - The stub backend and heuristic routing create several successful inference-shaped paths that do not produce meaningful inference.
 - Status is modeled independently in daemon, MCP, dashboard, and tray-facing behavior without a shared source of truth. The abstraction count is higher than the actual consistency achieved.
 - Centralizing every SQL statement in one file separates queries from the repository code that explains them. At the current schema size, this adds navigation overhead and has already encouraged broad `SELECT *` coupling.
-- The tray has its own manifest and lockfile while being excluded from the workspace but referenced as an optional daemon dependency. That is an awkward structural compromise and makes workspace-wide build and test semantics less obvious.
+- The tray was excluded from the workspace while being referenced as an optional daemon dependency, so it compiled but was never tested, linted or formatted by any `--workspace` command. That ended on 2026-09-17: it is a member, its per-crate lockfile is gone, and its 66 tests run with the rest.
 - The PRD and configuration surface are ahead of the working product. Several polished control surfaces surround capabilities that are still placeholders or disconnected.
