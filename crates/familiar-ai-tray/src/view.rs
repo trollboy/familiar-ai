@@ -201,10 +201,13 @@ pub fn build_gates_view(gates: &Value) -> GatesView {
             })
             .unwrap_or_default();
 
-        match groups
-            .iter_mut()
-            .find(|g| if path.is_empty() { g.prd_id == key } else { g.prd_path == key })
-        {
+        match groups.iter_mut().find(|g| {
+            if path.is_empty() {
+                g.prd_id == key
+            } else {
+                g.prd_path == key
+            }
+        }) {
             Some(group) => {
                 if !reason.is_empty() && !group.reasons.contains(&reason) {
                     group.reasons.push(reason);
@@ -218,7 +221,11 @@ pub fn build_gates_view(gates: &Value) -> GatesView {
             None => groups.push(GateGroup {
                 prd_id: str_at(row, "prd_id").to_string(),
                 prd_path: path,
-                reasons: if reason.is_empty() { vec![] } else { vec![reason] },
+                reasons: if reason.is_empty() {
+                    vec![]
+                } else {
+                    vec![reason]
+                },
                 recovery_commands: commands,
             }),
         }
@@ -306,10 +313,7 @@ pub struct BacklogSummary {
 impl BacklogSummary {
     /// The headline, ordered so the actionable number is read first.
     pub fn headline(&self) -> String {
-        let mut parts = vec![format!(
-            "<b>{} startable</b>",
-            self.startable
-        )];
+        let mut parts = vec![format!("<b>{} startable</b>", self.startable)];
         if self.blocked > 0 {
             parts.push(format!("{} blocked", self.blocked));
         }
@@ -937,7 +941,11 @@ pub fn outstanding_markup(reason: &BlockedReason) -> String {
         parts.push(format!(
             "{} finding{} awaiting your verdict",
             reason.pending_decisions,
-            if reason.pending_decisions == 1 { "" } else { "s" }
+            if reason.pending_decisions == 1 {
+                ""
+            } else {
+                "s"
+            }
         ));
     } else if !reason.findings.is_empty() {
         parts.push("every finding has already been decided".to_string());
@@ -1452,7 +1460,8 @@ mod tests {
 
     #[test]
     fn an_attempt_with_no_review_is_not_dropped() {
-        let attempts = json!({"items": [{"sequence": 1, "prd_id": "PRD-99", "outcome": "retained"}]});
+        let attempts =
+            json!({"items": [{"sequence": 1, "prd_id": "PRD-99", "outcome": "retained"}]});
         let view = build_session_detail(&json!({}), &attempts, &json!({"items": []}));
         assert_eq!(view.attempts.len(), 1);
         assert!(view.attempts[0].review_disposition.is_none());
@@ -1553,13 +1562,18 @@ mod tests {
         assert!(budget_markup(&view).contains("2 unpriced"));
 
         view.priced_attempts = 1;
-        assert!(budget_markup(&view).contains("1 priced attempt·") || budget_markup(&view).contains("1 priced attempt,"));
+        assert!(
+            budget_markup(&view).contains("1 priced attempt·")
+                || budget_markup(&view).contains("1 priced attempt,")
+        );
     }
 
     #[test]
     fn command_json_reads_as_a_command_in_both_accepted_shapes() {
         assert_eq!(
-            command_summary(r#"{"argv":["familiar-ai","run","docs/prds/PRD-1.md"],"timeout_ms":null}"#),
+            command_summary(
+                r#"{"argv":["familiar-ai","run","docs/prds/PRD-1.md"],"timeout_ms":null}"#
+            ),
             "familiar-ai run docs/prds/PRD-1.md"
         );
         // The worker also accepts a bare argv array.
@@ -1595,7 +1609,10 @@ mod tests {
     fn project_state_distinguishes_unregistered_from_active() {
         assert_eq!(project_state_label(&json!({"state": "active"})), "active");
         assert_eq!(project_state_label(&json!({"state": "paused"})), "paused");
-        assert_eq!(project_state_label(&json!({"state": null})), "not registered");
+        assert_eq!(
+            project_state_label(&json!({"state": null})),
+            "not registered"
+        );
         assert_eq!(project_state_label(&json!({})), "not registered");
     }
 
@@ -1629,7 +1646,10 @@ mod tests {
 
     #[test]
     fn adapters_are_offered_with_the_ones_that_are_not_installed_labelled() {
-        let set = choices_for(&["agents".into(), "implementation".into(), "adapter".into()], &catalogue());
+        let set = choices_for(
+            &["agents".into(), "implementation".into(), "adapter".into()],
+            &catalogue(),
+        );
         let Some(ChoiceSet::Closed(choices)) = set else {
             panic!("adapters must be a closed set")
         };
@@ -1657,7 +1677,11 @@ mod tests {
 
         // The implementer may still have it.
         let implementer = choices_for(
-            &["agents".into(), "implementation".into(), "permission_mode".into()],
+            &[
+                "agents".into(),
+                "implementation".into(),
+                "permission_mode".into(),
+            ],
             &catalogue(),
         );
         let Some(ChoiceSet::Closed(choices)) = implementer else {
@@ -1669,10 +1693,16 @@ mod tests {
     #[test]
     fn the_same_setting_gets_the_same_dropdown_wherever_it_appears() {
         // A repository's review agent names the same things as [agents.*].
-        let path: Vec<String> = ["repositories", "/p/one", "review", "implementation_agent", "adapter_id"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let path: Vec<String> = [
+            "repositories",
+            "/p/one",
+            "review",
+            "implementation_agent",
+            "adapter_id",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert!(matches!(
             choices_for(&path, &catalogue()),
             Some(ChoiceSet::Closed(_))
@@ -1697,7 +1727,11 @@ mod tests {
             Some(ChoiceSet::Open(_))
         ));
         // And a setting with no known options is free text as before.
-        assert!(choices_for(&["driver".into(), "max_prds_per_session".into()], &catalogue()).is_none());
+        assert!(choices_for(
+            &["driver".into(), "max_prds_per_session".into()],
+            &catalogue()
+        )
+        .is_none());
     }
 
     #[test]
@@ -1851,7 +1885,11 @@ mod tests {
         ]});
         let built = build_blocked_reasons(&reasons);
         // Broadened outranks ambiguous, exactly as the policy orders them.
-        assert!(built[0].1.headline.starts_with("scope broadened"), "{:?}", built[0].1.headline);
+        assert!(
+            built[0].1.headline.starts_with("scope broadened"),
+            "{:?}",
+            built[0].1.headline
+        );
         assert!(built[0].1.headline.contains("1 file"));
         assert!(built[1].1.headline.starts_with("needs your decision"));
 
@@ -1866,16 +1904,18 @@ mod tests {
     /// files read as six problems.
     #[test]
     fn repeated_findings_for_one_file_are_counted_and_listed_once() {
-        let dup = |path: &str| {
-            json!({"path": path, "decision": "undeclared_scope_expansion", "rule_detail": ""})
-        };
+        let dup = |path: &str| json!({"path": path, "decision": "undeclared_scope_expansion", "rule_detail": ""});
         let reasons = json!({"items": [{"prd_path": "a.md", "review_findings": 0, "blocking": [
             dup("SPECTRA.md"), dup("docker-compose.yml"),
             dup("SPECTRA.md"), dup("docker-compose.yml"),
             dup("SPECTRA.md"), dup("docker-compose.yml"),
         ]}]});
         let built = build_blocked_reasons(&reasons);
-        assert!(built[0].1.headline.contains("2 files"), "{}", built[0].1.headline);
+        assert!(
+            built[0].1.headline.contains("2 files"),
+            "{}",
+            built[0].1.headline
+        );
         let m = blocked_detail_markup(&built[0].1);
         assert_eq!(m.matches("SPECTRA.md").count(), 1, "{m}");
         assert_eq!(m.matches("docker-compose.yml").count(), 1, "{m}");
@@ -1928,13 +1968,19 @@ mod tests {
             {"prd_path": "a.md", "review_findings": 0, "blocking": [], "invalid_reason": null}
         ]});
         let built = build_blocked_reasons(&reasons);
-        assert!(built[0].1.headline.contains("without a recorded scope finding"));
+        assert!(built[0]
+            .1
+            .headline
+            .contains("without a recorded scope finding"));
 
         // An explicit invalid_reason is preferred when there is one.
         let reasons = json!({"items": [
             {"prd_path": "a.md", "review_findings": 0, "blocking": [], "invalid_reason": "dirty worktree"}
         ]});
-        assert_eq!(build_blocked_reasons(&reasons)[0].1.headline, "dirty worktree");
+        assert_eq!(
+            build_blocked_reasons(&reasons)[0].1.headline,
+            "dirty worktree"
+        );
     }
 
     #[test]
@@ -2027,7 +2073,10 @@ mod tests {
         assert!(names("agents.implementation").contains(&"effort".to_string()));
         // ollama does not, but keeps everything it does accept.
         let reviewer = names("agents.reviewer");
-        assert!(!reviewer.contains(&"permission_mode".to_string()), "{reviewer:?}");
+        assert!(
+            !reviewer.contains(&"permission_mode".to_string()),
+            "{reviewer:?}"
+        );
         assert!(!reviewer.contains(&"effort".to_string()), "{reviewer:?}");
         assert!(reviewer.contains(&"adapter".to_string()));
         assert!(reviewer.contains(&"model".to_string()));
@@ -2142,7 +2191,10 @@ mod tests {
         // Top level first, then alphabetical, so the form does not reshuffle.
         assert_eq!(sections[0].title, "");
         assert_eq!(
-            sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+            sections
+                .iter()
+                .map(|s| s.title.as_str())
+                .collect::<Vec<_>>(),
             vec!["", "driver", "review"]
         );
 
@@ -2184,7 +2236,10 @@ mod tests {
         });
         let sections = build_config_form(&doc);
         let titles: Vec<_> = sections.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, vec!["verification.checks.0", "verification.checks.1"]);
+        assert_eq!(
+            titles,
+            vec!["verification.checks.0", "verification.checks.1"]
+        );
         assert_eq!(
             sections[1].fields[0].path,
             vec!["verification", "checks", "1", "check_id"]

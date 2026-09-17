@@ -18,23 +18,50 @@ pub enum Query {
     InferenceStatus,
     /// Probes a backend over the network. The only slow query — callers must
     /// run it off the main thread or the window freezes for its duration.
-    TestConnection { target: String },
+    TestConnection {
+        target: String,
+    },
     /// Repositories this database holds stewardship state for.
     Repositories,
     /// PRDs stopped awaiting a human decision.
-    Gates { repo: String },
-    Backlog { repo: String, limit: usize },
-    Sessions { repo: String, limit: usize },
-    Attempts { repo: String, session_id: String },
-    Budget { repo: String, session_id: String },
-    Review { repo: String, session_id: String },
+    Gates {
+        repo: String,
+    },
+    Backlog {
+        repo: String,
+        limit: usize,
+    },
+    Sessions {
+        repo: String,
+        limit: usize,
+    },
+    Attempts {
+        repo: String,
+        session_id: String,
+    },
+    Budget {
+        repo: String,
+        session_id: String,
+    },
+    Review {
+        repo: String,
+        session_id: String,
+    },
     /// The text of one PRD, so it can be read without leaving the window.
-    PrdText { repo: String, prd_path: String },
+    PrdText {
+        repo: String,
+        prd_path: String,
+    },
     /// Control-plane executions for this repository, newest first.
-    Executions { repo: String, limit: usize },
+    Executions {
+        repo: String,
+        limit: usize,
+    },
     /// `active`, `paused`, `archived`, or absent when the repository has never
     /// been registered with the control plane.
-    ProjectState { repo: String },
+    ProjectState {
+        repo: String,
+    },
     /// Model identifiers fetched live from each configured provider's
     /// `/v1/models`. Slow — it goes over the network to every provider — so
     /// callers run it off the GTK thread and fill the dropdowns when it lands.
@@ -44,13 +71,19 @@ pub enum Query {
     /// is installed and authenticated rather than from a hard-coded list.
     ConfigChoices,
     /// Latest recorded pipeline phase per PRD, for the backlog's progress meter.
-    Checkpoints { repo: String },
+    Checkpoints {
+        repo: String,
+    },
     /// Why each blocked PRD is blocked: the scope findings that stopped it.
-    BlockedReasons { repo: String },
+    BlockedReasons {
+        repo: String,
+    },
     /// Declared dependencies per PRD, and which of them are not yet completed.
     /// A PRD with unmet dependencies cannot be run, and the form must not
     /// offer to start it.
-    Dependencies { repo: String },
+    Dependencies {
+        repo: String,
+    },
     /// The whole of config.toml, parsed to JSON, plus the file's own path.
     /// The form is built from the document as it actually is, so a setting
     /// nobody has hard-coded a widget for still appears.
@@ -61,10 +94,7 @@ impl Query {
     /// Whether answering this query may block on the network. The windows use
     /// it to decide what must be pushed onto a worker thread.
     pub fn is_slow(&self) -> bool {
-        matches!(
-            self,
-            Query::TestConnection { .. } | Query::DiscoverModels
-        )
+        matches!(self, Query::TestConnection { .. } | Query::DiscoverModels)
     }
 }
 
@@ -90,10 +120,7 @@ pub enum Action {
     /// Re-drives a PRD's retained candidate from where it stopped.
     ResumePrd { repo: String, prd_id: String },
     /// Stops one execution, terminating its worker process group.
-    CancelExecution {
-        repo: String,
-        execution_id: String,
-    },
+    CancelExecution { repo: String, execution_id: String },
     /// Pauses or resumes the whole project. The control plane has no
     /// per-execution pause, so this is deliberately project-wide.
     SetProjectPaused { repo: String, paused: bool },

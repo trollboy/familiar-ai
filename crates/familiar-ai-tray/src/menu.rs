@@ -9,15 +9,24 @@ use crate::commands::DashboardTarget;
 pub enum MenuItemSpec {
     Header(String),
     Separator,
-    LlmToggle { enabled: bool },
-    PauseToggle { paused: bool },
-    RecentProject { name: String, repo_root: String },
+    LlmToggle {
+        enabled: bool,
+    },
+    PauseToggle {
+        paused: bool,
+    },
+    RecentProject {
+        name: String,
+        repo_root: String,
+    },
     RecentProjectsHeader,
     EmptyRecentProjects,
     OpenSettings,
     /// Only present when the dashboard is actually reachable: an item that
     /// opens a port nothing is listening on is worse than no item.
-    OpenDashboard { target: DashboardTarget },
+    OpenDashboard {
+        target: DashboardTarget,
+    },
     About,
     Quit,
 }

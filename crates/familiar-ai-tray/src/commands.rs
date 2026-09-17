@@ -38,9 +38,8 @@ mod tests {
         let _ = TrayCommand::ResumeHeavyTasks;
         let _ = TrayCommand::OpenSettings;
         let _ = TrayCommand::OpenDashboard(DashboardTarget::Window);
-        let _ = TrayCommand::OpenDashboard(DashboardTarget::Web(
-            "http://127.0.0.1:9400".to_string(),
-        ));
+        let _ =
+            TrayCommand::OpenDashboard(DashboardTarget::Web("http://127.0.0.1:9400".to_string()));
         let _ = TrayCommand::OpenProject(PathBuf::from("/test"));
         let _ = TrayCommand::Quit;
     }
