@@ -29,23 +29,32 @@ and account for the cost. Each of those stages works. What has almost never
 happened is all of them in sequence, unattended, ending in an integrated
 candidate.
 
-### Delivery record
+### Delivery record — this host only
 
-Queried from the execution ledger, `~/.local/share/familiar-ai/familiar.db`,
-2026-09-16. This table is the project's actual scoreboard; where any other
-document disagrees with it, it is stale.
+Queried from `~/.local/share/familiar-ai/familiar.db` on the Linux box,
+2026-09-17. **Read the scope carefully: the ledger is per-host and there is
+no aggregate.** Every `repository_key` in this store is a `/home/trollboy`
+path; the M1 Mac, which did the early heavy lifting and ran all of the Codex
+work, keeps its own SQLite that nothing here can see. `driver_sessions` has
+no host-identity column at all — PRD-091 exists to add one, for locking, and
+even that would not merge histories.
 
-| | |
+So the numbers below are one machine's slice, not the project's record, and
+nobody can currently produce the project's record.
+
+| On this host | |
 |---|---|
-| Driver sessions, lifetime | 26 |
-| PRD attempts, lifetime | 39 |
+| Driver sessions | 26 |
+| PRD attempts | 39 |
 | Attempts with outcome `completed` | **2** |
 | Attempts integrated by Familiar | **2** — PRD-53, PRD-81 |
-| Largest wave ever integrated | **1 PRD** |
-| Last drive session of any kind | 2026-09-05 |
+| Largest wave integrated here | **1 PRD** |
+| Last PRD attempt of any kind | 2026-09-05 |
+| Adapters that have ever run here | `claude-code` only; `codex` never |
 
 `driver_attempts.integrated_at` is the only integration record in the schema.
-Everything else in `docs/prds/done/` was landed by a human.
+Everything else in `docs/prds/done/` was landed by a human, on one box or the
+other.
 
 ### What is stopping it
 
@@ -68,9 +77,9 @@ six times for six different reasons.
 
 | | |
 |---|---|
-| Attributed spend across all attempts | **$359.07** |
+| Attributed spend, this host | **$359.07** |
 | Attempts carrying no cost attribution | 19 of 39 |
-| Cost per delivered PRD | **≥ $179.54** — a floor, not a measurement |
+| Cost per delivered PRD, this host | **≥ $179.54** — a floor on one machine, not a measurement |
 
 The two deliveries: PRD-53 at $26.26 over 55.3 minutes, PRD-81 at $1.22 over
 33.5 minutes, both `claude-code`/`sonnet`. The floor above is the honest

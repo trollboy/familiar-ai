@@ -47,9 +47,12 @@ hands-off through clean independent review and merge-queue integration."
 in that wave and says otherwise — **053 completed and integrated; 038
 and 058 were both retained `scope_ambiguous` and never carry an
 `integrated_at`.** Wave 6 (059/060/061) integrated nothing at all.
-Lifetime totals across the whole project: 39 attempts, **2** completed,
-**2** integrated (PRD-53 on 09-01, PRD-81 on 09-04), in separate
-single-PRD sessions.
+Totals **on the Linux host**: 39 attempts, **2** completed, **2**
+integrated (PRD-53 on 09-01, PRD-81 on 09-04), in separate single-PRD
+sessions. This is one machine's slice, corrected 2026-09-17 — the M1 ran
+the early work and every Codex execution against its own store, which
+this box cannot read, and `driver_sessions` has no host column. There is
+no project-wide aggregate, and that absence is itself the finding.
 
 What genuinely worked, and is worth keeping, is the *designed pause*:
 `scope_ambiguous` pausing a candidate, freeing its slot so siblings
@@ -59,9 +62,12 @@ recorded scope approvals, a waiver, and a manual completion override —
 was accurate about 038. What was never true is the step after the pause:
 no resumed candidate has ever reached integration through Familiar.
 
-**Familiar has never integrated a multi-PRD wave. The largest wave it has
-ever integrated is one PRD.** FAM-BUG-019 and FAM-BUG-022 are reopened as
-of 2026-09-16; 019's exit criterion is unchanged and unmet. PRD-098 makes
+**No multi-PRD wave integration is recorded on this host; the largest
+wave integrated here is one PRD.** Whether that holds for the M1 is
+unknown and is the open question — if the Mac holds an integrated
+multi-PRD wave, the original closure was right. FAM-BUG-019 and
+FAM-BUG-022 are reopened as of 2026-09-16 pending that evidence; 019's
+exit criterion is unchanged and unmet by anything visible here. PRD-098 makes
 this class of claim a shipped query instead of an audit note, so the next
 closure is decided by the table rather than by the narrative.
 
@@ -134,7 +140,7 @@ alone. Round regeneration for 082+ happens after 096 reports.
 **096 → {083-class delivery blockers, chosen by the 096 histogram} → the
 082+ queue.**
 
-The ledger's own ranking of what stops delivery, lifetime:
+The ledger's own ranking of what stops delivery, this host:
 
 | Retained reason | Count |
 |---|---|
