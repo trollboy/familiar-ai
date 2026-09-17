@@ -1,4 +1,4 @@
-# Backlog Execution Plan — updated 2026-09-16
+# Backlog Execution Plan — updated 2026-09-17
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
 **Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
@@ -124,21 +124,105 @@ this is the same computation `familiar-ai backlog metadata-check` and
 authoring-time plan validation use, not an estimate.
 
 Every wave listed above is landed. The approved 038–073 backlog is
-exhausted, and the queue is now PRDs 082, 085, 086, 088, 089, 090, 092,
-093, 094, 095, 096 in `docs/prds/`, indexed in `ROADMAP.md`.
+exhausted. **The rounds below are regenerated for the current queue and are
+measured, not authored** — `achievable_width()` was called directly against
+the live backlog on 2026-09-17 (`familiar-ai operator width` refuses while
+the control-plane owner is live, so the same function was called through a
+one-off harness; the numbers are the scheduler's own).
 
-**These rounds are not regenerated here yet.** Recomputing achievable
-width for the new queue is real work and would be the third consecutive
-plan written against an unmeasured system. PRD-098 lands first and alone:
-it is cheap, it makes both north-star metrics a shipped query, and it
-reports the retained-reason histogram — so the next round table is
-computed from what actually blocks delivery rather than from file-overlap
-alone. Round regeneration for 082+ happens after 096 reports.
+## Queue state, 2026-09-17
+
+Sixteen PRDs sit in `docs/prds/`. One of them is not remaining work:
+
+- **PRD-095 — declared git and forge identity: IMPLEMENTED** in `833aa02`
+  (config, delivery, `delivery_identity.rs`, the credential contract). It
+  stays in `docs/prds/` only because archiving is the owner's separate act
+  (`7ef6d26`). It is excluded from the rounds below.
+- **PRD-096 and PRD-097 are authored, not implemented.** Their merges
+  (`476ad81`, `deec7f8`) carried the PRD documents and nothing else —
+  `crates/familiar-ai-daemon/tests/forge_adapters.rs` and
+  `docs/contracts/forge-adapters.md` do not exist on any branch. Both are
+  full work items in the rounds below.
+
+That leaves **fifteen PRDs of remaining work**: 082, 085, 086, 088, 089,
+090, 092, 093, 094, 096, 097, 098, 099, 100, 101.
+
+Every one of them is dependency-satisfiable — every declared dependency is
+either in `docs/prds/done/` already or is itself in this queue. Only three
+carry an in-queue dependency edge: **089 → 088**, **098 → {085, 086}**,
+**101 → 100**.
+
+## Measured width
+
+```
+graph_width=16  achievable_width=6
+```
+
+Six is the ceiling for the whole active set, and no round below reaches it,
+because the largest mutually-disjoint set is not also dependency-ready. The
+binding constraint is not the dependency graph — it is four hub files:
+
+| Contended file | PRDs declaring it |
+|---|---|
+| `config/default.toml` | 088, 089, 094, 097, 100, 101 |
+| `README.md` | 090, 092, 098, 099, 101 |
+| `crates/familiar-ai-core/src/config/registry_workers.rs` | 086, 094, 100, 101 |
+| `crates/familiar-ai-daemon/src/run.rs` | 086, 088, 094, 100 |
+
+Thirty-seven conflict edges exist across fifteen PRDs. **Twenty-two of them
+are one of those four files.** PRD-076 split the previous generation of hot
+surfaces per feature and the width went up; these four are the next
+generation and nobody has split them. `README.md` in particular is a
+documentation file serializing five product PRDs — splitting the operator
+surface out of it, or declaring per-section ownership, is the cheapest
+width purchase available and is worth its own PRD.
+
+## Rounds
+
+A round is the owner's definition applied literally: dependency-ready and
+mutually scope-disjoint under `scope_overlap` on the amended
+`expected_files`. Six rounds is the floor for this queue under every
+ordering tested — the schedule below hits that floor *and* front-loads the
+two things the north star is waiting on.
+
+| Round | Width | PRDs | What it buys |
+|---|---|---|---|
+| 1 | 4 | **099**, **100**, 085, 093 | verification runs unasked; Familiar's own loop is a selectable worker; the autonomy stall taxonomy starts recording |
+| 2 | 3 | **101**, 082, 096 | no vendor CLI required; tool-output retention hardened; a failing required check becomes work, not a wall |
+| 3 | 3 | 086, 090, 097 | cost measurement; CLI surface pass; forge-agnostic delivery |
+| 4 | 2 | 088, 098 | load-faithful verification; delivery claims computed from the ledger |
+| 5 | 2 | 089, 092 | no holes in required gates; the gate builds what users install |
+| 6 | 1 | 094 | local workers reachable from dispatch |
+
+**Why this ordering and not the widest-first one.** Greedy
+maximum-independent-set scheduling also finishes in six rounds, but it puts
+PRD-100 in round 5 and PRD-101 alone in round 6 — because 101 conflicts
+with nine of the other fourteen and can only run after 100. That schedule
+costs exactly the same and delivers the **vendor-CLI independence pair four
+rounds later**. Since the round count is identical, ordering is free, and
+it should be spent on the elephant: Familiar must not require `codex` or
+`claude` to run. Rounds 1 and 2 deliver that.
+
+PRD-099 shares round 1 for the same reason. It is a precondition for the
+honesty of everything after it: nine queued PRDs write their criteria in
+the language of automatic verification (*"proven by a gate job"*, *"a check
+scans and fails"*) and `.github` has never existed on any branch. Rounds
+2–6 are unfalsifiable until 099 lands, so it goes first rather than
+somewhere convenient.
 
 ## Critical path
 
-**096 → {083-class delivery blockers, chosen by the 096 histogram} → the
-082+ queue.**
+**{099, 100} → 101 → 085 → 086 → 098.**
+
+Two chains, run concurrently. The left chain is goal 2, vendor
+independence, and is three rounds long. The right chain is the measurement
+spine — 085 records why unattended runs stall, 086 makes `CostUnmeasured`
+the exception, and 098 turns both into a shipped query so the next status
+claim is decided by the table rather than by narrative. 098 cannot start
+before both of its inputs land, and 085 and 086 conflict on
+`crates/familiar-ai-daemon/src/report.rs`, so the spine is four rounds long
+no matter how it is scheduled. It is the longest path in the queue and it
+sets the six-round floor.
 
 The ledger's own ranking of what stops delivery, this host:
 
@@ -152,21 +236,33 @@ The ledger's own ranking of what stops delivery, this host:
 | `interrupted` | 3 |
 | `human_review_required` | 3 |
 
-Two observations that should drive the next round rather than the
-file-overlap width computation:
+Two observations that this round table answers directly:
 
 1. **Scope authorization refuses nine attempts** — the single largest
    cause, and PRD-080 already narrowed it once. The remaining
    `scope_broadened` cases are post-080 (PRD-63, 72, 87, 92 on 09-03 and
-   09-05), so 080 did not close the class.
+   09-05), so 080 did not close the class. The hub-file table above is the
+   same finding seen from the other side: PRDs are declared against files
+   that other PRDs also need.
 2. **Six attempts record no reason at all** and six die on a review
-   precondition before a model is ever called. Neither is a hard problem;
-   both are invisible without the histogram, which is why nobody has
-   fixed them.
+   precondition before a model is ever called. PRD-085 (round 1) makes the
+   first class visible and PRD-093 (round 1) makes the second class
+   impossible to author. Both are in round 1 deliberately.
 
 Per the bug policy, FAM-BUG-019 and FAM-BUG-022 are reopened and outrank
 the product queue. Their exit criterion is unchanged: one multi-PRD wave
-delivered using only Familiar commands.
+delivered using only Familiar commands. **Round 1 is the natural test** —
+it is a four-PRD wave, and if it has to be landed by hand, that is the
+recurrence, not a footnote.
+
+## Approval status
+
+**The 082+ queue still carries no batch approval.** This regeneration does
+not create one. It replaces a plan that said the rounds could not be
+computed until something else reported, with rounds computed from the
+scheduler itself — but opening the batch gate over this decomposition is
+the owner's call, and until it is opened these PRDs execute one at a time
+under ordinary per-PRD approval.
 
 ## Scheduling guidance
 
