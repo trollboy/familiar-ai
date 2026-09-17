@@ -165,6 +165,13 @@ containing changes. Landing work is a human act.
 kernel ≥ 5.13 or macOS, and at least one coding agent CLI on `PATH`
 (`claude` or `codex`).
 
+The CLI is a real prerequisite today, not a recommendation: `AgentAdapterKind`
+is a closed enum of three vendor-CLI variants and `as_agent_entry` maps any
+unrecognised runtime to Codex, so a raw-API or local worker cannot currently be
+selected to implement a PRD even though the loop to run one is built. PRD-100
+adds the bridge; PRD-101 makes a host with one API key and no vendor CLI a
+supported installation and deletes this paragraph.
+
 ```bash
 git clone git@github.com:trollboy/familiar-ai.git
 cd familiar-ai

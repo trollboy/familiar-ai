@@ -344,6 +344,21 @@ containment and tool-output retention work while these were staged.
   the gate compiles. No declared dependencies, and the queue that
   already writes "proven by a gate job" assumes it.
 
+- PRD-100 — Familiar's own loop is a selectable worker. The vendor
+  dependency is three registry entries and a closed three-variant enum,
+  not architecture: `raw_runtime` is write-capable and reachable only
+  from tests, `AnthropicAdapter` implements a different trait, and
+  `as_agent_entry` silently maps any unknown runtime to the Codex CLI.
+  Adds the bridge, registers it, holds it to identical authority, and
+  records edit-success so the result is a number. Depends on PRD-031,
+  PRD-044, PRD-057, PRD-058.
+- PRD-101 — no vendor CLI required. Makes a host with one API key and no
+  `claude`/`codex` a first-class installation: host-derived worker
+  resolution, a diagnostic naming every road in, onboarding that writes
+  a config valid on this box, a missing CLI as a per-worker fact rather
+  than a session failure, and the README prerequisite deleted. Depends
+  on PRD-036, PRD-078, PRD-100.
+
 Suggested order: PRD-098 first and alone — it is the only queued item
 that reports whether any of the others moved a north-star metric, and it
 is cheap. Then PRD-096, which is the largest delivery blocker the ledger
@@ -352,8 +367,10 @@ first), then PRD-084 and PRD-092 (a binary-release user has neither the
 tools nor a clean build), then PRD-099 (nothing above is verified until
 the gate runs itself), then PRD-089 and PRD-087 (open gate hole,
 fundamental invariants), then PRD-086 and PRD-085 (measurement before
-steering), then PRD-088, PRD-090, PRD-093, PRD-094, PRD-095, PRD-097,
-and PRD-091.
+steering), then PRD-100 and PRD-101 in that order (the vendor-dependency pair;
+100 is a bridge plus a config-type correction, 101 is the install story
+that only becomes reachable after it), then PRD-088, PRD-090, PRD-093,
+PRD-094, PRD-095, PRD-097, and PRD-091.
 
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to
