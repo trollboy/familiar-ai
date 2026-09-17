@@ -20,35 +20,78 @@ should not.
 
 ## Status
 
-**Honest summary: the autonomy half works. The economy half is not built.**
+**Honest summary: the parts are built; the loop does not close. Two PRDs out of
+thirty-nine attempts have ever been delivered without a human finishing them.**
 
-Familiar can select a PRD, implement it with a real coding agent, verify it,
-review it with an independent model, and account for the cost — unattended.
-It has done this on its own codebase twice.
+Familiar can select a PRD, compile context for it, implement it with a real
+coding agent, verify it deterministically, review it with an independent model,
+and account for the cost. Each of those stages works. What has almost never
+happened is all of them in sequence, unattended, ending in an integrated
+candidate.
+
+### Delivery record
+
+Queried from the execution ledger, `~/.local/share/familiar-ai/familiar.db`,
+2026-09-16. This table is the project's actual scoreboard; where any other
+document disagrees with it, it is stale.
 
 | | |
 |---|---|
-| **Stage 1 — supervised overnight loop** | ✅ Complete (adapter → isolation → driver loop → morning report) |
-| **Stage 2 — full autopilot** | ⏳ Planner and parallel worktrees specified, not built |
-| **Wave Three — economy / multi-model routing** | ❌ 0% built, deliberately unstarted pending measurement |
+| Driver sessions, lifetime | 26 |
+| PRD attempts, lifetime | 39 |
+| Attempts with outcome `completed` | **2** |
+| Attempts integrated by Familiar | **2** — PRD-53, PRD-81 |
+| Largest wave ever integrated | **1 PRD** |
+| Last drive session of any kind | 2026-09-05 |
+
+`driver_attempts.integrated_at` is the only integration record in the schema.
+Everything else in `docs/prds/done/` was landed by a human.
+
+### What is stopping it
+
+| Retained reason | Count |
+|---|---|
+| Review precondition: PRD lacks an explicit Acceptance Criteria section | 6 |
+| *(no reason recorded)* | 6 |
+| `scope_broadened` | 5 |
+| `scope_ambiguous` | 4 |
+| `unclassified_result` | 3 |
+| `interrupted` | 3 |
+| `human_review_required` | 3 |
+
+Scope authorization refuses nine. Six die on a review precondition before a
+model is called. Six record no reason at all, which is measurement debt rather
+than a category. One PRD was attempted six times in a single day and retained
+six times for six different reasons.
+
+### Cost
+
+| | |
+|---|---|
+| Attributed spend across all attempts | **$359.07** |
+| Attempts carrying no cost attribution | 19 of 39 |
+| Cost per delivered PRD | **≥ $179.54** — a floor, not a measurement |
+
+The two deliveries: PRD-53 at $26.26 over 55.3 minutes, PRD-81 at $1.22 over
+33.5 minutes, both `claude-code`/`sonnet`. The floor above is the honest
+number because nineteen attempts carry no attribution at all; the true figure
+is higher and nobody currently knows by how much.
+
+Neither north-star metric below has ever been computed by a shipped command.
+PRD-098 makes them one, and makes a documented claim the ledger does not
+support fail a check.
+
+| | |
+|---|---|
+| **Stage 1 — supervised overnight loop** | ✅ Built (adapter → isolation → driver loop → morning report) |
+| **Stage 2 — full autopilot** | ⚠️ Planner and parallel worktrees built; the loop does not close unattended |
+| **Wave Three — economy / multi-model routing** | ⚠️ Partly built — billing ledger, token discipline, local runtime landed; local workers are not yet reachable from dispatch (PRD-094) |
+| **Verification gate** | ❌ No CI exists; the gate is four commands run by hand (PRD-099) |
 | **Platforms** | Linux (kernel ≥ 5.13) and macOS. Windows unsupported |
 
-### Measured, not estimated
-
-Two self-builds, on this repository, against real models:
-
-| PRD | Tokens | Wall clock | Outcome |
-|---|---|---|---|
-| PRD-022 (backlog verb + migration) | 8,399,462 | 12.9 min | Implemented; review halted on a scope finding |
-| PRD-024 (execution budgets, 13 files) | 56,784,204 | 37.4 min | Implemented; review halted on token ceiling |
-
-Both produced correct, well-tested work. **Both required a human at the review
-boundary.** Roughly 99% of those tokens were cache reads, and the cost is driven
-by *turn count* in the agentic loop rather than prompt size — which is why
-prompt compression is not on the roadmap and turn reduction is.
-
-Familiar is used daily on its own development. It is not yet something to point
-at an unfamiliar codebase and walk away from.
+Familiar is used daily on its own development, but it is developed by hand far
+more than by itself. It is not something to point at an unfamiliar codebase and
+walk away from.
 
 ---
 

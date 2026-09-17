@@ -316,12 +316,44 @@ containment and tool-output retention work while these were staged.
   finding outcomes tracked to a calibration number, and front-matter
   `status` honoured by eligibility. Depends on PRD-019, PRD-030,
   PRD-045, PRD-071.
+- PRD-094 — local workers reachable from dispatch. PRD-063 built a
+  complete local-inference runtime that no dispatch path constructs;
+  until a `provider = "local"` worker can be selected and executed,
+  goal 1 gets nothing from it. No declared dependencies.
+- PRD-095 — declared git and forge identity per repository. Familiar
+  authors commits and publishes PRs as whatever identity the ambient
+  environment supplies; on a multi-account box that is silently wrong
+  until a write fails with an opaque 500. Per-repository declaration,
+  per-invocation selection, no global mutation.
+- PRD-096 — a failing required check is work, not a wall. The
+  coordinator stops before review when a required check fails, so the
+  implementer is never asked to fix the failing test, and the attended
+  pause offers a retry that provably cannot change the outcome
+  (FAM-BUG-054). Status `draft`.
+- PRD-097 — delivery is forge-agnostic.
+- PRD-098 — delivery claims computed from the ledger. The database
+  records 39 attempts, 2 completed, 2 integrated, while the README and a
+  closed FAM-BUG-019 claimed autonomous wave delivery. The north-star
+  metrics become a shipped query, "delivered autonomously" gets one
+  machine-checkable definition, and a documented claim the ledger does
+  not support fails a check. Depends on PRD-046, PRD-051, PRD-077.
+- PRD-099 — the gate runs without being asked. `.github` has never
+  existed here; the gate is four README commands run by hand. Automatic
+  triggers, one definition, unknown-is-failure, required rather than
+  advisory, a queryable verdict. Disjoint from PRD-092, which owns what
+  the gate compiles. No declared dependencies, and the queue that
+  already writes "proven by a gate job" assumes it.
 
-Suggested order: PRD-083 first and alone (it is the failure a stranger
-hits first), then PRD-084 and PRD-092 (a binary-release user has neither
-the tools nor a clean build), then PRD-089 and PRD-087 (open gate hole,
+Suggested order: PRD-098 first and alone — it is the only queued item
+that reports whether any of the others moved a north-star metric, and it
+is cheap. Then PRD-096, which is the largest delivery blocker the ledger
+names that already has a PRD. Then PRD-083 (the failure a stranger hits
+first), then PRD-084 and PRD-092 (a binary-release user has neither the
+tools nor a clean build), then PRD-099 (nothing above is verified until
+the gate runs itself), then PRD-089 and PRD-087 (open gate hole,
 fundamental invariants), then PRD-086 and PRD-085 (measurement before
-steering), then PRD-088, PRD-090, PRD-093, and PRD-091.
+steering), then PRD-088, PRD-090, PRD-093, PRD-094, PRD-095, PRD-097,
+and PRD-091.
 
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to

@@ -447,8 +447,21 @@ PRD-076.
 
 ### FAM-BUG-019 — Dogfood workflow repeatedly collapses into manual per-PRD delivery
 
-- **Status:** CLOSED 2026-09-02 — waves 5 and 6 delivered autonomously
-- **Audit evidence:** Wave 5 (038/053/058) and wave 6 (059/060/061) ran claim → implement → verify → independent review → merge-queue integration without manual git operations. Remaining human touchpoints are DESIGNED gates (scope decisions on undeclared dependency changes, waivers for reviewer claims), not delivery collapse. The operator role is now approval, not integration.
+- **Status:** REOPENED 2026-09-16 — the 2026-09-02 closure is not supported by the execution ledger. The exit criterion below has never been met.
+- **Reopening evidence (2026-09-16), queried from `~/.local/share/familiar-ai/familiar.db`:** lifetime totals are 26 driver sessions, 39 PRD attempts, **2** with outcome `completed`, and **2** with a non-null `driver_attempts.integrated_at` (PRD-53, PRD-81). There is no merge-queue or integration table anywhere in the schema; `integrated_at` is the only integration record that exists. The six PRDs named in the closure resolve as:
+
+  | PRD | Outcome | Reason | Integrated |
+  |---|---|---|---|
+  | PRD-38 | retained | `scope_ambiguous` | no |
+  | PRD-53 | completed | — | **yes** |
+  | PRD-58 | retained | `scope_ambiguous` | no |
+  | PRD-59 | retained | `scope_broadened` | no |
+  | PRD-60 | retained | `scope_ambiguous` | no |
+  | PRD-61 | retained | `scope_broadened` | no |
+
+  One attempt row exists per PRD; no later attempt succeeded. Wave 5's session integrated exactly one PRD. Wave 6's session integrated none. The exit criterion requires a **multi-PRD** wave, and no session in this project's history has integrated more than one candidate.
+- **What the closure got right, and what it did not:** the *designed pause* genuinely works. `scope_ambiguous` pausing a candidate, freeing the slot, and resuming on an owner decision is real, is what PRD-080 demonstrated, and is correctly described in `docs/prds/EXECUTION-PLAN.md` as landing under recorded scope approvals and a manual completion override. What does not hold is the step after it: no resumed candidate has ever reached integration through Familiar. PRDs 59–61 carry no `integrated_at`, and no resume recorded an attempt row at all — so either the resumes did not run through Familiar, or resume does not record an attempt. Both are findings; the second is measurement debt covered by PRD-098.
+- **Why it was closeable on a wrong picture:** the closure was an audit of narratives rather than a query of the table underneath them, and neither north-star metric has ever been computed — there is no command that computes them. PRD-098 makes delivery claims a shipped query, gives "delivered autonomously" one machine-checkable definition, and requires an execution-outcome bug to close on a recorded query rather than an audit note. This entry is the migration case for that criterion.
 - **Original status:** Open; systemic release-blocking dogfood failure
 - **Observed:** The repeated delivery workflow is: (1) launch an allowlisted
   `familiar-ai drive` wave, (2) encounter a cascade of retained or failed
@@ -523,8 +536,8 @@ PRD-076.
 
 ### FAM-BUG-022 — Wave 4 reproduces cascade-then-manual delivery
 
-- **Status:** CLOSED 2026-09-02 — see FAM-BUG-019
-- **Audit evidence:** Same closure evidence: two consecutive waves integrated through the merge queue.
+- **Status:** REOPENED 2026-09-16 — see FAM-BUG-019. This entry was closed on FAM-BUG-019's evidence by reference; that evidence did not hold, so the closure does not either.
+- **Reopening note (2026-09-16):** the closure read "two consecutive waves integrated through the merge queue". The ledger records two integrations in the project's entire history (PRD-53 on 2026-09-01, PRD-81 on 2026-09-04), in separate sessions, neither of them a wave. Cascade-then-manual delivery is therefore unretired as a reproduction.
 - **Original status:** Open; concrete second reproduction of FAM-BUG-019
 - **Observed:** Wave 4 first spent roughly eleven silent minutes before an
   unused Unsloth credential aborted the whole session. After that was fixed,

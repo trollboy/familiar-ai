@@ -1,4 +1,4 @@
-# Backlog Execution Plan — updated 2026-08-31
+# Backlog Execution Plan — updated 2026-09-16
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
 **Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
@@ -8,13 +8,20 @@ dependency-ready AND mutually scope-disjoint.**
 the first work of every session; "transferred to PRD-X" is valid only when
 PRD-X runs next; new bugs go to the top, never the end.
 
-**Approval:** All 15 pending PRDs (038, 053, 058–061, 063, 071–073,
-076–080) are approved for implementation. PRDs 077–080 are the bug-carrier
-family created 2026-08-31 from waves 3–4 after-action findings and run
-first under the bug policy. Every economy mechanism still defaults off and
-promotes only on a recorded PRD-051 measurement. This document is the
-owner's standing authorization: workers must not pause for per-PRD plan
-sign-off on scope-conformant work.
+**Approval:** the 2026-08-31 batch (038, 053, 058–061, 063, 071–073,
+076–080) was approved for implementation and is now **fully landed and
+exhausted**. PRDs 077–080 were the bug-carrier family created from waves
+3–4 after-action findings. Every economy mechanism still defaults off and
+promotes only on a recorded PRD-051 measurement. This document remains the
+owner's standing authorization for that batch: workers must not pause for
+per-PRD plan sign-off on scope-conformant work within it.
+
+**The 082+ queue carries no batch approval yet.** It was not part of the
+2026-08-31 authorization, and this document does not extend approval to it
+— that is the owner's gate to open, and PRD-019's model says it opens over
+a *decomposition*, which for 082+ has not been reviewed as a batch. Until
+then the 082+ PRDs are executed one at a time under ordinary per-PRD
+approval, not under standing authorization.
 
 ## Completed
 
@@ -26,16 +33,37 @@ sign-off on scope-conformant work.
 | gate | 066, 067, 068 | complete 2026-08-31 |
 | 3 | 050, 052, 054, 057, 064, 069, 070, 074, 075 | complete 2026-08-31 — **all nine retained; integrated manually**; [after-action](../wave3_afteraction_report.md) |
 | 4 | 032, 055, 056, 062 | complete 2026-08-31 — **cascade-then-manual again**; [after-action](../wave4_afteraction_report.md) |
+| 5 | 038, 053, 058 | complete 2026-09-01 — **1 of 3 integrated by Familiar** (053); 038 and 058 retained `scope_ambiguous` and landed by hand |
+| 6 | 059, 060, 061, 063, 072 | complete 2026-09-03 — **0 of 5 integrated**; all retained (`scope_broadened`/`scope_ambiguous`) and landed by hand |
+| 7 | 071, 073 | complete — **0 of 2 integrated**; 071 retained `human_review_required`, 073 never attempted by the driver at all |
+| — | 081, 083, 084, 087, 091 | complete 2026-09-05..09 — **1 of 5 integrated** (081); 083/087/091 retained, 084 never attempted |
 
-~~The waves-3/4 caveat: Familiar had never integrated a multi-PRD wave
-autonomously (FAM-BUG-019/022).~~ **Ended 2026-09-01 by wave 5:** the
-scheduler ran the computed width live (038∥053, 058 admitted on hold
-release), 053 and 058 completed hands-off through clean independent
-review and merge-queue integration, and 038 landed under the owner's
-recorded scope approvals, waiver, and manual completion override
-(FAM-BUG-044 tracks the waiver-identity gap that required the override).
-Recommendation standing with the owner: close 022; close 019 with the
-044 note.
+**The waves-3/4 caveat stands. It was retired on 2026-09-01 and reinstated
+on 2026-09-16 against the execution ledger.**
+
+The 2026-09-01 entry claimed wave 5 ended it: "053 and 058 completed
+hands-off through clean independent review and merge-queue integration."
+`~/.local/share/familiar-ai/familiar.db` records one attempt row per PRD
+in that wave and says otherwise — **053 completed and integrated; 038
+and 058 were both retained `scope_ambiguous` and never carry an
+`integrated_at`.** Wave 6 (059/060/061) integrated nothing at all.
+Lifetime totals across the whole project: 39 attempts, **2** completed,
+**2** integrated (PRD-53 on 09-01, PRD-81 on 09-04), in separate
+single-PRD sessions.
+
+What genuinely worked, and is worth keeping, is the *designed pause*:
+`scope_ambiguous` pausing a candidate, freeing its slot so siblings
+continue, and resuming on a recorded owner decision. That is PRD-080
+working as specified, and the 038 description above — landed under
+recorded scope approvals, a waiver, and a manual completion override —
+was accurate about 038. What was never true is the step after the pause:
+no resumed candidate has ever reached integration through Familiar.
+
+**Familiar has never integrated a multi-PRD wave. The largest wave it has
+ever integrated is one PRD.** FAM-BUG-019 and FAM-BUG-022 are reopened as
+of 2026-09-16; 019's exit criterion is unchanged and unmet. PRD-098 makes
+this class of claim a shipped query instead of an audit note, so the next
+closure is decided by the table rather than by the narrative.
 
 ## Remaining waves
 
@@ -89,23 +117,50 @@ Graph width is the round's PRD count; achievable width is
 this is the same computation `familiar-ai backlog metadata-check` and
 authoring-time plan validation use, not an estimate.
 
-| Wave | PRDs | Graph width | Achievable width |
-|------|------|-------------|------------------|
-| bug gate | 077, 078, 079, 080 — **complete** | 4 | done |
-| gate | 076 **complete** | 1 | 1 |
-| 5 | 038, 053, 058 — **ALL LANDED 2026-09-01** | 3 | 2 — achieved live exactly as computed: 038∥053 in parallel, 058 admitted the moment 053 released the `config/default.toml` hold |
-| 6 | 059, 060, 061, 063, 072 | 5 | 3 — `059`/`060`/`061` still share `crates/familiar-ai-core/src/config/providers.rs` (each adds its own `InferenceRuntimeKind` variant to the same closed enum; splitting that enum is a semantic change, out of this PRD's scope) and serialize pairwise; `063` (registry_workers.rs) and `072` (agent_runtime.rs) are disjoint from that trio and from each other, so `{one of 059/060/061, 063, 072}` run together |
-| 7 | 071, 073 | 2 | 2 — fully disjoint post-076 (`config/review.rs` vs `config/registry_workers.rs`, `cli/batch_review.rs` vs `cli/model_residency.rs`, distinct repo/test files) |
+Every wave listed above is landed. The approved 038–073 backlog is
+exhausted, and the queue is now PRDs 082, 085, 086, 088, 089, 090, 092,
+093, 094, 095, 096 in `docs/prds/`, indexed in `ROADMAP.md`.
+
+**These rounds are not regenerated here yet.** Recomputing achievable
+width for the new queue is real work and would be the third consecutive
+plan written against an unmeasured system. PRD-098 lands first and alone:
+it is cheap, it makes both north-star metrics a shipped query, and it
+reports the retained-reason histogram — so the next round table is
+computed from what actually blocks delivery rather than from file-overlap
+alone. Round regeneration for 082+ happens after 096 reports.
 
 ## Critical path
 
-**{059 | 060 | 061, 063, 072} → {071, 073}** — everything before this is
-landed as of 2026-09-01. Wave 6 runs at achievable width 3 with the
-059/060/061 providers-enum trio serializing pairwise through the merge
-queue; wave 7 is fully disjoint at width 2. Seven PRDs remain in the
-entire approved backlog. Per the bug policy, FAM-BUG-044 and frictions
-007/008 (delivery-machinery, direct-fix lane) are the first work of the
-next session, before wave 6.
+**096 → {083-class delivery blockers, chosen by the 096 histogram} → the
+082+ queue.**
+
+The ledger's own ranking of what stops delivery, lifetime:
+
+| Retained reason | Count |
+|---|---|
+| Review precondition: PRD lacks an explicit Acceptance Criteria section | 6 |
+| *(no reason recorded)* | 6 |
+| `scope_broadened` | 5 |
+| `scope_ambiguous` | 4 |
+| `unclassified_result` | 3 |
+| `interrupted` | 3 |
+| `human_review_required` | 3 |
+
+Two observations that should drive the next round rather than the
+file-overlap width computation:
+
+1. **Scope authorization refuses nine attempts** — the single largest
+   cause, and PRD-080 already narrowed it once. The remaining
+   `scope_broadened` cases are post-080 (PRD-63, 72, 87, 92 on 09-03 and
+   09-05), so 080 did not close the class.
+2. **Six attempts record no reason at all** and six die on a review
+   precondition before a model is ever called. Neither is a hard problem;
+   both are invisible without the histogram, which is why nobody has
+   fixed them.
+
+Per the bug policy, FAM-BUG-019 and FAM-BUG-022 are reopened and outrank
+the product queue. Their exit criterion is unchanged: one multi-PRD wave
+delivered using only Familiar commands.
 
 ## Scheduling guidance
 
