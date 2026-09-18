@@ -165,12 +165,7 @@ fn pending_for(conn: &Connection, repository_key: &str, prd_id: &str) -> i64 {
     .unwrap_or(0)
 }
 
-fn recovery_for(
-    detail: &str,
-    prd_id: &str,
-    prd_path: &str,
-    pending_decisions: i64,
-) -> Vec<String> {
+fn recovery_for(detail: &str, prd_id: &str, prd_path: &str, pending_decisions: i64) -> Vec<String> {
     let mut commands = Vec::new();
     if detail.starts_with("scope_") && pending_decisions > 0 {
         commands.push(format!(
@@ -279,7 +274,12 @@ pub fn pending_human_gates(
                 kind: "stopped_attempt".into(),
                 session_id: Some(session_id),
                 prd_id: prd_id.clone(),
-                recovery_commands: recovery_for(&detail, &prd_id, &prd_path, pending_for(conn, repository_key, &prd_id)),
+                recovery_commands: recovery_for(
+                    &detail,
+                    &prd_id,
+                    &prd_path,
+                    pending_for(conn, repository_key, &prd_id),
+                ),
                 prd_path,
                 detail,
             });
@@ -405,7 +405,9 @@ mod tests {
     fn scope_advice_appears_only_when_a_finding_actually_awaits_a_verdict() {
         let db = database();
         let driver = DriverRepository::new(db.conn());
-        driver.open_session("session-1", "/repo/.git", "{}").unwrap();
+        driver
+            .open_session("session-1", "/repo/.git", "{}")
+            .unwrap();
         let attempt = driver
             .record_attempt_started("session-1", "PRD-1", "docs/prds/PRD-1.md", None)
             .unwrap();
@@ -474,7 +476,9 @@ mod tests {
     fn pending_human_gates_omits_prds_whose_decision_was_already_made() {
         let db = database();
         let driver = DriverRepository::new(db.conn());
-        driver.open_session("session-1", "/repo/.git", "{}").unwrap();
+        driver
+            .open_session("session-1", "/repo/.git", "{}")
+            .unwrap();
 
         // Same stopped outcome for all three; only the backlog status differs.
         for (n, status) in [(1, "completed"), (2, "pending"), (3, "in_progress")] {
@@ -537,7 +541,12 @@ mod tests {
                 invalid_reason: None,
             })
             .unwrap();
-        assert_eq!(pending_human_gates(db.conn(), "/repo/.git", 10).unwrap().len(), 1);
+        assert_eq!(
+            pending_human_gates(db.conn(), "/repo/.git", 10)
+                .unwrap()
+                .len(),
+            1
+        );
 
         db.conn()
             .execute(

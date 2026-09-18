@@ -112,7 +112,11 @@ impl ControlPlaneService {
     /// `active`, `paused`, `archived`, or `None` when the project has never
     /// been registered. Distinguishing "not registered" from "active" matters:
     /// a submission against an unregistered project cannot be scheduled.
-    pub fn project_state(&self, scope: &CapabilityScope, project_id: &str) -> Result<Option<String>> {
+    pub fn project_state(
+        &self,
+        scope: &CapabilityScope,
+        project_id: &str,
+    ) -> Result<Option<String>> {
         require(scope, Authority::Observe, project_id, None)?;
         let db = self
             .db

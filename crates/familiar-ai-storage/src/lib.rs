@@ -13,8 +13,7 @@ pub use repos::accounting::{
 };
 pub use repos::backlog::{
     list_entries as list_backlog_entries, list_recovery_events, list_repository_keys,
-    BacklogEntryRow, RecoveryEventRow,
-    SqliteBacklogRepository,
+    BacklogEntryRow, RecoveryEventRow, SqliteBacklogRepository,
 };
 pub use repos::batch_review::{
     BatchReviewRepository, BatchReviewRow, BatchReviewState, NewBatchReview,

@@ -89,7 +89,10 @@ fn every_operator_command_demands_a_named_human() {
         let mut args: Vec<&str> = base.to_vec();
         args.extend(["--actor", "someone", "--reason", "a reason"]);
         let (text, ok) = run(&args, temp.path(), None);
-        assert!(!ok, "{base:?} accepted an actor that is not human:<identity>");
+        assert!(
+            !ok,
+            "{base:?} accepted an actor that is not human:<identity>"
+        );
         assert!(
             text.contains("human:<identity>"),
             "{base:?} must say what an actor looks like, got: {text}"
@@ -193,7 +196,11 @@ fn the_width_command_and_the_drive_agree_on_one_backlog() {
     // Width is computed from scope disjointness, so each PRD needs a real
     // Expected Files contract. Two touch the same file and therefore cannot
     // run together; the third is disjoint from both.
-    for (n, file) in [(1, "crates/a/src/one.rs"), (2, "crates/a/src/one.rs"), (3, "crates/b/src/three.rs")] {
+    for (n, file) in [
+        (1, "crates/a/src/one.rs"),
+        (2, "crates/a/src/one.rs"),
+        (3, "crates/b/src/three.rs"),
+    ] {
         fs::write(
             repo.path().join(format!("docs/prds/PRD-{n}.md")),
             format!("# PRD-{n}: Fixture {n}\n\n## Expected Files\n\n- `{file}`\n"),

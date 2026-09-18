@@ -226,12 +226,7 @@ impl DaemonDataSource {
 
         let status_of_id: std::collections::HashMap<String, Option<&String>> = discovered
             .iter()
-            .map(|prd| {
-                (
-                    prd.id.to_string(),
-                    statuses.get(&prd.path.to_string()),
-                )
-            })
+            .map(|prd| (prd.id.to_string(), statuses.get(&prd.path.to_string())))
             .collect();
 
         let items: Vec<Value> = discovered
@@ -244,9 +239,7 @@ impl DaemonDataSource {
                         let dep_id = dep.to_string();
                         match status_of_id.get(&dep_id) {
                             Some(Some(status)) if status.as_str() == "completed" => None,
-                            Some(Some(status)) => {
-                                Some(json!({"prd_id": dep_id, "status": status}))
-                            }
+                            Some(Some(status)) => Some(json!({"prd_id": dep_id, "status": status})),
                             // Declared but not discovered, or discovered with
                             // no backlog row yet.
                             _ => Some(json!({"prd_id": dep_id, "status": "not found"})),
@@ -482,8 +475,7 @@ impl DaemonDataSource {
                 .ok_or_else(|| format!("no such setting: {name}"))?;
             let hint = item_at(document.as_item_mut(), global_path)
                 .ok_or_else(|| format!("no such setting: {name}"))?;
-            let replacement =
-                typed_value(hint, &edit.value).map_err(|e| format!("{name}: {e}"))?;
+            let replacement = typed_value(hint, &edit.value).map_err(|e| format!("{name}: {e}"))?;
             let slot = ensure_item(document.as_item_mut(), &edit.path)
                 .ok_or_else(|| format!("cannot create setting: {name}"))?;
             *slot = replacement;
@@ -522,7 +514,10 @@ impl DataSource for DaemonDataSource {
                 let root = std::path::Path::new(&repo)
                     .canonicalize()
                     .map_err(|e| e.to_string())?;
-                let full = root.join(&prd_path).canonicalize().map_err(|e| e.to_string())?;
+                let full = root
+                    .join(&prd_path)
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
                 if !full.starts_with(&root) {
                     return Err(format!("{prd_path} is outside {}", root.display()));
                 }

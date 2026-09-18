@@ -123,7 +123,10 @@ pub fn operator(command: OperatorCommand) -> Result<(), String> {
                 .ok_or_else(|| format!("no checkpoint for {prd_id} in this repository"))?;
             let old_hash = checkpoint.diff_hash.clone();
             if let Some(base) = new_base {
-                println!("rebasing checkpoint base {} -> {base}", checkpoint.base_revision);
+                println!(
+                    "rebasing checkpoint base {} -> {base}",
+                    checkpoint.base_revision
+                );
                 checkpoint.base_revision = base;
             }
             // The same computation freeze and validate use, so a rebind

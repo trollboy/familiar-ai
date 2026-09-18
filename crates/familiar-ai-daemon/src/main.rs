@@ -630,13 +630,15 @@ fn main() -> ExitCode {
         // always offered; elsewhere it falls back to the served page, and is
         // omitted when that is not running either.
         dashboard_target(&state_arc.config.dashboard),
-        Some(Arc::new(familiar_ai_daemon::tray_data::DaemonDataSource::new(
-            state_arc.db.clone(),
-            state_arc.router.clone(),
-            runtime.clone(),
-            state_arc.control.clone(),
-            state_arc.paths.clone(),
-        )) as Arc<dyn familiar_ai_tray::DataSource>),
+        Some(
+            Arc::new(familiar_ai_daemon::tray_data::DaemonDataSource::new(
+                state_arc.db.clone(),
+                state_arc.router.clone(),
+                runtime.clone(),
+                state_arc.control.clone(),
+                state_arc.paths.clone(),
+            )) as Arc<dyn familiar_ai_tray::DataSource>,
+        ),
         shutdown_rx.clone(),
     );
 
@@ -687,8 +689,7 @@ fn run_with_tray_feature_but_disabled(state: DaemonState) -> ExitCode {
         let (_command_tx, command_rx) = mpsc::channel::<DaemonCommand>(64);
         // Same registration window as the tray path above: bootstrap ran on
         // the main thread before any runtime existed (FAM-BUG-050).
-        let mut termination =
-            TerminationSignals::register().expect("register termination signals");
+        let mut termination = TerminationSignals::register().expect("register termination signals");
         daemon_run(
             &state,
             &mut termination,

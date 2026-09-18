@@ -940,7 +940,7 @@ mod tests {
             .route("/projects", get(projects))
             .route("/recent", get(recent))
             .route("/stewardship/repositories", get(stewardship_repositories))
-        .route("/stewardship/backlog", get(stewardship_backlog))
+            .route("/stewardship/backlog", get(stewardship_backlog))
             .route("/stewardship/sessions", get(stewardship_sessions))
             .route(
                 "/stewardship/sessions/{session_id}/attempts",

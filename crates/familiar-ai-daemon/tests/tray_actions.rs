@@ -59,11 +59,7 @@ fn harness() -> Harness {
     let router = Arc::new(InferenceRouter::new(&Default::default()));
     let config_dir = tmp.path().join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(
-        config_dir.join("config.toml"),
-        CONFIG_FIXTURE,
-    )
-    .unwrap();
+    std::fs::write(config_dir.join("config.toml"), CONFIG_FIXTURE).unwrap();
     let paths = AppPaths {
         config_dir: config_dir.clone(),
         data_dir: tmp.path().join("data"),
@@ -218,7 +214,10 @@ fn a_prd_can_be_read_and_paths_outside_the_repository_cannot() {
             prd_path: "docs/prds/PRD-1.md".into(),
         })
         .unwrap();
-    assert!(text["text"].as_str().unwrap().contains("The body of the PRD"));
+    assert!(text["text"]
+        .as_str()
+        .unwrap()
+        .contains("The body of the PRD"));
 
     // Containment: a path that climbs out of the repository is refused rather
     // than read.
@@ -309,8 +308,14 @@ fn a_value_of_the_wrong_type_is_refused_and_nothing_is_written() {
             }],
         })
         .expect_err("a non-number for an integer setting must be refused");
-    assert!(error.contains("max_prds_per_session"), "names the setting: {error}");
-    assert!(error.contains("whole number"), "says what was expected: {error}");
+    assert!(
+        error.contains("max_prds_per_session"),
+        "names the setting: {error}"
+    );
+    assert!(
+        error.contains("whole number"),
+        "says what was expected: {error}"
+    );
     assert_eq!(std::fs::read_to_string(&h.config).unwrap(), before);
 }
 
@@ -404,9 +409,19 @@ fn a_project_can_override_a_setting_it_currently_inherits() {
         "override written as an integer, not a string:\n{written}"
     );
     // The global value is untouched: an override is not an edit of the default.
-    assert_eq!(parsed["review"]["max_review_attempts"].as_integer().unwrap(), 3);
+    assert_eq!(
+        parsed["review"]["max_review_attempts"]
+            .as_integer()
+            .unwrap(),
+        3
+    );
     // And the project's existing settings survive.
-    assert_eq!(parsed["repositories"]["/p/one"]["profile"].as_str().unwrap(), "strict");
+    assert_eq!(
+        parsed["repositories"]["/p/one"]["profile"]
+            .as_str()
+            .unwrap(),
+        "strict"
+    );
     assert!(written.contains("do not raise further without a warrant"));
 }
 

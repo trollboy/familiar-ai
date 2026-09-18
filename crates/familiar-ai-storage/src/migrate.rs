@@ -217,7 +217,7 @@ const MIGRATIONS: &[Migration] = &[
         // while this candidate sat retained. Renumbered rather than
         // renumbering a migration other databases have already applied.
         version: 63,
-        sql: include_str!("../migrations/063_local_worker_telemetry.sql")
+        sql: include_str!("../migrations/063_local_worker_telemetry.sql"),
     },
     Migration {
         version: 64,

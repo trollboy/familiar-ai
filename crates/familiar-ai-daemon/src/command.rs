@@ -29,9 +29,9 @@ pub fn daemon_command_from_tray(cmd: TrayCommand) -> Option<DaemonCommand> {
         TrayCommand::Quit => Some(DaemonCommand::Quit),
         // OpenSettings, OpenDashboard and OpenProject are handled by the tray
         // itself via opener.
-        TrayCommand::OpenSettings
-        | TrayCommand::OpenDashboard(_)
-        | TrayCommand::OpenProject(_) => None,
+        TrayCommand::OpenSettings | TrayCommand::OpenDashboard(_) | TrayCommand::OpenProject(_) => {
+            None
+        }
     }
 }
 

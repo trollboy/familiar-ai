@@ -135,7 +135,11 @@ fn archiving_a_prd_with_history_leaves_next_working() {
 
     // First run registers both and gives PRD-001 the history a claimed PRD
     // accumulates.
-    assert!(next_command(&repo, &database).output().unwrap().status.success());
+    assert!(next_command(&repo, &database)
+        .output()
+        .unwrap()
+        .status
+        .success());
     {
         let db = familiar_ai_storage::Database::open(&database).unwrap();
         db.conn()

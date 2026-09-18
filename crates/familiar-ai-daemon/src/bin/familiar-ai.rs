@@ -9,8 +9,8 @@ use familiar_ai_daemon::cli::batch_review::BatchReviewCommand;
 use familiar_ai_daemon::cli::billing::BillingCommand;
 use familiar_ai_daemon::cli::control::ControlCommand;
 use familiar_ai_daemon::cli::onboard::OnboardCommand;
-use familiar_ai_daemon::cli::plan::PlanCommand;
 use familiar_ai_daemon::cli::operator::OperatorCommand;
+use familiar_ai_daemon::cli::plan::PlanCommand;
 use familiar_ai_daemon::cli::stewardship::StewardshipCommand;
 use familiar_ai_daemon::cli::worker::WorkerCommand;
 
