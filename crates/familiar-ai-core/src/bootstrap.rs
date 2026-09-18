@@ -222,10 +222,13 @@ pub fn validate_dependency_closure(
     let mut errors = Vec::new();
     for item in &manifest.items {
         for dep in &by_id[&PrdId::new(item.prd_number)].dependencies {
-            if !listed.contains(dep)
-                && !(statuses.get(dep) == Some(&BacklogStatus::Completed)
-                    && completed_with_non_bootstrap_evidence.contains(dep))
-            {
+            // A dependency is satisfied either by being in the manifest, or by
+            // already being completed on evidence the bootstrap did not itself
+            // produce. Naming it keeps the check to a single negation.
+            let dependency_is_satisfied = listed.contains(dep)
+                || (statuses.get(dep) == Some(&BacklogStatus::Completed)
+                    && completed_with_non_bootstrap_evidence.contains(dep));
+            if !dependency_is_satisfied {
                 errors.push(format!(
                     "{} requires incomplete unlisted dependency {}",
                     item.path, dep

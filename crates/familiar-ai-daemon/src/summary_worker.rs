@@ -302,46 +302,6 @@ fn system_time_to_secs(time: Option<SystemTime>) -> Option<i64> {
         .map(|d| d.as_secs() as i64)
 }
 
-/// Walk a repo root and emit one SummaryRequest per source file, skipping
-/// hardcoded garbage directories and respecting `.gitignore`.
-pub fn enqueue_initial_scan(
-    repo_root: &Path,
-    project_id: i64,
-    tx: &mpsc::Sender<SummaryRequest>,
-    max_file_size_bytes: u64,
-) {
-    let walker = ignore::WalkBuilder::new(repo_root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .filter_entry(|entry| {
-            let name = entry.file_name().to_string_lossy();
-            !HARDCODED_SKIP_DIRS.contains(&name.as_ref())
-        })
-        .build();
-
-    for entry in walker.flatten() {
-        let path = entry.path();
-        let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
-            continue;
-        }
-        if meta.len() > max_file_size_bytes {
-            continue;
-        }
-        let req = SummaryRequest {
-            project_id,
-            repo_root: repo_root.to_path_buf(),
-            path: path.to_path_buf(),
-        };
-        if tx.try_send(req).is_err() {
-            // Channel full or closed — stop scanning
-            break;
-        }
-    }
-}
-
 /// Durable initial/recovery inventory. Enumeration errors are retained and
 /// prevent absence reconciliation; queue capacity only affects dispatch.
 pub fn run_repository_scan(
@@ -490,12 +450,19 @@ mod tests {
     use familiar_ai_storage::ProjectRepository;
 
     fn make_db_and_project() -> (Arc<Mutex<Database>>, i64) {
+        make_db_and_project_at("/test")
+    }
+
+    /// `start_repository_scan` refuses a root that is not the project's
+    /// registered `repo_root`, so any test that actually scans a directory has
+    /// to register that directory.
+    fn make_db_and_project_at(repo_root: &str) -> (Arc<Mutex<Database>>, i64) {
         let db = Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         let pid = db
             .create_project(&NewProject {
                 name: "p".into(),
-                repo_root: "/test".into(),
+                repo_root: repo_root.into(),
                 ignored_paths: vec![],
                 token_budget: None,
             })
@@ -735,8 +702,9 @@ mod tests {
         std::fs::write(root.join("node_modules/lib/x.js"), "x;\n").unwrap();
         std::fs::write(root.join("target/debug.bin"), "z\n").unwrap();
 
+        let (db, pid) = make_db_and_project_at(root.to_str().unwrap());
         let (tx, mut rx) = mpsc::channel(64);
-        enqueue_initial_scan(root, 1, &tx, 1_048_576);
+        run_repository_scan(&db, root, pid, &tx, 1_048_576);
         drop(tx);
 
         let mut paths = Vec::new();

@@ -359,7 +359,7 @@ mod tests {
         let db = database();
         let repository = CheckpointRepository::new(db.conn());
         repository.put(&checkpoint("/repo/.git", "PRD-1")).unwrap();
-        let id = format!("/repo/.git:PRD-1");
+        let id = "/repo/.git:PRD-1".to_string();
 
         // The FAM-BUG-039 shape: a later attempt revisits a phase this
         // checkpoint already recorded. A transition to the phase already held
@@ -414,7 +414,7 @@ mod tests {
         let db = database();
         let repository = CheckpointRepository::new(db.conn());
         repository.put(&checkpoint("/repo/.git", "PRD-1")).unwrap();
-        let id = format!("/repo/.git:PRD-1");
+        let id = "/repo/.git:PRD-1".to_string();
         repository.transition(&id, "implemented", "first").unwrap();
 
         let existing: i64 = db
@@ -477,7 +477,9 @@ mod tests {
 
         // It goes through the same allocator as every other event, so a
         // rebind cannot collide with a transition in the same occurrence.
-        repository.transition(id, "reviewed", "after the repair").unwrap();
+        repository
+            .transition(id, "reviewed", "after the repair")
+            .unwrap();
         let sequences: Vec<i64> = db
             .conn()
             .prepare("SELECT sequence FROM execution_checkpoint_events WHERE checkpoint_id=?1 ORDER BY sequence")
