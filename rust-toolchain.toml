@@ -1,0 +1,7 @@
+# The gate's verdict must not depend on which machine asked. Before this file
+# existed, local development ran 1.93 while the Docker verification image
+# pinned 1.88, so `cargo clippy -D warnings` was red on one and green on the
+# other. Keep this version and the Dockerfile's base image tag in lockstep.
+[toolchain]
+channel = "1.93.1"
+components = ["rustfmt", "clippy"]

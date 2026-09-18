@@ -1,11 +1,11 @@
 # Stage 1: Builder
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.93.1-bookworm AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release --no-default-features --bin familiar-ai-daemon
 
 # Stage 2: Test (used by docker compose test service)
-FROM rust:1.88-bookworm AS tester
+FROM rust:1.93.1-bookworm AS tester
 WORKDIR /app
 # familiar-ai-tray is a workspace member, so `--workspace` compiles it here
 # regardless of the daemon's feature flags. It links GTK and the Ayatana
