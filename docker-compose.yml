@@ -15,8 +15,9 @@ services:
       context: .
       target: tester
     working_dir: /app
-    command: >
-      cargo llvm-cov test --workspace --no-fail-fast --no-default-features
+    # PRD-099: the compose service declares no steps of its own. It runs the
+    # single definition, which is the same thing CI and a contributor run.
+    command: scripts/gate.sh
     volumes:
       - cargo-cache:/usr/local/cargo/registry
 

@@ -1,0 +1,35 @@
+# PRD-099: verification runs without being asked.
+#
+# Both triggers are unconditional. There is deliberately no workflow_dispatch
+# and no `if:` on the job or its steps: a gate that runs when someone chooses
+# to run it measures diligence, not correctness.
+#
+# This file declares no verification steps of its own. It builds the image the
+# README's local commands already use and runs scripts/gate.sh inside it, so
+# "green here, red there" reduces to a single cause.
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run is a run whose verdict nobody should read, but the newer
+# run replaces it, so cancelling in progress is safe here. The commit's own
+# verdict is never cancelled on its behalf.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the verification image
+        run: docker compose build test
+
+      - name: Run the gate
+        run: docker compose run --rm test scripts/gate.sh

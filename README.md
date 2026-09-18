@@ -340,10 +340,25 @@ is identical everywhere:
 
 ```bash
 docker compose build test
-docker compose run --rm test cargo test --workspace --no-default-features
-docker compose run --rm test cargo fmt --all -- --check
-docker compose run --rm test cargo clippy --workspace --all-targets -- -D warnings
+docker compose run --rm test
 ```
+
+That is the gate. The compose service runs `scripts/gate.sh`, which is the
+single definition of what verification means here — the same file CI runs on
+every push to `main` and every pull request. There is no second list of steps
+to keep in sync, and `gate_contract.rs` fails the build if one appears.
+
+To ask whether a commit has actually been verified, rather than assuming:
+
+```bash
+familiar-ai gate status              # HEAD of the default branch
+familiar-ai gate status --commit SHA
+```
+
+It answers `green`, `red`, `absent` or `unreadable`, and exits non-zero for
+anything but `green`. A commit that was never verified is `absent`, which is
+deliberately not the same answer as `red` and is never reported as a pass.
+See `docs/contracts/verification-gate.md`.
 
 Host commands are for repository inspection and version control only.
 

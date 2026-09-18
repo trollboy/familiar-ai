@@ -8,6 +8,7 @@ use familiar_ai_daemon::cli::backlog::BacklogCommand;
 use familiar_ai_daemon::cli::batch_review::BatchReviewCommand;
 use familiar_ai_daemon::cli::billing::BillingCommand;
 use familiar_ai_daemon::cli::control::ControlCommand;
+use familiar_ai_daemon::cli::gate::GateCommand;
 use familiar_ai_daemon::cli::onboard::OnboardCommand;
 use familiar_ai_daemon::cli::operator::OperatorCommand;
 use familiar_ai_daemon::cli::plan::PlanCommand;
@@ -196,6 +197,12 @@ enum Command {
     Operator {
         #[command(subcommand)]
         command: OperatorCommand,
+    },
+    /// Ask whether a commit was actually verified, refuse a merge that was
+    /// not, or record an override. Only green is a pass (PRD-099).
+    Gate {
+        #[command(subcommand)]
+        command: GateCommand,
     },
 }
 
@@ -665,6 +672,10 @@ fn main() -> ExitCode {
                 Err(error) => fail(error),
             }
         }
+        Command::Gate { command } => match familiar_ai_daemon::cli::gate::gate(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
         Command::Stewardship { command } => {
             match familiar_ai_daemon::cli::stewardship::stewardship_command(command) {
                 Ok(()) => ExitCode::SUCCESS,
