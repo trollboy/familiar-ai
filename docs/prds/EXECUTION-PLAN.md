@@ -1,4 +1,4 @@
-# Backlog Execution Plan — updated 2026-09-17
+# Backlog Execution Plan — updated 2026-09-18
 
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
 **Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
@@ -177,22 +177,77 @@ documentation file serializing five product PRDs — splitting the operator
 surface out of it, or declaring per-section ownership, is the cheapest
 width purchase available and is worth its own PRD.
 
+## Phase 0 — the gate's preconditions, COMPLETE 2026-09-18
+
+No PRD covers this work, which is why it sat red. A required gate cannot be
+landed onto a tree that fails its own checks: it would refuse every merge on
+day one and the first thing anyone would do is switch it off. Four chores,
+all verified inside the verification image rather than only on a
+workstation:
+
+- **rustfmt** (`170c420`) — 16 files, mostly import ordering left by the
+  PRD-084 operator work.
+- **clippy** (`1425e5d`) — `--workspace --all-targets -- -D warnings` now
+  exits 0. It took four fixes, not one: clippy stops at the first failing
+  crate, so each fix exposed the next. The last was a dead-code error that
+  turned out to matter — `enqueue_initial_scan` was a leftover of the
+  refactor to the durable `run_repository_scan`, and the only caller left
+  was the sole test asserting that `node_modules/` and `target/` are
+  skipped. That assertion was guarding code the product no longer runs. The
+  function is gone and the test now covers the live path.
+- **Toolchain pinned** (`b865530`) — `rust-toolchain.toml` at 1.93.1, both
+  Dockerfile stages matched. Local ran 1.93 while the image pinned 1.88, so
+  `clippy -D warnings` was red on one and green on the other. **This
+  delivers PRD-099's sixth acceptance criterion already** — what
+  verification means is now changeable only by a reviewed change to this
+  repository. Whoever implements 099 should not write it twice.
+- **Verification image rebuilt** — and with `familiar-ai-tray` now a
+  workspace member (`e31dc53`), the image needed GTK and the Ayatana
+  indicator. Confirmed: the tray compiles in Docker and appears in the
+  coverage table.
+
+**The suite was already green.** 1427 passed / 0 failed / 2 ignored across
+90 targets locally; 1411 / 0 across 74 in the image, the gap being
+`--no-default-features` dropping the daemon's tray tests. Roughly 1,400
+tests and ~97 archived PRDs, and the only thing wrong was that nothing had
+ever run them in one command. Coverage baseline: **78.76% lines, 71.89%
+functions**, with `familiar-ai-tray/src/windows.rs` at **0.00%** — 2,252
+lines of GTK verified by nobody but a human looking at it.
+
+Every command in this phase was run by hand. That is the point of PRD-099
+and the reason it is the next thing.
+
 ## Rounds
 
 A round is the owner's definition applied literally: dependency-ready and
 mutually scope-disjoint under `scope_overlap` on the amended
-`expected_files`. Six rounds is the floor for this queue under every
-ordering tested — the schedule below hits that floor *and* front-loads the
-two things the north star is waiting on.
+`expected_files`.
+
+**PRD-099 is landed first, alone, by a human — it is not a round.** An
+unverified system cannot be asked to build its own verifier and then be
+believed about the result. It is also the precondition for the honesty of
+everything after it: nine queued PRDs write their criteria in the language
+of automatic verification (*"proven by a gate job"*, *"a check scans and
+fails"*) and `.github` has never existed on any branch, so every round
+below is unfalsifiable until it lands. Land it advisory, watch a few
+merges, then turn on the merge refusal.
+
+**This costs one sequential step and the cost is stated rather than
+hidden:** six rounds is the floor for the remaining fourteen PRDs under
+every ordering tested, so the queue is 099 plus six rounds — seven phases,
+where the 2026-09-17 cut claimed six by putting 099 inside round 1.
 
 | Round | Width | PRDs | What it buys |
 |---|---|---|---|
-| 1 | 4 | **099**, **100**, 085, 093 | verification runs unasked; Familiar's own loop is a selectable worker; the autonomy stall taxonomy starts recording |
+| 1 | 4 | **100**, 085, 090, 093 | Familiar's own loop is a selectable worker; the stall taxonomy starts recording; CLI surface pass; PRD admission quality |
 | 2 | 3 | **101**, 082, 096 | no vendor CLI required; tool-output retention hardened; a failing required check becomes work, not a wall |
-| 3 | 3 | 086, 090, 097 | cost measurement; CLI surface pass; forge-agnostic delivery |
+| 3 | 3 | 086, 092, 097 | cost measurement; the gate builds what users install; forge-agnostic delivery |
 | 4 | 2 | 088, 098 | load-faithful verification; delivery claims computed from the ledger |
-| 5 | 2 | 089, 092 | no holes in required gates; the gate builds what users install |
+| 5 | 1 | 089 | no holes in required gates |
 | 6 | 1 | 094 | local workers reachable from dispatch |
+
+The width-1 tail is structural, not sloppy scheduling: 089 depends on 088
+and conflicts with 094, so nothing can share either round.
 
 **Why this ordering and not the widest-first one.** Greedy
 maximum-independent-set scheduling also finishes in six rounds, but it puts
@@ -203,26 +258,19 @@ rounds later**. Since the round count is identical, ordering is free, and
 it should be spent on the elephant: Familiar must not require `codex` or
 `claude` to run. Rounds 1 and 2 deliver that.
 
-PRD-099 shares round 1 for the same reason. It is a precondition for the
-honesty of everything after it: nine queued PRDs write their criteria in
-the language of automatic verification (*"proven by a gate job"*, *"a check
-scans and fails"*) and `.github` has never existed on any branch. Rounds
-2–6 are unfalsifiable until 099 lands, so it goes first rather than
-somewhere convenient.
-
 ## Critical path
 
-**{099, 100} → 101 → 085 → 086 → 098.**
+**099 → {100 → 101} and {085 → 086 → 098}.**
 
-Two chains, run concurrently. The left chain is goal 2, vendor
-independence, and is three rounds long. The right chain is the measurement
-spine — 085 records why unattended runs stall, 086 makes `CostUnmeasured`
+099 gates both. After it, two chains run concurrently. The left chain is
+goal 2, vendor independence, and is two rounds long. The right chain is
+the measurement spine — 085 records why unattended runs stall, 086 makes `CostUnmeasured`
 the exception, and 098 turns both into a shipped query so the next status
 claim is decided by the table rather than by narrative. 098 cannot start
 before both of its inputs land, and 085 and 086 conflict on
 `crates/familiar-ai-daemon/src/report.rs`, so the spine is four rounds long
 no matter how it is scheduled. It is the longest path in the queue and it
-sets the six-round floor.
+sets the six-round floor for the rounds.
 
 The ledger's own ranking of what stops delivery, this host:
 
@@ -252,8 +300,9 @@ Two observations that this round table answers directly:
 Per the bug policy, FAM-BUG-019 and FAM-BUG-022 are reopened and outrank
 the product queue. Their exit criterion is unchanged: one multi-PRD wave
 delivered using only Familiar commands. **Round 1 is the natural test** —
-it is a four-PRD wave, and if it has to be landed by hand, that is the
-recurrence, not a footnote.
+a four-PRD wave, run once 099 makes its result verifiable, and if it has to
+be landed by hand that is the recurrence, not a footnote. Phase 0 and 099
+are both deliberately hand-run and neither counts as evidence either way.
 
 ## Approval status
 
