@@ -61,7 +61,12 @@ pub use repos::reservation::{
     SettlementObservation, SettlementResult,
 };
 pub use repos::review::{ReviewRepository, INVARIANT_REVIEW_RECOVERY_TOLERANCE};
-pub use repos::session_rollup::SessionRollupRepository;
+pub use repos::session_rollup::{
+    assert_stall_taxonomy_complete, autonomy_for_window, classify_attempt_stall,
+    human_interventions_for_prd, session_autonomy, stall_recovery, stall_taxonomy_classes,
+    AutonomyWindowSummary, HumanIntervention, PrdAutonomy, PrdAutonomyOutcome, SessionAutonomy,
+    SessionRollupRepository, StallRecovery, INVARIANT_STALL_TAXONOMY_COMPLETE,
+};
 pub use repos::stewardship::{
     budget_summary, pending_human_gates, review_findings_for_session, BudgetSummary, PendingGate,
     ReviewFindingsRow,

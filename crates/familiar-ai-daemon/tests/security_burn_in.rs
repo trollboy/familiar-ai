@@ -305,7 +305,7 @@ fn hostile_provider_output_is_redacted_from_reports_database_rows_and_comments()
         calls: Mutex::new(Vec::new()),
     };
     assert!(deliver_with(&ownership, &policy, "repo", &runner).is_err());
-    let report = familiar_ai_daemon::report::render(&db, None).unwrap();
+    let report = familiar_ai_daemon::report::render(&db, None, 0).unwrap();
     std::env::remove_var("SECURITY_BURN_IN_DURABLE_CANARY");
 
     assert!(!report.contains(CANARY));
