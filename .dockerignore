@@ -1,4 +1,9 @@
 target/
 .git/
 *.md
+# PRD-099: the gate checks that no second list of verification steps appears in
+# the README, and a check that cannot see the file it checks is not a check.
+# Only this one root-level document is un-ignored; docs/ is nested and was
+# never matched by the pattern above.
+!README.md
 .claude/

@@ -15,6 +15,7 @@ pub mod billing;
 pub mod control;
 pub mod deliver;
 pub mod drive;
+pub mod gate;
 pub mod history;
 pub mod model_residency;
 pub mod next;

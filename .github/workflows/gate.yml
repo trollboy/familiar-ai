@@ -1,0 +1,44 @@
+# PRD-099: verification runs without being asked.
+#
+# The trigger is unconditional: no workflow_dispatch and no `if:` on the job
+# or its steps. A gate that runs when someone chooses to run it measures
+# diligence, not correctness.
+#
+# It fires on pushes to the default branch and nothing else. This is a local
+# desktop application, not a deployed service: the durable question CI can
+# answer is "is main verified, and is that recorded", and `main` is the only
+# artifact that question is about. A branch mid-development is not, so the
+# gate does not run on pull requests and does not burn eight minutes of
+# runner time on every work-in-progress commit. During development the same
+# definition runs locally and incrementally — `docker compose run --rm test`,
+# or `scripts/gate.sh` directly.
+#
+# This file declares no verification steps of its own. It builds the image the
+# README's local commands already use and runs scripts/gate.sh inside it, so
+# "green here, red there" reduces to a single cause.
+name: gate
+
+on:
+  push:
+    branches: [main]
+
+# Runs queue rather than cancel. A cancelled run is reported as failure by
+# `gate status` — absence of evidence is never evidence — so cancelling a
+# superseded run would brand that commit red forever on the strength of a
+# later push. Each commit gets its own honest verdict.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the verification image
+        run: docker compose build test
+
+      - name: Run the gate
+        run: docker compose run --rm test scripts/gate.sh
