@@ -194,34 +194,44 @@ pub(crate) fn handle_attached_review(
                     libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
                 }
                 eprintln!("What you can do:\n");
-                eprintln!("  [r] retry remediation");
                 // The stop reason dominates every per-check signal: with no
                 // attempts left, retry cannot invoke the implementer at all,
-                // and advice derived from an advisory check's flakiness is
-                // worse than none.
-                if retries_exhausted(&cycle.stop_reasons) {
-                    eprintln!("      No remediation attempts remain for this cycle, so this will");
-                    eprintln!("      not send the implementer back — it re-runs the checks only.");
+                // and a failure that reproduced byte-identical output on
+                // unchanged input cannot resolve by re-running the same
+                // thing again. Both are provable, not merely unlikely, so
+                // retry is withheld outright rather than offered with a
+                // caveat (PRD-096) — the caveat is what left the owner
+                // pressing `[r]` back into the same prompt on PRD-63.
+                let retry_available = retry_offered(&cycle.stop_reasons, any_deterministic);
+                if retry_available {
+                    eprintln!("  [r] retry remediation");
+                    if any_varying {
+                        eprintln!(
+                            "      A failure above is not stable across attempts, so it may be"
+                        );
+                        eprintln!("      transient. Retrying is reasonable.\n");
+                    } else {
+                        eprintln!(
+                            "      Send the implementer back at the failures above. Usually right"
+                        );
+                        eprintln!("      when the failure is specific and a fix is known.\n");
+                    }
+                } else if retries_exhausted(&cycle.stop_reasons) {
+                    eprintln!(
+                        "  Retry is not offered: no remediation attempts remain for this cycle."
+                    );
                     eprintln!("      Closing the findings above needs a fix, a new cycle, or an");
                     eprintln!("      explicit decision to defer them.\n");
-                } else if any_deterministic {
-                    eprintln!(
-                        "      A failure above is deterministic — the same input has produced"
-                    );
-                    eprintln!(
-                        "      the same output every attempt, so retrying it unchanged cannot"
-                    );
-                    eprintln!(
-                        "      succeed. Only new input (a fix, or different direction) can.\n"
-                    );
-                } else if any_varying {
-                    eprintln!("      A failure above is not stable across attempts, so it may be");
-                    eprintln!("      transient. Retrying is reasonable.\n");
                 } else {
                     eprintln!(
-                        "      Send the implementer back at the failures above. Usually right"
+                        "  Retry is not offered: a failure above is deterministic — the same"
                     );
-                    eprintln!("      when the failure is specific and a fix is known.\n");
+                    eprintln!(
+                        "      input has produced the same output every attempt, so retrying it"
+                    );
+                    eprintln!(
+                        "      unchanged cannot succeed. Only new input (a fix, or different\n      direction) can.\n"
+                    );
                 }
                 eprintln!("  [a] accept reviewed risk");
                 eprintln!("      Land it anyway, recording you as having reviewed and accepted");
@@ -229,7 +239,11 @@ pub(crate) fn handle_attached_review(
                 eprintln!("  [p] preserve checkpoint");
                 eprintln!("      Stop here. Nothing is lost — pick it up later with");
                 eprintln!("      `familiar-ai resume {prd_id}`.\n");
-                eprint!("Choose [r]etry remediation, [a]ccept reviewed risk, or [p]reserve checkpoint: ");
+                if retry_available {
+                    eprint!("Choose [r]etry remediation, [a]ccept reviewed risk, or [p]reserve checkpoint: ");
+                } else {
+                    eprint!("Choose [a]ccept reviewed risk or [p]reserve checkpoint: ");
+                }
                 let _ = io::stderr().flush();
                 let mut choice = String::new();
                 if io::stdin().read_line(&mut choice).unwrap_or(0) == 0 {
@@ -241,7 +255,7 @@ pub(crate) fn handle_attached_review(
                     });
                 }
                 match choice.trim().to_ascii_lowercase().as_str() {
-                    "r" | "retry" => {
+                    "r" | "retry" if retry_available => {
                         result = crate::run::resume_implemented_checkpoint(
                             worktree, &prd_id, agents, config, paths,
                         );
@@ -439,6 +453,17 @@ fn retries_exhausted(stops: &[familiar_ai_review::ReviewStopReason]) -> bool {
     })
 }
 
+/// Whether `[r]etry remediation` is a real option, not just a printable
+/// one. Both inputs are provable dead ends, not merely unlikely ones: no
+/// attempts left means the coordinator itself refuses to invoke the
+/// implementer again, and a deterministic failure means the last attempt
+/// already ran the exact same check against the exact same unchanged input.
+/// PRD-096 turns each from a caveat next to `[r]` into a reason `[r]` is not
+/// printed at all.
+fn retry_offered(stops: &[familiar_ai_review::ReviewStopReason], any_deterministic: bool) -> bool {
+    !retries_exhausted(stops) && !any_deterministic
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +586,31 @@ mod tests {
             ReviewStopReason::VerificationUnsuccessful
         ]));
         assert!(!retries_exhausted(&[]));
+    }
+
+    /// PRD-096: retry must be withheld, not merely caveated, whenever it is
+    /// provably useless — attempts exhausted, or the last failure was
+    /// deterministic — and offered otherwise.
+    #[test]
+    fn retry_is_withheld_exactly_when_it_cannot_help() {
+        use familiar_ai_review::ReviewStopReason;
+        assert!(!retry_offered(
+            &[ReviewStopReason::RetryLimitExhausted],
+            false
+        ));
+        assert!(!retry_offered(
+            &[ReviewStopReason::VerificationUnsuccessful],
+            true
+        ));
+        assert!(!retry_offered(
+            &[ReviewStopReason::RetryLimitExhausted],
+            true
+        ));
+        assert!(retry_offered(
+            &[ReviewStopReason::VerificationUnsuccessful],
+            false
+        ));
+        assert!(retry_offered(&[], false));
     }
 
     #[test]
