@@ -300,17 +300,342 @@ impl ReviewCoordinator<'_> {
                 return self.stop(cycle, reason);
             }
         }
+        let mut remediation_count = 0;
         if required_failed(&cycle.verification_before_review) {
-            let reason = if cycle
+            // A denied environment is not a code defect: no implementer
+            // attempt can change the outcome, so this still stops here
+            // rather than entering the remediation loop below (PRD-096).
+            if cycle
                 .verification_before_review
                 .iter()
                 .any(|e| e.required && e.status == VerificationStatus::EnvironmentDenied)
             {
-                ReviewStopReason::EnvironmentDenied
-            } else {
-                ReviewStopReason::VerificationUnsuccessful
-            };
-            return self.stop(cycle, reason);
+                return self.stop(cycle, ReviewStopReason::EnvironmentDenied);
+            }
+            let mut failing: Vec<VerificationEvidence> = cycle
+                .verification_before_review
+                .iter()
+                .filter(|e| e.required && e.status != VerificationStatus::Passed)
+                .cloned()
+                .collect();
+            loop {
+                if remediation_count >= request.limits.max_remediation_attempts {
+                    eprintln!(
+                        "review: required check(s) still failing after {remediation_count} \
+                         remediation attempt(s): {}",
+                        failing
+                            .iter()
+                            .map(|e| e.check_id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    return self.stop(cycle, ReviewStopReason::RetryLimitExhausted);
+                }
+                if let Err(error) = self.reserve(&cycle, &request.limits, Action::Remediation) {
+                    return self.stop(cycle, limit_reason(&error));
+                }
+                remediation_count += 1;
+                cycle.state = ReviewCycleState::Remediating;
+                let blocking_findings: Vec<ReviewFinding> = failing
+                    .iter()
+                    .map(|evidence| {
+                        synthesize_check_failure_finding(
+                            &cycle.cycle_id,
+                            remediation_count,
+                            evidence,
+                        )
+                    })
+                    .collect();
+                let remediation = RemediationRequest {
+                    remediation_id: format!("{}-remediation-{remediation_count}", cycle.cycle_id),
+                    cycle_id: cycle.cycle_id.clone(),
+                    task: request.task.clone(),
+                    implementation: request.implementation.assignment.clone(),
+                    base_revision: request.task.base_revision.clone(),
+                    allowed_paths: request
+                        .scope_policy
+                        .allowed_paths
+                        .iter()
+                        .map(|entry| entry.normalized.clone())
+                        .collect(),
+                    prohibited_paths: request
+                        .scope_policy
+                        .prohibited_rules
+                        .iter()
+                        .map(|rule| rule.rule_id.clone())
+                        .collect(),
+                    blocking_findings: blocking_findings.clone(),
+                    relevant_diff: captured.diff.clone(),
+                    relevant_contracts: request.contracts.clone(),
+                    relevant_invariants: request.invariants.clone(),
+                    verification_failures: failing.clone(),
+                    acceptance_checks: request
+                        .verification_plan
+                        .checks
+                        .iter()
+                        .map(|c| RemediationCheck {
+                            check_id: c.check_id.clone(),
+                            description: format!("run exact configured command: {:?}", c.argv),
+                        })
+                        .collect(),
+                    budget: RemediationBudget {
+                        max_tokens: request.limits.remediation_reservation_tokens,
+                        max_cost_microusd: request.limits.action_reservation_cost_microusd,
+                        max_duration_ms: request.limits.action_reservation_duration_ms,
+                    },
+                    scope_rules: Some(scope_rule_summary(
+                        &request.scope_policy,
+                        cycle
+                            .scope_evaluations
+                            .last()
+                            .map(|evaluation| {
+                                evaluation
+                                    .findings
+                                    .iter()
+                                    .filter(|finding| {
+                                        !matches!(
+                                            finding.decision,
+                                            ScopeDecision::AllowedChange
+                                                | ScopeDecision::JustifiedExpectedFileChange
+                                        )
+                                    })
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    )),
+                };
+                let remediation_bytes = serde_json::to_vec(&remediation)
+                    .map_err(|e| CoordinatorError::Persistence(e.to_string()))?;
+                cycle.remediation_request = Some(
+                    self.store
+                        .save_artifact("remediation_request", &remediation_bytes)
+                        .map_err(CoordinatorError::Persistence)?,
+                );
+                self.store
+                    .save_cycle(&cycle)
+                    .map_err(CoordinatorError::Persistence)?;
+                let started = Utc::now().to_rfc3339();
+                let timer = Instant::now();
+                let remediation_result = match self.implementer.remediate(&remediation, output) {
+                    Ok(result) => {
+                        let result_bytes = serde_json::to_vec(&result)
+                            .map_err(|error| RemediationExecutionError::Agent(error.to_string()))?;
+                        let result_artifact = self
+                            .store
+                            .save_artifact("remediation_result", &result_bytes)
+                            .map_err(RemediationExecutionError::Agent)?;
+                        cycle.remediation_attempts.push(StageExecution {
+                            stage_id: remediation.remediation_id.clone(),
+                            kind: StageKind::Remediation,
+                            started_at: result.started_at.clone(),
+                            ended_at: result.ended_at.clone(),
+                            duration_ms: result.duration_ms,
+                            outcome: result.execution.outcome.clone(),
+                            usage: result.usage.clone(),
+                            unavailable_fields: result.unavailable_fields.clone(),
+                            request_artifact: cycle.remediation_request.clone(),
+                            response_artifact: Some(result_artifact),
+                        });
+                        result
+                    }
+                    Err(error) => {
+                        eprintln!("review: remediation agent failed: {error}");
+                        let mut stage = failed_stage(
+                            remediation.remediation_id.clone(),
+                            StageKind::Remediation,
+                            started,
+                            timer,
+                            "agent_failure",
+                        );
+                        stage.request_artifact = cycle.remediation_request.clone();
+                        if !add_usage(&mut cycle, &stage.usage) {
+                            return self.stop(cycle, ReviewStopReason::TokenLimitExhausted);
+                        }
+                        if !add_duration(&mut cycle, stage.duration_ms) {
+                            return self.stop(cycle, ReviewStopReason::DurationLimitExhausted);
+                        }
+                        cycle.remediation_attempts.push(stage);
+                        self.store
+                            .save_cycle(&cycle)
+                            .map_err(CoordinatorError::Persistence)?;
+                        if remediation_count >= request.limits.max_remediation_attempts {
+                            return self.stop(cycle, ReviewStopReason::AgentFailure);
+                        }
+                        continue;
+                    }
+                };
+                if !add_usage(&mut cycle, &remediation_result.usage) {
+                    return self.stop(cycle, ReviewStopReason::TokenLimitExhausted);
+                }
+                if !add_duration(&mut cycle, remediation_result.duration_ms) {
+                    return self.stop(cycle, ReviewStopReason::DurationLimitExhausted);
+                }
+                if let Some(reason) = budget_violation(&cycle, &request.limits) {
+                    return self.stop(cycle, reason);
+                }
+                captured = match self
+                    .collector
+                    .capture(repository, &request.task.base_revision)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        eprintln!(
+                            "review: re-capture after check-driven remediation failed: {error}"
+                        );
+                        return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+                    }
+                };
+                let scope_evidence = match collect_scope_evidence(
+                    repository,
+                    &captured.changed_files,
+                    &captured.bytes,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        eprintln!("review: scope evidence re-collection failed: {error}");
+                        return self.stop(cycle, ReviewStopReason::EvidenceFailure);
+                    }
+                };
+                let evaluation = evaluate_scope(
+                    &request.scope_policy,
+                    &captured.changed_files,
+                    &scope_evidence,
+                );
+                let scope = scope_check_result(
+                    &captured.changed_files,
+                    &evaluation,
+                    &request.scope_policy,
+                    &format!("remediation-{remediation_count}"),
+                );
+                cycle.scope_evaluations.push(scope.clone());
+                cycle.tier_selection = Some(select_review_tier(
+                    &request.tier_policy,
+                    &request.declared_risk_classes,
+                    &captured.changed_files,
+                    captured.diff.byte_size,
+                    &scope,
+                ));
+                cycle.remediation_result = Some(RemediationResult {
+                    changed_files: captured.changed_files.clone(),
+                    resulting_diff: captured.diff.clone(),
+                    scope_check: scope,
+                    ..remediation_result
+                });
+                self.store
+                    .save_cycle(&cycle)
+                    .map_err(CoordinatorError::Persistence)?;
+                match evaluation.disposition {
+                    ScopeDisposition::Broadened
+                        if human_review_absorbed(&evaluation, &request.approved_scope_findings) =>
+                    {
+                        let _ = writeln!(
+                            output,
+                            "scope: undeclared expansions covered by durable approvals; proceeding"
+                        );
+                    }
+                    ScopeDisposition::Broadened => {
+                        return self.stop(cycle, ReviewStopReason::ScopeBroadened)
+                    }
+                    ScopeDisposition::HumanReviewRequired
+                        if human_review_absorbed(&evaluation, &request.approved_scope_findings) =>
+                    {
+                        let _ = writeln!(
+                            output,
+                            "scope: human-review findings covered by durable approvals; proceeding"
+                        );
+                    }
+                    ScopeDisposition::HumanReviewRequired => {
+                        return self.stop(cycle, ReviewStopReason::ScopeAmbiguous)
+                    }
+                    ScopeDisposition::Contained => {}
+                }
+                cycle.state = ReviewCycleState::Reverifying;
+                cycle.verification_after_remediation.clear();
+                let cited_checks: Vec<String> =
+                    failing.iter().map(|e| e.check_id.clone()).collect();
+                let unsuccessful_checks = cited_checks.clone();
+                for check in relevant_checks(
+                    &request.verification_plan,
+                    &captured
+                        .changed_files
+                        .iter()
+                        .map(|f| f.path.clone())
+                        .collect::<Vec<_>>(),
+                    &cited_checks,
+                    &unsuccessful_checks,
+                ) {
+                    if let Err(error) = self.reserve(&cycle, &request.limits, Action::Verification)
+                    {
+                        return self.stop(cycle, limit_reason(&error));
+                    }
+                    let ev = match self
+                        .verifier
+                        .run(repository, check, &captured.diff.content_hash)
+                    {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful)
+                        }
+                    };
+                    cycle.verification_after_remediation.push(ev);
+                    cycle.verification_history.push(
+                        cycle
+                            .verification_after_remediation
+                            .last()
+                            .expect("just pushed verification")
+                            .clone(),
+                    );
+                    let verification_duration = cycle
+                        .verification_after_remediation
+                        .last()
+                        .expect("just pushed verification")
+                        .duration_ms;
+                    if !add_duration(&mut cycle, verification_duration) {
+                        return self.stop(cycle, ReviewStopReason::DurationLimitExhausted);
+                    }
+                    if let Some(reason) = budget_violation(&cycle, &request.limits) {
+                        return self.stop(cycle, reason);
+                    }
+                }
+                if cycle
+                    .verification_after_remediation
+                    .iter()
+                    .any(|e| e.required && e.status == VerificationStatus::EnvironmentDenied)
+                {
+                    return self.stop(cycle, ReviewStopReason::EnvironmentDenied);
+                }
+                // An empty (or non-covering) re-verification set must never
+                // read as the required gate passing: absence of a failing
+                // result is not evidence of a passing one. Only a check id
+                // that was actually re-run counts toward resolving it.
+                let missing: Vec<String> = failing
+                    .iter()
+                    .filter(|e| {
+                        !cycle
+                            .verification_after_remediation
+                            .iter()
+                            .any(|after| after.check_id == e.check_id)
+                    })
+                    .map(|e| e.check_id.clone())
+                    .collect();
+                if !missing.is_empty() {
+                    eprintln!(
+                        "review: re-verification produced no evidence for required check(s): {}",
+                        missing.join(", ")
+                    );
+                    return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful);
+                }
+                if !required_failed(&cycle.verification_after_remediation) {
+                    break;
+                }
+                failing = cycle
+                    .verification_after_remediation
+                    .iter()
+                    .filter(|e| e.required && e.status != VerificationStatus::Passed)
+                    .cloned()
+                    .collect();
+            }
         }
         if cycle
             .tier_selection
@@ -346,7 +671,6 @@ impl ReviewCoordinator<'_> {
         let mut request = request;
         request.reviewer = selected_reviewer;
         let mut prior = Vec::new();
-        let mut remediation_count = 0;
         loop {
             if cycle.attempt >= request.limits.max_review_attempts {
                 return self.stop(cycle, ReviewStopReason::RetryLimitExhausted);
@@ -997,6 +1321,49 @@ fn required_failed(v: &[VerificationEvidence]) -> bool {
         .any(|e| e.required && e.status != VerificationStatus::Passed)
 }
 
+/// Turns a failed required check into the same shape a reviewer's finding
+/// takes, so a red gate reaches the implementer through the one remediation
+/// path instead of being a wall the coordinator stops in front of
+/// (PRD-096 / FAM-BUG-054). `CorrectnessDefect` is the deliberate category
+/// choice here — see PRD-096's "Resolved" section for why this does not
+/// warrant its own `FindingCategory` variant.
+fn synthesize_check_failure_finding(
+    cycle_id: &str,
+    attempt: u32,
+    evidence: &VerificationEvidence,
+) -> ReviewFinding {
+    let finding_evidence = [&evidence.stdout, &evidence.stderr]
+        .into_iter()
+        .flatten()
+        .map(|output| FindingEvidence::Verification {
+            check_id: evidence.check_id.clone(),
+            output: output.clone(),
+        })
+        .collect();
+    ReviewFinding {
+        finding_id: format!("{cycle_id}-check-{}-{attempt}", evidence.check_id),
+        category: FindingCategory::CorrectnessDefect,
+        severity: FindingSeverity::Critical,
+        blocking: true,
+        title: format!("Required check '{}' failed", evidence.check_id),
+        claim: format!(
+            "Required verification check '{}' did not pass (status {:?}, exit_code {:?}). {}",
+            evidence.check_id,
+            evidence.status,
+            evidence.exit_code,
+            evidence.summary.trim()
+        ),
+        evidence: finding_evidence,
+        remediation: format!(
+            "Fix the failure in required check '{}'; see the captured output for details.",
+            evidence.check_id
+        ),
+        status: FindingStatus::Open,
+        supersedes: None,
+        acceptance_criterion_id: None,
+    }
+}
+
 fn evidence_identity(finding: &ReviewFinding) -> String {
     serde_json::to_string(&(finding.category, &finding.evidence)).unwrap_or_default()
 }
@@ -1252,6 +1619,20 @@ mod tests {
             panic!("clean review must not remediate")
         }
     }
+    /// Proves a required check failure never reaches the reviewer: a check
+    /// still red must be worked by the implementer directly (PRD-096), and
+    /// any call here is the coordinator wrongly asking for an opinion on
+    /// code it hasn't even confirmed compiles or passes.
+    struct PanicReviewer;
+    impl ReviewAgent for PanicReviewer {
+        fn review(
+            &self,
+            _: &ReviewRequest,
+            _: &mut dyn Write,
+        ) -> Result<ReviewResult, ReviewExecutionError> {
+            panic!("reviewer must not be invoked while a required check is still failing")
+        }
+    }
     struct RemediatingReviewer {
         calls: RefCell<u32>,
     }
@@ -1325,6 +1706,53 @@ mod tests {
             _: &mut dyn Write,
         ) -> Result<RemediationResult, RemediationExecutionError> {
             *self.calls.borrow_mut() += 1;
+            Ok(RemediationResult {
+                remediation_id: request.remediation_id.clone(),
+                implementation: AgentObservation {
+                    assignment: request.implementation.clone(),
+                    agent_version: None,
+                    reported_model: None,
+                    unavailable_fields: BTreeMap::new(),
+                },
+                started_at: "2026-01-01T00:00:00Z".into(),
+                ended_at: "2026-01-01T00:00:00Z".into(),
+                duration_ms: 1,
+                execution: ExecutionObservation {
+                    exit_code: Some(0),
+                    signal: None,
+                    outcome: "completed".into(),
+                },
+                addressed_findings: vec![],
+                changed_files: vec![],
+                resulting_diff: reference(),
+                scope_check: ScopeCheckResult {
+                    added: vec![],
+                    modified: vec![],
+                    deleted: vec![],
+                    renamed: vec![],
+                    disposition: ScopeDisposition::Contained,
+                    findings: vec![],
+                    policy_snapshot_hash: String::new(),
+                    phase: String::new(),
+                },
+                usage: known_usage(),
+                unavailable_fields: BTreeMap::new(),
+            })
+        }
+    }
+    /// Records every request it receives so a test can inspect exactly what
+    /// the implementer was handed, e.g. whether a synthesised check-failure
+    /// finding carried the check id and captured evidence (PRD-096).
+    struct RecordingImplementer {
+        calls: RefCell<Vec<RemediationRequest>>,
+    }
+    impl RemediationAgent for RecordingImplementer {
+        fn remediate(
+            &self,
+            request: &RemediationRequest,
+            _: &mut dyn Write,
+        ) -> Result<RemediationResult, RemediationExecutionError> {
+            self.calls.borrow_mut().push(request.clone());
             Ok(RemediationResult {
                 remediation_id: request.remediation_id.clone(),
                 implementation: AgentObservation {
@@ -1915,13 +2343,177 @@ mod tests {
         );
         assert_eq!(cycle.attempt, 0)
     }
+    /// PRD-096 / FAM-BUG-054: a failing required check used to stop the
+    /// cycle before any review ran, and the implementer was never asked to
+    /// fix it. It is now routed into the same bounded remediation loop as a
+    /// reviewer finding — reusing `PanicReviewer` proves the reviewer is
+    /// still never invoked on this path, and `RetryLimitExhausted` (rather
+    /// than the old immediate `VerificationUnsuccessful`) proves it took
+    /// exactly `max_remediation_attempts` real attempts, not zero.
     #[test]
-    fn failed_required_verification_stops_before_review() {
+    fn failed_required_verification_reaches_implementer_and_exhausts_bound() {
         let store = Store::default();
+        let implementer = SuccessfulImplementer {
+            calls: RefCell::new(0),
+        };
         let coordinator = ReviewCoordinator {
             collector: &Collector,
             verifier: &FailingVerifier,
-            reviewer: &Reviewer,
+            reviewer: &PanicReviewer,
+            implementer: &implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+            batch_reviewer: None,
+        };
+        let request = base_request();
+        let max_remediation_attempts = request.limits.max_remediation_attempts;
+        let cycle = coordinator
+            .run(Path::new("."), request, &mut Vec::new())
+            .unwrap();
+        assert_eq!(
+            cycle.stop_reasons,
+            vec![ReviewStopReason::RetryLimitExhausted]
+        );
+        assert_eq!(cycle.attempt, 0, "reviewer must never be invoked");
+        assert_eq!(*implementer.calls.borrow(), max_remediation_attempts);
+        assert_eq!(
+            cycle.remediation_attempts.len(),
+            max_remediation_attempts as usize
+        );
+    }
+    /// The regression PRD-096 exists for: the synthesised finding must
+    /// actually carry the failing check's id and its captured evidence
+    /// through to `RemediationRequest::verification_failures`, not just
+    /// trigger *some* remediation call. Fails against the coordinator prior
+    /// to this change, which never calls the implementer on this path.
+    #[test]
+    fn implementer_receives_check_id_and_captured_failure() {
+        let store = Store::default();
+        let implementer = RecordingImplementer {
+            calls: RefCell::new(vec![]),
+        };
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &FailingVerifier,
+            reviewer: &PanicReviewer,
+            implementer: &implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+            batch_reviewer: None,
+        };
+        let cycle = coordinator
+            .run(Path::new("."), base_request(), &mut Vec::new())
+            .unwrap();
+        assert_eq!(cycle.attempt, 0, "reviewer must never be invoked");
+        let calls = implementer.calls.borrow();
+        assert!(!calls.is_empty(), "implementer must have been invoked");
+        let first = &calls[0];
+        assert_eq!(first.verification_failures.len(), 1);
+        assert_eq!(first.verification_failures[0].check_id, "test");
+        assert_eq!(
+            first.verification_failures[0].status,
+            VerificationStatus::Failed
+        );
+        assert!(first.verification_failures[0].stdout.is_some());
+        assert!(first.blocking_findings.iter().any(|f| f.category
+            == FindingCategory::CorrectnessDefect
+            && f.evidence.iter().any(|e| matches!(
+                e,
+                FindingEvidence::Verification { check_id, .. } if check_id == "test"
+            ))));
+    }
+    /// Reverification round whose evidence never covers the check that
+    /// actually failed: it fails "test" on the first (pre-review) run, then
+    /// on every later run reports a Passed result tagged with a different
+    /// check id. This is the concrete shape of "the re-verification set
+    /// doesn't cover the previously-failing required check" — reachable
+    /// whenever re-verification evidence gets attached to the wrong check
+    /// identity — and it must not read as the gate passing.
+    struct WrongCheckIdVerifier {
+        calls: RefCell<u32>,
+    }
+    impl VerificationRunner for WrongCheckIdVerifier {
+        fn run(
+            &self,
+            repository: &Path,
+            check: &VerificationCheck,
+            id: &str,
+        ) -> Result<VerificationEvidence, VerificationError> {
+            let mut calls = self.calls.borrow_mut();
+            *calls += 1;
+            let mut evidence = Verifier.run(repository, check, id)?;
+            if *calls == 1 {
+                evidence.status = VerificationStatus::Failed;
+                evidence.exit_code = Some(1);
+            } else {
+                evidence.check_id = "different-check".into();
+                evidence.status = VerificationStatus::Passed;
+                evidence.exit_code = Some(0);
+            }
+            Ok(evidence)
+        }
+    }
+    /// FAM-BUG-054 remediation follow-up: `required_failed` is `.any()` over
+    /// whatever evidence the re-verification round produced, which is
+    /// vacuously false when that evidence doesn't include the check that was
+    /// actually failing. The coordinator must require positive evidence
+    /// (an entry for that exact check id, `Passed`) before it treats the
+    /// required gate as resolved and proceeds to review. Fails against the
+    /// coordinator prior to this change, which reads the missing coverage as
+    /// success and lets `PanicReviewer` be invoked.
+    #[test]
+    fn missing_reverification_evidence_does_not_read_as_passing() {
+        let store = Store::default();
+        let implementer = SuccessfulImplementer {
+            calls: RefCell::new(0),
+        };
+        let verifier = WrongCheckIdVerifier {
+            calls: RefCell::new(0),
+        };
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &verifier,
+            reviewer: &PanicReviewer,
+            implementer: &implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+            batch_reviewer: None,
+        };
+        let cycle = coordinator
+            .run(Path::new("."), base_request(), &mut Vec::new())
+            .unwrap();
+        assert_eq!(cycle.attempt, 0, "reviewer must never be invoked");
+        assert_eq!(
+            cycle.stop_reasons,
+            vec![ReviewStopReason::VerificationUnsuccessful]
+        );
+        assert_eq!(*implementer.calls.borrow(), 1);
+    }
+    struct EnvironmentDeniedVerifier;
+    impl VerificationRunner for EnvironmentDeniedVerifier {
+        fn run(
+            &self,
+            repository: &Path,
+            check: &VerificationCheck,
+            id: &str,
+        ) -> Result<VerificationEvidence, VerificationError> {
+            let mut evidence = Verifier.run(repository, check, id)?;
+            evidence.status = VerificationStatus::EnvironmentDenied;
+            evidence.exit_code = None;
+            Ok(evidence)
+        }
+    }
+    /// A denied environment is not a code defect: no implementer attempt can
+    /// fix it, so this must keep stopping immediately rather than entering
+    /// the remediation loop PRD-096 adds for ordinary required-check
+    /// failures. `Implementer` and `PanicReviewer` both panic if called.
+    #[test]
+    fn environment_denied_required_check_stops_without_remediation() {
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &EnvironmentDeniedVerifier,
+            reviewer: &PanicReviewer,
             implementer: &Implementer,
             store: &store,
             policy: BlockingPolicy::default(),
@@ -1932,9 +2524,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             cycle.stop_reasons,
-            vec![ReviewStopReason::VerificationUnsuccessful]
+            vec![ReviewStopReason::EnvironmentDenied]
         );
-        assert_eq!(cycle.attempt, 0)
+        assert_eq!(cycle.attempt, 0);
+        assert!(cycle.remediation_attempts.is_empty());
     }
     #[test]
     fn scope_expansion_stops_without_remediation() {
