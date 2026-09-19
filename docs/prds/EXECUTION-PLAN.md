@@ -239,8 +239,8 @@ where the 2026-09-17 cut claimed six by putting 099 inside round 1.
 
 | Round | Width | PRDs | What it buys |
 |---|---|---|---|
-| 1 | 4 | **100**, 085, 090, 093 | Familiar's own loop is a selectable worker; the stall taxonomy starts recording; CLI surface pass; PRD admission quality |
-| 2 | 3 | **101**, 082, 096 | no vendor CLI required; tool-output retention hardened; a failing required check becomes work, not a wall |
+| 1 | 4 | **100**, 085, 090, 096 | Familiar's own loop is a selectable worker; the stall taxonomy starts recording; CLI surface pass; a failing required check becomes work, not a wall |
+| 2 | 3 | **101**, 082, 093 | no vendor CLI required; tool-output retention hardened; PRD admission quality |
 | 3 | 3 | 086, 092, 097 | cost measurement; the gate builds what users install; forge-agnostic delivery |
 | 4 | 2 | 088, 098 | load-faithful verification; delivery claims computed from the ledger |
 | 5 | 1 | 089 | no holes in required gates |
@@ -248,6 +248,24 @@ where the 2026-09-17 cut claimed six by putting 099 inside round 1.
 
 The width-1 tail is structural, not sloppy scheduling: 089 depends on 088
 and conflicts with 094, so nothing can share either round.
+
+**Amended 2026-09-19: 093 moved from round 1 to round 2.** A pre-flight of
+round 1's manifests found that PRD-085 and PRD-093 each declare a migration
+but neither declared `crates/familiar-ai-storage/src/migrate.rs` — and a
+migration that is not registered in that file's `MIGRATIONS` array never
+runs. Both would have hit `scope_broadened` on their first real edit, which
+is the single largest cause of retained attempts in the ledger and is
+exactly what stopped PRD-099's implementation until the manifest was
+widened. Declaring `migrate.rs` fixes that, and makes 085 and 093 conflict
+with each other, so they can no longer share a round.
+
+That is a real bottleneck worth naming: **every migration-bearing PRD must
+touch `migrate.rs`, so no two of them can ever run in the same round.** 085,
+086 and 093 are now mutually serialized for that reason alone. It is the
+same hub-file problem as `README.md` and `config/default.toml`, and a
+registration mechanism that did not require editing a shared array — a
+build script, or `include_dir!` over the migrations directory — would return
+that width.
 
 **Why this ordering and not the widest-first one.** Greedy
 maximum-independent-set scheduling also finishes in six rounds, but it puts
