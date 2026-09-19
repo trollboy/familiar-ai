@@ -91,8 +91,13 @@ pub fn merge_decision(
 #[derive(Debug, Subcommand)]
 pub enum GateCommand {
     /// Run the single definition and record its verdict against HEAD.
-    /// This is what the pre-push hook invokes.
-    Run,
+    Run {
+        /// Invoked from the pre-push hook. Honours `[gate] pre_push_hook`,
+        /// so the trigger can be turned off without the definition changing
+        /// and without uninstalling the hook. A plain `gate run` always runs.
+        #[arg(long)]
+        hook: bool,
+    },
     /// Answer green, red, absent or unreadable for a commit. Exits non-zero
     /// for anything but green.
     Status {
@@ -157,7 +162,23 @@ fn open_db() -> Result<Database, String> {
 
 pub fn gate(command: GateCommand) -> Result<(), String> {
     match command {
-        GateCommand::Run => {
+        GateCommand::Run { hook } => {
+            if hook {
+                let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+                let current = std::env::current_dir().map_err(|e| e.to_string())?;
+                let config = effective_repository_config(&paths, &current)?;
+                if !config.gate.pre_push_hook {
+                    // A trigger is off, not a step. Nothing about what the gate
+                    // runs has changed, and the commit simply carries no
+                    // verdict — `gate status` answers `absent`, which is the
+                    // honest answer and is never a pass.
+                    println!(
+                        "gate: pre-push hook disabled by config ([gate] pre_push_hook = false); \
+                         this commit will read `absent` until something verifies it"
+                    );
+                    return Ok(());
+                }
+            }
             let commit = resolve_commit(None)?;
             let repo = std::env::current_dir().map_err(|e| e.to_string())?;
             let script = Path::new("scripts/gate.sh");

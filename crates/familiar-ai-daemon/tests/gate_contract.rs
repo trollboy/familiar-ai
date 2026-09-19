@@ -66,12 +66,41 @@ fn the_trigger_is_a_local_hook_that_records_its_verdict() {
     );
 
     // A gate that runs when someone chooses to run it measures diligence, not
-    // correctness. The hook must not be opt-in at its own discretion.
+    // correctness. The hook must not be opt-in at its own discretion: the
+    // only supported off switch is the recorded `[gate] pre_push_hook`
+    // setting, honoured in Rust where it can be reasoned about, not an
+    // ambient environment variable the shell script consults.
     for weakener in ["GATE_SKIP", "SKIP_GATE", "if [ -z"] {
         assert!(
             !hook.contains(weakener),
             "the hook must not carry its own bypass ({weakener}) — `git push --no-verify` \
              is the bypass, and it leaves the commit reading `absent`"
+        );
+    }
+    assert!(
+        hook.contains("--hook"),
+        "the hook must identify itself so the trigger can be turned off by \
+         configuration without uninstalling it and without touching the definition"
+    );
+}
+
+#[test]
+fn the_toggle_turns_off_a_trigger_and_never_a_step() {
+    // PRD-099's sixth criterion: no setting outside the repository may add,
+    // remove or weaken a step. `[gate] pre_push_hook` is allowed because it
+    // decides whether a caller fires, not what the gate runs — the step list
+    // stays in scripts/gate.sh, which no configuration can reach.
+    let config = read("crates/familiar-ai-core/src/config/gate.rs");
+    assert!(
+        config.contains("fn default_pre_push_hook() -> bool {\n    true\n}"),
+        "the hook must default to on; verification is opt-out, not opt-in"
+    );
+    let gate = read("scripts/gate.sh");
+    for setting in ["pre_push_hook", "config", "GateConfig"] {
+        assert!(
+            !gate.contains(setting),
+            "the definition must not consult configuration ({setting}) — only the \
+             trigger is configurable"
         );
     }
 }

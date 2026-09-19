@@ -16,6 +16,7 @@ mod daemon;
 mod dashboard;
 mod delivery;
 mod driver;
+mod gate;
 mod inference;
 mod packer;
 mod preflight;
@@ -39,6 +40,7 @@ pub use daemon::*;
 pub use dashboard::*;
 pub use delivery::*;
 pub use driver::*;
+pub use gate::*;
 pub use inference::*;
 pub use packer::*;
 pub use preflight::*;
@@ -83,6 +85,8 @@ pub struct Config {
     pub watcher: WatcherConfig,
     #[serde(default)]
     pub tray: TrayConfig,
+    #[serde(default)]
+    pub gate: GateConfig,
     #[serde(default)]
     pub summary: SummaryConfig,
     #[serde(default)]

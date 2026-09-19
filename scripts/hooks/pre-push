@@ -24,7 +24,7 @@ set -euo pipefail
 for candidate in ./target/debug/familiar-ai ./target/release/familiar-ai familiar-ai; do
     if command -v "$candidate" >/dev/null 2>&1 &&
         "$candidate" gate --help >/dev/null 2>&1; then
-        exec "$candidate" gate run
+        exec "$candidate" gate run --hook
     fi
 done
 
