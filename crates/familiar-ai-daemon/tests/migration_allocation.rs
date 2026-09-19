@@ -102,9 +102,13 @@ fn migration_versions_are_unique_and_ascending() {
 fn no_queued_prd_declares_a_migration_number_that_is_already_taken() {
     // The check that would have caught PRD-093 declaring 063 while
     // 063_local_worker_telemetry.sql already existed.
-    let existing: Vec<String> = declared_migrations()
+    // A collision is claiming a number someone else took, not the number you
+    // authored: an implemented PRD legitimately declares the migration it
+    // created, and that file is applied precisely because the PRD shipped. So
+    // compare the whole filename, not just the prefix.
+    let existing: BTreeMap<String, String> = declared_migrations()
         .into_iter()
-        .map(|(_, file)| file.split('_').next().unwrap_or_default().to_string())
+        .map(|(_, file)| (file.split('_').next().unwrap_or_default().to_string(), file))
         .collect();
 
     let prd_dir = repo_root().join("docs/prds");
@@ -122,14 +126,23 @@ fn no_queued_prd_declares_a_migration_number_that_is_already_taken() {
             let Some(start) = line.find("migrations/") else {
                 continue;
             };
-            let declared: String = line[start + "migrations/".len()..]
+            let declared_file: String = line[start + "migrations/".len()..]
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
+            let declared_number: String = declared_file
                 .chars()
                 .take_while(char::is_ascii_digit)
                 .collect();
-            if declared.len() == 3 && existing.contains(&declared) {
-                collisions.push(format!(
-                    "{name} declares migration {declared}, already applied"
-                ));
+            if declared_number.len() != 3 {
+                continue;
+            }
+            if let Some(applied) = existing.get(&declared_number) {
+                if applied != &declared_file {
+                    collisions.push(format!(
+                        "{name} declares migration {declared_file}, but {applied} already holds number {declared_number}"
+                    ));
+                }
             }
         }
     }
