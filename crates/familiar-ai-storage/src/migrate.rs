@@ -221,7 +221,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 64,
-        sql: include_str!("../migrations/073_model_residency.sql"),
+        sql: include_str!("../migrations/064_model_residency.sql"),
     },
 ];
 
