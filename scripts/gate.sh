@@ -32,13 +32,44 @@ step() {
     local name="$1"
     shift
     note "--- gate: ${name}"
-    if ! "$@"; then
+
+    # Tee rather than capture: the output still streams to the terminal at
+    # whatever pace it can take, and a copy is kept so a red verdict can say
+    # what actually failed. "test FAILED" with no test name is honest and
+    # useless — you cannot act on it without re-running, and a flaky failure
+    # will not reproduce.
+    local log
+    log="$(mktemp -t familiar-ai-gate-step.XXXXXX)"
+    # errexit and pipefail would kill the script on the failing pipeline
+    # before PIPESTATUS could be read, aborting the gate at its first red
+    # step instead of running every step and reporting each one.
+    set +e
+    "$@" 2>&1 | tee "${log}"
+    local outcome=${PIPESTATUS[0]}
+    set -e
+
+    if [ "${outcome}" -ne 0 ]; then
+        note "--- gate: ${name} FAILED"
+        # Name the failures in the verdict, capped so one catastrophic run
+        # cannot write an unbounded row into the ledger.
+        local culprits
+        culprits="$(grep -oE '^test [^ ]+ \.\.\. FAILED' "${log}" |
+            sed 's/^test //; s/ \.\.\. FAILED$//' | head -20 | tr '\n' ' ')"
+        if [ -n "${culprits}" ]; then
+            note "--- gate: ${name} failures: ${culprits}"
+        else
+            # Not a test failure — a compile error, a linter, a killed step.
+            local lastline
+            lastline="$(grep -m1 -E '^error' "${log}" | head -c 200)"
+            [ -n "${lastline}" ] && note "--- gate: ${name} error: ${lastline}"
+        fi
+        rm -f "${log}"
         # Record and keep going: one red step should not hide the others, but
         # any red step fails the gate.
-        note "--- gate: ${name} FAILED"
         failed="${failed} ${name}"
         return 0
     fi
+    rm -f "${log}"
     note "--- gate: ${name} ok"
 }
 
