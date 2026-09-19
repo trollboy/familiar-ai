@@ -43,7 +43,9 @@ pub use repos::file_summary::{
     FileSummaryReconciliationResult, FileSummaryRepository, FileSummaryRollbackResult,
     ReconciliationReason,
 };
-pub use repos::gate::{GateOverride, GateOverrideRepository};
+pub use repos::gate::{
+    GateOverride, GateOverrideRepository, GateVerdictRecord, GateVerdictRepository,
+};
 pub use repos::lifecycle::{
     LifecycleChange, LifecycleOutcome, LifecycleRepository, PendingSummaryWork, RetirementReason,
     ScanRun, ScanStatus,

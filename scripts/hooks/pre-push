@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# PRD-099: verification runs without being asked.
+#
+# This is the trigger. It runs the single definition before anything leaves
+# this machine and records the verdict against HEAD in Familiar's ledger, so a
+# commit that has never been verified is distinguishable from one that passed.
+#
+# Install:
+#   ln -sf ../../scripts/hooks/pre-push .git/hooks/pre-push
+#
+# Bypass, when you genuinely need to:
+#   git push --no-verify
+# which pushes an unverified commit. `familiar-ai gate status` will say
+# `absent` for it, which is the point — the bypass is visible afterwards
+# rather than silent.
+
+set -euo pipefail
+
+# Probe for the capability, not the name. An installed binary predating the
+# gate command exists on PATH and cannot run it, and a hook that trusts the
+# name blocks the push with an argument-parsing error instead of verifying
+# anything. The repository's own build wins over an older install.
+for candidate in ./target/debug/familiar-ai ./target/release/familiar-ai familiar-ai; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+        "$candidate" gate --help >/dev/null 2>&1; then
+        exec "$candidate" gate run
+    fi
+done
+
+# No binary can record a verdict, so run the definition directly and say so.
+# The push still gets verified; `gate status` will read `absent` for the
+# commit, because nothing wrote a verdict down and claiming otherwise would
+# be worse than admitting it.
+echo "pre-push: no familiar-ai build with a gate command found;" \
+     "running the definition without recording a verdict"
+exec scripts/gate.sh

@@ -10,14 +10,14 @@ is, and every caller runs it without substituting or adding steps:
 
 | Caller | Invocation |
 |---|---|
-| GitHub Actions | `.github/workflows/gate.yml` runs it inside the compose `test` image |
-| A contributor | `docker compose run --rm test` |
+| The pre-push hook | `familiar-ai gate run`, which runs it and records the verdict |
+| A contributor | `docker compose run --rm test`, or `scripts/gate.sh` directly |
 | The compose service | its `command:` is `scripts/gate.sh` |
 
 Two lists that are supposed to match will eventually not match, so there is one
 list. `crates/familiar-ai-daemon/tests/gate_contract.rs` fails the build if a
 `cargo fmt`, `cargo clippy`, `cargo test` or workspace `cargo build` appears in
-a workflow file, in `docker-compose.yml`, or in `README.md`.
+`docker-compose.yml`, in `README.md`, or in the hook.
 
 What the steps *contain* — which features they enable, which system
 dependencies they need, what they compile — belongs to PRD-092, not here. This
@@ -25,42 +25,45 @@ contract is about the gate running at all.
 
 ## Triggers
 
-Push to `main`, and nothing else. The trigger is unconditional: no
-`workflow_dispatch`, no `if:` on the job or its steps, and no
-`continue-on-error`. A verification that runs when someone chooses to run it
-measures diligence, not correctness.
+**Verification is local.** This is a desktop application that runs on the
+machine doing the work, not a service deployed from a pipeline. There is no
+hosted runner, no build minutes, and no network required to know whether a
+commit was verified.
 
-**Deliberately not on pull requests.** This is a locally running desktop
-application, not a deployed service. The durable question CI can answer is
-whether `main` is verified and whether that is recorded; a branch mid-
-development is not an artifact that question is about. Firing on every push to
-an open pull request spends several minutes of runner time per work-in-progress
-commit and reports a verdict on code the author already knows is in flux.
-
-Verification during development is the same definition run locally, where the
-build cache is warm and the answer takes seconds:
+The trigger is `scripts/hooks/pre-push`, installed with:
 
 ```bash
-docker compose run --rm test    # or: scripts/gate.sh
+ln -sf ../../scripts/hooks/pre-push .git/hooks/pre-push
 ```
 
-**Runs queue rather than cancel.** A cancelled run is reported as failure, so
-cancelling a superseded run would brand its commit red forever on the strength
-of a later push. `cancel-in-progress` is `false`, and `gate_contract.rs` fails
-the build if that changes — the rule and its consequence live in different
-files and must not drift apart.
+It runs `familiar-ai gate run`, which executes the single definition and
+records the verdict against `HEAD` in Familiar's own ledger. Nothing leaves
+the machine unverified without that being visible afterwards.
+
+The bypass is `git push --no-verify`. It is deliberately available and
+deliberately leaves a trace: the pushed commit has no recorded verdict, so
+`familiar-ai gate status` answers `absent` for it. A bypass you can see
+afterwards is worth more than one that cannot happen.
+
+**Why not a hosted runner.** An earlier cut of this PRD ran the gate in GitHub
+Actions on push and pull request. That was webapp-shaped thinking applied to a
+local client: it cost around eight minutes of cold-cache compilation per run,
+fired on every work-in-progress commit, coupled verification to a forge whose
+independence PRD-101 exists to establish, and made the answer to "is this
+verified" depend on a network call. The objective — runs unasked, recorded,
+queryable — never required any of it.
 
 ## The four answers
 
-`familiar-ai gate status [--commit SHA]` answers for any commit, and exits
-non-zero for anything but green.
+`familiar-ai gate status [--commit SHA]` reads Familiar's ledger and answers
+for any commit, offline, exiting non-zero for anything but green.
 
 | Answer | Meaning | Pass? |
 |---|---|---|
 | `green` | the gate ran to completion and succeeded | yes |
-| `red` | it ran and did not succeed — including cancelled, timed out, skipped, still queued, in progress, or completed with no conclusion | no |
-| `absent` | nothing ever verified this commit | no |
-| `unreadable` | the verdict could not be read: no network, no auth, a malformed response | no |
+| `red` | it ran and did not succeed | no |
+| `absent` | nothing ever verified this commit — including a `--no-verify` push | no |
+| `unreadable` | a verdict is recorded but this build does not recognise it | no |
 
 Three properties are load-bearing:
 
@@ -71,9 +74,9 @@ Three properties are load-bearing:
 - **Absent is not red.** A commit nothing ever verified is a different fact
   from a commit that failed, and conflating them is how a project convinces
   itself that unverified code is merely unlucky.
-- **Only the gate decides.** A check run named `gate` is the gate. Another
-  workflow's green check on the same commit cannot make the verdict green;
-  a commit with other passing checks and no gate run is `absent`.
+- **The latest run is the truth about that tree.** Re-running the gate on a
+  commit replaces its verdict, so a stale red does not outlive the fix and a
+  stale green does not outlive a regression.
 
 ## Overrides
 
@@ -95,32 +98,11 @@ the run it refers to.
 `gate override` refuses when the gate is already green: there is nothing to
 override, and a record suggesting otherwise would be a lie in the ledger.
 
-## Precondition: branch protection
-
-**Making the gate *required* is a one-time human step outside this repository**,
-and it is named here rather than designed around.
-
-Enabling GitHub Actions is already done. What remains is branch protection on
-`main` with the `gate` check required. Until that is on, criterion 4 of PRD-099
-is unenforceable by this repository: `gate require` will refuse a bad merge
-when it is asked, but nothing compels the forge to ask it.
-
-The honest order is:
-
-1. Land the gate and let it run on a few merges.
-2. Confirm it goes green, and that its verdict matches a local run.
-3. *Then* turn on branch protection with `gate` required.
-
-Turning protection on before the gate has ever run green refuses every merge on
-day one, and the first thing anyone does then is switch it off — which is how
-gates die. An unprotected branch makes the gate advisory, and the gate is
-honest about that rather than reporting green.
-
 ## No setting outside this tree may weaken it
 
-Everything that decides the verdict is a reviewed file here. The workflow uses
-no `secrets.` or `vars.`, and `scripts/gate.sh` branches on no environment
-variable that could skip a step. A step that can be disabled by a setting
+Everything that decides the verdict is a reviewed file here. `scripts/gate.sh`
+branches on no environment variable that could skip a step, and the hook
+carries no bypass of its own. A step that can be disabled by a setting
 stored somewhere else is a step whose removal leaves no diff and no reviewer,
 and `gate_contract.rs` fails the build if one appears.
 

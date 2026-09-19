@@ -14,6 +14,14 @@ use super::now_rfc3339;
 use crate::Database;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateVerdictRecord {
+    pub commit_sha: String,
+    pub verdict: String,
+    pub detail: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateOverride {
     pub override_id: String,
     pub commit_sha: String,
@@ -80,6 +88,71 @@ impl<'a> GateOverrideRepository<'a> {
                         actor: row.get(3)?,
                         reason: row.get(4)?,
                         created_at: row.get(5)?,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(FamiliarError::Database(other.to_string())),
+            })
+    }
+}
+
+/// PRD-099, amended: verification runs locally and its verdict is recorded
+/// here rather than read back from a forge. Offline, instant, and not coupled
+/// to a vendor.
+pub struct GateVerdictRepository<'a> {
+    db: &'a Database,
+}
+
+impl<'a> GateVerdictRepository<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
+    }
+
+    /// Record the outcome of a gate run against the commit it verified.
+    /// Re-running the gate on the same commit replaces the previous verdict —
+    /// the latest run is the truth about that tree.
+    pub fn record(
+        &self,
+        commit_sha: &str,
+        verdict: &str,
+        detail: &str,
+    ) -> familiar_ai_core::Result<GateVerdictRecord> {
+        let recorded_at = now_rfc3339();
+        self.db
+            .conn()
+            .execute(
+                "INSERT INTO gate_verdicts(commit_sha,verdict,detail,recorded_at) VALUES(?1,?2,?3,?4) ON CONFLICT(commit_sha) DO UPDATE SET verdict=excluded.verdict,detail=excluded.detail,recorded_at=excluded.recorded_at",
+                params![commit_sha, verdict, detail, recorded_at],
+            )
+            .map_err(|error| FamiliarError::Database(error.to_string()))?;
+        Ok(GateVerdictRecord {
+            commit_sha: commit_sha.to_string(),
+            verdict: verdict.to_string(),
+            detail: detail.to_string(),
+            recorded_at,
+        })
+    }
+
+    /// The recorded verdict for a commit, or `None` when nothing ever verified
+    /// it. `None` is `absent`, which is not the same answer as red.
+    pub fn for_commit(
+        &self,
+        commit_sha: &str,
+    ) -> familiar_ai_core::Result<Option<GateVerdictRecord>> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT commit_sha,verdict,detail,recorded_at FROM gate_verdicts WHERE commit_sha=?1",
+                params![commit_sha],
+                |row| {
+                    Ok(GateVerdictRecord {
+                        commit_sha: row.get(0)?,
+                        verdict: row.get(1)?,
+                        detail: row.get(2)?,
+                        recorded_at: row.get(3)?,
                     })
                 },
             )

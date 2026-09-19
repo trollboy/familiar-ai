@@ -2,6 +2,11 @@
 //! never reports an unknown outcome as a pass, refuses an unrecorded override,
 //! answers for any commit, and cannot be weakened from outside this tree.
 //!
+//! Amended 2026-09-19: verification is local. This is a desktop application
+//! that runs on the machine doing the work, so the trigger is a git hook and
+//! the verdict lives in Familiar's ledger — not a hosted runner and not a
+//! forge's check-run API.
+//!
 //! These read the gate definition as data. That is the point: the assertions
 //! are about the files a reviewer would have to change to weaken verification,
 //! so weakening it fails the build rather than passing quietly.
@@ -9,8 +14,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use familiar_ai_daemon::cli::gate::{merge_decision, verdict_from_check_runs, GateVerdict};
-use familiar_ai_storage::{Database, GateOverrideRepository};
+use familiar_ai_daemon::cli::gate::{merge_decision, verdict_of, GateVerdict};
+use familiar_ai_storage::{Database, GateOverrideRepository, GateVerdictRepository};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -26,68 +31,67 @@ fn read(relative: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} must exist: {e}", path.display()))
 }
 
+/// Strip `#` comments so prose explaining the design cannot satisfy or break
+/// an assertion about the directives.
+fn directives(body: &str) -> String {
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ---------------------------------------------------------------------------
-// AC1 — verification runs on the default branch, without a human invoking it.
+// AC1 — verification runs without a human invoking it, and locally.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_gate_runs_on_the_default_branch_and_is_never_manually_triggered() {
-    let full = read(".github/workflows/gate.yml");
-    // Comments explain why the file is shaped the way it is and routinely name
-    // the things it must not do, so the assertions read the directives only.
-    let workflow: String = full
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
+fn the_trigger_is_a_local_hook_that_records_its_verdict() {
+    let hook = directives(&read("scripts/hooks/pre-push"));
 
     assert!(
-        workflow.contains("push:"),
-        "the gate must run on push to the default branch"
+        hook.contains("gate run"),
+        "the hook must run the gate and record the verdict, not just run the steps"
     );
     assert!(
-        workflow.contains("branches: [main]"),
-        "the push trigger must name the default branch"
+        hook.contains("scripts/gate.sh"),
+        "its fallback must still be the single definition"
     );
-    // Deliberately NOT on pull_request. This is a desktop application, not a
-    // deployed service: `main` is the artifact whose verification is worth
-    // recording, and a branch mid-development is not. Firing on every push to
-    // an open PR spends eight minutes of runner time per work-in-progress
-    // commit and reports a verdict on code the author already knows is in
-    // flux. The same definition runs locally and incrementally instead.
+    // A binary predating the gate command exists on PATH and cannot run it.
+    // Trusting the name blocks the push with an argument-parsing error
+    // instead of verifying anything, which is how this hook first failed.
     assert!(
-        !workflow.contains("pull_request"),
-        "the gate must not run on pull requests — see docs/contracts/verification-gate.md"
+        hook.contains("gate --help"),
+        "the hook must probe for the gate capability, not merely for a binary \
+         called familiar-ai"
     );
 
     // A gate that runs when someone chooses to run it measures diligence, not
-    // correctness. No manual trigger, and no condition on the job that could
-    // make a run silently not happen.
-    assert!(
-        !workflow.contains("workflow_dispatch"),
-        "the gate must not be manually triggerable — that is the failure mode it exists to end"
-    );
-    for line in workflow.lines() {
-        let trimmed = line.trim();
+    // correctness. The hook must not be opt-in at its own discretion.
+    for weakener in ["GATE_SKIP", "SKIP_GATE", "if [ -z"] {
         assert!(
-            !trimmed.starts_with("if:"),
-            "no step or job in the gate may be conditional, found: {trimmed}"
-        );
-        assert!(
-            !trimmed.starts_with("continue-on-error"),
-            "a step that may fail without failing the gate is not a gate step: {trimmed}"
+            !hook.contains(weakener),
+            "the hook must not carry its own bypass ({weakener}) — `git push --no-verify` \
+             is the bypass, and it leaves the commit reading `absent`"
         );
     }
+}
 
-    // `gate status` reports a cancelled run as failure, because absence of
-    // evidence is never evidence. Cancelling a superseded run would therefore
-    // brand that commit red forever on the strength of a later push, so runs
-    // queue instead. These two rules are in different files and must not drift
-    // apart.
+#[test]
+fn verification_does_not_depend_on_a_hosted_runner() {
+    // This is a locally running desktop application. Nothing about knowing
+    // whether a commit is verified should require a forge, a network, or
+    // anyone's build minutes.
     assert!(
-        !workflow.contains("cancel-in-progress: true"),
-        "cancelling a run makes its commit read as red — runs must queue, not cancel"
+        !repo_root().join(".github/workflows").exists(),
+        "verification must not be delegated to a hosted runner"
     );
+    let command = read("crates/familiar-ai-daemon/src/cli/gate.rs");
+    for forge in ["api.github.com", "check_runs", "reqwest"] {
+        assert!(
+            !command.contains(forge),
+            "the verdict must be read from Familiar's own ledger, not from {forge}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +101,7 @@ fn the_gate_runs_on_the_default_branch_and_is_never_manually_triggered() {
 #[test]
 fn no_verification_step_is_declared_outside_the_single_definition() {
     // Two lists that are supposed to match will eventually not match. The
-    // workflow, the compose service and the README may invoke the definition;
+    // compose service, the README and the hook may invoke the definition;
     // none of them may restate what it does.
     let mut offenders = Vec::new();
 
@@ -120,9 +124,9 @@ fn no_verification_step_is_declared_outside_the_single_definition() {
         }
     };
 
-    scan("gate.yml", &read(".github/workflows/gate.yml"));
     scan("docker-compose.yml", &read("docker-compose.yml"));
     scan("README.md", &read("README.md"));
+    scan("pre-push", &read("scripts/hooks/pre-push"));
 
     assert!(
         offenders.is_empty(),
@@ -130,7 +134,6 @@ fn no_verification_step_is_declared_outside_the_single_definition() {
         offenders.join("\n")
     );
 
-    // And the single definition really is the thing every caller runs.
     let gate = read("scripts/gate.sh");
     for verb in ["cargo fmt", "cargo clippy", "cargo test"] {
         assert!(
@@ -143,138 +146,46 @@ fn no_verification_step_is_declared_outside_the_single_definition() {
         "the compose service must invoke the single definition"
     );
     assert!(
-        read(".github/workflows/gate.yml").contains("scripts/gate.sh"),
-        "the workflow must invoke the single definition"
-    );
-    assert!(
         read("README.md").contains("scripts/gate.sh"),
         "the README must point a contributor at the single definition"
     );
 }
 
 // ---------------------------------------------------------------------------
-// AC3 — an incomplete gate is a failed gate.
+// AC3 / AC5 — the four answers, and unknown is never a pass.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn every_unknown_outcome_is_reported_as_failure_and_never_as_a_pass() {
-    let cases = [
-        (
-            "cancelled",
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"cancelled"}]}"#,
-        ),
-        (
-            "timed out (lost runner)",
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"timed_out"}]}"#,
-        ),
-        (
-            "skipped — the step never executed",
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"skipped"}]}"#,
-        ),
-        (
-            "still queued",
-            r#"{"check_runs":[{"name":"gate","status":"queued","conclusion":null}]}"#,
-        ),
-        (
-            "in progress",
-            r#"{"check_runs":[{"name":"gate","status":"in_progress","conclusion":null}]}"#,
-        ),
-        (
-            "completed with no conclusion at all",
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":null}]}"#,
-        ),
-        (
-            "action required",
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"action_required"}]}"#,
-        ),
-        (
-            "stale",
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"stale"}]}"#,
-        ),
-        (
-            "neutral",
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"neutral"}]}"#,
-        ),
-    ];
-    for (label, body) in cases {
-        let verdict = verdict_from_check_runs(body);
-        assert!(
-            !verdict.is_pass(),
-            "{label} must never be a pass, got {}",
-            verdict.as_str()
-        );
-        assert_eq!(
-            verdict,
-            GateVerdict::Red,
-            "{label} is an incomplete gate and an incomplete gate is a failed gate"
-        );
-    }
-
-    // A verdict that cannot be read is its own answer, and also not a pass.
-    for (label, body) in [
-        ("not json at all", "<html>502 Bad Gateway</html>"),
-        ("json without check_runs", r#"{"message":"Not Found"}"#),
-        ("empty body", ""),
-    ] {
-        let verdict = verdict_from_check_runs(body);
-        assert_eq!(
-            verdict,
-            GateVerdict::Unreadable,
-            "{label} must read as unreadable"
-        );
-        assert!(!verdict.is_pass(), "{label} must never be a pass");
-    }
-
-    // One green run among failures is still a failure.
-    let mixed = r#"{"check_runs":[
-        {"name":"gate","status":"completed","conclusion":"success"},
-        {"name":"gate","status":"completed","conclusion":"failure"}
-    ]}"#;
-    assert_eq!(verdict_from_check_runs(mixed), GateVerdict::Red);
+fn database() -> Database {
+    let db = Database::open_in_memory().unwrap();
+    db.run_migrations().unwrap();
+    db
 }
-
-#[test]
-fn another_workflows_green_check_cannot_turn_the_gate_green() {
-    // Absence of the gate is absence, even when the commit has other checks
-    // that passed. This is the difference between "verified" and "something
-    // ran".
-    let body =
-        r#"{"check_runs":[{"name":"docs-preview","status":"completed","conclusion":"success"}]}"#;
-    assert_eq!(verdict_from_check_runs(body), GateVerdict::Absent);
-    assert!(!verdict_from_check_runs(body).is_pass());
-}
-
-// ---------------------------------------------------------------------------
-// AC5 — the verdict is answerable, in four distinct answers.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_command_answers_green_red_absent_and_unreadable() {
+    let db = database();
+    let verdicts = GateVerdictRepository::new(&db);
+
+    // Absent: nothing ever verified this commit. Deliberately not red.
+    assert_eq!(verdict_of(None), GateVerdict::Absent);
     assert_eq!(
-        verdict_from_check_runs(
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"success"}]}"#
-        ),
-        GateVerdict::Green
-    );
-    assert_eq!(
-        verdict_from_check_runs(
-            r#"{"check_runs":[{"name":"gate","status":"completed","conclusion":"failure"}]}"#
-        ),
-        GateVerdict::Red
-    );
-    assert_eq!(
-        verdict_from_check_runs(r#"{"check_runs":[]}"#),
+        verdict_of(verdicts.for_commit("never-seen").unwrap().as_ref()),
         GateVerdict::Absent
     );
-    assert_eq!(verdict_from_check_runs("{"), GateVerdict::Unreadable);
 
-    // Absent is deliberately not red: a commit nothing ever verified is a
-    // different fact from a commit that failed.
-    assert_ne!(GateVerdict::Absent, GateVerdict::Red);
+    let green = verdicts
+        .record("aaa", "green", "fmt ok; clippy ok; test ok")
+        .unwrap();
+    assert_eq!(verdict_of(Some(&green)), GateVerdict::Green);
+
+    let red = verdicts.record("bbb", "red", "test FAILED").unwrap();
+    assert_eq!(verdict_of(Some(&red)), GateVerdict::Red);
+
     assert_eq!(GateVerdict::Green.as_str(), "green");
     assert_eq!(GateVerdict::Red.as_str(), "red");
     assert_eq!(GateVerdict::Absent.as_str(), "absent");
     assert_eq!(GateVerdict::Unreadable.as_str(), "unreadable");
+
     assert!(GateVerdict::Green.is_pass());
     for verdict in [
         GateVerdict::Red,
@@ -283,17 +194,83 @@ fn the_command_answers_green_red_absent_and_unreadable() {
     ] {
         assert!(!verdict.is_pass(), "{} must not pass", verdict.as_str());
     }
+    assert_ne!(GateVerdict::Absent, GateVerdict::Red);
+}
+
+#[test]
+fn a_verdict_that_cannot_be_understood_is_never_a_pass() {
+    // The schema constrains what can be written, but a row read back with an
+    // outcome this build does not recognise — a newer writer, a corrupted
+    // value — must not be assumed green.
+    for stored in ["", "GREEN", "passed", "probably fine", "unknown"] {
+        let record = familiar_ai_storage::GateVerdictRecord {
+            commit_sha: "ccc".into(),
+            verdict: stored.into(),
+            detail: String::new(),
+            recorded_at: "2026-09-19T00:00:00Z".into(),
+        };
+        let verdict = verdict_of(Some(&record));
+        assert_eq!(
+            verdict,
+            GateVerdict::Unreadable,
+            "a stored verdict of {stored:?} must read as unreadable"
+        );
+        assert!(!verdict.is_pass(), "{stored:?} must never be a pass");
+    }
+}
+
+#[test]
+fn the_schema_refuses_an_outcome_the_gate_cannot_produce() {
+    let db = database();
+    let verdicts = GateVerdictRepository::new(&db);
+    for bogus in ["amber", "skipped", "cancelled", ""] {
+        assert!(
+            verdicts.record("ddd", bogus, "").is_err(),
+            "the ledger must refuse a verdict of {bogus:?}"
+        );
+    }
+}
+
+#[test]
+fn a_verdict_is_only_recorded_for_a_tree_that_matches_the_commit() {
+    // `gate run` verifies the working tree but records against HEAD. If those
+    // differ, the verdict describes a tree nobody committed, and attaching it
+    // to the commit is a false green. The command refuses to record instead.
+    let command = read("crates/familiar-ai-daemon/src/cli/gate.rs");
+    assert!(
+        command.contains("working_tree_is_dirty"),
+        "gate run must check the tree against HEAD before recording a verdict"
+    );
+    assert!(
+        command.contains("--untracked-files=no"),
+        "untracked files are not part of the commit and must not block recording"
+    );
+    let guard = command
+        .split_once("working_tree_is_dirty()?")
+        .map(|(_, tail)| tail.split("}}").next().unwrap_or("").to_string())
+        .unwrap_or_default();
+    assert!(
+        guard.contains("not recording"),
+        "the refusal to record must say so out loud rather than silently skipping"
+    );
+}
+
+#[test]
+fn rerunning_the_gate_replaces_that_commits_verdict() {
+    // The latest run is the truth about that tree — a stale red must not
+    // outlive the fix, and a stale green must not outlive a regression.
+    let db = database();
+    let verdicts = GateVerdictRepository::new(&db);
+    verdicts.record("eee", "red", "test FAILED").unwrap();
+    verdicts.record("eee", "green", "test ok").unwrap();
+    let found = verdicts.for_commit("eee").unwrap().unwrap();
+    assert_eq!(found.verdict, "green");
+    assert_eq!(verdict_of(Some(&found)), GateVerdict::Green);
 }
 
 // ---------------------------------------------------------------------------
 // AC4 — required, and an unrecorded override is itself refused.
 // ---------------------------------------------------------------------------
-
-fn database() -> Database {
-    let db = Database::open_in_memory().unwrap();
-    db.run_migrations().unwrap();
-    db
-}
 
 #[test]
 fn a_merge_past_a_non_green_gate_is_refused_without_a_recorded_override() {
@@ -313,7 +290,6 @@ fn a_merge_past_a_non_green_gate_is_refused_without_a_recorded_override() {
             "the refusal must name the verdict it is refusing: {refusal}"
         );
     }
-    // Green needs no override and is never refused.
     assert!(merge_decision("abc123", GateVerdict::Green, None).is_ok());
 }
 
@@ -326,13 +302,12 @@ fn a_recorded_override_names_the_actor_the_commit_and_the_reason() {
             "abc123",
             "red",
             "human:trollboy",
-            "runner outage, verified locally",
+            "verified locally, see FAM-BUG-031",
         )
         .unwrap();
 
     assert_eq!(record.commit_sha, "abc123");
     assert_eq!(record.actor, "human:trollboy");
-    assert_eq!(record.reason, "runner outage, verified locally");
     assert!(
         !record.created_at.is_empty(),
         "the record must be timestamped"
@@ -341,18 +316,15 @@ fn a_recorded_override_names_the_actor_the_commit_and_the_reason() {
     let found = repository.for_commit("abc123").unwrap().expect("durable");
     assert_eq!(found, record, "the override must survive as written");
 
-    // With it on record, the same merge proceeds — and says so out loud.
     let line = merge_decision("abc123", GateVerdict::Red, Some(&found)).unwrap();
     assert!(line.contains("human:trollboy"), "{line}");
-    assert!(line.contains("runner outage"), "{line}");
+    assert!(line.contains("FAM-BUG-031"), "{line}");
 
-    // A commit with no override of its own is unaffected by someone else's.
     assert!(repository.for_commit("def456").unwrap().is_none());
 }
 
 #[test]
 fn an_override_that_names_nobody_cannot_be_written_at_all() {
-    // The constraint is in the schema, not in the caller remembering to check.
     let db = database();
     let repository = GateOverrideRepository::new(&db);
     for (actor, reason) in [
@@ -378,27 +350,8 @@ fn an_override_that_names_nobody_cannot_be_written_at_all() {
 
 #[test]
 fn the_gate_definition_depends_on_no_configuration_outside_this_repository() {
-    let workflow: String = read(".github/workflows/gate.yml")
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let gate: String = read("scripts/gate.sh")
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let gate = directives(&read("scripts/gate.sh"));
 
-    // A step that a repository or organisation setting can disable is a step
-    // whose removal leaves no diff and no reviewer.
-    for forbidden in ["secrets.", "vars.", "repository_dispatch"] {
-        assert!(
-            !workflow.contains(forbidden),
-            "the gate must not depend on {forbidden}, which lives outside this tree"
-        );
-    }
-
-    // And the definition itself must not branch on ambient environment.
     for forbidden in ["GATE_SKIP", "SKIP_", "if [ -n \"${CI"] {
         assert!(
             !gate.contains(forbidden),
@@ -410,6 +363,6 @@ fn the_gate_definition_depends_on_no_configuration_outside_this_repository() {
         repo_root()
             .join("docs/contracts/verification-gate.md")
             .exists(),
-        "the gate's contract, including the branch-protection precondition, must be documented"
+        "the gate's contract must be documented"
     );
 }

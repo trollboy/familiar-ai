@@ -16,18 +16,30 @@ set -euo pipefail
 
 failed=""
 
+# `familiar-ai gate run` sets GATE_SUMMARY to a path and reads the one-line
+# outcomes back from it. Writing them to a file rather than having the caller
+# capture this script's whole stdout keeps megabytes of test output streaming
+# straight to the terminal, where a hook's non-blocking stdout can take it at
+# its own pace, instead of being buffered and relayed in one oversized write.
+note() {
+    echo "$1"
+    if [ -n "${GATE_SUMMARY:-}" ]; then
+        echo "$1" >> "${GATE_SUMMARY}"
+    fi
+}
+
 step() {
     local name="$1"
     shift
-    echo "--- gate: ${name}"
+    note "--- gate: ${name}"
     if ! "$@"; then
         # Record and keep going: one red step should not hide the others, but
         # any red step fails the gate.
-        echo "--- gate: ${name} FAILED"
+        note "--- gate: ${name} FAILED"
         failed="${failed} ${name}"
         return 0
     fi
-    echo "--- gate: ${name} ok"
+    note "--- gate: ${name} ok"
 }
 
 step fmt    cargo fmt --all -- --check
@@ -35,8 +47,8 @@ step clippy cargo clippy --workspace --all-targets -- -D warnings
 step test   cargo test --workspace --no-default-features
 
 if [ -n "${failed}" ]; then
-    echo "gate: FAILED —${failed}"
+    note "gate: FAILED —${failed}"
     exit 1
 fi
 
-echo "gate: passed"
+note "gate: passed"
