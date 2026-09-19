@@ -306,12 +306,61 @@ are both deliberately hand-run and neither counts as evidence either way.
 
 ## Approval status
 
-**The 082+ queue still carries no batch approval.** This regeneration does
-not create one. It replaces a plan that said the rounds could not be
-computed until something else reported, with rounds computed from the
-scheduler itself — but opening the batch gate over this decomposition is
-the owner's call, and until it is opened these PRDs execute one at a time
-under ordinary per-PRD approval.
+**BATCH APPROVED — by the owner, 2026-09-19.**
+
+The 082+ queue is approved for unattended execution over the decomposition
+in this document: PRDs **082, 085, 086, 088, 089, 090, 092, 093, 094, 096,
+097, 098, 100 and 101**, in the six rounds above, under the human-approval
+policy at the end of this file. This is the PRD-019 batch gate opening over
+a decomposition for the first time since the 2026-08-31 authorization was
+exhausted.
+
+Workers implementing within a PRD's declared `expected_files`,
+`acceptance_criteria` and `risk_classes` proceed without pausing for
+per-PRD sign-off. That is the point of the grant: until now these PRDs ran
+one at a time under ordinary approval, which made a multi-PRD wave — and
+therefore the FAM-BUG-019 exit criterion — impossible to even attempt.
+
+**PRD-099 is not in the grant.** It lands by hand, alone, ahead of the
+rounds: an unverified system cannot be asked to build its own verifier and
+then be believed about the result.
+
+What this grant does **not** authorize, unchanged from the standing policy
+below:
+
+- Work outside a listed PRD's declared scope. A scope deviation still
+  pauses with a decidable finding (PRD-080) or blocks with a recorded
+  reason; it does not proceed on the strength of this approval.
+- A migration number not allocated in that PRD's `expected_files`.
+- Any new PRD. Work not traceable to a listed PRD needs its own approval.
+- Merging to `main` by hand. If that becomes necessary it is a FAM-BUG-019
+  recurrence and goes in the bug log.
+
+### Preconditions cleared before the grant
+
+- **Phase 0** — the gate's own checks are green and the toolchain is
+  pinned, so a round's failure is the round's and not the environment's.
+- **Migration allocation deconflicted, 2026-09-19.** PRD-093 declared
+  `063_admission_quality.sql` while `063_local_worker_telemetry.sql`
+  already existed — a flat collision inside round 1. PRD-085 and PRD-086
+  declared 059 and 060, both gaps in the applied sequence, which would have
+  ordered differently on a fresh database than on an upgraded one. These
+  are now 068, 066 and 067. `073_model_residency.sql` was renamed to 064 to
+  match the version it actually declares, and
+  `crates/familiar-ai-daemon/tests/migration_allocation.rs` fails the build
+  if a filename and its version disagree, if versions collide or go
+  backwards, or if a queued PRD declares a number already applied.
+- **The tray is pinned to keep shipping.**
+  `crates/familiar-ai-daemon/tests/tray_ships.rs` fails if it returns to the
+  workspace `exclude` list, leaves the daemon's default feature set, or
+  grows its own lockfile again.
+
+### Open, and not blockers
+
+- Branch protection is off. The gate is advisory until it is on, which is
+  deliberate ordering rather than an oversight.
+- Nothing calls `familiar-ai gate require` yet, so the delivery path can
+  still integrate a commit whose gate is red or absent.
 
 ## Scheduling guidance
 
