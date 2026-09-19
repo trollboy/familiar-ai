@@ -438,6 +438,29 @@ pub fn list_pending_human_gates(
     }))
 }
 
+/// PRD-085 AC4: autonomy over a bounded window of sessions, grouped by
+/// repository, stall class, and intervention command, so the most frequent
+/// human step is identifiable without reading transcripts.
+pub fn get_autonomy(
+    db: &Database,
+    repository: &RepositoryIdentity,
+    start: &str,
+    end: &str,
+) -> Result<Value, StewardshipError> {
+    let summary = familiar_ai_storage::autonomy_for_window(db.conn(), &repository.key, start, end)
+        .map_err(storage)?;
+    Ok(json!({
+        "repository_key": summary.repository_key,
+        "range_start": start,
+        "range_end": end,
+        "unattended_completions": summary.unattended_completions,
+        "assisted_completions": summary.assisted_completions,
+        "stalled": summary.stalled,
+        "by_stall_class": summary.by_stall_class,
+        "by_intervention_command": summary.by_intervention_command,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

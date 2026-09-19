@@ -43,7 +43,16 @@ impl std::fmt::Display for ReportError {
 impl std::error::Error for ReportError {}
 
 /// Render one driver session: the named one, or the most recent.
-pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportError> {
+///
+/// `min_unattended_percent` is PRD-085's configured autonomy floor (0-100,
+/// 0 disables the check): the minimum percentage of this session's
+/// completed PRDs that must finish with no human intervention before the
+/// session states itself as an autonomy failure.
+pub fn render(
+    db: &Database,
+    session_id: Option<&str>,
+    min_unattended_percent: u32,
+) -> Result<String, ReportError> {
     let sessions = DriverRepository::new(db.conn());
     let session = match session_id {
         Some(id) => sessions
@@ -76,7 +85,73 @@ pub fn render(db: &Database, session_id: Option<&str>) -> Result<String, ReportE
     render_cost(db, &mut out, &attempts)?;
     render_reconciliation(db, &mut out, &session.repository_key)?;
     render_judgment(&mut out, &session, &stopped, &pending_scope);
+    let autonomy =
+        familiar_ai_storage::session_autonomy(db.conn(), &session.session_id).map_err(storage)?;
+    render_autonomy(&mut out, &autonomy, min_unattended_percent);
     Ok(familiar_ai_agent::redact_sensitive(out))
+}
+
+/// PRD-085: how many of this session's completed PRDs finished with nobody's
+/// hand on them, how many finished only after a named intervention, and how
+/// many stalled — computed from durable rows alone, never from narration. A
+/// session whose unattended fraction falls below the configured floor
+/// states itself as an autonomy failure rather than reading as ordinary.
+fn render_autonomy(
+    out: &mut String,
+    autonomy: &familiar_ai_storage::SessionAutonomy,
+    min_unattended_percent: u32,
+) {
+    use familiar_ai_storage::{PrdAutonomyOutcome, StallRecovery};
+
+    let assisted = autonomy.assisted();
+    let stalled = autonomy.stalled();
+    let _ = writeln!(
+        out,
+        "\nAUTONOMY\n  unattended={} assisted={} stalled={}",
+        autonomy.unattended_count(),
+        assisted.len(),
+        stalled.len()
+    );
+    for prd in &assisted {
+        let PrdAutonomyOutcome::Assisted { commands } = &prd.outcome else {
+            continue;
+        };
+        let _ = writeln!(out, "  assisted: {} {}", prd.prd_id, prd.prd_path);
+        for command in commands {
+            let _ = writeln!(out, "    {command}");
+        }
+    }
+    for prd in &stalled {
+        let PrdAutonomyOutcome::Stalled {
+            stall_class,
+            recovery,
+        } = &prd.outcome
+        else {
+            continue;
+        };
+        let _ = writeln!(
+            out,
+            "  stalled: {} {} class={stall_class}",
+            prd.prd_id, prd.prd_path
+        );
+        match recovery {
+            StallRecovery::Command(command) => {
+                let _ = writeln!(out, "    {command}");
+            }
+            StallRecovery::Unrecoverable(reason) => {
+                let _ = writeln!(out, "    unrecoverable: {reason}");
+            }
+        }
+    }
+    if min_unattended_percent > 0
+        && autonomy.is_autonomy_failure(min_unattended_percent as f64 / 100.0)
+    {
+        let _ = writeln!(
+            out,
+            "  ! AUTONOMY FAILURE: unattended completion fell below the configured {min_unattended_percent}% floor; dominant stall class: {}",
+            autonomy.dominant_stall_class().unwrap_or("none")
+        );
+    }
 }
 
 fn render_escalations(out: &mut String, attempts: &[DriverAttempt]) {
@@ -640,11 +715,11 @@ mod tests {
     fn absent_sessions_error_rather_than_rendering_emptiness() {
         let db = database();
         assert!(matches!(
-            render(&db, None).unwrap_err(),
+            render(&db, None, 0).unwrap_err(),
             ReportError::NoSession
         ));
         assert!(matches!(
-            render(&db, Some("nope")).unwrap_err(),
+            render(&db, Some("nope"), 0).unwrap_err(),
             ReportError::UnknownSession(_)
         ));
     }
@@ -743,11 +818,16 @@ mod tests {
              NEEDS HUMAN JUDGMENT (1)\n  \
              PRD-18 docs/prds/PRD-018.md\n    \
              familiar-ai backlog release docs/prds/PRD-018.md --actor human:<you> --reason \"<why>\"\n    \
-             familiar-ai backlog complete docs/prds/PRD-018.md --actor human:<you> --reason \"<why>\"\n",
+             familiar-ai backlog complete docs/prds/PRD-018.md --actor human:<you> --reason \"<why>\"\n\
+             \n\
+             AUTONOMY\n  \
+             unattended=1 assisted=0 stalled=1\n  \
+             stalled: PRD-18 docs/prds/PRD-018.md class=review_disabled\n    \
+             familiar-ai resume PRD-18\n",
             started = session.started_at,
             ended = session.ended_at.unwrap(),
         );
-        assert_eq!(render(&db, None).unwrap(), expected);
+        assert_eq!(render(&db, None, 0).unwrap(), expected);
     }
 
     #[test]
@@ -758,7 +838,7 @@ mod tests {
             .record_attempt_started("drive-2", "PRD-17", "docs/prds/PRD-017.md", Some("exec-9"))
             .unwrap();
         // No finish_session, no attempt outcome: the process died here.
-        let report = render(&db, Some("drive-2")).unwrap();
+        let report = render(&db, Some("drive-2"), 0).unwrap();
         assert!(report.contains("ended:       — (interrupted)"));
         assert!(report.contains("termination: interrupted (no termination recorded)"));
         assert!(report.contains("reason=interrupted (attempt did not finish)"));
@@ -786,7 +866,7 @@ mod tests {
         repository
             .finish_session("drive-3", "backlog_empty")
             .unwrap();
-        let report = render(&db, None).unwrap();
+        let report = render(&db, None, 0).unwrap();
         assert!(report.contains("known:   1000 micro-USD across 1 attempt(s)"));
         assert!(report.contains("unknown: 2 attempt(s) with no measurable cost"));
     }
@@ -802,7 +882,7 @@ mod tests {
             let db = database();
             let repository = seed(&db, "drive-x", "{}");
             repository.finish_session("drive-x", reason).unwrap();
-            let report = render(&db, None).unwrap();
+            let report = render(&db, None, 0).unwrap();
             assert!(report.contains(marker), "missing call-out for {reason}");
         }
     }
@@ -829,8 +909,8 @@ mod tests {
             .unwrap();
 
         let before = repository.attempts("drive-4").unwrap();
-        let first = render(&db, None).unwrap();
-        let second = render(&db, None).unwrap();
+        let first = render(&db, None, 0).unwrap();
+        let second = render(&db, None, 0).unwrap();
         assert_eq!(first, second);
         assert_eq!(repository.attempts("drive-4").unwrap(), before);
         assert_eq!(
@@ -854,10 +934,10 @@ mod tests {
             .finish_session("drive-new", "nothing_eligible")
             .unwrap();
 
-        assert!(render(&db, None)
+        assert!(render(&db, None, 0)
             .unwrap()
             .contains("session:     drive-new"));
-        assert!(render(&db, Some("drive-old"))
+        assert!(render(&db, Some("drive-old"), 0)
             .unwrap()
             .contains("session:     drive-old"));
     }
@@ -889,7 +969,7 @@ mod tests {
         repository
             .finish_session("drive-5", "nothing_eligible")
             .unwrap();
-        let report = render(&db, None).unwrap();
+        let report = render(&db, None, 0).unwrap();
         assert!(report.contains("reason=review_disabled"));
         assert!(!report.contains("scope:"));
     }

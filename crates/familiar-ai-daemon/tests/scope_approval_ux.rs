@@ -128,7 +128,7 @@ fn report_prints_approve_and_reject_before_release_or_complete() {
         )
         .unwrap();
 
-    let report = familiar_ai_daemon::report::render(&db, None).unwrap();
+    let report = familiar_ai_daemon::report::render(&db, None, 0).unwrap();
     assert!(
         report.contains(
             "familiar-ai scope-decisions --finding-hash finding-hash-1 --candidate-hash sha256:candidate-PRD-83 --approve --actor human:<identity> --reason \"<why>\""
@@ -171,7 +171,7 @@ fn report_never_treats_a_non_scope_stop_as_hiding_a_scope_decision() {
         .finish_session("drive-2", "nothing_eligible")
         .unwrap();
 
-    let report = familiar_ai_daemon::report::render(&db, None).unwrap();
+    let report = familiar_ai_daemon::report::render(&db, None, 0).unwrap();
     assert!(report.contains("backlog release"));
     assert!(report.contains("backlog complete"));
     assert!(!report.contains("scope-decisions"));
@@ -617,7 +617,7 @@ fn every_scope_pause_surface_names_scope_decisions_not_only_release_or_complete(
         )
         .unwrap();
 
-    let report = familiar_ai_daemon::report::render(&db, None).unwrap();
+    let report = familiar_ai_daemon::report::render(&db, None, 0).unwrap();
     assert!(report.contains("scope-decisions"));
     assert_approve_precedes_release_or_complete(&report);
 

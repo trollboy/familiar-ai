@@ -1168,7 +1168,7 @@ fn report_states_work_blockers_cost_cache_human_gates_and_recovery() {
             0,
         )
         .unwrap();
-    let report = familiar_ai_daemon::report::render(&db, Some(&summary.session_id)).unwrap();
+    let report = familiar_ai_daemon::report::render(&db, Some(&summary.session_id), 0).unwrap();
     for section in [
         "BUILT (",
         "STOPPED (",

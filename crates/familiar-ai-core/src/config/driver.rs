@@ -31,6 +31,14 @@ pub struct DriverConfig {
     /// Finite implementation-stage token ceiling. Zero disables this ceiling.
     #[serde(default)]
     pub max_implementation_tokens: u64,
+    /// PRD-085: the minimum percentage (0-100) of a session's completed
+    /// PRDs that must finish with no human intervention before the session
+    /// reports itself as an autonomy failure. An integer percentage rather
+    /// than a fraction so this field stays exactly comparable, like every
+    /// other ceiling in this struct. Zero (the default) disables the check
+    /// — the floor is an opt-in target, not an assumed one.
+    #[serde(default)]
+    pub min_unattended_percent: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +65,7 @@ impl Default for DriverConfig {
             worktree_root: String::new(),
             model_routes: Vec::new(),
             max_implementation_tokens: 0,
+            min_unattended_percent: 0,
         }
     }
 }
@@ -91,6 +100,9 @@ impl DriverConfig {
                 "driver.model_routes has been removed; configure worker_registry.routing.rules instead"
                     .into(),
             );
+        }
+        if self.min_unattended_percent > 100 {
+            return Err("driver.min_unattended_percent must be between 0 and 100".into());
         }
         Ok(())
     }
