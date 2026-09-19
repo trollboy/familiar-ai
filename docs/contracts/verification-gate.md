@@ -25,10 +25,30 @@ contract is about the gate running at all.
 
 ## Triggers
 
-Push to `main`, and every pull request. Both are unconditional. There is no
+Push to `main`, and nothing else. The trigger is unconditional: no
 `workflow_dispatch`, no `if:` on the job or its steps, and no
-`continue-on-error`: a verification that runs when someone chooses to run it
+`continue-on-error`. A verification that runs when someone chooses to run it
 measures diligence, not correctness.
+
+**Deliberately not on pull requests.** This is a locally running desktop
+application, not a deployed service. The durable question CI can answer is
+whether `main` is verified and whether that is recorded; a branch mid-
+development is not an artifact that question is about. Firing on every push to
+an open pull request spends several minutes of runner time per work-in-progress
+commit and reports a verdict on code the author already knows is in flux.
+
+Verification during development is the same definition run locally, where the
+build cache is warm and the answer takes seconds:
+
+```bash
+docker compose run --rm test    # or: scripts/gate.sh
+```
+
+**Runs queue rather than cancel.** A cancelled run is reported as failure, so
+cancelling a superseded run would brand its commit red forever on the strength
+of a later push. `cancel-in-progress` is `false`, and `gate_contract.rs` fails
+the build if that changes — the rule and its consequence live in different
+files and must not drift apart.
 
 ## The four answers
 

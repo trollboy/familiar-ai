@@ -27,11 +27,11 @@ fn read(relative: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// AC1 — verification runs on both triggers, without a human invoking it.
+// AC1 — verification runs on the default branch, without a human invoking it.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_gate_declares_both_triggers_and_neither_is_manual() {
+fn the_gate_runs_on_the_default_branch_and_is_never_manually_triggered() {
     let full = read(".github/workflows/gate.yml");
     // Comments explain why the file is shaped the way it is and routinely name
     // the things it must not do, so the assertions read the directives only.
@@ -49,9 +49,15 @@ fn the_gate_declares_both_triggers_and_neither_is_manual() {
         workflow.contains("branches: [main]"),
         "the push trigger must name the default branch"
     );
+    // Deliberately NOT on pull_request. This is a desktop application, not a
+    // deployed service: `main` is the artifact whose verification is worth
+    // recording, and a branch mid-development is not. Firing on every push to
+    // an open PR spends eight minutes of runner time per work-in-progress
+    // commit and reports a verdict on code the author already knows is in
+    // flux. The same definition runs locally and incrementally instead.
     assert!(
-        workflow.contains("pull_request:"),
-        "the gate must run on every pull request"
+        !workflow.contains("pull_request"),
+        "the gate must not run on pull requests — see docs/contracts/verification-gate.md"
     );
 
     // A gate that runs when someone chooses to run it measures diligence, not
@@ -72,6 +78,16 @@ fn the_gate_declares_both_triggers_and_neither_is_manual() {
             "a step that may fail without failing the gate is not a gate step: {trimmed}"
         );
     }
+
+    // `gate status` reports a cancelled run as failure, because absence of
+    // evidence is never evidence. Cancelling a superseded run would therefore
+    // brand that commit red forever on the strength of a later push, so runs
+    // queue instead. These two rules are in different files and must not drift
+    // apart.
+    assert!(
+        !workflow.contains("cancel-in-progress: true"),
+        "cancelling a run makes its commit read as red — runs must queue, not cancel"
+    );
 }
 
 // ---------------------------------------------------------------------------

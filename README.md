@@ -345,8 +345,12 @@ docker compose run --rm test
 
 That is the gate. The compose service runs `scripts/gate.sh`, which is the
 single definition of what verification means here — the same file CI runs on
-every push to `main` and every pull request. There is no second list of steps
-to keep in sync, and `gate_contract.rs` fails the build if one appears.
+every push to `main`. There is no second list of steps to keep in sync, and
+`gate_contract.rs` fails the build if one appears.
+
+CI runs on `main` only. While you are working on a branch, run the gate
+locally: it is the same definition, your build cache is warm, and the answer
+takes seconds rather than minutes.
 
 To ask whether a commit has actually been verified, rather than assuming:
 
