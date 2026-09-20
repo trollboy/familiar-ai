@@ -799,6 +799,84 @@ fn gates_tab(
         0,
     );
 
+    /// Who is making this decision, in the `human:<identity>` form the backlog's
+    /// attribution check requires.
+    fn decision_actor() -> String {
+        let who = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_default();
+        let who = who.trim();
+        if who.is_empty() {
+            "human:tray".to_string()
+        } else {
+            format!("human:{who}")
+        }
+    }
+
+    /// Ask why, because the ledger will not accept a decision without it.
+    ///
+    /// `validate_recovery_attribution` refuses an empty actor and an empty
+    /// reason, so the tray's Release and Force-complete buttons — which passed
+    /// `String::new()` for both — could never succeed. A blank reason is refused
+    /// here rather than sent and rejected, so the operator is asked once instead
+    /// of shown an error.
+    fn prompt_for_reason(parent: &gtk::Window, title: &str, blurb: &str) -> Option<String> {
+        let dialog = gtk::Dialog::with_buttons(
+            Some(title),
+            Some(parent),
+            gtk::DialogFlags::MODAL | gtk::DialogFlags::DESTROY_WITH_PARENT,
+            &[
+                ("Cancel", gtk::ResponseType::Cancel),
+                ("Record", gtk::ResponseType::Accept),
+            ],
+        );
+        dialog.set_default_size(460, -1);
+        let content = dialog.content_area();
+        content.set_spacing(PAD);
+        content.set_margin_top(PAD);
+        content.set_margin_bottom(PAD);
+        content.set_margin_start(PAD);
+        content.set_margin_end(PAD);
+        content.pack_start(
+            &markup(&format!("<small>{}</small>", esc(blurb))),
+            false,
+            false,
+            0,
+        );
+
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some("Why — this is recorded against the PRD"));
+        entry.set_activates_default(true);
+        content.pack_start(&entry, false, false, 0);
+
+        let warning = markup("");
+        content.pack_start(&warning, false, false, 0);
+
+        dialog.set_default_response(gtk::ResponseType::Accept);
+        dialog.show_all();
+
+        loop {
+            match dialog.run() {
+                gtk::ResponseType::Accept => {
+                    let text = entry.text().to_string();
+                    if text.trim().is_empty() {
+                        warning.set_markup(
+                            "<small><span foreground=\"#d63b2f\">A reason is required — the \
+                         decision is refused without one.</span></small>",
+                        );
+                        continue;
+                    }
+                    unsafe { dialog.destroy() };
+                    return Some(text);
+                }
+                _ => {
+                    unsafe { dialog.destroy() };
+                    return None;
+                }
+            }
+        }
+    }
+
     let buttons_group = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
     for group in &v.groups {
         let entry = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -835,24 +913,52 @@ fn gates_tab(
             let prd_path = group.prd_path.clone();
             let refresh = refresh.clone();
             let parent = parent.clone();
+            let prd_for_prompt = prd_id.clone();
             button.connect_clicked(move |_| {
+                // Re-drive changes no durable verdict, so it needs no
+                // justification. Release discards retained work and
+                // force-complete marks a PRD done with its gates unsatisfied;
+                // both are overrides, and the backlog refuses either without
+                // an actor and a reason.
                 let action = match build {
                     0 => Action::ResumePrd {
                         repo: repo_owned.clone(),
                         prd_id: prd_id.clone(),
                     },
-                    1 => Action::ReleasePrd {
-                        repo: repo_owned.clone(),
-                        prd_path: prd_path.clone(),
-                        actor: String::new(),
-                        reason: String::new(),
-                    },
-                    _ => Action::CompletePrd {
-                        repo: repo_owned.clone(),
-                        prd_path: prd_path.clone(),
-                        actor: String::new(),
-                        reason: String::new(),
-                    },
+                    other => {
+                        let (title, blurb) = if other == 1 {
+                            (
+                                format!("Release {prd_for_prompt}"),
+                                "Returns it to pending and discards the retained work.".to_string(),
+                            )
+                        } else {
+                            (
+                                format!("Force-complete {prd_for_prompt}"),
+                                "Marks it completed with its gates unsatisfied. Nothing is \
+                                 merged, delivered or verified."
+                                    .to_string(),
+                            )
+                        };
+                        let Some(reason) = prompt_for_reason(&parent, &title, &blurb) else {
+                            return;
+                        };
+                        let actor = decision_actor();
+                        if other == 1 {
+                            Action::ReleasePrd {
+                                repo: repo_owned.clone(),
+                                prd_path: prd_path.clone(),
+                                actor,
+                                reason,
+                            }
+                        } else {
+                            Action::CompletePrd {
+                                repo: repo_owned.clone(),
+                                prd_path: prd_path.clone(),
+                                actor,
+                                reason,
+                            }
+                        }
+                    }
                 };
                 run_action(source.clone(), action, &refresh, &parent);
             });

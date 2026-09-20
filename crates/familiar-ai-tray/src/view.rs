@@ -168,6 +168,62 @@ pub struct GatesView {
     pub stopped_attempts: usize,
 }
 
+/// What the tray should do about the current gate set, given what it has
+/// already announced.
+///
+/// Pure, because "announce once" is the property that decides whether the
+/// surface stays worth reading, and it should be provable without a desktop
+/// session. The count is what the badge draws; `to_announce` is what the
+/// notifier is handed; `seen` is what the caller remembers for next time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Escalation {
+    pub count: usize,
+    pub to_announce: Vec<GateGroup>,
+    pub seen: std::collections::BTreeSet<String>,
+}
+
+/// A gate's identity for announcement purposes: the PRD plus the distinct
+/// reasons it stopped. A PRD that stops again for a *new* reason is new
+/// information and is announced; the same PRD stopped the same way is not.
+pub fn announcement_key(group: &GateGroup) -> String {
+    format!("{}|{}", group.prd_id, group.reasons.join(","))
+}
+
+/// Decide what to say. `already_seen` is the set of keys announced before.
+pub fn escalation(
+    view: &GatesView,
+    already_seen: &std::collections::BTreeSet<String>,
+) -> Escalation {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut to_announce = Vec::new();
+    for group in &view.groups {
+        let key = announcement_key(group);
+        if !already_seen.contains(&key) {
+            to_announce.push(group.clone());
+        }
+        seen.insert(key);
+    }
+    // Keys are rebuilt from the live set rather than accumulated, so a gate
+    // that is decided and later recurs announces again instead of being
+    // permanently suppressed by a memory of the old stop.
+    Escalation {
+        count: view.groups.len(),
+        to_announce,
+        seen,
+    }
+}
+
+/// The one-line summary a notification carries.
+pub fn escalation_message(group: &GateGroup) -> (String, String) {
+    let title = format!("{} needs a decision", group.prd_id);
+    let body = if group.reasons.is_empty() {
+        group.prd_path.clone()
+    } else {
+        group.reasons.join("; ")
+    };
+    (title, body)
+}
+
 /// Groups stopped attempts by PRD. A PRD that stopped four different ways is
 /// one thing to decide about, not four, and the ungrouped list ran to several
 /// screens for a backlog this size.
@@ -2271,5 +2327,89 @@ mod tests {
             build_repository_list(&repos),
             vec!["/home/u/p".to_string(), "/home/u/q/.git".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod escalation_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    fn gates(rows: serde_json::Value) -> GatesView {
+        build_gates_view(&rows)
+    }
+
+    #[test]
+    fn a_gate_is_announced_once_and_then_never_again() {
+        // The property that decides whether the surface stays worth reading.
+        let view = gates(json!({"items": [
+            {"prd_id": "PRD-90", "prd_path": "docs/prds/PRD-090.md", "kind": "scope_violation"},
+            {"prd_id": "PRD-100", "prd_path": "docs/prds/PRD-100.md", "kind": "human_review_required"}
+        ]}));
+
+        let first = escalation(&view, &BTreeSet::new());
+        assert_eq!(first.count, 2);
+        assert_eq!(first.to_announce.len(), 2, "both are new");
+
+        let second = escalation(&view, &first.seen);
+        assert_eq!(second.count, 2, "the badge still shows them");
+        assert!(
+            second.to_announce.is_empty(),
+            "nothing new to say: {:?}",
+            second.to_announce
+        );
+    }
+
+    #[test]
+    fn the_same_prd_stopping_a_new_way_is_new_information() {
+        let before = gates(json!({"items": [
+            {"prd_id": "PRD-90", "prd_path": "p", "kind": "scope_violation"}
+        ]}));
+        let seen = escalation(&before, &BTreeSet::new()).seen;
+
+        let after = gates(json!({"items": [
+            {"prd_id": "PRD-90", "prd_path": "p", "kind": "scope_violation"},
+            {"prd_id": "PRD-90", "prd_path": "p", "kind": "verification_failed"}
+        ]}));
+        let next = escalation(&after, &seen);
+        assert_eq!(next.to_announce.len(), 1, "the new reason is announced");
+    }
+
+    #[test]
+    fn a_decided_gate_that_recurs_announces_again() {
+        // Memory is rebuilt from the live set, not accumulated, so deciding a
+        // gate and having it come back is not silently suppressed.
+        let view = gates(json!({"items": [
+            {"prd_id": "PRD-90", "prd_path": "p", "kind": "scope_violation"}
+        ]}));
+        let seen = escalation(&view, &BTreeSet::new()).seen;
+
+        let cleared = escalation(&gates(json!({"items": []})), &seen);
+        assert_eq!(cleared.count, 0);
+        assert!(
+            cleared.seen.is_empty(),
+            "nothing is remembered once resolved"
+        );
+
+        let returned = escalation(&view, &cleared.seen);
+        assert_eq!(returned.to_announce.len(), 1, "it must speak up again");
+    }
+
+    #[test]
+    fn nothing_pending_is_completely_silent() {
+        let empty = escalation(&gates(json!({"items": []})), &BTreeSet::new());
+        assert_eq!(empty.count, 0);
+        assert!(empty.to_announce.is_empty());
+    }
+
+    #[test]
+    fn the_message_names_the_prd_and_why_it_stopped() {
+        let view = gates(json!({"items": [
+            {"prd_id": "PRD-90", "prd_path": "docs/prds/PRD-090.md", "kind": "scope_violation"}
+        ]}));
+        let (title, body) = escalation_message(&view.groups[0]);
+        assert!(title.contains("PRD-90"), "{title}");
+        assert!(body.contains("scope_violation"), "{body}");
     }
 }

@@ -13,7 +13,7 @@ use familiar_ai_storage::{Database, ProjectRepository};
 
 use crate::commands::{DashboardTarget, TrayCommand};
 use crate::data::DataSource;
-use crate::icon::load_tray_icon;
+use crate::icon::{load_tray_icon, tray_icon_with_count};
 use crate::menu::{build_tooltip, MenuItemSpec};
 
 pub struct TrayApp {
@@ -75,7 +75,10 @@ impl TrayApp {
         // Build initial menu
         let (menu, ids) = self.build_muda_menu()?;
 
-        let _tray = TrayIconBuilder::new()
+        // The handle must outlive the builder: updating the badge means
+        // calling set_icon on a live tray, and the previous code dropped it
+        // into `_tray` where it could never be reached again.
+        let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(build_tooltip(&self.status.lock().unwrap()))
             .with_icon(icon)
@@ -98,6 +101,69 @@ impl TrayApp {
                 tracing::trace!(active_projects = s.active_projects, "tray status tick");
             }
         });
+
+        // PRD-102: the badge and the notification.
+        //
+        // This runs on the GTK thread because both touch UI — the tray icon
+        // and gio's notification service. The cadence is deliberately slow:
+        // a gate is a human-scale event and polling it every second would
+        // spend the daemon's time telling itself nothing changed.
+        #[cfg(target_os = "linux")]
+        if let Some(source) = self.source.clone() {
+            use crate::notify::{DesktopNotifier, Notifier};
+            let tray_for_badge = tray;
+            let notifier = DesktopNotifier::new("net.shoggoth.familiar-ai");
+            let mut announced: std::collections::BTreeSet<String> = Default::default();
+            let mut drawn: Option<usize> = None;
+            glib::source::timeout_add_local(Duration::from_secs(10), move || {
+                let repos = match source.query(crate::data::Query::Repositories) {
+                    Ok(v) => v,
+                    Err(error) => {
+                        tracing::debug!(%error, "tray: could not list repositories for gates");
+                        return glib::ControlFlow::Continue;
+                    }
+                };
+                let mut groups = Vec::new();
+                for repo in crate::view::build_repository_list(&repos) {
+                    if let Ok(gates) = source.query(crate::data::Query::Gates { repo }) {
+                        groups.extend(crate::view::build_gates_view(&gates).groups);
+                    }
+                }
+                let view = crate::view::GatesView {
+                    stopped_attempts: groups.len(),
+                    groups,
+                };
+                let escalation = crate::view::escalation(&view, &announced);
+
+                // Redraw only on change: composing a 512x512 icon every tick
+                // to produce the same bytes is work nobody asked for.
+                if drawn != Some(escalation.count) {
+                    match tray_icon_with_count(escalation.count) {
+                        Ok(icon) => {
+                            if let Err(error) = tray_for_badge.set_icon(Some(icon)) {
+                                tracing::warn!(%error, "tray: could not update the badge");
+                            } else {
+                                drawn = Some(escalation.count);
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "tray: could not compose the badge"),
+                    }
+                }
+
+                // A notifier that fails must never alter what the gate surface
+                // reports: the badge above is already correct, and `announced`
+                // is updated regardless so a broken notification service
+                // cannot produce an endless retry every tick.
+                for group in &escalation.to_announce {
+                    let (title, body) = crate::view::escalation_message(group);
+                    if let Err(error) = notifier.notify(&title, &body) {
+                        tracing::warn!(%error, prd = %group.prd_id, "tray: notification not delivered");
+                    }
+                }
+                announced = escalation.seen;
+                glib::ControlFlow::Continue
+            });
+        }
 
         // Main loop: receive menu events and dispatch
         #[cfg(target_os = "linux")]
