@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod control_plane;
 pub mod error;
+pub mod git_env;
 pub mod models;
 pub mod onboarding;
 pub mod paths;
