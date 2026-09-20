@@ -866,9 +866,7 @@ model = "legacy"
         std::fs::create_dir(&main).unwrap();
         let git = |dir: &Path, args: &[&str]| {
             assert!(
-                std::process::Command::new("git")
-                    .args(args)
-                    .current_dir(dir)
+                crate::git_env::git_command(dir, args)
                     .output()
                     .unwrap()
                     .status

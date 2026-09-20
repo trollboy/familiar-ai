@@ -15,6 +15,10 @@ pub enum DashboardTarget {
 pub enum TrayCommand {
     EnableLlm,
     DisableLlm,
+    /// Opens the screen that sets inference up. Offered in place of the
+    /// enable/disable toggle while nothing is configured, because there is
+    /// nothing for that toggle to act on yet.
+    ConfigureLlm,
     PauseHeavyTasks,
     ResumeHeavyTasks,
     OpenSettings,
@@ -34,6 +38,7 @@ mod tests {
     fn variants_construct() {
         let _ = TrayCommand::EnableLlm;
         let _ = TrayCommand::DisableLlm;
+        let _ = TrayCommand::ConfigureLlm;
         let _ = TrayCommand::PauseHeavyTasks;
         let _ = TrayCommand::ResumeHeavyTasks;
         let _ = TrayCommand::OpenSettings;

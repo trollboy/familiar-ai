@@ -84,6 +84,15 @@ pub enum Query {
     Dependencies {
         repo: String,
     },
+    /// The effective inference settings: the file's values where it has them,
+    /// the schema's defaults where it does not.
+    ///
+    /// Distinct from `ConfigDocument`, which reports the file verbatim. A
+    /// daemon with no `[inference]` table has no inference rows in the
+    /// document at all, so a form built from that document offers nothing to
+    /// edit — which is exactly the state someone reaches for when they want
+    /// to configure inference for the first time.
+    InferenceSettings,
     /// The whole of config.toml, parsed to JSON, plus the file's own path.
     /// The form is built from the document as it actually is, so a setting
     /// nobody has hard-coded a widget for still appears.
@@ -141,6 +150,14 @@ pub enum Action {
     /// Writes changed fields back to config.toml, preserving its comments and
     /// layout. Applied together: either every edit lands or none does.
     SaveConfig { edits: Vec<ConfigEdit> },
+    /// Writes the inference settings, creating `[inference.text]` when the
+    /// file has no such table, and then rebuilds the running router from them
+    /// so the change takes effect without a restart.
+    SaveInferenceConfig {
+        mode: String,
+        builtin_url: String,
+        builtin_model: String,
+    },
 }
 
 impl Action {
@@ -156,6 +173,9 @@ impl Action {
             Self::SetProjectPaused { paused: false, .. } => "Resume this project".into(),
             Self::ReleasePrd { prd_path, .. } => format!("Release {prd_path} back to pending"),
             Self::CompletePrd { prd_path, .. } => format!("Force-complete {prd_path}"),
+            Self::SaveInferenceConfig { mode, .. } => {
+                format!("Set inference mode to {mode} and reload the router")
+            }
             Self::SaveConfig { edits } => format!(
                 "Save {} change{} to config.toml",
                 edits.len(),
@@ -188,6 +208,7 @@ impl Action {
             Self::StartPrd { .. }
             | Self::ResumePrd { .. }
             | Self::SetProjectPaused { .. }
+            | Self::SaveInferenceConfig { .. }
             | Self::SaveConfig { .. } => None,
         }
     }

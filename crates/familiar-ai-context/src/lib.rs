@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,10 +353,7 @@ fn required_git(
     args: &[&str],
     operation: &'static str,
 ) -> Result<String, ContextCompilationError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
+    let output = familiar_ai_core::git_env::git_command(cwd, args)
         .output()
         .map_err(|error| ContextCompilationError::Git {
             operation,
@@ -388,10 +384,7 @@ fn required_git(
 }
 
 fn optional_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
+    let output = familiar_ai_core::git_env::git_command(cwd, args)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -612,7 +605,14 @@ mod tests {
             original
         );
     }
-    use std::process::Command;
+
+    /// A `git` command for the tests. The tests build fixture repositories
+    /// and write to them, and they run under the repository's own pre-push
+    /// gate, which exports the ambient location variables -- so without this
+    /// their `git add` and `git commit` land in the real repository.
+    fn test_git() -> std::process::Command {
+        familiar_ai_core::git_env::git_command_bare()
+    }
 
     fn repository() -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
@@ -620,7 +620,7 @@ mod tests {
         fs::create_dir_all(temp.path().join("docs/adr")).unwrap();
         fs::create_dir_all(temp.path().join("docs/contracts")).unwrap();
         fs::create_dir_all(temp.path().join("docs/supporting")).unwrap();
-        assert!(Command::new("git")
+        assert!(test_git()
             .arg("init")
             .arg("--quiet")
             .arg(temp.path())
@@ -813,12 +813,12 @@ mod tests {
     fn linked_worktree_records_common_repository_and_head() {
         let temp = repository();
         fs::write(temp.path().join("docs/prds/work.md"), "work").unwrap();
-        assert!(Command::new("git")
+        assert!(test_git()
             .args(["-C", temp.path().to_str().unwrap(), "add", "."])
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(test_git()
             .args([
                 "-C",
                 temp.path().to_str().unwrap(),
@@ -836,7 +836,7 @@ mod tests {
             .success());
         let holder = tempfile::tempdir().unwrap();
         let linked = holder.path().join("linked");
-        assert!(Command::new("git")
+        assert!(test_git()
             .args([
                 "-C",
                 temp.path().to_str().unwrap(),

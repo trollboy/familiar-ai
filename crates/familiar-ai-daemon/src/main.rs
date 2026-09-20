@@ -174,10 +174,11 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
         let active = db_lock.list_active_projects().unwrap_or_default();
         let mut s = status.lock().unwrap();
         s.active_projects = active.len();
-        // local_llm_enabled starts false; the async daemon_run entry point
-        // will flip it to true after the manager actually loads the backend
-        // (if config.inference.text.mode != familiar_ai_core::config::InferenceMode::Disabled is set).
+        // Both start false; the async daemon_run entry point sets
+        // local_llm_configured from what the router actually built, and
+        // flips local_llm_enabled once a backend has loaded.
         s.local_llm_enabled = false;
+        s.local_llm_configured = false;
         // mcp_enabled means "MCP capability is compiled in and the binary exists",
         // not "an MCP session is currently active". MCP runs as a separate process
         // (familiar-ai-mcp binary) spawned per-session by the client.
@@ -289,7 +290,12 @@ async fn daemon_run(
 
     // If configured, try to load the LLM backend on startup. Failures are
     // logged but do not block daemon startup.
-    if state.config.inference.text.mode != familiar_ai_core::config::InferenceMode::Disabled {
+    // Ask the router what the config actually produced rather than reading
+    // the mode: a mode that names no reachable backend builds no managers,
+    // and the tray has to be able to tell "off" from "never set up".
+    let configured = state.router.is_configured().await;
+    state.status.lock().unwrap().local_llm_configured = configured;
+    if configured {
         match state.router.enable().await {
             Ok(()) => {
                 tracing::info!("LLM backend loaded");
@@ -299,6 +305,8 @@ async fn daemon_run(
                 tracing::warn!(error = %e, "failed to load LLM backend on startup");
             }
         }
+    } else {
+        tracing::info!("inference is not configured; no backend to load");
     }
 
     // Spawn summary worker if enabled
@@ -637,6 +645,7 @@ fn main() -> ExitCode {
                 runtime.clone(),
                 state_arc.control.clone(),
                 state_arc.paths.clone(),
+                state_arc.status.clone(),
             )) as Arc<dyn familiar_ai_tray::DataSource>,
         ),
         shutdown_rx.clone(),

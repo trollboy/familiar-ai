@@ -17,6 +17,22 @@
 
 set -euo pipefail
 
+# Git exports these to every process a hook runs, and they override the
+# directory a `git` invocation was pointed at. The gate runs the test suite,
+# and the suite builds fixture repositories and runs `git add`, `git commit`
+# and `git worktree add` inside them -- so with these set, a push made those
+# fixtures write to the repository being pushed. One such run committed
+# "fixture", deleting every tracked file, and left a stray branch and a
+# registered worktree under /tmp behind.
+#
+# Clearing them here is the fix at the origin: it covers every `git` call in
+# every crate, including the test fixtures, which is not something the callers
+# can be trusted to remember one at a time. `familiar_ai_core::git_env` clears
+# them again at the call sites that resolve repository identity, for the case
+# where a Familiar binary is run from somebody else's hook.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+
 # Probe for the capability, not the name. An installed binary predating the
 # gate command exists on PATH and cannot run it, and a hook that trusts the
 # name blocks the push with an argument-parsing error instead of verifying
