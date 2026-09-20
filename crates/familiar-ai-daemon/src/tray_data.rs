@@ -626,6 +626,14 @@ impl DataSource for DaemonDataSource {
                     .map_err(|e| e.to_string())?;
                 Ok(json!({"items": rows}))
             }
+            Query::Rounds { repo, limit } => {
+                let db = self
+                    .db
+                    .lock()
+                    .map_err(|_| "database lock poisoned".to_string())?;
+                stewardship::list_rounds(&db, &Self::identity(&repo)?, limit)
+                    .map_err(|e| e.to_string())
+            }
             Query::Checkpoints { repo } => {
                 let db = self
                     .db
@@ -699,6 +707,7 @@ impl DataSource for DaemonDataSource {
                     | Query::Executions { .. }
                     | Query::ProjectState { .. }
                     | Query::ConfigDocument
+                    | Query::Rounds { .. }
                     | Query::InferenceSettings
                     | Query::ConfigChoices
                     | Query::Checkpoints { .. }

@@ -70,6 +70,12 @@ pub enum Query {
     /// actually use. Asked once per form so every dropdown is built from what
     /// is installed and authenticated rather than from a hard-coded list.
     ConfigChoices,
+    /// The driver's sessions and the attempts inside them, for the backlog's
+    /// waterfall. A "round" is a session — the unit the driver works in.
+    Rounds {
+        repo: String,
+        limit: usize,
+    },
     /// Latest recorded pipeline phase per PRD, for the backlog's progress meter.
     Checkpoints {
         repo: String,

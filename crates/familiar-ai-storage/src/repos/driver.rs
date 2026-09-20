@@ -17,6 +17,25 @@ pub struct DriverSession {
     pub warrant_json: String,
 }
 
+/// One PRD's appearance in one round, which is all the rounds view needs.
+///
+/// Deliberately not a `DriverAttempt`: that carries twenty-odd columns about
+/// how an attempt was configured, and a chart that reads every one of them for
+/// every PRD in the backlog pays for data it never draws.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RoundAttempt {
+    pub session_id: String,
+    pub sequence: i64,
+    pub prd_id: String,
+    pub prd_path: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    /// `completed`, `retained`, or absent while the attempt is still running.
+    pub outcome: Option<String>,
+    pub retained_reason: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DriverAttempt {
     pub sequence: i64,
@@ -567,6 +586,60 @@ impl<'a> DriverRepository<'a> {
             }),
         ).optional().map_err(db)
     }
+
+    /// How many sessions this repository has, for saying what a truncated
+    /// chart is truncating.
+    pub fn count_sessions(&self, repository_key: &str) -> familiar_ai_core::Result<usize> {
+        self.conn
+            .query_row(
+                "SELECT count(*) FROM driver_sessions WHERE repository_key=?1",
+                params![repository_key],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count as usize)
+            .map_err(db)
+    }
+
+    /// Every attempt in this repository's most recent `limit` sessions, in one
+    /// read.
+    ///
+    /// The rounds view needs each PRD placed against each session, so asking
+    /// per session would be one round trip per column — twenty-odd queries to
+    /// draw one chart, growing with every session the driver ever opened.
+    pub fn rounds(
+        &self,
+        repository_key: &str,
+        limit: usize,
+    ) -> familiar_ai_core::Result<Vec<RoundAttempt>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT a.session_id,a.sequence,a.prd_id,a.prd_path,a.started_at,a.ended_at,\
+                 a.outcome,a.retained_reason,a.duration_ms FROM driver_attempts a \
+                 JOIN driver_sessions s ON s.session_id=a.session_id \
+                 WHERE s.repository_key=?1 AND s.session_id IN \
+                   (SELECT session_id FROM driver_sessions WHERE repository_key=?1 \
+                    ORDER BY started_at DESC, session_id DESC LIMIT ?2) \
+                 ORDER BY s.started_at, s.session_id, a.sequence",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map(params![repository_key, limit as i64], |row| {
+                Ok(RoundAttempt {
+                    session_id: row.get(0)?,
+                    sequence: row.get(1)?,
+                    prd_id: row.get(2)?,
+                    prd_path: row.get(3)?,
+                    started_at: row.get(4)?,
+                    ended_at: row.get(5)?,
+                    outcome: row.get(6)?,
+                    retained_reason: row.get(7)?,
+                    duration_ms: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                })
+            })
+            .map_err(db)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db)
+    }
 }
 
 fn redact_sensitive(mut value: String) -> String {
@@ -607,6 +680,79 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         db
+    }
+
+    /// The chart reads one row per repository and one column per session, so
+    /// the query has to be scoped and ordered, and its limit has to take the
+    /// newest sessions rather than the oldest.
+    #[test]
+    fn rounds_are_scoped_ordered_and_limited_to_the_newest_sessions() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        for (session, repo) in [
+            ("s1", "/repo/.git"),
+            ("s2", "/repo/.git"),
+            ("s3", "/repo/.git"),
+            ("other", "/elsewhere/.git"),
+        ] {
+            repository.open_session(session, repo, "{}").unwrap();
+            // `started_at` is the sort key and defaults to now, so the
+            // sessions need distinguishable timestamps.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        for (session, prd) in [
+            ("s1", "PRD-1"),
+            ("s2", "PRD-2"),
+            ("s3", "PRD-3"),
+            ("other", "PRD-9"),
+        ] {
+            repository
+                .record_attempt_started(session, prd, &format!("docs/prds/{prd}.md"), None)
+                .unwrap();
+        }
+
+        let all = repository.rounds("/repo/.git", 10).unwrap();
+        assert_eq!(
+            all.iter().map(|a| a.prd_id.as_str()).collect::<Vec<_>>(),
+            ["PRD-1", "PRD-2", "PRD-3"],
+            "oldest session first, and the other repository's work is not ours"
+        );
+
+        let newest = repository.rounds("/repo/.git", 2).unwrap();
+        assert_eq!(
+            newest.iter().map(|a| a.prd_id.as_str()).collect::<Vec<_>>(),
+            ["PRD-2", "PRD-3"],
+            "a truncated chart drops the oldest rounds, not the newest"
+        );
+
+        assert_eq!(repository.count_sessions("/repo/.git").unwrap(), 3);
+        assert_eq!(repository.count_sessions("/elsewhere/.git").unwrap(), 1);
+    }
+
+    /// An unfinished attempt has no outcome. The chart distinguishes that from
+    /// a finished one, so the query must carry the null rather than defaulting
+    /// it to something that reads as an ending.
+    #[test]
+    fn rounds_carry_the_outcome_and_its_absence() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        repository.open_session("s1", "/repo/.git", "{}").unwrap();
+        let done = repository
+            .record_attempt_started("s1", "PRD-1", "docs/prds/PRD-1.md", None)
+            .unwrap();
+        repository
+            .record_attempt_started("s1", "PRD-2", "docs/prds/PRD-2.md", None)
+            .unwrap();
+        repository
+            .record_attempt_finished("s1", done, "retained", Some("a gate"), None, Some(2_000))
+            .unwrap();
+
+        let rounds = repository.rounds("/repo/.git", 10).unwrap();
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds[0].outcome.as_deref(), Some("retained"));
+        assert_eq!(rounds[0].retained_reason.as_deref(), Some("a gate"));
+        assert_eq!(rounds[0].duration_ms, Some(2_000));
+        assert_eq!(rounds[1].outcome, None, "still running");
     }
 
     #[test]
