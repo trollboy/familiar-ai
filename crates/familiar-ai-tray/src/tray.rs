@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +29,11 @@ pub struct TrayApp {
     /// Answers the windows' queries. Absent in builds with no data behind the
     /// tray, in which case the windows are never opened.
     source: Option<Arc<dyn DataSource>>,
+    /// PRD-102: how many PRDs are waiting on a decision, as last counted by
+    /// the badge poll. Held rather than queried so building the menu — which
+    /// happens on the GTK thread, in response to a click — never blocks on
+    /// the database.
+    pending_gates: Arc<AtomicUsize>,
     /// Flipped true once the daemon is shutting down. `gtk::main()` owns the
     /// main thread and returns only when something calls `gtk::main_quit()`,
     /// so without this the process outlives its own SIGTERM: the workers stop,
@@ -36,6 +42,11 @@ pub struct TrayApp {
 }
 
 impl TrayApp {
+    /// The count the menu label uses. Read from the badge poll's last result.
+    fn pending_gates(&self) -> usize {
+        self.pending_gates.load(Ordering::Relaxed)
+    }
+
     // Every argument is a distinct collaborator the tray holds for its whole
     // life; collapsing them into a parameter struct would only move the same
     // eight names one indirection away.
@@ -59,6 +70,7 @@ impl TrayApp {
             dashboard,
             source,
             shutdown_rx,
+            pending_gates: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -115,6 +127,7 @@ impl TrayApp {
             let notifier = DesktopNotifier::new("net.shoggoth.familiar-ai");
             let mut announced: std::collections::BTreeSet<String> = Default::default();
             let mut drawn: Option<usize> = None;
+            let gate_count = self.pending_gates.clone();
             glib::source::timeout_add_local(Duration::from_secs(10), move || {
                 let repos = match source.query(crate::data::Query::Repositories) {
                     Ok(v) => v,
@@ -137,6 +150,7 @@ impl TrayApp {
 
                 // Redraw only on change: composing a 512x512 icon every tick
                 // to produce the same bytes is work nobody asked for.
+                gate_count.store(escalation.count, Ordering::Relaxed);
                 if drawn != Some(escalation.count) {
                     match tray_icon_with_count(escalation.count) {
                         Ok(icon) => {
@@ -243,6 +257,7 @@ impl TrayApp {
             &recent,
             self.config.recent_projects_count,
             self.dashboard.clone(),
+            self.pending_gates(),
         );
         drop(recent);
 
@@ -250,6 +265,11 @@ impl TrayApp {
             match item {
                 MenuItemSpec::Header(text) => {
                     let mi = MenuItem::new(text, false, None);
+                    menu.append(&mi).ok();
+                }
+                MenuItemSpec::PendingGates { count, target } => {
+                    let mi = MenuItem::new(crate::menu::pending_gates_label(count), true, None);
+                    ids.insert(mi.id().clone(), TrayCommand::OpenDashboard(target.clone()));
                     menu.append(&mi).ok();
                 }
                 MenuItemSpec::Separator => {

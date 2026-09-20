@@ -8,6 +8,13 @@ use crate::commands::DashboardTarget;
 #[derive(Debug, Clone, PartialEq)]
 pub enum MenuItemSpec {
     Header(String),
+    /// PRD-102: the signpost. The badge says how many decisions are waiting;
+    /// this is the way to them. Present only when the count is non-zero —
+    /// a menu entry saying "0 waiting on you" is noise.
+    PendingGates {
+        count: usize,
+        target: DashboardTarget,
+    },
     Separator,
     LlmToggle {
         enabled: bool,
@@ -31,14 +38,39 @@ pub enum MenuItemSpec {
     Quit,
 }
 
+/// What the signpost says. Names the work rather than the mechanism: an
+/// operator glancing at a tray wants to know something needs them, not that a
+/// table has rows.
+pub fn pending_gates_label(count: usize) -> String {
+    if count == 1 {
+        "1 PRD is waiting on you".to_string()
+    } else {
+        format!("{count} PRDs are waiting on you")
+    }
+}
+
 /// Build the logical menu structure from current state.
 pub fn build_menu_spec(
     status: &AppStatus,
     recent_projects: &[Project],
     recent_count: usize,
     dashboard: Option<DashboardTarget>,
+    pending_gates: usize,
 ) -> Vec<MenuItemSpec> {
     let mut items = Vec::new();
+
+    // PRD-102: decisions first. The badge on the icon is a signal with no
+    // destination unless the menu offers one, and burying it under the status
+    // headers would make the operator hunt for the thing that is waiting.
+    if pending_gates > 0 {
+        if let Some(target) = dashboard.clone() {
+            items.push(MenuItemSpec::PendingGates {
+                count: pending_gates,
+                target,
+            });
+            items.push(MenuItemSpec::Separator);
+        }
+    }
 
     // Status header
     items.push(MenuItemSpec::Header(format!(
@@ -147,7 +179,7 @@ mod tests {
     #[test]
     fn empty_state_menu() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5, None);
+        let items = build_menu_spec(&status, &[], 5, None, 0);
         // header(2) + sep + llm + pause + sep + recent_header + empty + sep + settings + about + sep + quit = 13
         assert_eq!(items.len(), 13);
         assert!(matches!(items[0], MenuItemSpec::Header(_)));
@@ -162,7 +194,7 @@ mod tests {
     #[test]
     fn llm_enabled_reflected() {
         let status = make_status(2, true, false);
-        let items = build_menu_spec(&status, &[], 5, None);
+        let items = build_menu_spec(&status, &[], 5, None, 0);
         assert!(matches!(
             items[3],
             MenuItemSpec::LlmToggle { enabled: true }
@@ -177,7 +209,7 @@ mod tests {
             make_project(2, "beta", "/b"),
             make_project(3, "gamma", "/c"),
         ];
-        let items = build_menu_spec(&status, &projects, 5, None);
+        let items = build_menu_spec(&status, &projects, 5, None, 0);
         let recent_count = items
             .iter()
             .filter(|i| matches!(i, MenuItemSpec::RecentProject { .. }))
@@ -191,7 +223,7 @@ mod tests {
         let projects: Vec<_> = (0..10)
             .map(|i| make_project(i, &format!("p{i}"), &format!("/p{i}")))
             .collect();
-        let items = build_menu_spec(&status, &projects, 5, None);
+        let items = build_menu_spec(&status, &projects, 5, None, 0);
         let recent_count = items
             .iter()
             .filter(|i| matches!(i, MenuItemSpec::RecentProject { .. }))
@@ -202,7 +234,7 @@ mod tests {
     #[test]
     fn no_recent_projects_shows_empty() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5, None);
+        let items = build_menu_spec(&status, &[], 5, None, 0);
         assert!(items.contains(&MenuItemSpec::EmptyRecentProjects));
         assert!(!items
             .iter()
@@ -212,7 +244,7 @@ mod tests {
     #[test]
     fn header_shows_project_count() {
         let status = make_status(7, true, true);
-        let items = build_menu_spec(&status, &[], 5, None);
+        let items = build_menu_spec(&status, &[], 5, None, 0);
         let header = match &items[0] {
             MenuItemSpec::Header(s) => s.clone(),
             _ => panic!("expected header"),
@@ -232,14 +264,14 @@ mod tests {
     #[test]
     fn always_includes_quit() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5, None);
+        let items = build_menu_spec(&status, &[], 5, None, 0);
         assert!(items.contains(&MenuItemSpec::Quit));
     }
 
     #[test]
     fn always_includes_settings_and_about() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5, None);
+        let items = build_menu_spec(&status, &[], 5, None, 0);
         assert!(items.contains(&MenuItemSpec::OpenSettings));
         assert!(items.contains(&MenuItemSpec::About));
     }
@@ -247,7 +279,7 @@ mod tests {
     #[test]
     fn dashboard_item_present_when_enabled() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5, Some(DashboardTarget::Window));
+        let items = build_menu_spec(&status, &[], 5, Some(DashboardTarget::Window), 0);
         assert!(items.contains(&MenuItemSpec::OpenDashboard {
             target: DashboardTarget::Window,
         }));
@@ -257,6 +289,7 @@ mod tests {
             &[],
             5,
             Some(DashboardTarget::Web("http://127.0.0.1:9400".to_string())),
+            0,
         );
         assert!(items.contains(&MenuItemSpec::OpenDashboard {
             target: DashboardTarget::Web("http://127.0.0.1:9400".to_string()),
@@ -268,10 +301,60 @@ mod tests {
     #[test]
     fn dashboard_item_absent_when_disabled() {
         let status = make_status(0, false, false);
-        let items = build_menu_spec(&status, &[], 5, None);
+        let items = build_menu_spec(&status, &[], 5, None, 0);
         assert!(!items
             .iter()
             .any(|i| matches!(i, MenuItemSpec::OpenDashboard { .. })));
         assert_eq!(items.len(), 13);
+    }
+}
+
+#[cfg(test)]
+mod pending_gate_menu_tests {
+    use super::*;
+
+    fn status() -> AppStatus {
+        AppStatus::default()
+    }
+
+    #[test]
+    fn nothing_waiting_adds_no_menu_entry() {
+        // A menu line reading "0 PRDs are waiting on you" is noise, and the
+        // whole point of the badge is that quiet means quiet.
+        let items = build_menu_spec(&status(), &[], 5, Some(DashboardTarget::Window), 0);
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, MenuItemSpec::PendingGates { .. })),
+            "no signpost when nothing is waiting"
+        );
+    }
+
+    #[test]
+    fn work_waiting_puts_the_signpost_first() {
+        // The badge is a signal with no destination unless the menu offers
+        // one, and burying it under the status headers makes the operator
+        // hunt for the thing that needs them.
+        let items = build_menu_spec(&status(), &[], 5, Some(DashboardTarget::Window), 6);
+        match items.first() {
+            Some(MenuItemSpec::PendingGates { count, .. }) => assert_eq!(*count, 6),
+            other => panic!("the signpost must come first, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_signpost_needs_somewhere_to_point() {
+        // With no dashboard there is nowhere to send the operator, so the
+        // entry would be a dead end.
+        let items = build_menu_spec(&status(), &[], 5, None, 6);
+        assert!(!items
+            .iter()
+            .any(|i| matches!(i, MenuItemSpec::PendingGates { .. })));
+    }
+
+    #[test]
+    fn the_label_counts_in_plain_words() {
+        assert_eq!(pending_gates_label(1), "1 PRD is waiting on you");
+        assert_eq!(pending_gates_label(6), "6 PRDs are waiting on you");
     }
 }
