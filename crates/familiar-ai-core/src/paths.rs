@@ -179,9 +179,7 @@ impl AppPaths {
             })
             .join(identity);
 
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .map(|d| PathBuf::from(d).join(identity))
-            .unwrap_or_else(|_| PathBuf::from(format!("/tmp/{identity}-{uid}")));
+        let runtime_dir = runtime_dir_from(std::env::var_os("XDG_RUNTIME_DIR"), identity, uid);
 
         let log_dir = state_dir.join("log");
         let pid_path = state_dir.join(format!("{identity}.pid"));
@@ -231,6 +229,45 @@ impl Default for AppPaths {
     }
 }
 
+/// Where the runtime directory goes, given the environment rather than
+/// reading it.
+///
+/// Pulled out of `AppPaths::new` because the test for the `/tmp` fallback
+/// used `std::env::remove_var`, and `cargo test` runs tests as threads in one
+/// process: mutating a process-global while siblings read it is a data race.
+/// It flaked the gate on 2026-09-19 and again on 2026-09-20, both times
+/// unreproducibly, because by the time anyone looked the variable was back.
+#[cfg(not(target_os = "macos"))]
+pub fn runtime_dir_from(
+    xdg_runtime_dir: Option<std::ffi::OsString>,
+    identity: &str,
+    uid: u32,
+) -> PathBuf {
+    match xdg_runtime_dir.filter(|value| !value.is_empty()) {
+        Some(value) => PathBuf::from(value).join(identity),
+        None => PathBuf::from(format!("/tmp/{identity}-{uid}")),
+    }
+}
+
+/// An XDG directory, given the environment rather than reading it.
+///
+/// Same reason as `runtime_dir_from`: the tests for these rules mutated
+/// process-global environment variables while sibling tests read them.
+#[cfg(not(target_os = "macos"))]
+pub fn xdg_dir_from(
+    configured: Option<std::ffi::OsString>,
+    home_relative_fallback: &str,
+    identity: &str,
+) -> PathBuf {
+    match configured.filter(|value| !value.is_empty()) {
+        Some(value) => PathBuf::from(value),
+        None => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(home_relative_fallback),
+    }
+    .join(identity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,19 +308,30 @@ mod tests {
         }
     }
 
+    /// The `/tmp` fallback, proven without touching the process environment.
+    ///
+    /// This used to `remove_var("XDG_RUNTIME_DIR")`, call `AppPaths::new()`
+    /// and put the variable back. `cargo test` runs tests as threads in one
+    /// process, so that window was visible to every sibling calling
+    /// `AppPaths::new()` — and the test itself failed whenever a sibling
+    /// restored the variable before its own read. It flaked the gate twice,
+    /// unreproducibly both times, because the evidence put itself back.
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn tmp_fallback_uses_new_identity() {
-        let previous = std::env::var_os("XDG_RUNTIME_DIR");
-        std::env::remove_var("XDG_RUNTIME_DIR");
-        let paths = AppPaths::new();
-        if let Some(value) = previous {
-            std::env::set_var("XDG_RUNTIME_DIR", value);
-        }
-        let uid = unsafe { libc::getuid() };
         assert_eq!(
-            paths.runtime_dir,
-            PathBuf::from(format!("/tmp/familiar-ai-{uid}"))
+            runtime_dir_from(None, "familiar-ai", 1000),
+            PathBuf::from("/tmp/familiar-ai-1000")
+        );
+        // An empty value is not a directory, and must fall back too.
+        assert_eq!(
+            runtime_dir_from(Some(std::ffi::OsString::new()), "familiar-ai", 1000),
+            PathBuf::from("/tmp/familiar-ai-1000")
+        );
+        // And when the environment does name one, it is used.
+        assert_eq!(
+            runtime_dir_from(Some("/run/user/1000".into()), "familiar-ai", 1000),
+            PathBuf::from("/run/user/1000/familiar-ai")
         );
     }
 
@@ -334,10 +382,10 @@ mod tests {
     fn respects_xdg_config_home() {
         let tmp = tempfile::tempdir().unwrap();
         let custom = tmp.path().join("custom-config");
-        std::env::set_var("XDG_CONFIG_HOME", &custom);
-        let paths = AppPaths::new();
-        std::env::remove_var("XDG_CONFIG_HOME");
-        assert_eq!(paths.config_dir, custom.join("familiar-ai"));
+        assert_eq!(
+            xdg_dir_from(Some(custom.clone().into()), ".config", "familiar-ai"),
+            custom.join("familiar-ai")
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -345,10 +393,10 @@ mod tests {
     fn respects_xdg_runtime_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let custom = tmp.path().join("custom-runtime");
-        std::env::set_var("XDG_RUNTIME_DIR", &custom);
-        let paths = AppPaths::new();
-        std::env::remove_var("XDG_RUNTIME_DIR");
-        assert_eq!(paths.runtime_dir, custom.join("familiar-ai"));
+        assert_eq!(
+            runtime_dir_from(Some(custom.clone().into()), "familiar-ai", 1000),
+            custom.join("familiar-ai")
+        );
     }
 
     #[test]
