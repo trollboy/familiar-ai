@@ -2117,6 +2117,31 @@ fn compute_review_preflight(
     }))
 }
 
+/// The scope the independent reviewer is told about.
+///
+/// `compile_scope_policy` deliberately keeps the PRD's contract out of
+/// `allowed_paths` and applies it at adjudication time instead. Handing the
+/// reviewer that ceiling alone means a PRD which legitimately declares a path
+/// outside it — `README.md`, `config/default.toml`, `docker-compose.yml` —
+/// reads as a scope violation, and the reviewer raises a blocking finding the
+/// adjudicator would have found `contained`. PRD-090 died exactly that way on
+/// 2026-09-19 (FAM-BUG-060).
+pub fn review_allowed_paths(scope_policy: &familiar_ai_review::ScopePolicySnapshot) -> Vec<String> {
+    let mut paths: Vec<String> = scope_policy
+        .allowed_paths
+        .iter()
+        .map(|entry| entry.normalized.clone())
+        .collect();
+    if scope_policy.allow_prd_expected_file_expansion {
+        for entry in &scope_policy.contract {
+            if !paths.contains(&entry.normalized) {
+                paths.push(entry.normalized.clone());
+            }
+        }
+    }
+    paths
+}
+
 fn build_scope_policy(
     config: &Config,
     prd_repository_path: &str,
@@ -2417,11 +2442,15 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
             .unwrap_or_else(|| context.prd.content.clone()),
         acceptance_criteria: criteria,
         base_revision: base_revision.into(),
-        allowed_paths: scope_policy
-            .allowed_paths
-            .iter()
-            .map(|entry| entry.normalized.clone())
-            .collect(),
+        // The reviewer must be told what the system actually authorises, not
+        // just the static ceiling. `compile_scope_policy` deliberately keeps
+        // the PRD's contract out of `allowed_paths` and applies it at
+        // adjudication time instead — so a PRD that legitimately declares a
+        // path outside the ceiling (README.md, config/default.toml,
+        // docker-compose.yml) reads to an independent reviewer as a scope
+        // violation, and it raises a blocking finding the adjudicator would
+        // have found `contained`. PRD-090 died exactly this way.
+        allowed_paths: review_allowed_paths(scope_policy),
         prohibited_changes: scope_policy
             .prohibited_rules
             .iter()

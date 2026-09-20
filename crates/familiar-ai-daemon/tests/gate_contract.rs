@@ -395,3 +395,69 @@ fn the_gate_definition_depends_on_no_configuration_outside_this_repository() {
         "the gate's contract must be documented"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Scope: the reviewer is told what the system authorises, not just the ceiling.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_reviewer_receives_prd_declared_paths_not_only_the_static_ceiling() {
+    use familiar_ai_daemon::run::review_allowed_paths;
+    use familiar_ai_review::{compile_scope_policy, parse_expected_files, ScopePolicyInput};
+
+    // PRD-090's shape: a ceiling of crates/ and a contract that legitimately
+    // declares README.md. Adjudication treats that as contained; the reviewer
+    // must be told the same thing, or it raises a blocking scope violation on
+    // a file the PRD itself declares (FAM-BUG-060).
+    let contract = parse_expected_files(
+        "## Expected Files\n\n- `crates/familiar-ai-daemon/src/cli/mod.rs`\n- `README.md`\n",
+    )
+    .expect("the fixture declares two files");
+
+    let policy = compile_scope_policy(ScopePolicyInput {
+        prd_path: "docs/prds/PRD-090.md".into(),
+        prd_content_hash: "sha256:fixture".into(),
+        contract: contract.clone(),
+        allowed_paths: vec!["crates/".into()],
+        allow_prd_expected_file_expansion: true,
+        declaration_mode: familiar_ai_review::ScopeDeclarationMode::ExpectedOrConfigured,
+        prohibited_rules: Vec::new(),
+        file_class_policies: Default::default(),
+        classification_rules: Vec::new(),
+        baseline_revision: "sha256:base".into(),
+        config_provenance: "fixture".into(),
+    })
+    .expect("the fixture compiles");
+
+    let paths = review_allowed_paths(&policy);
+    assert!(
+        paths.iter().any(|p| p == "README.md"),
+        "the reviewer must be told README.md is authorised; got {paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p == "crates/"),
+        "the configured ceiling must survive; got {paths:?}"
+    );
+
+    // With expansion off, the ceiling is the whole authority and the contract
+    // must NOT silently widen it.
+    let strict = compile_scope_policy(ScopePolicyInput {
+        prd_path: "docs/prds/PRD-090.md".into(),
+        prd_content_hash: "sha256:fixture".into(),
+        contract,
+        allowed_paths: vec!["crates/".into()],
+        allow_prd_expected_file_expansion: false,
+        declaration_mode: familiar_ai_review::ScopeDeclarationMode::ExpectedOrConfigured,
+        prohibited_rules: Vec::new(),
+        file_class_policies: Default::default(),
+        classification_rules: Vec::new(),
+        baseline_revision: "sha256:base".into(),
+        config_provenance: "fixture".into(),
+    })
+    .expect("the strict fixture compiles");
+    let strict_paths = review_allowed_paths(&strict);
+    assert!(
+        !strict_paths.iter().any(|p| p == "README.md"),
+        "expansion is off, so the contract must not widen the ceiling; got {strict_paths:?}"
+    );
+}

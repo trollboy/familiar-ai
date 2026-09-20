@@ -735,6 +735,84 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
   unattended sessions. Open; surfaced 2026-08-31 during PRD-077
   verification.
 
+## 2026-09-19 — round 1: one infrastructure bug voided a wave, one review bug blocked a candidate
+
+**FAM-BUG-059 — verification leaked a Docker network and a cargo-cache
+volume per PRD, until the address pool was exhausted. FIXED.**
+
+Every `[[review.verification]]` check ran `docker compose run` from a
+worktree directory, so Compose derived a project name from that directory
+(`prd-90`) and created `prd-90_default` plus `prd-90_cargo-cache`. `--rm`
+removes the container and neither of those. Docker's default pool holds
+about 31 networks.
+
+Round 1 failed 4 of 4 with `verification_failed` and the evidence read
+`failed to create network prd-90_default: all predefined address pools have
+been fully subnetted`. Cost: $52.02 and 70 minutes, proving nothing about
+the PRDs.
+
+Leaking since at least 2026-09-04 — `prd-71_default` was still present.
+Some share of the historical 39 attempts likely died of this and were
+attributed to the PRDs or the models.
+
+Two things kept it invisible for six weeks:
+
+- The taxonomy records infrastructure failure and candidate failure with
+  the same code. `verification_failed` cannot distinguish "this code is
+  wrong" from "the host has no subnets left".
+- The per-project volume leak gave every run a cold cargo cache, so
+  1,045-4,292s runs looked like ordinary slowness rather than a system
+  recompiling the world every time. After the fix: 181s.
+
+Fixed by pinning every verification check to one Compose project
+(`-p familiar-ai-verify`): one network, one warm shared cache, reused by
+every check, worktree and worker. Recorded in
+`docs/contracts/verification-gate.md`.
+
+**FAM-BUG-060 — the independent reviewer is given the static scope ceiling
+instead of the authorised scope. FIXED.**
+
+`compile_scope_policy` deliberately builds `allowed_paths` from the
+configured ceiling only and applies the PRD's contract at adjudication
+time. But the review task was built from that ceiling alone, so a reviewer
+was told scope was `["crates/"]` while the PRD legitimately declared
+`README.md`.
+
+PRD-090 was blocked by a `scope_violation` finding
+(`readme-outside-allowed-paths`) on a file its own `expected_files`
+declares. The inconsistency is provable: PRD-096 declares
+`docs/contracts/command-model.md`, also outside the ceiling, and its scope
+*adjudication* recorded `contained`.
+
+This would have blocked much of the queue: 092, 098, 099 and 101 declare
+`README.md`; 088, 089, 094, 097, 100 and 101 declare `config/default.toml`;
+088 and 092 declare `docker-compose.yml`.
+
+Fixed in `run.rs`: the review task's `allowed_paths` now includes the PRD's
+contract when `allow_prd_expected_file_expansion` is set. Pinned by
+`the_reviewer_receives_prd_declared_paths_not_only_the_static_ceiling`.
+
+**FAM-BUG-061 — no independent review has ever been costed. OPEN.**
+
+Only two sites write usage observations: `run.rs` (stage `implementation`)
+and `batch_review.rs` (stage `review`). The ledger contains `implementation`
+and `execution` rows and **zero `review` rows**, because the batch-review
+path has never run. The independent reviewer's model calls — every one in
+the project's history — are unaccounted.
+
+The `resume` of round 1 ran independent reviewers for four PRDs and
+recorded no cost at all. This is a direct contributor to 19 of 39 attempts
+carrying no cost and to the $359 lifetime total being an undercount.
+
+Owner: PRD-086, which exists to make `CostUnmeasured` the exception. Not
+fixed here because instrumenting the review path is that PRD's subject.
+
+**Open: an unidentified flake.** One unreproducible red on 2026-09-19
+(`9a8d970`), green on immediate re-run. FAM-BUG-027's `worker_lock` race
+was fixed on 2026-09-01 so it is probably not that. The verdict detail was
+too coarse to name the test, which is itself now fixed: `scripts/gate.sh`
+records failing test names, so the next occurrence will identify itself.
+
 ## 2026-09-01 — PRD-076 first drive attempt: two bugs found, both fixed
 
 The first post-bug-gate drive (PRD-076) failed in preflight after 861s of

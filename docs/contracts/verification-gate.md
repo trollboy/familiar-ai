@@ -98,6 +98,37 @@ the run it refers to.
 `gate override` refuses when the gate is already green: there is nothing to
 override, and a record suggesting otherwise would be a lie in the ledger.
 
+## Two paths, and why they differ
+
+Verification runs in two places, with different isolation, and the difference
+is deliberate rather than an oversight.
+
+| Path | Runs | Isolation |
+|---|---|---|
+| **Candidate verification** — `[[review.verification]]` checks during `run`/`drive` | model-written code no human has reviewed | Docker, via `docker compose -p familiar-ai-verify run` |
+| **`scripts/gate.sh`** — the pre-push hook and `gate run` | code already on a branch a human is pushing | the host, natively |
+
+**Docker is the sandbox for unreviewed code.** A candidate's own new tests are
+compiled and executed to verify it; that is model-written code running before
+any human has read it. The agent's tool calls are sandboxed separately by
+landlock (`crates/familiar-ai-agent/src/isolation.rs`), which does not cover
+verification. The container is what covers it.
+
+That is the *only* reason Docker is load-bearing here. It is not required to
+install Familiar, not required to run the daemon, and absent from
+`config/default.toml` entirely — the Docker argv lives in the operator's own
+`[[review.verification]]` config and could be pointed at native `cargo`
+commands tomorrow. Doing so would trade the sandbox away, knowingly.
+
+**One compose project for every check.** All verification runs pass
+`-p familiar-ai-verify`. Without it Compose derives a project name from the
+worktree directory, so each PRD gets its own network *and its own
+`cargo-cache` volume*: networks accumulate until the address pool is exhausted
+and every run starts with a cold cache. That is not hypothetical — it
+exhausted the pool on 2026-09-19 and failed an entire four-PRD wave, after
+leaking silently since at least 2026-09-04. Verification dropped from
+1,045–4,292s to 181s once the cache was shared.
+
 ## No setting outside this tree may weaken it
 
 Everything that decides the verdict is a reviewed file here. `scripts/gate.sh`
