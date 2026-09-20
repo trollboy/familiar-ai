@@ -914,7 +914,7 @@ pub fn open_dashboard_window(source: Arc<dyn DataSource>) {
                 }
                 notebook.append_page(
                     &gates_tab(source.clone(), &repo, &refresh, &win),
-                    Some(&tab("Waiting on you")),
+                    Some(&tab(&gates_tab_label(pending_gate_count(&source, &repo)))),
                 );
                 notebook.append_page(
                     &backlog_tab(source.clone(), &repo, &refresh, &win),
@@ -999,6 +999,31 @@ fn error_page(what: &str, e: &str) -> gtk::Widget {
     let b = vbox();
     b.pack_start(&label(&format!("{what} failed: {e}")), false, false, 0);
     b.upcast()
+}
+
+/// How many PRDs are waiting, for the tab label.
+///
+/// PRD-102: the count belongs where it can be seen without opening anything.
+/// It is on the icon and in the menu; a tab reading just "Waiting on you"
+/// makes the operator open it to find out whether it is worth opening.
+fn pending_gate_count(source: &Arc<dyn DataSource>, repo: &str) -> usize {
+    source
+        .query(Query::Gates {
+            repo: repo.to_string(),
+        })
+        .map(|value| view::build_gates_view(&value).groups.len())
+        .unwrap_or(0)
+}
+
+/// The tab's label, carrying the count when there is one. Zero is silent, for
+/// the same reason the badge is: a surface that announces "nothing is wrong"
+/// teaches its reader to stop looking.
+fn gates_tab_label(count: usize) -> String {
+    if count == 0 {
+        "Waiting on you".to_string()
+    } else {
+        format!("Waiting on you ({count})")
+    }
 }
 
 fn gates_tab(
@@ -2027,4 +2052,23 @@ fn discover_models_into(
         Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
         Err(mpsc::TryRecvError::Disconnected) => gtk::glib::ControlFlow::Break,
     });
+}
+
+#[cfg(test)]
+mod gates_tab_label_tests {
+    use super::gates_tab_label;
+
+    #[test]
+    fn the_tab_carries_the_count_so_it_need_not_be_opened_to_find_out() {
+        assert_eq!(gates_tab_label(1), "Waiting on you (1)");
+        assert_eq!(gates_tab_label(6), "Waiting on you (6)");
+    }
+
+    #[test]
+    fn nothing_waiting_shows_no_number() {
+        // Same rule as the badge: quiet is quiet. "Waiting on you (0)" is a
+        // surface announcing that nothing is wrong, which teaches its reader
+        // to stop looking at it.
+        assert_eq!(gates_tab_label(0), "Waiting on you");
+    }
 }
