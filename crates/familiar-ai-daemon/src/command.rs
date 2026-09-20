@@ -27,11 +27,13 @@ pub fn daemon_command_from_tray(cmd: TrayCommand) -> Option<DaemonCommand> {
         TrayCommand::PauseHeavyTasks => Some(DaemonCommand::PauseHeavyTasks),
         TrayCommand::ResumeHeavyTasks => Some(DaemonCommand::ResumeHeavyTasks),
         TrayCommand::Quit => Some(DaemonCommand::Quit),
-        // OpenSettings, OpenDashboard and OpenProject are handled by the tray
-        // itself via opener.
-        TrayCommand::OpenSettings | TrayCommand::OpenDashboard(_) | TrayCommand::OpenProject(_) => {
-            None
-        }
+        // OpenSettings, ConfigureLlm, OpenDashboard and OpenProject are
+        // handled by the tray itself: they open a window or a file, and the
+        // daemon has nothing to do for them.
+        TrayCommand::OpenSettings
+        | TrayCommand::ConfigureLlm
+        | TrayCommand::OpenDashboard(_)
+        | TrayCommand::OpenProject(_) => None,
     }
 }
 
@@ -265,7 +267,24 @@ mod tests {
 
         handle_commands(rx, status.clone(), state.clone(), router, shutdown_tx).await;
 
-        assert!(status.lock().unwrap().local_llm_enabled);
+        // The router here is built from the default config, which is disabled
+        // and so builds no backends. Enabling it cannot succeed, and the
+        // status must say so: this assertion used to read `assert!(...)` and
+        // passed only because `enable()` reported success for having looped
+        // over nothing, which is what made the tray's toggle look dead.
+        assert!(!status.lock().unwrap().local_llm_enabled);
         assert!(state.lock().unwrap().paused);
+    }
+
+    /// Enabling with nothing configured is an error, not a silent success.
+    /// The daemon must not record inference as on when no backend exists.
+    #[tokio::test]
+    async fn enable_without_configuration_reports_failure() {
+        let router = make_router();
+        let error = router.enable().await.expect_err("nothing is configured");
+        assert!(
+            error.to_string().contains("not configured"),
+            "the error has to name the cause: {error}"
+        );
     }
 }

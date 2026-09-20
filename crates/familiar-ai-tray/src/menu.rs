@@ -9,9 +9,7 @@ use crate::commands::DashboardTarget;
 pub enum MenuItemSpec {
     Header(String),
     Separator,
-    LlmToggle {
-        enabled: bool,
-    },
+    Llm(LlmMenuState),
     PauseToggle {
         paused: bool,
     },
@@ -31,6 +29,46 @@ pub enum MenuItemSpec {
     Quit,
 }
 
+/// What the inference item offers, which is not a two-way toggle: a daemon
+/// with no backend in its config has nothing to enable, so it is offered a way
+/// to configure one instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmMenuState {
+    /// Nothing is configured. The item leads to the settings screen.
+    Unconfigured,
+    /// Configured and loaded. The item turns it off.
+    Enabled,
+    /// Configured but not loaded. The item turns it on.
+    Disabled,
+}
+
+impl LlmMenuState {
+    pub fn of(status: &AppStatus) -> Self {
+        match (status.local_llm_configured, status.local_llm_enabled) {
+            (false, _) => Self::Unconfigured,
+            (true, true) => Self::Enabled,
+            (true, false) => Self::Disabled,
+        }
+    }
+
+    /// The label as it appears in the menu.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unconfigured => "Configure Local LLM…",
+            Self::Enabled => "Disable Local LLM",
+            Self::Disabled => "Enable Local LLM",
+        }
+    }
+
+    pub fn command(&self) -> crate::commands::TrayCommand {
+        match self {
+            Self::Unconfigured => crate::commands::TrayCommand::ConfigureLlm,
+            Self::Enabled => crate::commands::TrayCommand::DisableLlm,
+            Self::Disabled => crate::commands::TrayCommand::EnableLlm,
+        }
+    }
+}
+
 /// Build the logical menu structure from current state.
 pub fn build_menu_spec(
     status: &AppStatus,
@@ -47,19 +85,16 @@ pub fn build_menu_spec(
     )));
     items.push(MenuItemSpec::Header(format!(
         "LLM: {} | MCP: {}",
-        if status.local_llm_enabled {
-            "on"
-        } else {
-            "off"
+        match LlmMenuState::of(status) {
+            LlmMenuState::Unconfigured => "not configured",
+            LlmMenuState::Enabled => "on",
+            LlmMenuState::Disabled => "off",
         },
         if status.mcp_enabled { "on" } else { "off" }
     )));
     items.push(MenuItemSpec::Separator);
 
-    // LLM toggle
-    items.push(MenuItemSpec::LlmToggle {
-        enabled: status.local_llm_enabled,
-    });
+    items.push(MenuItemSpec::Llm(LlmMenuState::of(status)));
 
     // Pause toggle (paused state not currently tracked in AppStatus, default false)
     items.push(MenuItemSpec::PauseToggle { paused: false });
@@ -102,10 +137,10 @@ pub fn build_tooltip(status: &AppStatus) -> String {
     format!(
         "Familiar\nActive projects: {}\nLLM: {}\nMCP: {}",
         status.active_projects,
-        if status.local_llm_enabled {
-            "enabled"
-        } else {
-            "disabled"
+        match LlmMenuState::of(status) {
+            LlmMenuState::Unconfigured => "not configured",
+            LlmMenuState::Enabled => "enabled",
+            LlmMenuState::Disabled => "disabled",
         },
         if status.mcp_enabled {
             "enabled"
@@ -121,11 +156,24 @@ mod tests {
     use chrono::Utc;
     use familiar_ai_core::models::Project;
 
+    /// A status whose inference is configured, and loaded when `llm`. An
+    /// enabled backend is a configured one by definition; the unconfigured
+    /// case is built by `make_unconfigured` because it is a third state, not
+    /// the `false` end of this one.
     fn make_status(active: usize, llm: bool, mcp: bool) -> AppStatus {
         let mut s = AppStatus::new();
         s.active_projects = active;
         s.local_llm_enabled = llm;
+        s.local_llm_configured = true;
         s.mcp_enabled = mcp;
+        s
+    }
+
+    fn make_unconfigured(active: usize) -> AppStatus {
+        let mut s = AppStatus::new();
+        s.active_projects = active;
+        s.local_llm_enabled = false;
+        s.local_llm_configured = false;
         s
     }
 
@@ -146,15 +194,12 @@ mod tests {
 
     #[test]
     fn empty_state_menu() {
-        let status = make_status(0, false, false);
+        let status = make_unconfigured(0);
         let items = build_menu_spec(&status, &[], 5, None);
         // header(2) + sep + llm + pause + sep + recent_header + empty + sep + settings + about + sep + quit = 13
         assert_eq!(items.len(), 13);
         assert!(matches!(items[0], MenuItemSpec::Header(_)));
-        assert!(matches!(
-            items[3],
-            MenuItemSpec::LlmToggle { enabled: false }
-        ));
+        assert_eq!(items[3], MenuItemSpec::Llm(LlmMenuState::Unconfigured));
         assert!(items.contains(&MenuItemSpec::EmptyRecentProjects));
         assert!(items.contains(&MenuItemSpec::Quit));
     }
@@ -163,10 +208,54 @@ mod tests {
     fn llm_enabled_reflected() {
         let status = make_status(2, true, false);
         let items = build_menu_spec(&status, &[], 5, None);
+        assert_eq!(items[3], MenuItemSpec::Llm(LlmMenuState::Enabled));
+    }
+
+    /// The three states are distinct in label and in what clicking does. An
+    /// unconfigured daemon must not be offered "Enable Local LLM": there is
+    /// no backend for it to load, so the click can only appear to do nothing.
+    #[test]
+    fn unconfigured_offers_configuration_not_a_toggle() {
+        let items = build_menu_spec(&make_unconfigured(0), &[], 5, None);
+        assert_eq!(items[3], MenuItemSpec::Llm(LlmMenuState::Unconfigured));
+        assert_eq!(LlmMenuState::Unconfigured.label(), "Configure Local LLM…");
         assert!(matches!(
-            items[3],
-            MenuItemSpec::LlmToggle { enabled: true }
+            LlmMenuState::Unconfigured.command(),
+            crate::commands::TrayCommand::ConfigureLlm
         ));
+    }
+
+    #[test]
+    fn configured_but_unloaded_offers_enable() {
+        let items = build_menu_spec(&make_status(0, false, false), &[], 5, None);
+        assert_eq!(items[3], MenuItemSpec::Llm(LlmMenuState::Disabled));
+        assert_eq!(LlmMenuState::Disabled.label(), "Enable Local LLM");
+        assert!(matches!(
+            LlmMenuState::Disabled.command(),
+            crate::commands::TrayCommand::EnableLlm
+        ));
+    }
+
+    #[test]
+    fn enabled_offers_disable() {
+        assert_eq!(LlmMenuState::Enabled.label(), "Disable Local LLM");
+        assert!(matches!(
+            LlmMenuState::Enabled.command(),
+            crate::commands::TrayCommand::DisableLlm
+        ));
+    }
+
+    /// The header and tooltip have to tell "off" apart from "never set up",
+    /// because the remedy for each is a different click.
+    #[test]
+    fn unconfigured_reads_differently_from_off() {
+        let unconfigured = build_tooltip(&make_unconfigured(0));
+        let off = build_tooltip(&make_status(0, false, false));
+        assert!(
+            unconfigured.contains("LLM: not configured"),
+            "{unconfigured}"
+        );
+        assert!(off.contains("LLM: disabled"), "{off}");
     }
 
     #[test]

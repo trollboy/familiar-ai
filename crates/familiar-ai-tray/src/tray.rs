@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tokio::sync::{mpsc, watch};
@@ -15,6 +16,13 @@ use crate::commands::{DashboardTarget, TrayCommand};
 use crate::data::DataSource;
 use crate::icon::{load_tray_icon, tray_icon_with_count};
 use crate::menu::{build_tooltip, MenuItemSpec};
+
+/// How often the drawn menu is compared against the state it describes.
+///
+/// The comparison reads the database, so it runs on its own cadence rather
+/// than on every pass of the 100ms event tick. A second is well inside what
+/// reads as immediate for a menu the operator has to open to see.
+const MENU_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct TrayApp {
     config: TrayConfig,
@@ -73,7 +81,8 @@ impl TrayApp {
         let icon = load_tray_icon()?;
 
         // Build initial menu
-        let (menu, ids) = self.build_muda_menu()?;
+        let mut spec = self.menu_spec();
+        let (menu, ids) = render_menu(&spec);
 
         // The handle must outlive the builder: updating the badge means
         // calling set_icon on a live tray, and the previous code dropped it
@@ -91,16 +100,10 @@ impl TrayApp {
         let config_path = self.config_path.clone();
         let ids_arc = Arc::new(Mutex::new(ids));
 
-        // Start a background thread to poll status and update menu/tooltip periodically
-        let status_clone = self.status.clone();
-        let _db_clone = self.db.clone();
-        let _ids_for_refresh = ids_arc.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(1));
-            if let Ok(s) = status_clone.lock() {
-                tracing::trace!(active_projects = s.active_projects, "tray status tick");
-            }
-        });
+        // Shared rather than moved: the badge below and the menu redraw in the
+        // event loop are two timers on the same GTK thread, and both need the
+        // live handle. Rc is enough — neither ever leaves this thread.
+        let tray = Rc::new(tray);
 
         // PRD-102: the badge and the notification.
         //
@@ -111,7 +114,7 @@ impl TrayApp {
         #[cfg(target_os = "linux")]
         if let Some(source) = self.source.clone() {
             use crate::notify::{DesktopNotifier, Notifier};
-            let tray_for_badge = tray;
+            let tray_for_badge = tray.clone();
             let notifier = DesktopNotifier::new("net.shoggoth.familiar-ai");
             let mut announced: std::collections::BTreeSet<String> = Default::default();
             let mut drawn: Option<usize> = None;
@@ -174,11 +177,13 @@ impl TrayApp {
             let config_path_for_loop = config_path.clone();
             let shutdown_rx = self.shutdown_rx.clone();
             let source_for_loop = self.source.clone();
+            let refresh = self.refresher();
+            let mut last_refresh = Instant::now();
             glib::source::timeout_add_local(Duration::from_millis(100), move || {
                 let mut quitting = false;
                 while let Ok(event) = menu_channel.try_recv() {
-                    let ids = ids_for_loop.lock().unwrap();
-                    if let Some(cmd) = ids.resolve(&event.id) {
+                    let cmd = ids_for_loop.lock().unwrap().resolve(&event.id);
+                    if let Some(cmd) = cmd {
                         // Read before the move: handle_command consumes it.
                         quitting |= matches!(cmd, TrayCommand::Quit);
                         handle_command(
@@ -193,9 +198,22 @@ impl TrayApp {
                 // from the menu, or the daemon is stopping on its own (SIGTERM).
                 // Both have to leave gtk::main(), which is what returns the main
                 // thread to the caller so the PID file is removed.
+                //
+                // Checked before the redraw, never after: the redraw takes the
+                // database lock, and making SIGTERM wait behind it is how a
+                // shutdown misses its deadline and the supervisor escalates.
                 if quitting || *shutdown_rx.borrow() {
                     gtk::main_quit();
                     return glib::ControlFlow::Break;
+                }
+                // Redraw when the menu would now read differently. Without
+                // this the menu is whatever it was at startup for the life of
+                // the process: toggling inference changed the daemon and left
+                // the item still saying "Enable Local LLM", which is
+                // indistinguishable from the click having done nothing.
+                if last_refresh.elapsed() >= MENU_REFRESH_INTERVAL {
+                    last_refresh = Instant::now();
+                    refresh.refresh_if_changed(&tray, &mut spec, &ids_for_loop);
                 }
                 glib::ControlFlow::Continue
             });
@@ -205,10 +223,12 @@ impl TrayApp {
         #[cfg(not(target_os = "linux"))]
         {
             // macOS: simple loop polling menu events
+            let refresh = self.refresher();
+            let mut last_refresh = Instant::now();
             loop {
                 if let Ok(event) = menu_channel.try_recv() {
-                    let ids = ids_arc.lock().unwrap();
-                    if let Some(cmd) = ids.resolve(&event.id) {
+                    let cmd = ids_arc.lock().unwrap().resolve(&event.id);
+                    if let Some(cmd) = cmd {
                         let should_quit = matches!(cmd, TrayCommand::Quit);
                         handle_command(cmd, &command_tx, &config_path, self.source.as_ref());
                         if should_quit {
@@ -219,6 +239,10 @@ impl TrayApp {
                 if *self.shutdown_rx.borrow() {
                     break;
                 }
+                if last_refresh.elapsed() >= MENU_REFRESH_INTERVAL {
+                    last_refresh = Instant::now();
+                    refresh.refresh_if_changed(&tray, &mut spec, &ids_arc);
+                }
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -226,10 +250,8 @@ impl TrayApp {
         Ok(())
     }
 
-    fn build_muda_menu(&self) -> Result<(Menu, MenuIdMap), FamiliarError> {
-        let menu = Menu::new();
-        let mut ids = MenuIdMap::new();
-
+    /// The menu as it should read right now.
+    fn menu_spec(&self) -> Vec<MenuItemSpec> {
         let status = self.status.lock().unwrap().clone();
         let recent = self
             .db
@@ -237,15 +259,83 @@ impl TrayApp {
             .unwrap()
             .list_active_projects()
             .unwrap_or_default();
-
-        let spec = crate::menu::build_menu_spec(
+        crate::menu::build_menu_spec(
             &status,
             &recent,
             self.config.recent_projects_count,
             self.dashboard.clone(),
-        );
-        drop(recent);
+        )
+    }
 
+    /// The collaborators the redraw needs, owned, so it can live inside the
+    /// event loop's closure after `self` has been consumed.
+    fn refresher(&self) -> MenuRefresher {
+        MenuRefresher {
+            status: self.status.clone(),
+            db: self.db.clone(),
+            recent_projects_count: self.config.recent_projects_count,
+            dashboard: self.dashboard.clone(),
+        }
+    }
+}
+
+/// Keeps the drawn menu in step with the state it describes.
+struct MenuRefresher {
+    status: Arc<Mutex<AppStatus>>,
+    db: Arc<Mutex<Database>>,
+    recent_projects_count: usize,
+    dashboard: Option<DashboardTarget>,
+}
+
+impl MenuRefresher {
+    /// Rebuilds the tray's menu when its contents would differ from what is
+    /// drawn, and leaves it alone otherwise.
+    ///
+    /// The comparison is over the spec rather than a hand-picked set of
+    /// fields, so a new menu item cannot be added without its changes also
+    /// triggering a redraw. Rebuilding unconditionally would work too, but it
+    /// replaces the menu ten times a second, which closes it under the
+    /// pointer while someone is reading it.
+    fn refresh_if_changed(
+        &self,
+        tray: &tray_icon::TrayIcon,
+        drawn: &mut Vec<MenuItemSpec>,
+        ids: &Arc<Mutex<MenuIdMap>>,
+    ) {
+        let status = match self.status.lock() {
+            Ok(status) => status.clone(),
+            Err(_) => return,
+        };
+        let recent = match self.db.lock() {
+            Ok(db) => db.list_active_projects().unwrap_or_default(),
+            Err(_) => return,
+        };
+        let spec = crate::menu::build_menu_spec(
+            &status,
+            &recent,
+            self.recent_projects_count,
+            self.dashboard.clone(),
+        );
+        if spec == *drawn {
+            return;
+        }
+        let (menu, new_ids) = render_menu(&spec);
+        tray.set_menu(Some(Box::new(menu)));
+        if let Err(e) = tray.set_tooltip(Some(build_tooltip(&status))) {
+            tracing::warn!(error = %e, "failed to update tray tooltip");
+        }
+        *ids.lock().unwrap() = new_ids;
+        *drawn = spec;
+    }
+}
+
+/// Turns the logical menu into muda widgets, and records which widget id maps
+/// to which command.
+fn render_menu(spec: &[MenuItemSpec]) -> (Menu, MenuIdMap) {
+    let menu = Menu::new();
+    let mut ids = MenuIdMap::new();
+    {
+        let spec = spec.to_vec();
         for item in spec {
             match item {
                 MenuItemSpec::Header(text) => {
@@ -255,19 +345,9 @@ impl TrayApp {
                 MenuItemSpec::Separator => {
                     menu.append(&PredefinedMenuItem::separator()).ok();
                 }
-                MenuItemSpec::LlmToggle { enabled } => {
-                    let label = if enabled {
-                        "Disable Local LLM"
-                    } else {
-                        "Enable Local LLM"
-                    };
-                    let mi = MenuItem::new(label, true, None);
-                    let cmd = if enabled {
-                        TrayCommand::DisableLlm
-                    } else {
-                        TrayCommand::EnableLlm
-                    };
-                    ids.insert(mi.id().clone(), cmd);
+                MenuItemSpec::Llm(state) => {
+                    let mi = MenuItem::new(state.label(), true, None);
+                    ids.insert(mi.id().clone(), state.command());
                     menu.append(&mi).ok();
                 }
                 MenuItemSpec::PauseToggle { paused } => {
@@ -325,12 +405,12 @@ impl TrayApp {
                 }
             }
         }
-
-        // Suppress unused warning for Submenu import
-        let _ = std::marker::PhantomData::<Submenu>;
-
-        Ok((menu, ids))
     }
+
+    // Suppress unused warning for Submenu import
+    let _ = std::marker::PhantomData::<Submenu>;
+
+    (menu, ids)
 }
 
 pub struct MenuIdMap {
@@ -366,6 +446,20 @@ fn handle_command(
     source: Option<&Arc<dyn DataSource>>,
 ) {
     match &cmd {
+        // Straight to the inference page rather than the window's first tab:
+        // the operator clicked an item about the LLM, and making them find
+        // the right tab is the same dead end as the item that did nothing.
+        TrayCommand::ConfigureLlm => match source {
+            #[cfg(target_os = "linux")]
+            Some(source) => {
+                crate::windows::open_inference_settings_window(source.clone(), config_path.clone())
+            }
+            _ => {
+                if let Err(e) = opener::open(config_path) {
+                    tracing::warn!(error = %e, "failed to open settings file");
+                }
+            }
+        },
         TrayCommand::OpenSettings => match source {
             // A window beats dropping the user into a text editor, and it can
             // still open the file for anything that has to persist.

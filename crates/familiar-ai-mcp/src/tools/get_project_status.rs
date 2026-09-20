@@ -48,6 +48,7 @@ impl Tool for GetProjectStatusTool {
         let mut result = json!({
             "active_projects": status.active_projects,
             "local_llm_enabled": status.local_llm_enabled,
+            "local_llm_configured": status.local_llm_configured,
             "mcp_enabled": status.mcp_enabled,
             "startup_time": status.startup_time.to_rfc3339(),
             "uptime_secs": uptime_secs,
