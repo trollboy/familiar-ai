@@ -14,6 +14,20 @@
 
 set -euo pipefail
 
+# Git exports these to every process a hook runs, and they override the
+# directory a `git` invocation was pointed at. The steps below build fixture
+# repositories and run `git add`, `git commit` and `git worktree add` inside
+# them -- so run from the pre-push hook, without this, those fixtures write to
+# the repository being pushed. Two pushes did exactly that: one committed
+# "fixture", deleting every tracked file, the other added a file called
+# `file`.
+#
+# Cleared here rather than only in the hook because this file is the single
+# definition every caller runs, and because the hook a contributor has
+# installed is whatever they symlinked, possibly from another checkout.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
+
 failed=""
 
 # `familiar-ai gate run` sets GATE_SUMMARY to a path and reads the one-line

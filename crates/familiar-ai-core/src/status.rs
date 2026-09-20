@@ -6,6 +6,11 @@ pub struct AppStatus {
     pub startup_time: DateTime<Utc>,
     pub active_projects: usize,
     pub local_llm_enabled: bool,
+    /// Whether config.toml names a backend at all. Distinct from
+    /// `local_llm_enabled`, which is whether one is loaded right now: an
+    /// unconfigured daemon has nothing to enable, and a surface that cannot
+    /// tell the two apart can only offer a toggle that does nothing.
+    pub local_llm_configured: bool,
     pub mcp_enabled: bool,
     pub last_heartbeat: DateTime<Utc>,
 }
@@ -17,6 +22,7 @@ impl AppStatus {
             startup_time: now,
             active_projects: 0,
             local_llm_enabled: false,
+            local_llm_configured: false,
             mcp_enabled: false,
             last_heartbeat: now,
         }
@@ -42,6 +48,7 @@ mod tests {
         let status = AppStatus::new();
         assert_eq!(status.active_projects, 0);
         assert!(!status.local_llm_enabled);
+        assert!(!status.local_llm_configured);
         assert!(!status.mcp_enabled);
         assert!(status.startup_time <= Utc::now());
     }

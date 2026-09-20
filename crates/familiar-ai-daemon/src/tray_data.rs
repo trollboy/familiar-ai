@@ -30,6 +30,10 @@ pub struct DaemonDataSource {
     runtime: Arc<tokio::runtime::Runtime>,
     control: ControlPlaneService,
     paths: familiar_ai_core::AppPaths,
+    /// The same status the tray menu reads. Configuring inference has to
+    /// update it, or the menu keeps offering to configure something that is
+    /// now configured.
+    status: Arc<Mutex<familiar_ai_core::AppStatus>>,
 }
 
 impl DaemonDataSource {
@@ -39,6 +43,7 @@ impl DaemonDataSource {
         runtime: Arc<tokio::runtime::Runtime>,
         control: ControlPlaneService,
         paths: familiar_ai_core::AppPaths,
+        status: Arc<Mutex<familiar_ai_core::AppStatus>>,
     ) -> Self {
         Self {
             db,
@@ -46,6 +51,7 @@ impl DaemonDataSource {
             runtime,
             control,
             paths,
+            status,
         }
     }
 
@@ -452,6 +458,95 @@ impl DaemonDataSource {
     /// all of it. Edits are applied to an in-memory document and only written
     /// once every one of them succeeded, so a rejected value cannot leave the
     /// file half-changed.
+    /// Writes the inference settings and applies them to the running daemon.
+    ///
+    /// Two things make this its own path rather than three `ConfigEdit`s.
+    /// The generic save can only write a setting the file already has, or one
+    /// whose type it can borrow from a global of the same name — and a daemon
+    /// being configured for the first time has no `[inference]` table to take
+    /// either from. And these settings decide whether a backend exists at
+    /// all, so applying them means rebuilding the router, not noting that a
+    /// restart is due.
+    fn save_inference_config(
+        &self,
+        mode: &str,
+        builtin_url: &str,
+        builtin_model: &str,
+    ) -> Result<Value, String> {
+        if !INFERENCE_MODES.contains(&mode) {
+            return Err(format!("unknown inference mode: {mode}"));
+        }
+        let url = builtin_url.trim();
+        let model = builtin_model.trim();
+        // A mode that needs the builtin endpoint and does not have one would
+        // write a config that cannot load, and the operator would be told
+        // "enabled" about a backend that is not there.
+        if matches!(mode, "local_only" | "hybrid") {
+            if url.is_empty() {
+                return Err("an endpoint is required for this mode".into());
+            }
+            if model.is_empty() {
+                return Err("a model is required for this mode".into());
+            }
+        }
+
+        let path = self.config_path();
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut document: toml_edit::Document = text.parse().map_err(|e| format!("{e}"))?;
+        for (key, value) in [
+            ("mode", mode),
+            ("builtin_url", url),
+            ("builtin_model", model),
+        ] {
+            let slot = ensure_item(
+                document.as_item_mut(),
+                &["inference".to_string(), "text".to_string(), key.to_string()],
+            )
+            .ok_or_else(|| format!("cannot create setting: inference.text.{key}"))?;
+            *slot = toml_edit::value(value);
+        }
+
+        // Same recoverability rule the generic save follows: keep what was
+        // there before overwriting it.
+        let backup = path.with_extension(format!(
+            "toml.bak-inference-{}",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        std::fs::copy(&path, &backup).map_err(|e| e.to_string())?;
+        std::fs::write(&path, document.to_string()).map_err(|e| e.to_string())?;
+
+        // Re-read rather than patching an in-memory copy: the file is the
+        // source of truth, and it may have been edited by hand too.
+        let inference = read_inference_config(&path)?;
+        let router = self.router.clone();
+        let (configured, loaded, load_error) = self.runtime.block_on(async move {
+            router.reconfigure(&inference).await;
+            let configured = router.is_configured().await;
+            match router.enable().await {
+                Ok(()) => (configured, true, None),
+                Err(e) => (configured, false, Some(e.to_string())),
+            }
+        });
+
+        if let Ok(mut status) = self.status.lock() {
+            status.local_llm_configured = configured;
+            status.local_llm_enabled = loaded;
+        }
+
+        let note = match (configured, loaded, &load_error) {
+            (false, _, _) => "Saved. Inference is disabled, so no backend is loaded.".to_string(),
+            (true, true, _) => "Saved and loaded. Inference is active now.".to_string(),
+            (true, false, Some(e)) => format!("Saved, but the backend did not load: {e}"),
+            (true, false, None) => "Saved, but the backend did not load.".to_string(),
+        };
+        Ok(json!({
+            "configured": configured,
+            "loaded": loaded,
+            "backup": backup.to_string_lossy(),
+            "note": note,
+        }))
+    }
+
     fn save_config(&self, edits: &[ConfigEdit]) -> Result<Value, String> {
         let path = self.config_path();
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -543,6 +638,15 @@ impl DataSource for DaemonDataSource {
             Query::BlockedReasons { repo } => self.blocked_reasons(&repo),
             Query::ConfigChoices => Ok(self.config_choices()),
             Query::DiscoverModels => Ok(self.discover_models()),
+            Query::InferenceSettings => {
+                let inference = read_inference_config(&self.config_path())?;
+                let text = &inference.text;
+                Ok(json!({
+                    "mode": mode_id(&text.mode),
+                    "builtin_url": text.builtin_url,
+                    "builtin_model": text.builtin_model,
+                }))
+            }
             Query::ConfigDocument => {
                 let path = self.config_path();
                 let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -595,6 +699,7 @@ impl DataSource for DaemonDataSource {
                     | Query::Executions { .. }
                     | Query::ProjectState { .. }
                     | Query::ConfigDocument
+                    | Query::InferenceSettings
                     | Query::ConfigChoices
                     | Query::Checkpoints { .. }
                     | Query::Dependencies { .. }
@@ -706,7 +811,46 @@ impl DataSource for DaemonDataSource {
                 &reason,
             ),
             Action::SaveConfig { edits } => self.save_config(&edits),
+            Action::SaveInferenceConfig {
+                mode,
+                builtin_url,
+                builtin_model,
+            } => self.save_inference_config(&mode, &builtin_url, &builtin_model),
         }
+    }
+}
+
+/// The effective inference settings: the file's `[inference]` table where it
+/// has one, the schema's defaults where it does not.
+///
+/// Deliberately narrower than `Config::load`, which validates the whole file —
+/// including canonicalizing every configured repository's worktree. Setting up
+/// inference must not fail because some unrelated repository has since been
+/// moved or deleted.
+fn read_inference_config(
+    path: &std::path::Path,
+) -> Result<familiar_ai_core::config::InferenceConfig, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let document: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
+    match document.get("inference") {
+        Some(table) => table.clone().try_into().map_err(|e| format!("{e}")),
+        // Every field carries a serde default, so an absent table is the
+        // default configuration rather than an error.
+        None => Ok(familiar_ai_core::config::InferenceConfig::default()),
+    }
+}
+
+/// The inference modes the config file accepts, spelled as serde writes them.
+const INFERENCE_MODES: [&str; 4] = ["disabled", "local_only", "remote_only", "hybrid"];
+
+/// The mode's config-file spelling, which is what the form's dropdown uses.
+fn mode_id(mode: &familiar_ai_core::config::InferenceMode) -> &'static str {
+    use familiar_ai_core::config::InferenceMode;
+    match mode {
+        InferenceMode::Disabled => "disabled",
+        InferenceMode::LocalOnly => "local_only",
+        InferenceMode::RemoteOnly => "remote_only",
+        InferenceMode::Hybrid => "hybrid",
     }
 }
 

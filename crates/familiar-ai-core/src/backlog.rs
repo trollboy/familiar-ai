@@ -5,7 +5,6 @@ use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct PrdId {
@@ -674,10 +673,7 @@ impl BacklogDiscovery for FilesystemBacklogDiscovery {
             BacklogError::Repository(format!("cannot resolve current directory: {e}"))
         })?;
         let git = |args: &[&str]| -> Result<PathBuf, BacklogError> {
-            let output = Command::new("git")
-                .args(["-C"])
-                .arg(&cwd)
-                .args(args)
+            let output = crate::git_env::git_command(&cwd, args)
                 .output()
                 .map_err(|e| BacklogError::Repository(format!("cannot run git: {e}")))?;
             if !output.status.success() {

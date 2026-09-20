@@ -16,6 +16,7 @@ use familiar_ai_tray::data::{Action, ConfigEdit, DataSource, Query};
 use tempfile::TempDir;
 
 struct Harness {
+    status: Arc<Mutex<familiar_ai_core::AppStatus>>,
     _tmp: TempDir,
     repo: String,
     config: std::path::PathBuf,
@@ -38,7 +39,9 @@ allowed_paths = ["docs", "crates"]
 max_review_attempts = 3
 
 [repositories."/p/one"]
-profile = "strict"
+# A real profile name: the fixture stands in for a config the daemon loads,
+# and a value that fails validation would only ever test the failure path.
+profile = "canonical"
 "#;
 
 fn harness() -> Harness {
@@ -70,8 +73,10 @@ fn harness() -> Harness {
         pid_path: tmp.path().join("run.pid"),
     };
     let repo = repo_dir.to_string_lossy().into_owned();
+    let status = Arc::new(Mutex::new(familiar_ai_core::AppStatus::new()));
     Harness {
-        source: DaemonDataSource::new(db, router, runtime, control, paths),
+        source: DaemonDataSource::new(db, router, runtime, control, paths, status.clone()),
+        status,
         repo,
         config: config_dir.join("config.toml"),
         _tmp: tmp,
@@ -420,7 +425,7 @@ fn a_project_can_override_a_setting_it_currently_inherits() {
         parsed["repositories"]["/p/one"]["profile"]
             .as_str()
             .unwrap(),
-        "strict"
+        "canonical"
     );
     assert!(written.contains("do not raise further without a warrant"));
 }
@@ -466,4 +471,145 @@ fn a_project_override_of_an_unknown_setting_is_refused() {
         })
         .expect_err("unknown settings must be refused even under a project");
     assert!(error.contains("no_such_setting"), "{error}");
+}
+
+// --------------------------------------------------------- inference set-up
+
+/// The fixture has no `[inference]` table, which is the state of every daemon
+/// nobody has configured — and the state in which the tray's inference item
+/// matters. The settings still have to be readable, or the form that edits
+/// them has nothing to show.
+#[test]
+fn inference_settings_are_offered_even_when_the_file_has_no_inference_table() {
+    let h = harness();
+    let document = h.source.query(Query::ConfigDocument).unwrap();
+    assert!(
+        document["document"].get("inference").is_none(),
+        "the fixture is meant to have no inference table"
+    );
+
+    let settings = h.source.query(Query::InferenceSettings).unwrap();
+    assert_eq!(settings["mode"], "disabled");
+    // The defaults come from the schema, so the endpoint and model are
+    // present to be edited rather than blank.
+    assert!(!settings["builtin_url"].as_str().unwrap().is_empty());
+    assert!(!settings["builtin_model"].as_str().unwrap().is_empty());
+}
+
+/// The generic config save cannot create the table — it has no existing
+/// setting to take the type from — which is why configuring inference has its
+/// own action. If this ever starts succeeding, the dedicated path can go.
+#[test]
+fn the_generic_save_cannot_create_the_inference_table() {
+    let h = harness();
+    let outcome = h.source.act(Action::SaveConfig {
+        edits: vec![ConfigEdit {
+            path: vec!["inference".into(), "text".into(), "mode".into()],
+            value: "local_only".into(),
+        }],
+    });
+    assert!(outcome.is_err(), "expected a refusal, got {outcome:?}");
+}
+
+#[test]
+fn saving_inference_creates_the_table_and_marks_it_configured() {
+    let h = harness();
+    assert!(!h.status.lock().unwrap().local_llm_configured);
+
+    let result = h
+        .source
+        .act(Action::SaveInferenceConfig {
+            mode: "local_only".into(),
+            // A port nothing listens on: the save must land and be reported
+            // as configured whether or not a backend answers.
+            builtin_url: "http://127.0.0.1:1".into(),
+            builtin_model: "qwen2.5:3b".into(),
+        })
+        .expect("the save should land");
+
+    assert_eq!(result["configured"], true);
+
+    // It is in the file...
+    let document = h.source.query(Query::ConfigDocument).unwrap();
+    assert_eq!(
+        document["document"]["inference"]["text"]["mode"],
+        "local_only"
+    );
+    assert_eq!(
+        document["document"]["inference"]["text"]["builtin_model"],
+        "qwen2.5:3b"
+    );
+
+    // ...the rest of the file survived, comments included...
+    let text = std::fs::read_to_string(&h.config).unwrap();
+    assert!(text.contains("do not raise further without a warrant"));
+    assert!(text.contains("max_prds_per_session = 6"));
+
+    // ...the running router picked it up without a restart...
+    let status = h.source.query(Query::InferenceStatus).unwrap();
+    assert_eq!(status["text_mode"], "localonly");
+
+    // ...and the tray now knows it has something to toggle.
+    assert!(h.status.lock().unwrap().local_llm_configured);
+}
+
+/// Saving back to disabled has to clear the flag too, or the menu keeps
+/// offering to enable a backend that no longer exists.
+#[test]
+fn saving_disabled_clears_the_configured_flag() {
+    let h = harness();
+    h.source
+        .act(Action::SaveInferenceConfig {
+            mode: "local_only".into(),
+            builtin_url: "http://127.0.0.1:1".into(),
+            builtin_model: "qwen2.5:3b".into(),
+        })
+        .unwrap();
+    assert!(h.status.lock().unwrap().local_llm_configured);
+
+    let result = h
+        .source
+        .act(Action::SaveInferenceConfig {
+            mode: "disabled".into(),
+            builtin_url: "http://127.0.0.1:1".into(),
+            builtin_model: "qwen2.5:3b".into(),
+        })
+        .unwrap();
+
+    assert_eq!(result["configured"], false);
+    assert!(!h.status.lock().unwrap().local_llm_configured);
+    assert!(!h.status.lock().unwrap().local_llm_enabled);
+}
+
+/// A mode that needs an endpoint must not be saved without one: the config
+/// would be written, the backend would fail to load, and the operator would
+/// be back to a setting that appears to do nothing.
+#[test]
+fn a_mode_needing_an_endpoint_is_refused_without_one() {
+    let h = harness();
+    for (url, model) in [("", "qwen2.5:3b"), ("http://127.0.0.1:1", "")] {
+        let outcome = h.source.act(Action::SaveInferenceConfig {
+            mode: "local_only".into(),
+            builtin_url: url.into(),
+            builtin_model: model.into(),
+        });
+        assert!(
+            outcome.is_err(),
+            "expected a refusal for ({url:?}, {model:?})"
+        );
+    }
+    // Nothing was written on the way to refusing.
+    let document = h.source.query(Query::ConfigDocument).unwrap();
+    assert!(document["document"].get("inference").is_none());
+}
+
+#[test]
+fn an_unknown_mode_is_refused() {
+    let h = harness();
+    let outcome = h.source.act(Action::SaveInferenceConfig {
+        mode: "sometimes".into(),
+        builtin_url: "http://127.0.0.1:1".into(),
+        builtin_model: "qwen2.5:3b".into(),
+    });
+    assert!(outcome.is_err(), "expected a refusal, got {outcome:?}");
 }

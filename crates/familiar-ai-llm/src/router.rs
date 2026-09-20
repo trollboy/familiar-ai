@@ -39,13 +39,51 @@ pub struct RouterHealthState {
     pub embedding_fallback: Option<LlmHealthState>,
 }
 
-pub struct InferenceRouter {
-    text_config: Arc<RwLock<TextInferenceConfig>>,
-    embedding_config: Arc<RwLock<EmbeddingInferenceConfig>>,
+/// The four managers a configuration produces, replaced as a set.
+///
+/// They live behind one lock rather than four so a reconfiguration is atomic:
+/// a caller can never observe the text side of a new config against the
+/// embedding side of the old one.
+#[derive(Default, Clone)]
+struct Managers {
     text_primary: Option<Arc<LlmManager>>,
     text_fallback: Option<Arc<LlmManager>>,
     embed_primary: Option<Arc<LlmManager>>,
     embed_fallback: Option<Arc<LlmManager>>,
+}
+
+impl Managers {
+    fn from_config(config: &InferenceConfig) -> Self {
+        let (text_primary, text_fallback) = build_text_managers(&config.text);
+        let (embed_primary, embed_fallback) = build_embed_managers(&config.embedding);
+        Self {
+            text_primary,
+            text_fallback,
+            embed_primary,
+            embed_fallback,
+        }
+    }
+
+    fn labelled(&self) -> Vec<(&'static str, Arc<LlmManager>)> {
+        let mut out = Vec::new();
+        for (label, slot) in [
+            ("text_primary", &self.text_primary),
+            ("text_fallback", &self.text_fallback),
+            ("embed_primary", &self.embed_primary),
+            ("embed_fallback", &self.embed_fallback),
+        ] {
+            if let Some(manager) = slot {
+                out.push((label, manager.clone()));
+            }
+        }
+        out
+    }
+}
+
+pub struct InferenceRouter {
+    text_config: Arc<RwLock<TextInferenceConfig>>,
+    embedding_config: Arc<RwLock<EmbeddingInferenceConfig>>,
+    managers: Arc<RwLock<Managers>>,
 }
 
 fn builtin_params(
@@ -88,22 +126,49 @@ impl InferenceRouter {
         let text = &config.text;
         let embed = &config.embedding;
 
-        let (text_primary, text_fallback) = build_text_managers(text);
-        let (embed_primary, embed_fallback) = build_embed_managers(embed);
-
         Self {
             text_config: Arc::new(RwLock::new(text.clone())),
             embedding_config: Arc::new(RwLock::new(embed.clone())),
-            text_primary,
-            text_fallback,
-            embed_primary,
-            embed_fallback,
+            managers: Arc::new(RwLock::new(Managers::from_config(config))),
         }
     }
 
+    /// Rebuilds every manager from a new configuration, dropping whatever the
+    /// old one had loaded.
+    ///
+    /// The router is handed out as an `Arc` to workers that keep it for the
+    /// life of the process, so reconfiguring has to happen behind `&self`:
+    /// the alternative is a restart, which is exactly what makes configuring
+    /// inference from the tray feel like it did nothing.
+    pub async fn reconfigure(&self, config: &InferenceConfig) {
+        let replacement = Managers::from_config(config);
+        for (_, manager) in self.managers.read().await.labelled() {
+            manager.disable().await;
+        }
+        *self.text_config.write().await = config.text.clone();
+        *self.embedding_config.write().await = config.embedding.clone();
+        *self.managers.write().await = replacement;
+    }
+
+    /// Whether this configuration produced anything that could serve a
+    /// request. False whenever every mode is disabled or left unset.
+    pub async fn is_configured(&self) -> bool {
+        !self.managers.read().await.labelled().is_empty()
+    }
+
     pub async fn enable(&self) -> Result<(), LlmError> {
+        let managers = self.all_managers().await;
+        // A disabled configuration builds no managers at all, and looping over
+        // none of them used to collect no errors and report success — the
+        // caller then recorded inference as enabled against a router that had
+        // nothing to enable. Say so instead.
+        if managers.is_empty() {
+            return Err(LlmError::Config(
+                "inference is not configured: no backend is set in config.toml".into(),
+            ));
+        }
         let mut errors = Vec::new();
-        for (label, mgr) in self.all_managers() {
+        for (label, mgr) in managers {
             if let Err(e) = mgr.enable().await {
                 tracing::warn!(manager = label, error = %e, "failed to enable");
                 errors.push(e);
@@ -117,17 +182,18 @@ impl InferenceRouter {
     }
 
     pub async fn disable(&self) {
-        for (_, mgr) in self.all_managers() {
+        for (_, mgr) in self.all_managers().await {
             mgr.disable().await;
         }
     }
 
     pub async fn text_health(&self) -> (LlmHealthState, Option<LlmHealthState>) {
-        let primary = match &self.text_primary {
+        let managers = self.managers.read().await.clone();
+        let primary = match &managers.text_primary {
             Some(m) => m.health().await,
             None => LlmHealthState::disabled(),
         };
-        let fallback = match &self.text_fallback {
+        let fallback = match &managers.text_fallback {
             Some(m) => Some(m.health().await),
             None => None,
         };
@@ -135,11 +201,12 @@ impl InferenceRouter {
     }
 
     pub async fn embedding_health(&self) -> (LlmHealthState, Option<LlmHealthState>) {
-        let primary = match &self.embed_primary {
+        let managers = self.managers.read().await.clone();
+        let primary = match &managers.embed_primary {
             Some(m) => m.health().await,
             None => LlmHealthState::disabled(),
         };
-        let fallback = match &self.embed_fallback {
+        let fallback = match &managers.embed_fallback {
             Some(m) => Some(m.health().await),
             None => None,
         };
@@ -270,11 +337,12 @@ impl InferenceRouter {
     }
 
     pub async fn test_connection(&self, target: &str) -> ConnectionTestResult {
+        let managers = self.managers.read().await.clone();
         let mgr = match target {
-            "text_primary" => self.text_primary.as_ref(),
-            "text_fallback" => self.text_fallback.as_ref(),
-            "embed_primary" => self.embed_primary.as_ref(),
-            "embed_fallback" => self.embed_fallback.as_ref(),
+            "text_primary" => managers.text_primary.clone(),
+            "text_fallback" => managers.text_fallback.clone(),
+            "embed_primary" => managers.embed_primary.clone(),
+            "embed_fallback" => managers.embed_fallback.clone(),
             _ => None,
         };
         let Some(manager) = mgr else {
@@ -307,25 +375,12 @@ impl InferenceRouter {
 
     // --- private helpers ---
 
-    fn all_managers(&self) -> Vec<(&str, &Arc<LlmManager>)> {
-        let mut out = Vec::new();
-        if let Some(m) = &self.text_primary {
-            out.push(("text_primary", m));
-        }
-        if let Some(m) = &self.text_fallback {
-            out.push(("text_fallback", m));
-        }
-        if let Some(m) = &self.embed_primary {
-            out.push(("embed_primary", m));
-        }
-        if let Some(m) = &self.embed_fallback {
-            out.push(("embed_fallback", m));
-        }
-        out
+    async fn all_managers(&self) -> Vec<(&'static str, Arc<LlmManager>)> {
+        self.managers.read().await.labelled()
     }
 
     async fn any_loaded(&self) -> bool {
-        for (_, mgr) in self.all_managers() {
+        for (_, mgr) in self.all_managers().await {
             if mgr.is_loaded().await {
                 return true;
             }
@@ -334,19 +389,23 @@ impl InferenceRouter {
     }
 
     async fn get_text_primary_backend(&self) -> Option<Arc<dyn crate::backend::LlmBackend>> {
-        self.text_primary.as_ref()?.backend().await
+        let manager = self.managers.read().await.text_primary.clone()?;
+        manager.backend().await
     }
 
     async fn get_text_fallback_backend(&self) -> Option<Arc<dyn crate::backend::LlmBackend>> {
-        self.text_fallback.as_ref()?.backend().await
+        let manager = self.managers.read().await.text_fallback.clone()?;
+        manager.backend().await
     }
 
     async fn get_embed_primary_backend(&self) -> Option<Arc<dyn crate::backend::LlmBackend>> {
-        self.embed_primary.as_ref()?.backend().await
+        let manager = self.managers.read().await.embed_primary.clone()?;
+        manager.backend().await
     }
 
     async fn get_embed_fallback_backend(&self) -> Option<Arc<dyn crate::backend::LlmBackend>> {
-        self.embed_fallback.as_ref()?.backend().await
+        let manager = self.managers.read().await.embed_fallback.clone()?;
+        manager.backend().await
     }
 }
 
@@ -497,6 +556,56 @@ mod tests {
         }
     }
 
+    /// The whole point of the reconfigure path: a router handed out as an
+    /// `Arc` at startup has to be able to acquire backends later, because the
+    /// alternative is telling the operator to restart the daemon after they
+    /// configure one.
+    #[tokio::test]
+    async fn reconfigure_gives_a_disabled_router_backends() {
+        let router = InferenceRouter::new(&disabled_config());
+        assert!(!router.is_configured().await);
+        assert!(router.enable().await.is_err());
+
+        router.reconfigure(&local_only_config()).await;
+
+        assert!(router.is_configured().await);
+        assert_eq!(router.health().await.text_mode, "localonly");
+        // It is now a real target for a connection test rather than being
+        // reported as "not configured".
+        assert_ne!(
+            router.test_connection("text_primary").await.status_text,
+            "not configured"
+        );
+    }
+
+    /// And the reverse: configuring back to disabled drops what was there
+    /// rather than leaving a stale backend serving requests.
+    #[tokio::test]
+    async fn reconfigure_to_disabled_drops_the_backends() {
+        let router = InferenceRouter::new(&local_only_config());
+        assert!(router.is_configured().await);
+
+        router.reconfigure(&disabled_config()).await;
+
+        assert!(!router.is_configured().await);
+        assert_eq!(router.health().await.text_mode, "disabled");
+        assert_eq!(
+            router.test_connection("text_primary").await.status_text,
+            "not configured"
+        );
+    }
+
+    /// Enabling nothing is a failure. Reporting success for having iterated
+    /// over an empty set is what let the daemon record inference as on while
+    /// no backend existed.
+    #[tokio::test]
+    async fn enable_with_no_managers_is_an_error_not_a_success() {
+        let router = InferenceRouter::new(&disabled_config());
+        let error = router.enable().await.expect_err("nothing to enable");
+        assert!(matches!(error, LlmError::Config(_)), "{error:?}");
+        assert!(error.to_string().contains("not configured"), "{error}");
+    }
+
     #[tokio::test]
     async fn disabled_mode_summarize_returns_error() {
         let router = InferenceRouter::new(&disabled_config());
@@ -576,7 +685,8 @@ mod tests {
     async fn local_only_builds_primary_no_fallback() {
         let config = local_only_config();
         let router = InferenceRouter::new(&config);
-        assert!(router.text_primary.is_some());
-        assert!(router.text_fallback.is_none());
+        let managers = router.managers.read().await.clone();
+        assert!(managers.text_primary.is_some());
+        assert!(managers.text_fallback.is_none());
     }
 }

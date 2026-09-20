@@ -1,5 +1,4 @@
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 /// The single minting site for repository origin identity (PRD-087).
 ///
@@ -34,12 +33,12 @@ pub enum RepositoryOriginError {
 /// the sole definition of repository identity: two paths produce the same
 /// key if and only if they belong to the same repository.
 pub fn repository_origin_key(path: &Path) -> Result<String, RepositoryOriginError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .map_err(RepositoryOriginError::Exec)?;
+    let output = crate::git_env::git_command(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .output()
+    .map_err(RepositoryOriginError::Exec)?;
     if !output.status.success() {
         return Err(RepositoryOriginError::GitFailed(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -215,14 +214,10 @@ fn verify_physical_containment(root: &Path, relative: &str) -> Result<(), PathId
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Stdio;
     use tempfile::tempdir;
 
     fn git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .stdin(Stdio::null())
+        assert!(crate::git_env::git_command(dir, args)
             .status()
             .unwrap()
             .success());

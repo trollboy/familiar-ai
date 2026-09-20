@@ -27,6 +27,9 @@ thread_local! {
     /// One window each, reused. Clicking a menu item twice should raise the
     /// window that is already open, not stack a second copy behind it.
     static SETTINGS_WINDOW: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
+    /// The open settings window's notebook, so a second request to open it
+    /// can switch to the page that was asked for instead of being ignored.
+    static SETTINGS_NOTEBOOK: RefCell<Option<gtk::Notebook>> = const { RefCell::new(None) };
     static DASHBOARD_WINDOW: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
 }
 
@@ -135,7 +138,44 @@ fn section(title: &str) -> (gtk::Frame, gtk::Box) {
 // ------------------------------------------------------------------ settings
 
 pub fn open_settings_window(source: Arc<dyn DataSource>, config_path: PathBuf) {
+    open_settings_on(source, config_path, SettingsPage::Configuration);
+}
+
+/// Settings, opened on the inference page.
+///
+/// The tray's inference item leads here. Landing on the window's first tab and
+/// leaving the operator to find the right one is the same dead end as the item
+/// that appeared to do nothing.
+pub fn open_inference_settings_window(source: Arc<dyn DataSource>, config_path: PathBuf) {
+    open_settings_on(source, config_path, SettingsPage::Inference);
+}
+
+/// Which page the settings window opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Configuration,
+    Inference,
+}
+
+impl SettingsPage {
+    fn index(self) -> u32 {
+        match self {
+            Self::Configuration => 0,
+            Self::Inference => 1,
+        }
+    }
+}
+
+fn open_settings_on(source: Arc<dyn DataSource>, config_path: PathBuf, page: SettingsPage) {
     if present_existing(&SETTINGS_WINDOW) {
+        // An already-open window still has to move to the page that was
+        // asked for, or clicking the inference item does nothing visible
+        // whenever settings happens to be open behind another window.
+        SETTINGS_NOTEBOOK.with(|slot| {
+            if let Some(notebook) = slot.borrow().as_ref() {
+                notebook.set_current_page(Some(page.index()));
+            }
+        });
         return;
     }
     let win = window("Familiar — Settings", 720, 640);
@@ -146,13 +186,223 @@ pub fn open_settings_window(source: Arc<dyn DataSource>, config_path: PathBuf) {
         &config_tab(source.clone(), &win, &config_path),
         Some(&tab("Configuration")),
     );
-    notebook.append_page(&inference_tab(source.clone()), Some(&tab("Inference")));
+    notebook.append_page(
+        &inference_tab(source.clone(), &win),
+        Some(&tab("Inference")),
+    );
+    notebook.set_current_page(Some(page.index()));
+    SETTINGS_NOTEBOOK.with(|slot| *slot.borrow_mut() = Some(notebook.clone()));
+    win.connect_destroy(|_| {
+        SETTINGS_NOTEBOOK.with(|slot| *slot.borrow_mut() = None);
+    });
     win.add(&notebook);
     remember(&SETTINGS_WINDOW, &win);
     win.show_all();
+    notebook.set_current_page(Some(page.index()));
 }
 
-fn inference_tab(source: Arc<dyn DataSource>) -> gtk::Widget {
+fn inference_tab(source: Arc<dyn DataSource>, parent: &gtk::Window) -> gtk::Widget {
+    let root = vbox();
+    let body = vbox();
+    populate_inference_tab(&body, source, parent);
+    root.pack_start(&scrolled(&body), true, true, 0);
+    root.upcast()
+}
+
+/// Fills the inference page: the settings that decide whether there is a
+/// backend at all, then the live state of whatever those settings produced.
+///
+/// Rebuilt in place after a save, because everything below the form — which
+/// managers exist, whether they loaded — is derived from what was just
+/// written, and a page that still showed the old state would be the same
+/// silence this whole item is meant to fix.
+fn populate_inference_tab(body: &gtk::Box, source: Arc<dyn DataSource>, parent: &gtk::Window) {
+    for child in body.children() {
+        body.remove(&child);
+    }
+
+    let settings = source.query(Query::InferenceSettings);
+    match &settings {
+        Ok(settings) => body.pack_start(
+            &inference_form(source.clone(), settings, body, parent),
+            false,
+            false,
+            0,
+        ),
+        Err(e) => body.pack_start(
+            &label(&format!("Could not read inference settings: {e}")),
+            false,
+            false,
+            0,
+        ),
+    }
+
+    body.pack_start(&inference_live_state(source), true, true, 0);
+    body.show_all();
+}
+
+/// The editable part: mode, endpoint and model.
+///
+/// Built from the effective configuration rather than from the config file's
+/// text, so it is present and fillable even when the file has no `[inference]`
+/// table at all — which is the state of every daemon that has never had one
+/// set up, and so the only state in which this form matters.
+fn inference_form(
+    source: Arc<dyn DataSource>,
+    settings: &Value,
+    body: &gtk::Box,
+    parent: &gtk::Window,
+) -> gtk::Widget {
+    let (frame, inner) = section("Configuration");
+    let string = |key: &str| {
+        settings
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let mode = gtk::ComboBoxText::new();
+    for (value, caption) in INFERENCE_MODES {
+        mode.append(Some(value), caption);
+    }
+    let current_mode = string("mode");
+    if !mode.set_active_id(Some(&current_mode)) {
+        mode.set_active_id(Some("disabled"));
+    }
+    inner.pack_start(&form_row("Mode", &mode), false, false, 0);
+
+    let url = gtk::Entry::new();
+    url.set_text(&string("builtin_url"));
+    url.set_placeholder_text(Some("http://localhost:11434"));
+    inner.pack_start(&form_row("Endpoint", &url), false, false, 0);
+
+    let model = gtk::ComboBoxText::with_entry();
+    let current_model = string("builtin_model");
+    if !current_model.is_empty() {
+        model.append(Some(&current_model), &current_model);
+        model.set_active_id(Some(&current_model));
+    }
+    inner.pack_start(&form_row("Model", &model), false, false, 0);
+    // The endpoint usually knows what it serves; ask it, so the model does not
+    // have to be typed from memory.
+    discover_models_into(
+        source.clone(),
+        vec![model.clone()],
+        vec![current_model.clone()],
+    );
+
+    let status = label("");
+    let save = gtk::Button::with_label("Save and apply");
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, PAD);
+    row.pack_start(&status, false, false, 0);
+    row.pack_end(&save, false, false, 0);
+    inner.pack_start(&row, false, false, 0);
+
+    inner.pack_start(
+        &markup(
+            "<small>Applied to the running daemon immediately — no restart.              The previous config.toml is kept as a backup.</small>",
+        ),
+        false,
+        false,
+        0,
+    );
+
+    save.connect_clicked({
+        let source = source.clone();
+        let body = body.clone();
+        let parent = parent.clone();
+        let (mode, url, model, status) = (mode.clone(), url.clone(), model.clone(), status.clone());
+        move |save| {
+            let action = Action::SaveInferenceConfig {
+                mode: mode.active_id().map(|s| s.to_string()).unwrap_or_default(),
+                builtin_url: url.text().to_string(),
+                builtin_model: combo_entry_text(&model),
+            };
+            save_inference(source.clone(), action, &body, &parent, save, &status);
+        }
+    });
+
+    frame.upcast()
+}
+
+/// The modes as the config file spells them, with captions that say what each
+/// one actually does.
+const INFERENCE_MODES: [(&str, &str); 4] = [
+    ("disabled", "Disabled — no inference"),
+    ("local_only", "Local only — use the endpoint below"),
+    ("remote_only", "Remote only — use the configured remote"),
+    ("hybrid", "Hybrid — local first, remote as fallback"),
+];
+
+fn form_row(caption: &str, widget: &impl IsA<gtk::Widget>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, PAD);
+    let name = label(caption);
+    name.set_xalign(0.0);
+    name.set_width_chars(10);
+    row.pack_start(&name, false, false, 0);
+    row.pack_start(widget, true, true, 0);
+    row
+}
+
+fn combo_entry_text(combo: &gtk::ComboBoxText) -> String {
+    combo
+        .child()
+        .and_then(|child| child.downcast::<gtk::Entry>().ok())
+        .map(|entry| entry.text().to_string())
+        .unwrap_or_default()
+}
+
+/// Saves off the GTK thread, then redraws the page from what the daemon now
+/// reports, so the result of the save is visible rather than assumed.
+fn save_inference(
+    source: Arc<dyn DataSource>,
+    action: Action,
+    body: &gtk::Box,
+    parent: &gtk::Window,
+    save: &gtk::Button,
+    status: &gtk::Label,
+) {
+    let (tx, rx) = mpsc::channel();
+    let worker_source = source.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(worker_source.act(action));
+    });
+
+    save.set_sensitive(false);
+    status.set_text("Saving…");
+    let (save, status) = (save.clone(), status.clone());
+    let (body, parent) = (body.clone(), parent.clone());
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+        Ok(outcome) => {
+            save.set_sensitive(true);
+            match outcome {
+                Ok(result) => {
+                    status.set_text(
+                        result
+                            .get("note")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Saved."),
+                    );
+                    populate_inference_tab(&body, source.clone(), &parent);
+                }
+                Err(e) => {
+                    status.set_text("Save failed.");
+                    notify(&parent, gtk::MessageType::Error, &e);
+                }
+            }
+            gtk::glib::ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            save.set_sensitive(true);
+            status.set_text("Save failed.");
+            gtk::glib::ControlFlow::Break
+        }
+    });
+}
+
+fn inference_live_state(source: Arc<dyn DataSource>) -> gtk::Widget {
     let root = vbox();
     root.pack_start(
         &markup("<small>Live state and connection tests.</small>"),
@@ -229,7 +479,7 @@ fn inference_tab(source: Arc<dyn DataSource>) -> gtk::Widget {
         ),
     }
 
-    root.pack_start(&scrolled(&body), true, true, 0);
+    root.pack_start(&body, false, false, 0);
     root.pack_start(&result, false, false, 0);
     root.upcast()
 }
