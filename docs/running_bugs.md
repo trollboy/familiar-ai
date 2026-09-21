@@ -754,6 +754,40 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
   unattended sessions. Open; surfaced 2026-08-31 during PRD-077
   verification.
 
+## 2026-09-21 — PRD-090 landed by hand, recorded as the rule requires
+
+### FAM-BUG-065 — A false completion stranded finished work outside every recovery path
+
+- **Status:** Open
+- **Found:** 2026-09-21, trying to land PRD-90 after FAM-BUG-064 was fixed.
+- **Detail:** FAM-BUG-064 marked PRD-90 `completed` while its eight changed
+  files sat uncommitted in a worktree. Fixing the ordering stops that
+  happening again; it does not undo the one that happened. And because
+  completion is immutable by contract
+  (`docs/contracts/completion-is-immutable.md`), the status cannot be walked
+  back — so `resume` refuses the PRD outright:
+
+      PRD-90 is already completed and integrated; its preserved worktree is
+      historical evidence, not resumable work
+
+  A false completion therefore does not merely misreport. It **locks the
+  work out of every supported recovery path**, permanently.
+- **How it was resolved this time:** by hand. `git apply` of the worktree
+  diff onto `main` — 1,631 lines across seven files plus one new test file —
+  which applied cleanly, compiled, and passed the full suite. PRD-090's
+  namespacing absorbed the `ops gate` command added since, alias and all.
+- **Recorded as a FAM-BUG-019 recurrence**, per the scheduling rule that a
+  hand-merge to `main` "goes in the bug log, not just the terminal history".
+  The nuance, stated rather than used as an excuse: Familiar did the
+  implementation and the review, and only the final landing was manual. The
+  reason it needed hands was a defect in Familiar, now fixed.
+- **Expected fix:** completion is immutable, so the answer is not a reverse
+  transition. Either a PRD whose candidate never landed must be unreachable
+  as a completion in the first place — which FAM-BUG-064 now enforces — or
+  there needs to be a supported way to land evidence that is already marked
+  complete, distinct from resuming it. The second is a real design question
+  and deserves a PRD.
+
 ## 2026-09-21 — a false completion, and the rule that replaces reversing it
 
 ### FAM-BUG-064 — The backlog reaches `completed` before the candidate reaches `main`

@@ -576,7 +576,10 @@ fn top_level_help_names_scope_decisions() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("scope-decisions"), "{stdout}");
+    // PRD-090: the deciding command is now a top-level daily verb named
+    // `approve` -- more discoverable than the old `scope-decisions`, which
+    // still works as a recorded alias (see cli_surface.rs).
+    assert!(stdout.contains("approve"), "{stdout}");
 }
 
 #[test]

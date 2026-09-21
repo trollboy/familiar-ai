@@ -7,6 +7,14 @@
 //! library module cannot reference a type defined only in a binary crate.
 //! Every function here is a verbatim move of what used to live inline in
 //! `bin/familiar-ai.rs`.
+//!
+//! PRD-090: the modules below are unchanged by the CLI surface design pass.
+//! `bin/familiar-ai.rs` now presents them under a small set of declared
+//! administrative namespaces (`config`, `accounting`, `stewardship`, `plan`,
+//! `ops`) instead of at the top level, alongside the daily verbs (`next`,
+//! `run`, `drive`, `resume`, `report`, `approve`, `deliver`) and the
+//! no-argument front door. Every previous top-level invocation keeps working
+//! as a hidden alias -- see [`shared::RELOCATED_COMMAND_ALIASES`].
 
 pub mod accounting;
 pub mod backlog;

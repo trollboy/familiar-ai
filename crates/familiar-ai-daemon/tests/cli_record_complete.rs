@@ -43,6 +43,7 @@ fn record_complete_transitions_a_fresh_pending_entry_and_writes_audit_rows() {
         repo.path(),
         &database,
         &[
+            "plan",
             "backlog",
             "record-complete",
             "docs/prds/PRD-014.md",

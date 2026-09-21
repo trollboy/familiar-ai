@@ -3,6 +3,12 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use familiar_ai_core::{
+    validate_graph, AppPaths, BacklogDiscovery, BacklogManager, BacklogStatusStore,
+    FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
+};
+use familiar_ai_storage::{DriverRepository, OrchestrationRepository, SqliteBacklogRepository};
+
 use familiar_ai_daemon::cli::accounting::AccountingCommand;
 use familiar_ai_daemon::cli::backlog::BacklogCommand;
 use familiar_ai_daemon::cli::batch_review::BatchReviewCommand;
@@ -12,104 +18,36 @@ use familiar_ai_daemon::cli::gate::GateCommand;
 use familiar_ai_daemon::cli::onboard::OnboardCommand;
 use familiar_ai_daemon::cli::operator::OperatorCommand;
 use familiar_ai_daemon::cli::plan::PlanCommand;
+use familiar_ai_daemon::cli::shared::{database, effective_repository_config};
 use familiar_ai_daemon::cli::stewardship::StewardshipCommand;
 use familiar_ai_daemon::cli::worker::WorkerCommand;
 
+/// PRD-090: a small set of daily verbs at the top, everything else reachable
+/// under a declared administrative namespace. See
+/// [`familiar_ai_daemon::cli::shared::TOP_LEVEL_COMMANDS`] for the exact
+/// declared set and its ceiling, and
+/// [`familiar_ai_daemon::cli::shared::RELOCATED_COMMAND_ALIASES`] for every
+/// previous top-level name this reorganisation kept working.
 #[derive(Debug, Parser)]
 #[command(name = "familiar-ai", about = "Familiar command-line interface")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Submit and observe daemon-owned detached executions.
-    Control {
-        #[command(subcommand)]
-        command: ControlCommand,
-    },
-    /// Configure native compression or report a measured paired experiment.
-    Compress {
-        #[command(subcommand)]
-        command: CompressCommand,
-    },
-    /// Manage provider endpoints and enabled models without handling credentials.
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    /// Inspect cached authoritative billing or explicitly collect it.
-    Billing {
-        #[command(subcommand)]
-        command: BillingCommand,
-    },
-    /// Reconciliation-aware, source-attributed cost reporting; cached-only.
-    Accounting {
-        #[command(subcommand)]
-        command: AccountingCommand,
-    },
-    /// Configure and observe PRD-071 batch-tier independent review.
-    BatchReview {
-        #[command(subcommand)]
-        command: BatchReviewCommand,
-    },
-    /// Hold configured local model artifacts loaded between executions.
-    ModelResidency {
-        #[command(subcommand)]
-        command: ModelResidencyCommand,
-    },
-    /// Show repository project-configuration approval and binding state.
-    Status {
-        #[arg(long, default_value = ".")]
-        repository: PathBuf,
-    },
-    /// Validate prerequisites without claiming a PRD or invoking a model.
-    Preflight,
-    /// Select the next eligible repository PRD without executing it.
+    // -- Daily verbs -----------------------------------------------------
+    /// Select the next eligible repository PRD without executing it; run it
+    /// with `familiar-ai run <path>`.
     Next,
-    /// Execute a repository PRD with the configured coding agent.
+    /// Execute a repository PRD with the configured coding agent. A scope
+    /// pause is decided with `familiar-ai approve`.
     Run { prd_path: PathBuf },
-    /// Continue one durable partial, or inspect/schedule all durable partials.
-    Resume {
-        /// PRD identifier (for example PRD-123), or `all`.
-        prd: String,
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Attach a durable human waiver to one open blocking review finding
-    /// (required by completion-evidence for terminal reviews). Waivers are
-    /// substance-keyed and survive reviewer finding-id rotation.
-    Waive {
-        #[arg(long)]
-        cycle_id: String,
-        #[arg(long)]
-        finding_id: String,
-        /// Mandatory explicit human authority, e.g. human:trollboy.
-        #[arg(long)]
-        actor: String,
-        /// Mandatory non-empty audit reason.
-        #[arg(long)]
-        reason: String,
-    },
-    /// List or decide one hash-bound pending scope finding.
-    ScopeDecisions {
-        #[arg(long)]
-        finding_hash: Option<String>,
-        #[arg(long)]
-        candidate_hash: Option<String>,
-        #[arg(long, conflicts_with = "reject")]
-        approve: bool,
-        #[arg(long, conflicts_with = "approve")]
-        reject: bool,
-        #[arg(long)]
-        actor: Option<String>,
-        #[arg(long)]
-        reason: Option<String>,
-    },
     /// Execute eligible backlog PRDs unattended until the backlog is empty,
-    /// nothing is eligible, or the budget warrant is exhausted. Flags may only
-    /// tighten the configured warrant, never loosen it.
+    /// nothing is eligible, or the budget warrant is exhausted. Flags may
+    /// only tighten the configured warrant, never loosen it. See what
+    /// happened with `familiar-ai report`.
     Drive {
         #[arg(long)]
         max_prds: Option<u64>,
@@ -127,14 +65,133 @@ enum Command {
         #[arg(long = "prd")]
         prd: Vec<String>,
     },
-    /// List recent standalone executions.
+    /// Continue one durable partial, or inspect/schedule all durable
+    /// partials. Any pending scope finding needs `familiar-ai approve`
+    /// first; a reviewed partial ships with `familiar-ai deliver`.
+    Resume {
+        /// PRD identifier (for example PRD-123), or `all`.
+        prd: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Render one unattended driver session: what got built, what stopped
+    /// and why, what it cost, and what needs `familiar-ai approve`.
+    /// Defaults to the most recent session.
+    Report { session_id: Option<String> },
+    /// Decide one hash-bound pending scope finding, by ordinal or PRD id
+    /// when run with no arguments on a terminal, or by the flags below.
+    /// Continue the paused work afterward with `familiar-ai resume <prd>`.
+    Approve {
+        #[arg(long)]
+        finding_hash: Option<String>,
+        #[arg(long)]
+        candidate_hash: Option<String>,
+        #[arg(long, conflicts_with = "reject")]
+        approve: bool,
+        #[arg(long, conflicts_with = "approve")]
+        reject: bool,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Publish, check, merge, deploy to staging, and smoke-test one reviewed
+    /// worktree under the configured finite delivery policy -- completes the
+    /// workflow.
+    Deliver {
+        ownership_record: PathBuf,
+        /// Resolve and execute the repository-bound environment role.
+        #[arg(long)]
+        to: Option<String>,
+    },
+
+    // -- Administrative namespaces ----------------------------------------
+    /// Providers, models, artifacts, compression, and local model residency.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Reconciliation-aware cost reporting, cached billing, and usage.
+    Accounting {
+        #[command(subcommand)]
+        command: AccountingNamespaceCommand,
+    },
+    /// Read-only queries over durable execution-era state: backlog,
+    /// sessions, attempts, checkpoints, recovery, delivery, budgets, review,
+    /// gates, reconciliation, workers, repository status, preflight, and
+    /// standalone-execution history.
+    Stewardship {
+        #[command(subcommand)]
+        command: StewardshipNamespaceCommand,
+    },
+    /// Draft or decide a human-reviewed PRD proposal batch, and the backlog
+    /// and policy administration around it: onboarding, backlog bootstrap
+    /// and recovery, and batch-tier review configuration.
+    Plan {
+        #[command(subcommand)]
+        command: Option<PlanNamespaceCommand>,
+        /// Design documents supplied to the configured planner agent.
+        design_docs: Vec<PathBuf>,
+    },
+    /// Operational control and repair: detached executions, the native
+    /// worker daemon, operator checkpoint repairs, the merge gate, and
+    /// review waivers.
+    Ops {
+        #[command(subcommand)]
+        command: OpsCommand,
+    },
+
+    // -- Hidden legacy aliases ---------------------------------------------
+    // Every command below moved under an administrative namespace above.
+    // Each keeps its previous top-level invocation working unchanged; the
+    // notice naming its new form is printed in `main` before parsing, from
+    // `familiar_ai_daemon::cli::shared::RELOCATED_COMMAND_ALIASES`, so it
+    // fires even for a bare `--help`.
+    #[command(hide = true)]
+    ScopeDecisions {
+        #[arg(long)]
+        finding_hash: Option<String>,
+        #[arg(long)]
+        candidate_hash: Option<String>,
+        #[arg(long, conflicts_with = "reject")]
+        approve: bool,
+        #[arg(long, conflicts_with = "approve")]
+        reject: bool,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    #[command(hide = true)]
+    Billing {
+        #[command(subcommand)]
+        command: BillingCommand,
+    },
+    #[command(hide = true)]
+    Compress {
+        #[command(subcommand)]
+        command: CompressCommand,
+    },
+    #[command(hide = true)]
+    ModelResidency {
+        #[command(subcommand)]
+        command: ModelResidencyCommand,
+    },
+    #[command(hide = true)]
+    Status {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
+    #[command(hide = true)]
+    Preflight,
+    #[command(hide = true)]
     History {
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u8).range(1..=100))]
         limit: u8,
         #[arg(long)]
         verbose: bool,
     },
-    /// Query cached local accounting. With no range, preserves the legacy summary.
+    #[command(hide = true)]
     Usage {
         #[arg(long, requires = "end")]
         start: Option<String>,
@@ -149,47 +206,140 @@ enum Command {
         #[arg(long)]
         dense: bool,
     },
-    /// Render one unattended driver session: what got built, what stopped and
-    /// why, what it cost, and what needs human judgment. Defaults to the most
-    /// recent session.
-    Report { session_id: Option<String> },
-    /// Publish, check, merge, deploy to staging, and smoke-test one reviewed
-    /// worktree under the configured finite delivery policy.
-    Deliver {
-        ownership_record: PathBuf,
-        /// Resolve and execute the repository-bound environment role.
-        #[arg(long)]
-        to: Option<String>,
-    },
-    /// Install and operate a bounded native-supervised worker.
-    Worker {
+    #[command(hide = true)]
+    Onboard {
         #[command(subcommand)]
-        command: WorkerCommand,
+        command: OnboardCommand,
     },
-    /// Inspect or roll back the historical backlog bootstrap.
+    #[command(hide = true)]
     Backlog {
         #[command(subcommand)]
         command: BacklogCommand,
     },
-    /// Draft or decide a human-reviewed PRD proposal batch.
-    Plan {
+    #[command(hide = true)]
+    BatchReview {
         #[command(subcommand)]
-        command: Option<PlanCommand>,
-        /// Design documents supplied to the configured planner agent.
-        design_docs: Vec<PathBuf>,
+        command: BatchReviewCommand,
     },
+    #[command(hide = true)]
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
+    },
+    #[command(hide = true)]
+    Worker {
+        #[command(subcommand)]
+        command: WorkerCommand,
+    },
+    #[command(hide = true)]
+    Operator {
+        #[command(subcommand)]
+        command: OperatorCommand,
+    },
+    #[command(hide = true)]
+    Gate {
+        #[command(subcommand)]
+        command: GateCommand,
+    },
+    #[command(hide = true)]
+    Waive {
+        #[arg(long)]
+        cycle_id: String,
+        #[arg(long)]
+        finding_id: String,
+        /// Mandatory explicit human authority, e.g. human:trollboy.
+        #[arg(long)]
+        actor: String,
+        /// Mandatory non-empty audit reason.
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+/// The word after `familiar-ai invoked` finds its top-level name here first;
+/// see the individual leaf commands' own doc comments (`billing status`,
+/// `usage`, ...) for what moved where.
+#[derive(Debug, Subcommand)]
+enum AccountingNamespaceCommand {
+    #[command(flatten)]
+    Report(AccountingCommand),
+    /// Inspect cached authoritative billing, explicitly collect it, or
+    /// reconcile it against local estimates.
+    Billing {
+        #[command(subcommand)]
+        command: BillingCommand,
+    },
+    /// Query cached local accounting. With no range, preserves the legacy
+    /// summary.
+    Usage {
+        #[arg(long, requires = "end")]
+        start: Option<String>,
+        #[arg(long, requires = "start")]
+        end: Option<String>,
+        #[arg(long, default_value = "day")]
+        bucket: String,
+        #[arg(long, value_delimiter = ',')]
+        group_by: Vec<String>,
+        #[arg(long = "filter")]
+        filters: Vec<String>,
+        #[arg(long)]
+        dense: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StewardshipNamespaceCommand {
+    #[command(flatten)]
+    Query(StewardshipCommand),
+    /// Show repository project-configuration approval and binding state.
+    Status {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
+    /// Validate prerequisites without claiming a PRD or invoking a model.
+    Preflight,
+    /// List recent standalone executions.
+    History {
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u8).range(1..=100))]
+        limit: u8,
+        #[arg(long)]
+        verbose: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PlanNamespaceCommand {
+    #[command(flatten)]
+    Batch(PlanCommand),
     /// Discover and approve repository-owned policy without claiming work.
     Onboard {
         #[command(subcommand)]
         command: OnboardCommand,
     },
-    /// Query durable execution-era state (backlog, sessions, attempts,
-    /// worktrees, review findings, budgets, delivery, recovery events, and
-    /// pending human gates) for the current repository. Read-only; prints
-    /// one JSON object per invocation.
-    Stewardship {
+    /// Inspect or roll back the historical backlog bootstrap, and record
+    /// human-attributed recovery decisions.
+    Backlog {
         #[command(subcommand)]
-        command: StewardshipCommand,
+        command: BacklogCommand,
+    },
+    /// Configure and observe PRD-071 batch-tier independent review.
+    BatchReview {
+        #[command(subcommand)]
+        command: BatchReviewCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpsCommand {
+    /// Submit and observe daemon-owned detached executions.
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
+    },
+    /// Install and operate a bounded native-supervised worker.
+    Worker {
+        #[command(subcommand)]
+        command: WorkerCommand,
     },
     /// Operator repairs: rebind a checkpoint, transition its phase, or ask
     /// the scheduler its achievable width. Each requires an explicit human
@@ -203,6 +353,21 @@ enum Command {
     Gate {
         #[command(subcommand)]
         command: GateCommand,
+    },
+    /// Attach a durable human waiver to one open blocking review finding
+    /// (required by completion-evidence for terminal reviews). Waivers are
+    /// substance-keyed and survive reviewer finding-id rotation.
+    Waive {
+        #[arg(long)]
+        cycle_id: String,
+        #[arg(long)]
+        finding_id: String,
+        /// Mandatory explicit human authority, e.g. human:trollboy.
+        #[arg(long)]
+        actor: String,
+        /// Mandatory non-empty audit reason.
+        #[arg(long)]
+        reason: String,
     },
 }
 
@@ -310,6 +475,16 @@ enum ConfigCommand {
         effective: bool,
         #[arg(long, default_value = ".")]
         repository: PathBuf,
+    },
+    /// Configure native compression or report a measured paired experiment.
+    Compress {
+        #[command(subcommand)]
+        command: CompressCommand,
+    },
+    /// Hold configured local model artifacts loaded between executions.
+    ModelResidency {
+        #[command(subcommand)]
+        command: ModelResidencyCommand,
     },
 }
 
@@ -438,10 +613,295 @@ enum ModelCommand {
 }
 
 fn main() -> ExitCode {
+    // PRD-090: printed from raw argv, before clap parses anything, so the
+    // notice fires even for `familiar-ai <old-name> --help` -- an alias must
+    // be provably reachable, and `--help` is the safest possible probe of
+    // that.
+    if let Some(invoked) = std::env::args().nth(1) {
+        if let Some(notice) = familiar_ai_daemon::cli::shared::relocation_notice(&invoked) {
+            eprintln!("{notice}");
+        }
+    }
     let cli = Cli::parse();
     match cli.command {
-        Command::Control { command } => {
-            match familiar_ai_daemon::cli::control::control_command(command) {
+        None => front_door(),
+        Some(command) => dispatch(command),
+    }
+}
+
+/// Bare `familiar-ai`: the repository's current state and the single next
+/// runnable command, rather than a help dump.
+fn front_door() -> ExitCode {
+    match front_door_report() {
+        Ok(report) => {
+            print!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(error),
+    }
+}
+
+fn front_door_report() -> Result<String, String> {
+    let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("current-directory lookup failed: {e}"))?;
+    let config = effective_repository_config(&paths, &cwd)?;
+    let repository = FilesystemBacklogDiscovery
+        .resolve(&cwd)
+        .map_err(|e| e.to_string())?;
+    let mut db = database()?;
+
+    let pending_decision_command = OrchestrationRepository::new(db.conn())
+        .pending_scope_decisions(&repository.key)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+        .map(|decision| {
+            format!(
+                "familiar-ai approve --finding-hash {} --candidate-hash {} --approve --actor human:<identity> --reason \"<why>\"",
+                decision.finding_hash, decision.candidate_hash
+            )
+        });
+
+    let stopped_session_command = DriverRepository::new(db.conn())
+        .latest_session()
+        .map_err(|e| e.to_string())?
+        .and_then(|session| {
+            let reason = session.termination_reason.as_deref()?;
+            familiar_ai_daemon::cli::shared::termination_needs_attention(reason)
+                .then(|| format!("familiar-ai report {}", session.session_id))
+        });
+
+    let repository_config = config
+        .repository(&repository.worktree)
+        .map_err(|e| e.to_string())?;
+    let layout = repository_config.layout();
+    let discovered = FilesystemBacklogDiscovery
+        .discover_with_layout(&repository, &layout)
+        .map_err(|e| e.to_string())?;
+    let eligible_work_command = if discovered.is_empty() || validate_graph(&discovered).is_err() {
+        None
+    } else {
+        SqliteBacklogRepository::new(db.conn_mut())
+            .reconcile_and_snapshot(&repository, &discovered)
+            .map_err(|e| e.to_string())?;
+        let store = SqliteBacklogRepository::new(db.conn_mut());
+        let mut manager = BacklogManager::new(ProfiledFilesystemBacklogDiscovery { layout }, store);
+        manager
+            .next(&cwd)
+            .ok()
+            .map(|selected| format!("familiar-ai run {}", selected.path))
+    };
+
+    let state = familiar_ai_daemon::cli::shared::resolve_front_door_state(
+        pending_decision_command,
+        stopped_session_command,
+        eligible_work_command,
+    );
+    Ok(format!(
+        "repository: {}\nstate: {}\nnext: {}\n",
+        repository.key,
+        state.label(),
+        state.next_command()
+    ))
+}
+
+fn dispatch(command: Command) -> ExitCode {
+    match command {
+        Command::Next => match familiar_ai_daemon::cli::next::next() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Run { prd_path } => match familiar_ai_daemon::cli::run::run(&prd_path) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let code = error.exit_code();
+                eprintln!("error: {error}");
+                code.and_then(|value| u8::try_from(value).ok())
+                    .map_or(ExitCode::FAILURE, ExitCode::from)
+            }
+        },
+        Command::Drive {
+            max_prds,
+            max_cost_microusd,
+            max_duration_ms,
+            max_parallel_components,
+            worktree_root,
+            prd,
+        } => match familiar_ai_daemon::cli::drive::drive_command(
+            max_prds,
+            max_cost_microusd,
+            max_duration_ms,
+            max_parallel_components,
+            worktree_root,
+            prd,
+        ) {
+            // A crash-like zero-work stop (preflight failure, lost worker,
+            // storage failure) must be visible to wrapping scripts; only
+            // deliberate policy/budget stops exit 0.
+            Ok(summary) if summary.termination.worker_should_restart() => fail(format!(
+                "session {} terminated abnormally: {}",
+                summary.session_id,
+                summary.termination.as_str()
+            )),
+            Ok(_) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Resume { prd, dry_run } => {
+            match familiar_ai_daemon::cli::resume::resume_command(&prd, dry_run) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::Report { session_id } => {
+            match familiar_ai_daemon::cli::report::report_command(session_id.as_deref()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::Approve {
+            finding_hash,
+            candidate_hash,
+            approve,
+            reject,
+            actor,
+            reason,
+        }
+        | Command::ScopeDecisions {
+            finding_hash,
+            candidate_hash,
+            approve,
+            reject,
+            actor,
+            reason,
+        } => match familiar_ai_daemon::cli::scope_decisions::scope_decisions(
+            finding_hash,
+            candidate_hash,
+            approve,
+            reject,
+            actor,
+            reason,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Deliver {
+            ownership_record,
+            to,
+        } => match familiar_ai_daemon::cli::deliver::deliver_command(
+            &ownership_record,
+            to.as_deref(),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Config { command } => match config_command(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Accounting { command } => {
+            let result = match command {
+                AccountingNamespaceCommand::Report(command) => {
+                    familiar_ai_daemon::cli::accounting::accounting_command(command)
+                }
+                AccountingNamespaceCommand::Billing { command } => {
+                    familiar_ai_daemon::cli::billing::billing_command(command)
+                }
+                AccountingNamespaceCommand::Usage {
+                    start,
+                    end,
+                    bucket,
+                    group_by,
+                    filters,
+                    dense,
+                } => familiar_ai_daemon::cli::usage::usage(
+                    start.as_deref(),
+                    end.as_deref(),
+                    &bucket,
+                    group_by,
+                    filters,
+                    dense,
+                ),
+            };
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::Stewardship { command } => {
+            let result = match command {
+                StewardshipNamespaceCommand::Query(command) => {
+                    familiar_ai_daemon::cli::stewardship::stewardship_command(command)
+                }
+                StewardshipNamespaceCommand::Status { repository } => {
+                    familiar_ai_daemon::config_cli::execute(
+                        familiar_ai_daemon::config_cli::ConfigAction::Status { repository },
+                    )
+                }
+                StewardshipNamespaceCommand::Preflight => {
+                    familiar_ai_daemon::cli::preflight::preflight_command()
+                }
+                StewardshipNamespaceCommand::History { limit, verbose } => {
+                    familiar_ai_daemon::cli::history::history(limit, verbose)
+                }
+            };
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::Plan {
+            command,
+            design_docs,
+        } => {
+            let result = match command {
+                None => familiar_ai_daemon::cli::plan::plan(None, &design_docs),
+                Some(PlanNamespaceCommand::Batch(command)) => {
+                    familiar_ai_daemon::cli::plan::plan(Some(command), &design_docs)
+                }
+                Some(PlanNamespaceCommand::Onboard { command }) => {
+                    familiar_ai_daemon::cli::onboard::onboard(command)
+                }
+                Some(PlanNamespaceCommand::Backlog { command }) => {
+                    familiar_ai_daemon::cli::backlog::backlog(command)
+                }
+                Some(PlanNamespaceCommand::BatchReview { command }) => {
+                    familiar_ai_daemon::cli::batch_review::batch_review_command(command)
+                }
+            };
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+        Command::Ops { command } => {
+            let result = match command {
+                OpsCommand::Control { command } => {
+                    familiar_ai_daemon::cli::control::control_command(command)
+                }
+                OpsCommand::Worker { command } => {
+                    familiar_ai_daemon::cli::worker::worker_command(command)
+                }
+                OpsCommand::Operator { command } => {
+                    familiar_ai_daemon::cli::operator::operator(command)
+                }
+                OpsCommand::Gate { command } => familiar_ai_daemon::cli::gate::gate(command),
+                OpsCommand::Waive {
+                    cycle_id,
+                    finding_id,
+                    actor,
+                    reason,
+                } => familiar_ai_daemon::cli::waive::waive(cycle_id, finding_id, actor, reason),
+            };
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
+
+        // -- Hidden legacy aliases: identical behaviour, unchanged fields --
+        Command::Billing { command } => {
+            match familiar_ai_daemon::cli::billing::billing_command(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail(error),
             }
@@ -474,55 +934,9 @@ fn main() -> ExitCode {
                 Err(error) => fail(error),
             }
         }
-        Command::Config { command } => match config_command(command) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
         Command::ModelResidency { command } => {
-            match familiar_ai_daemon::cli::model_residency::execute(match command {
-                ModelResidencyCommand::Enable {
-                    key,
-                    worker,
-                    launch,
-                    memory_mb,
-                    ready_timeout_secs,
-                    actor,
-                } => familiar_ai_daemon::cli::model_residency::ResidencyAction::Enable {
-                    key,
-                    worker,
-                    launch,
-                    memory_mb,
-                    ready_timeout_secs,
-                    actor,
-                },
-                ModelResidencyCommand::Disable { key, actor } => {
-                    familiar_ai_daemon::cli::model_residency::ResidencyAction::Disable {
-                        key,
-                        actor,
-                    }
-                }
-                ModelResidencyCommand::Status { limit } => {
-                    familiar_ai_daemon::cli::model_residency::ResidencyAction::Status { limit }
-                }
-            }) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => fail(error),
-            }
-        }
-        Command::Billing { command } => {
-            match familiar_ai_daemon::cli::billing::billing_command(command) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => fail(error),
-            }
-        }
-        Command::Accounting { command } => {
-            match familiar_ai_daemon::cli::accounting::accounting_command(command) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => fail(error),
-            }
-        }
-        Command::BatchReview { command } => {
-            match familiar_ai_daemon::cli::batch_review::batch_review_command(command) {
+            match familiar_ai_daemon::cli::model_residency::execute(model_residency_action(command))
+            {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail(error),
             }
@@ -535,89 +949,6 @@ fn main() -> ExitCode {
         },
         Command::Preflight => match familiar_ai_daemon::cli::preflight::preflight_command() {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
-        Command::Next => match familiar_ai_daemon::cli::next::next() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
-        Command::Plan {
-            command,
-            design_docs,
-        } => match familiar_ai_daemon::cli::plan::plan(command, &design_docs) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
-        Command::Onboard { command } => match familiar_ai_daemon::cli::onboard::onboard(command) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
-        Command::Run { prd_path } => match familiar_ai_daemon::cli::run::run(&prd_path) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                let code = error.exit_code();
-                eprintln!("error: {error}");
-                code.and_then(|value| u8::try_from(value).ok())
-                    .map_or(ExitCode::FAILURE, ExitCode::from)
-            }
-        },
-        Command::Resume { prd, dry_run } => {
-            match familiar_ai_daemon::cli::resume::resume_command(&prd, dry_run) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => fail(error),
-            }
-        }
-        Command::Waive {
-            cycle_id,
-            finding_id,
-            actor,
-            reason,
-        } => match familiar_ai_daemon::cli::waive::waive(cycle_id, finding_id, actor, reason) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
-        Command::ScopeDecisions {
-            finding_hash,
-            candidate_hash,
-            approve,
-            reject,
-            actor,
-            reason,
-        } => match familiar_ai_daemon::cli::scope_decisions::scope_decisions(
-            finding_hash,
-            candidate_hash,
-            approve,
-            reject,
-            actor,
-            reason,
-        ) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
-        Command::Drive {
-            max_prds,
-            max_cost_microusd,
-            max_duration_ms,
-            max_parallel_components,
-            worktree_root,
-            prd,
-        } => match familiar_ai_daemon::cli::drive::drive_command(
-            max_prds,
-            max_cost_microusd,
-            max_duration_ms,
-            max_parallel_components,
-            worktree_root,
-            prd,
-        ) {
-            // A crash-like zero-work stop (preflight failure, lost worker,
-            // storage failure) must be visible to wrapping scripts; only
-            // deliberate policy/budget stops exit 0.
-            Ok(summary) if summary.termination.worker_should_restart() => fail(format!(
-                "session {} terminated abnormally: {}",
-                summary.session_id,
-                summary.termination.as_str()
-            )),
-            Ok(_) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
         Command::History { limit, verbose } => {
@@ -644,22 +975,26 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
-        Command::Report { session_id } => {
-            match familiar_ai_daemon::cli::report::report_command(session_id.as_deref()) {
+        Command::Onboard { command } => match familiar_ai_daemon::cli::onboard::onboard(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::Backlog { command } => match familiar_ai_daemon::cli::backlog::backlog(command) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        },
+        Command::BatchReview { command } => {
+            match familiar_ai_daemon::cli::batch_review::batch_review_command(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => fail(error),
             }
         }
-        Command::Deliver {
-            ownership_record,
-            to,
-        } => match familiar_ai_daemon::cli::deliver::deliver_command(
-            &ownership_record,
-            to.as_deref(),
-        ) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(error),
-        },
+        Command::Control { command } => {
+            match familiar_ai_daemon::cli::control::control_command(command) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => fail(error),
+            }
+        }
         Command::Worker { command } => {
             match familiar_ai_daemon::cli::worker::worker_command(command) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -676,21 +1011,73 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
-        Command::Stewardship { command } => {
-            match familiar_ai_daemon::cli::stewardship::stewardship_command(command) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => fail(error),
-            }
-        }
-        Command::Backlog { command } => match familiar_ai_daemon::cli::backlog::backlog(command) {
+        Command::Waive {
+            cycle_id,
+            finding_id,
+            actor,
+            reason,
+        } => match familiar_ai_daemon::cli::waive::waive(cycle_id, finding_id, actor, reason) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(error),
         },
     }
 }
 
+fn model_residency_action(
+    command: ModelResidencyCommand,
+) -> familiar_ai_daemon::cli::model_residency::ResidencyAction {
+    match command {
+        ModelResidencyCommand::Enable {
+            key,
+            worker,
+            launch,
+            memory_mb,
+            ready_timeout_secs,
+            actor,
+        } => familiar_ai_daemon::cli::model_residency::ResidencyAction::Enable {
+            key,
+            worker,
+            launch,
+            memory_mb,
+            ready_timeout_secs,
+            actor,
+        },
+        ModelResidencyCommand::Disable { key, actor } => {
+            familiar_ai_daemon::cli::model_residency::ResidencyAction::Disable { key, actor }
+        }
+        ModelResidencyCommand::Status { limit } => {
+            familiar_ai_daemon::cli::model_residency::ResidencyAction::Status { limit }
+        }
+    }
+}
+
 fn config_command(command: ConfigCommand) -> Result<(), String> {
     use familiar_ai_daemon::config_cli::{execute, ConfigAction};
+    if let ConfigCommand::Compress { command } = command {
+        return match command {
+            CompressCommand::OutputEnable {
+                stage,
+                register,
+                actor,
+            } => familiar_ai_daemon::compress_cli::configure_output(&stage, &register, &actor),
+            CompressCommand::InputEnable {
+                provider,
+                transform,
+                actor,
+            } => familiar_ai_daemon::compress_cli::configure_input(&provider, &transform, &actor),
+            CompressCommand::Experiment { label, lane, actor } => match lane {
+                Some(lane) => familiar_ai_daemon::compress_cli::configure_experiment(
+                    &label,
+                    &lane,
+                    actor.as_deref().expect("clap requires actor with lane"),
+                ),
+                None => familiar_ai_daemon::compress_cli::experiment(&label),
+            },
+        };
+    }
+    if let ConfigCommand::ModelResidency { command } = command {
+        return familiar_ai_daemon::cli::model_residency::execute(model_residency_action(command));
+    }
     let action = match command {
         ConfigCommand::Provider { command } => match command {
             ProviderCommand::Add {
@@ -797,6 +1184,9 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             }
             ConfigAction::ShowEffective { repository }
         }
+        ConfigCommand::Compress { .. } | ConfigCommand::ModelResidency { .. } => {
+            unreachable!("handled above")
+        }
     };
     execute(action)
 }
@@ -834,7 +1224,7 @@ mod tests {
 
     #[test]
     fn drive_accepts_repeatable_prd_allowlist_flags() {
-        let Command::Drive { prd, .. } = Cli::try_parse_from([
+        let Some(Command::Drive { prd, .. }) = Cli::try_parse_from([
             "familiar-ai",
             "drive",
             "--max-prds",
@@ -858,28 +1248,43 @@ mod tests {
             Cli::try_parse_from(["familiar-ai", "history", "--limit", "100"])
                 .unwrap()
                 .command,
-            Command::History { limit: 100, .. }
+            Some(Command::History { limit: 100, .. })
         ));
         assert!(Cli::try_parse_from(["familiar-ai", "history", "--limit", "0"]).is_err());
         assert!(matches!(
             Cli::try_parse_from(["familiar-ai", "usage"])
                 .unwrap()
                 .command,
-            Command::Usage { .. }
+            Some(Command::Usage { .. })
         ));
         assert!(matches!(
             Cli::try_parse_from(["familiar-ai", "next"])
                 .unwrap()
                 .command,
-            Command::Next
+            Some(Command::Next)
         ));
+        assert!(Cli::try_parse_from(["familiar-ai"])
+            .unwrap()
+            .command
+            .is_none());
         assert!(matches!(
             Cli::try_parse_from(["familiar-ai", "onboard", "propose"])
                 .unwrap()
                 .command,
-            Command::Onboard {
+            Some(Command::Onboard {
                 command: OnboardCommand::Propose { .. }
-            }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "plan", "onboard", "propose"])
+                .unwrap()
+                .command,
+            Some(Command::Plan {
+                command: Some(PlanNamespaceCommand::Onboard {
+                    command: OnboardCommand::Propose { .. }
+                }),
+                ..
+            })
         ));
         assert!(matches!(
             Cli::try_parse_from([
@@ -894,9 +1299,9 @@ mod tests {
             ])
             .unwrap()
             .command,
-            Command::Onboard {
+            Some(Command::Onboard {
                 command: OnboardCommand::Approve { .. }
-            }
+            })
         ));
         assert!(Cli::try_parse_from([
             "familiar-ai",
@@ -912,17 +1317,17 @@ mod tests {
             Cli::try_parse_from(["familiar-ai", "backlog", "metadata-check"])
                 .unwrap()
                 .command,
-            Command::Backlog {
+            Some(Command::Backlog {
                 command: BacklogCommand::MetadataCheck { .. }
-            }
+            })
         ));
         assert!(matches!(
             Cli::try_parse_from(["familiar-ai", "backlog", "metadata-check", "--advisory"])
                 .unwrap()
                 .command,
-            Command::Backlog {
+            Some(Command::Backlog {
                 command: BacklogCommand::MetadataCheck { advisory: true, .. }
-            }
+            })
         ));
         assert!(matches!(
             Cli::try_parse_from([
@@ -937,9 +1342,9 @@ mod tests {
             ])
             .unwrap()
             .command,
-            Command::Backlog {
+            Some(Command::Backlog {
                 command: BacklogCommand::Complete { .. }
-            }
+            })
         ));
         assert!(matches!(
             Cli::try_parse_from([
@@ -954,9 +1359,88 @@ mod tests {
             ])
             .unwrap()
             .command,
-            Command::Backlog {
+            Some(Command::Backlog {
                 command: BacklogCommand::RecordComplete { .. }
-            }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "familiar-ai",
+                "approve",
+                "--finding-hash",
+                "h",
+                "--candidate-hash",
+                "c",
+                "--approve",
+                "--actor",
+                "human:alice",
+                "--reason",
+                "looks fine"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Approve { approve: true, .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "accounting", "billing", "status"])
+                .unwrap()
+                .command,
+            Some(Command::Accounting {
+                command: AccountingNamespaceCommand::Billing {
+                    command: BillingCommand::Status
+                }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "accounting", "month-to-date"])
+                .unwrap()
+                .command,
+            Some(Command::Accounting {
+                command: AccountingNamespaceCommand::Report(AccountingCommand::MonthToDate)
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "stewardship", "status"])
+                .unwrap()
+                .command,
+            Some(Command::Stewardship {
+                command: StewardshipNamespaceCommand::Status { .. }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "familiar-ai",
+                "ops",
+                "waive",
+                "--cycle-id",
+                "c",
+                "--finding-id",
+                "f",
+                "--actor",
+                "human:a",
+                "--reason",
+                "r"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Ops {
+                command: OpsCommand::Waive { .. }
+            })
+        ));
+        // Every relocated top-level name still parses on its own, unchanged.
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "billing", "status"])
+                .unwrap()
+                .command,
+            Some(Command::Billing {
+                command: BillingCommand::Status
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["familiar-ai", "status"])
+                .unwrap()
+                .command,
+            Some(Command::Status { .. })
         ));
     }
 }

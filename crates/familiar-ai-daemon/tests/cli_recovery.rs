@@ -46,6 +46,7 @@ fn release_prints_one_line_and_preserves_claim() {
     let (repo, database) = claimed_repo();
     let output = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
         .args([
+            "plan",
             "backlog",
             "release",
             "docs/prds/PRD-012.md",
@@ -89,6 +90,7 @@ fn complete_is_a_human_only_manual_override() {
     let (repo, database) = claimed_repo();
     let rejected = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
         .args([
+            "plan",
             "backlog",
             "complete",
             "docs/prds/PRD-012.md",
@@ -110,6 +112,7 @@ fn complete_is_a_human_only_manual_override() {
 
     let accepted = Command::new(env!("CARGO_BIN_EXE_familiar-ai"))
         .args([
+            "plan",
             "backlog",
             "complete",
             "docs/prds/PRD-012.md",
