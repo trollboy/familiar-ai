@@ -184,6 +184,7 @@ impl ReviewCoordinator<'_> {
             ended_at: None,
             disposition: ReviewDisposition::Pending,
             stop_reasons: vec![],
+            stop_detail: None,
             review_attempts: vec![],
             remediation_attempts: vec![],
         };
@@ -278,7 +279,13 @@ impl ReviewCoordinator<'_> {
                 .run(repository, check, &captured.diff.content_hash)
             {
                 Ok(value) => value,
-                Err(_) => return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful),
+                Err(error) => {
+                    return self.stop_with_detail(
+                        cycle,
+                        ReviewStopReason::VerificationUnsuccessful,
+                        format!("verification '{}' could not run: {error}", check.check_id),
+                    )
+                }
             };
             cycle.verification_before_review.push(ev);
             cycle.verification_history.push(
@@ -574,8 +581,12 @@ impl ReviewCoordinator<'_> {
                         .run(repository, check, &captured.diff.content_hash)
                     {
                         Ok(value) => value,
-                        Err(_) => {
-                            return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful)
+                        Err(error) => {
+                            return self.stop_with_detail(
+                                cycle,
+                                ReviewStopReason::VerificationUnsuccessful,
+                                format!("verification '{}' could not run: {error}", check.check_id),
+                            )
                         }
                     };
                     cycle.verification_after_remediation.push(ev);
@@ -624,7 +635,14 @@ impl ReviewCoordinator<'_> {
                         "review: re-verification produced no evidence for required check(s): {}",
                         missing.join(", ")
                     );
-                    return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful);
+                    return self.stop_with_detail(
+                        cycle,
+                        ReviewStopReason::VerificationUnsuccessful,
+                        format!(
+                            "re-verification produced no evidence for required check(s): {}",
+                            missing.join(", ")
+                        ),
+                    );
                 }
                 if !required_failed(&cycle.verification_after_remediation) {
                     break;
@@ -1156,7 +1174,13 @@ impl ReviewCoordinator<'_> {
                     .run(repository, check, &captured.diff.content_hash)
                 {
                     Ok(value) => value,
-                    Err(_) => return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful),
+                    Err(error) => {
+                        return self.stop_with_detail(
+                            cycle,
+                            ReviewStopReason::VerificationUnsuccessful,
+                            format!("verification '{}' could not run: {error}", check.check_id),
+                        )
+                    }
                 };
                 cycle.verification_after_remediation.push(ev);
                 cycle.verification_history.push(
@@ -1179,7 +1203,18 @@ impl ReviewCoordinator<'_> {
                 }
             }
             if required_failed(&cycle.verification_after_remediation) {
-                return self.stop(cycle, ReviewStopReason::VerificationUnsuccessful);
+                let failed = cycle
+                    .verification_after_remediation
+                    .iter()
+                    .filter(|e| e.required && e.status != VerificationStatus::Passed)
+                    .map(|e| format!("{} ({:?}): {}", e.check_id, e.status, e.summary))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return self.stop_with_detail(
+                    cycle,
+                    ReviewStopReason::VerificationUnsuccessful,
+                    format!("required check(s) ran and did not pass: {failed}"),
+                );
             }
             prior = blocking
                 .into_iter()
@@ -1252,6 +1287,23 @@ impl ReviewCoordinator<'_> {
         }
         Ok(())
     }
+    /// Stops the cycle and records why, in the stopping component's own
+    /// words. Used wherever the class alone cannot tell an operator what to
+    /// do — most of all `VerificationUnsuccessful`, which otherwise cannot
+    /// distinguish a failing check from a verifier that never ran.
+    fn stop_with_detail(
+        &self,
+        mut cycle: ReviewCycle,
+        reason: ReviewStopReason,
+        detail: impl Into<String>,
+    ) -> Result<ReviewCycle, CoordinatorError> {
+        let detail = detail.into();
+        if !detail.trim().is_empty() {
+            cycle.stop_detail = Some(detail);
+        }
+        self.stop(cycle, reason)
+    }
+
     fn stop(
         &self,
         mut cycle: ReviewCycle,
@@ -1931,6 +1983,59 @@ mod tests {
             approved_scope_findings: Default::default(),
         }
     }
+    /// A verifier that cannot run and a required check that runs and fails
+    /// both stop the cycle as `VerificationUnsuccessful`. They are not the
+    /// same problem and do not have the same remedy, so the class alone is
+    /// not enough — PRD-100 spent $29 and 71 minutes recording
+    /// `verification_failed` for what was a dead-code lint. The stopping
+    /// component's own words have to survive.
+    #[test]
+    fn a_verifier_that_cannot_run_says_so_rather_than_only_naming_the_class() {
+        struct Broken;
+        impl VerificationRunner for Broken {
+            fn run(
+                &self,
+                _: &Path,
+                _: &VerificationCheck,
+                _: &str,
+            ) -> Result<VerificationEvidence, VerificationError> {
+                Err(VerificationError::EmptyArgv)
+            }
+        }
+        let store = Store::default();
+        let coordinator = ReviewCoordinator {
+            collector: &Collector,
+            verifier: &Broken,
+            reviewer: &Reviewer,
+            implementer: &Implementer,
+            store: &store,
+            policy: BlockingPolicy::default(),
+            batch_reviewer: None,
+        };
+        let cycle = coordinator
+            .run(Path::new("."), base_request(), &mut Vec::new())
+            .expect("cycle runs");
+
+        assert!(cycle
+            .stop_reasons
+            .contains(&ReviewStopReason::VerificationUnsuccessful));
+        let detail = cycle
+            .stop_detail
+            .as_deref()
+            .expect("a verifier that could not run must say so");
+        assert!(
+            detail.contains("could not run"),
+            "detail must distinguish 'never ran' from 'ran and failed': {detail}"
+        );
+        assert!(
+            detail.contains("test"),
+            "detail must name the check: {detail}"
+        );
+        // Detail lives beside the class, never inside it: folding it into the
+        // reason token is what cost six attempts their classification.
+        assert!(!detail.starts_with("verification_unsuccessful"));
+    }
+
     #[test]
     fn checks_only_runs_applicable_verification_without_review_attempt() {
         let store = Store::default();

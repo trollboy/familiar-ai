@@ -964,6 +964,7 @@ pub fn resume_implemented_checkpoint(
     let mut trace = AttemptTrace {
         execution_id: Some(execution_id.into()),
         retained_reason: None,
+        retained_detail: None,
     };
     let route_context = route_context_for_prd(&prd_path)?;
     let owned_agents = build_selected_agents(config, &route_context)?;
@@ -1108,6 +1109,12 @@ pub fn accept_review_risk(
 pub struct AttemptTrace {
     pub execution_id: Option<String>,
     pub retained_reason: Option<&'static str>,
+    /// Why the attempt stopped, in the stopping component's own words. The
+    /// reason names a class; this says what actually happened. A driver that
+    /// only has the class cannot tell a failing check from a verifier that
+    /// never ran — which is how PRD-100 recorded `verification_failed` for a
+    /// dead-code lint.
+    pub retained_detail: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1853,6 +1860,7 @@ fn finish_implementation(
     if !clean {
         let reason = review_retained_reason(&cycle);
         trace.retained_reason = Some(reason);
+        trace.retained_detail = cycle.stop_detail.clone();
         if let Some(checkpoint) = familiar_ai_storage::CheckpointRepository::new(db.conn())
             .get(&repository.key, &target.id.to_string())
             .map_err(|e| RunError::Storage(e.to_string()))?
@@ -2291,6 +2299,7 @@ fn retained_traced(
     error: RunError,
 ) -> RunError {
     trace.retained_reason = Some(reason);
+    trace.retained_detail = Some(error.to_string());
     retained(target, reason, error)
 }
 

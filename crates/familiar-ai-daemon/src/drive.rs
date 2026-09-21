@@ -1847,7 +1847,16 @@ pub fn drive(
                     let retained_detail = match &result {
                         Err(error) => {
                             eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
-                            Some(stopping_detail(&error.to_string()))
+                            // The stopping component's own words beat the
+                            // driver's rendering of the error it was handed:
+                            // only the former can say which check failed, or
+                            // that none ever ran.
+                            Some(stopping_detail(
+                                trace
+                                    .retained_detail
+                                    .as_deref()
+                                    .unwrap_or(&error.to_string()),
+                            ))
                         }
                         Ok(_) => None,
                     };

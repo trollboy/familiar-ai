@@ -452,6 +452,7 @@ mod tests {
             ended_at: None,
             disposition: ReviewDisposition::Pending,
             stop_reasons: vec![],
+            stop_detail: None,
             review_attempts: vec![],
             remediation_attempts: vec![],
         };

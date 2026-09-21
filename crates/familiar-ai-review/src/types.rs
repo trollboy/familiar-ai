@@ -647,6 +647,14 @@ pub struct ReviewCycle {
     pub ended_at: Option<String>,
     pub disposition: ReviewDisposition,
     pub stop_reasons: Vec<ReviewStopReason>,
+    /// Why the cycle stopped, in the stopping component's own words. A stop
+    /// reason names a class; two very different situations share
+    /// `VerificationUnsuccessful` — a required check that ran and failed, and
+    /// a verifier that could not run at all. This is what tells them apart.
+    /// Never a stop-reason token: detail folded into the class costs the
+    /// attempt its classification downstream.
+    #[serde(default)]
+    pub stop_detail: Option<String>,
     pub review_attempts: Vec<StageExecution>,
     pub remediation_attempts: Vec<StageExecution>,
 }

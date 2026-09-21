@@ -1260,6 +1260,7 @@ mod tests {
             ended_at: Some("2026-08-03T00:00:01Z".into()),
             disposition: ReviewDisposition::ReadyForHumanApproval,
             stop_reasons: vec![ReviewStopReason::CleanReview],
+            stop_detail: None,
             review_attempts: Vec::new(),
             remediation_attempts: Vec::new(),
         }
