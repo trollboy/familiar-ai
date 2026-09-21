@@ -743,6 +743,37 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
   unattended sessions. Open; surfaced 2026-08-31 during PRD-077
   verification.
 
+## 2026-09-21 — a false completion, and the rule that replaces reversing it
+
+### FAM-BUG-064 — The backlog reaches `completed` before the candidate reaches `main`
+
+- **Status:** Open
+- **Found:** 2026-09-21, re-driving PRD-90 after FAM-BUG-062 was fixed.
+- **Detail:** The resume passed verification, returned a clean independent
+  review (`ReadyForHumanApproval`, `CleanReview`), wrote
+  `backlog_prds.status = completed`, and then failed with
+  `execution history failed: database error: database is locked`. Delivery
+  never ran. `main` did not move, `integrated_at` is empty, and the eight
+  changed files are still uncommitted in the worktree — while the backlog
+  says the PRD is done and the gate that would have shown it has gone.
+- **Contributing:** the checkpoint phase list names a phase `integrated`
+  whose detail is `backlog_completion_committed`. The name promises delivery;
+  the detail is bookkeeping. A reader auditing phases would conclude the
+  candidate had landed.
+- **Contributing:** `busy_timeout` is 5000ms, so the daemon held a write
+  transaction for longer than five seconds. FAM-BUG-062's delegation fix let
+  the delegate past the worker lock, and the worker lock had been the thing
+  incidentally preventing two processes from contending on SQLite. One
+  failure was traded for another, and this entry records that honestly.
+- **Expected fix:** completion is the last durable write, after delivery
+  succeeds — or the two are one transaction. A lock timeout must abort the
+  run, not leave a PRD claiming done.
+- **Not fixed by reversing the status.** See
+  `docs/contracts/completion-is-immutable.md`: there is deliberately no path
+  out of `completed`, and PRD-103 is the successor for what PRD-090 left
+  unmet. This entry is about the ordering defect that produced a *false*
+  completion, which is a different thing from a *partial* one.
+
 ## 2026-09-21 — actions taken in the window report nothing
 
 ### FAM-BUG-063 — A dispatched command's output is discarded, so failures are silent
