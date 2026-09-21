@@ -126,6 +126,7 @@ impl TrayApp {
         let menu_channel = MenuEvent::receiver();
         let command_tx = self.command_tx.clone();
         let config_path = self.config_path.clone();
+        let dashboard = self.dashboard.clone();
         let ids_arc = Arc::new(Mutex::new(ids));
 
         // Shared rather than moved: the badge below and the menu redraw in the
@@ -221,6 +222,7 @@ impl TrayApp {
                             &command_tx_for_loop,
                             &config_path_for_loop,
                             source_for_loop.as_ref(),
+                            dashboard.as_ref(),
                         );
                     }
                 }
@@ -284,7 +286,13 @@ impl TrayApp {
                     let cmd = ids_arc.lock().unwrap().resolve(&event.id);
                     if let Some(cmd) = cmd {
                         let should_quit = matches!(cmd, TrayCommand::Quit);
-                        handle_command(cmd, &command_tx, &config_path, self.source.as_ref());
+                        handle_command(
+                            cmd,
+                            &command_tx,
+                            &config_path,
+                            self.source.as_ref(),
+                            dashboard.as_ref(),
+                        );
                         if should_quit {
                             break;
                         }
@@ -510,15 +518,22 @@ fn handle_command(
     command_tx: &mpsc::Sender<TrayCommand>,
     config_path: &PathBuf,
     source: Option<&Arc<dyn DataSource>>,
+    dashboard: Option<&DashboardTarget>,
 ) {
     match &cmd {
         // Straight to the inference page rather than the window's first tab:
         // the operator clicked an item about the LLM, and making them find
         // the right tab is the same dead end as the item that did nothing.
-        TrayCommand::ConfigureLlm => match source {
+        TrayCommand::ConfigureLlm => match (source, dashboard) {
             #[cfg(target_os = "linux")]
-            Some(source) => {
+            (Some(source), _) => {
                 crate::windows::open_inference_settings_window(source.clone(), config_path.clone())
+            }
+            (_, Some(DashboardTarget::Web(url))) => {
+                let url = format!("{}/settings/inference", url.trim_end_matches('/'));
+                if let Err(e) = opener::open_browser(&url) {
+                    tracing::warn!(error = %e, url = %url, "failed to open inference settings");
+                }
             }
             _ => {
                 if let Err(e) = opener::open(config_path) {
@@ -526,12 +541,18 @@ fn handle_command(
                 }
             }
         },
-        TrayCommand::OpenSettings => match source {
+        TrayCommand::OpenSettings => match (source, dashboard) {
             // A window beats dropping the user into a text editor, and it can
             // still open the file for anything that has to persist.
             #[cfg(target_os = "linux")]
-            Some(source) => {
+            (Some(source), _) => {
                 crate::windows::open_settings_window(source.clone(), config_path.clone())
+            }
+            (_, Some(DashboardTarget::Web(url))) => {
+                let url = format!("{}/settings/inference", url.trim_end_matches('/'));
+                if let Err(e) = opener::open_browser(&url) {
+                    tracing::warn!(error = %e, url = %url, "failed to open settings UI");
+                }
             }
             _ => {
                 if let Err(e) = opener::open(config_path) {

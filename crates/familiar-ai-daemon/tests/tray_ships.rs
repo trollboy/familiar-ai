@@ -133,6 +133,17 @@ fn macos_tray_pumps_the_native_event_queue() {
 }
 
 #[test]
+fn non_gtk_settings_actions_have_a_graphical_destination() {
+    let source = read("crates/familiar-ai-tray/src/tray.rs");
+    assert_eq!(
+        source.matches("Some(DashboardTarget::Web(url))").count(),
+        2,
+        "both Configure Local LLM and Settings must route to the web UI"
+    );
+    assert!(source.contains("/settings/inference"));
+}
+
+#[test]
 fn the_trays_tests_are_reachable_from_a_workspace_run() {
     // The regression that matters most is not any single assertion in the tray
     // — it is that the tray has assertions at all and that a workspace command

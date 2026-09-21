@@ -2015,6 +2015,12 @@ reinstall the binary, then rerun the 076 drive.
   through the browser or editor, compiles a harmless stub for the GTK-only
   visual fixture, and explicitly pumps AppKit's event queue on the main thread.
   Regressions pin both the dependency boundary and native event dispatch.
+- **UI follow-up:** The first running build exposed that macOS still omitted
+  `Open Dashboard` and sent both Settings actions to the TOML file because the
+  dashboard default was off. The dashboard now defaults on only for macOS,
+  remains loopback-bound, and both Settings and Configure Local LLM open its
+  graphical inference page. Explicit `dashboard.enabled` configuration still
+  wins on every platform; Linux continues to use its native GTK windows.
 - **Evidence:** the tray-enabled macOS release links; macOS all-target checking
   passes; all 104 tray unit tests pass; strict tray Clippy passes; and the Linux
   dependency graph still contains `gtk` and `muda/gtk`. Docker was unavailable
