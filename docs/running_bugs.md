@@ -2027,6 +2027,28 @@ reinstall the binary, then rerun the 076 drive.
   on this Mac, so the existing Linux runtime/Xvfb test was preserved but not
   rerun locally.
 
+### FAM-BUG-067 — The shipped graphical product is not cross-platform
+
+- **Status:** Open — specified by PRD-104.
+- **Found:** 2026-09-21, during live macOS verification after FAM-BUG-066.
+- **Detail:** Linux owns substantial in-process GTK windows, while macOS tray
+  actions open the loopback dashboard in an external browser. Earlier macOS
+  behavior opened raw TOML in an editor. The current browser route makes the
+  actions graphical, but does not provide the native application windows or
+  Linux feature parity the operator expected. AppKit cannot reuse GTK widgets,
+  and maintaining independent GTK and AppKit screen implementations would
+  preserve the drift that exposed this gap.
+- **Required fix:** PRD-104 replaces both platform-specific presentation paths
+  with one Tauri desktop process over a typed same-user daemon protocol. It
+  keeps the daemon authoritative and independently alive, requires complete
+  GTK behavior parity and real macOS/Linux packaged-app smoke gates, forbids
+  browser/editor/Docker fallbacks as completion evidence, and removes GTK only
+  after the cross-platform gates pass.
+- **Evidence required to close:** the installed macOS and Linux artifacts show
+  the cat tray icon and open Dashboard, Settings, and Configure Local LLM as
+  application windows; the parity inventory, security boundary, lifecycle,
+  packaging, and fresh-install tests in PRD-104 all pass.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or
