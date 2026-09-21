@@ -4,6 +4,14 @@ This is the live operator-facing defect and friction log. Entries remain open
 until a verified fix is committed; a fix records its evidence and disposition
 instead of deleting the history.
 
+**Every bug gets an entry of the form `### FAM-BUG-NNN — title` followed by a
+`- **Status:**` line whose first word is `Open`, `Fixed`, `Closed` or
+`Reopened`.** Recording a bug as a bullet inside a dated narrative hides it
+from any count that follows this convention: on 2026-09-21 six of sixty-two
+entries were off-format, and "how many are open" had a different answer
+depending on how it was asked. `bug_log_contract.rs` fails the build if an id
+appears with no entry, or with a status a reader cannot classify.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable
@@ -78,7 +86,7 @@ instead of deleting the history.
 
 ### FAM-BUG-006 — First model enable can create an invalid mixed configuration
 
-- **Status:** Corruption guard fixed (committed in `4f0305e`); migration UX remains open
+- **Status:** Open — the corruption guard is fixed (committed in `4f0305e`); the migration UX remains open
 - **Disposition (2026-08-31):** transferred to **PRD-075** (audited lossless
   `[agents]` → `[worker_registry]` migration command, plus the generalized
   invariant: every configuration mutation validates the complete proposed
@@ -735,10 +743,65 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
   unattended sessions. Open; surfaced 2026-08-31 during PRD-077
   verification.
 
+## Backfilled entries
+
+These two were recorded only as bullets inside dated narrative below, so no
+count following this file's own convention could see them. The narrative is
+left where it is; these give them a findable entry.
+
+### FAM-BUG-027 — `worker_lock` simultaneous-fallback flake was a real claim race
+
+- **Status:** Fixed 2026-09-01 — `WorkerLock::create` wrote claim JSON into an `O_EXCL` file non-atomically, so a concurrent claimant read a half-written file, judged it corrupt, deleted the live winner's claim and claimed too. Two owners of an exclusive lock. Surfaced 2026-08-31 as a flaky test; upgraded to a product race and fixed. Narrative under *2026-09-01 — PRD-076 first drive attempt*.
+
+### FAM-BUG-028 — Evidence-erasing redaction
+
+- **Status:** Fixed 2026-09-01 — retained preflight output was redacted wholesale, so a failing check's evidence was destroyed before anyone could read it. Now a line-level contract: a failing-test line survives redaction. Narrative under *2026-09-01 — PRD-076 first drive attempt*.
+
+## 2026-09-21 — the tray's Re-drive button cannot succeed
+
+### FAM-BUG-062 — Re-drive dispatches a command that needs a lock the daemon holds
+
+- **Status:** Open
+
+
+`Action::ResumePrd` submits `["familiar-ai", "resume", <prd>]` to the
+control plane as a detached execution (`tray_data.rs`). That command needs
+exclusive mutating orchestrator ownership — and the daemon dispatching it
+already owns it:
+
+    cannot acquire mutating orchestrator ownership:
+    Familiar control-plane owner pid 3867955 is live;
+    socket state must be diagnosed and explicit recovery used
+
+So the button can never work while the daemon is running, which is the only
+time the tray exists to be clicked. Observed 2026-09-21: the owner pressed
+Re-drive on PRD-100 at 00:56:16, the execution ran and failed at 01:04:24,
+and the UI showed nothing at any point. Reproduced directly from a terminal,
+where it fails immediately with the same error.
+
+Two defects, and the second is why the first survived:
+
+1. The dispatch shape is self-defeating. Either the daemon performs the
+   resume in-process, or the spawned command has to run under the owner's
+   authority rather than contending with it. That is a design decision, not
+   a patch.
+2. **Nothing reports it.** No toast, no spinner, no row, no change to the
+   button — success and failure are indistinguishable from a click that did
+   nothing. PRD-102 put a count on the icon and a signpost in the menu, but
+   an action taken from the window still reports nothing at all. This is the
+   same class as the tray's Release and Force-complete buttons, which failed
+   validation on every click since they shipped and were only found on
+   2026-09-20 by reading the code.
+
+Until it is fixed, `familiar-ai resume <prd>` from a terminal works only
+with the daemon stopped.
+
 ## 2026-09-19 — round 1: one infrastructure bug voided a wave, one review bug blocked a candidate
 
-**FAM-BUG-059 — verification leaked a Docker network and a cargo-cache
-volume per PRD, until the address pool was exhausted. FIXED.**
+### FAM-BUG-059 — Verification leaked a Docker network and a cargo-cache volume per PRD
+
+- **Status:** Fixed 2026-09-19 — every check pinned to one compose project (`-p familiar-ai-verify`)
+
 
 Every `[[review.verification]]` check ran `docker compose run` from a
 worktree directory, so Compose derived a project name from that directory
@@ -769,8 +832,10 @@ Fixed by pinning every verification check to one Compose project
 every check, worktree and worker. Recorded in
 `docs/contracts/verification-gate.md`.
 
-**FAM-BUG-060 — the independent reviewer is given the static scope ceiling
-instead of the authorised scope. FIXED.**
+### FAM-BUG-060 — The independent reviewer is given the static scope ceiling, not the authorised scope
+
+- **Status:** Fixed 2026-09-20 — `review_allowed_paths` includes the PRD contract when expansion is enabled
+
 
 `compile_scope_policy` deliberately builds `allowed_paths` from the
 configured ceiling only and applies the PRD's contract at adjudication
@@ -792,7 +857,10 @@ Fixed in `run.rs`: the review task's `allowed_paths` now includes the PRD's
 contract when `allow_prd_expected_file_expansion` is set. Pinned by
 `the_reviewer_receives_prd_declared_paths_not_only_the_static_ceiling`.
 
-**FAM-BUG-061 — no independent review has ever been costed. OPEN.**
+### FAM-BUG-061 — No independent review has ever been costed
+
+- **Status:** Open — owner PRD-086, whose subject this is
+
 
 Only two sites write usage observations: `run.rs` (stage `implementation`)
 and `batch_review.rs` (stage `review`). The ledger contains `implementation`
@@ -1319,7 +1387,8 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-047 — Intermittent workspace test failure
 
-- **Status:** REOPENED then FIXED 2026-09-03 — I closed this wrongly. My
+- **Status:** Fixed 2026-09-03 (reopened 2026-09-02 after an incorrect
+  closure) — I closed this wrongly. My
   sixteen "clean" runs were all standalone; the failure only appears under
   the Docker gate's contended parallel load, which I never reproduced. It
   then failed PRD-063's verification for real. The offender is
@@ -1549,7 +1618,7 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-053 — RETRACTED: scope approvals are not voided by a rebind
 
-- **Status:** Retracted 2026-09-05, same day. The diagnosis was wrong.
+- **Status:** Closed (retracted) 2026-09-05, same day. The diagnosis was wrong.
 - **What I claimed:** that `scope_decisions` rows are keyed by
   `(finding_hash, candidate_hash)` and that `operator_rebind` therefore
   silently invalidates every approval on the candidate.
@@ -1602,7 +1671,14 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-054 — A failing required check dead-ends; remediation is unreachable
 
-- **Status:** Open
+- **Status:** Fixed 2026-09-20 by PRD-096, integrated by Familiar's own
+  merge queue in `5ce0755`/`f182492`. `coordinator.rs` now synthesises a
+  blocking finding from the failing check — `synthesize_check_failure_finding`
+  at line 1330 — and populates `RemediationRequest::verification_failures`
+  with it, instead of stopping at `VerificationUnsuccessful` before any
+  review runs. The field existed and was passed `vec![]` at every call site,
+  which is exactly what this entry described. 80 review-crate tests green.
+- **Prior status:** Open
 - **Found:** 2026-09-06, driving PRD-63 with a hand-written failing test.
 - **Detail:** When a required verification check fails, the coordinator
   stops before the reviewer runs:
@@ -1745,6 +1821,13 @@ reinstall the binary, then rerun the 076 drive.
   evidenced, and this entry deliberately stops short of naming a cause.
 - **Next step:** capture the failing test name and its output the next
   time a workspace run reports it; do not "fix" it before then.
+- **2026-09-21:** that capture now happens automatically. `scripts/gate.sh`
+  records the names of failing tests in the verdict, so the next occurrence
+  identifies itself instead of vanishing. This is how the XDG environment
+  race was found the same day — it had flaked twice and never reproduced,
+  because the test restored the variable it had deleted. 058 is still open
+  and still undiagnosed; what changed is that it can now be caught rather
+  than waited for.
 
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
