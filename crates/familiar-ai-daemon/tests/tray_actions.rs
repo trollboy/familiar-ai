@@ -11,12 +11,13 @@ use familiar_ai_core::AppPaths;
 use familiar_ai_daemon::control_plane::ControlPlaneService;
 use familiar_ai_daemon::tray_data::DaemonDataSource;
 use familiar_ai_llm::InferenceRouter;
-use familiar_ai_storage::Database;
+use familiar_ai_storage::{Database, DriverRepository};
 use familiar_ai_tray::data::{Action, ConfigEdit, DataSource, Query};
 use tempfile::TempDir;
 
 struct Harness {
     status: Arc<Mutex<familiar_ai_core::AppStatus>>,
+    db: Arc<Mutex<Database>>,
     _tmp: TempDir,
     repo: String,
     config: std::path::PathBuf,
@@ -54,6 +55,17 @@ fn harness() -> Harness {
     )
     .unwrap();
 
+    // Repository identity is resolved through git, so the fixture has to be a
+    // real repository for anything keyed on it to answer. Built through
+    // `git_env` so the fixture cannot inherit an ambient GIT_DIR and operate
+    // on the repository running the tests.
+    assert!(
+        familiar_ai_core::git_env::git_command(&repo_dir, &["init", "-q"])
+            .status()
+            .unwrap()
+            .success()
+    );
+
     let db = Database::open_in_memory().unwrap();
     db.run_migrations().unwrap();
     let db = Arc::new(Mutex::new(db));
@@ -75,7 +87,8 @@ fn harness() -> Harness {
     let repo = repo_dir.to_string_lossy().into_owned();
     let status = Arc::new(Mutex::new(familiar_ai_core::AppStatus::new()));
     Harness {
-        source: DaemonDataSource::new(db, router, runtime, control, paths, status.clone()),
+        source: DaemonDataSource::new(db.clone(), router, runtime, control, paths, status.clone()),
+        db,
         status,
         repo,
         config: config_dir.join("config.toml"),
@@ -612,4 +625,64 @@ fn an_unknown_mode_is_refused() {
         builtin_model: "qwen2.5:3b".into(),
     });
     assert!(outcome.is_err(), "expected a refusal, got {outcome:?}");
+}
+
+// ------------------------------------------------------------------ rounds
+
+/// The waterfall's axis, end to end: the window asks one question and gets
+/// back the sessions and every attempt inside them, scoped to this repository.
+#[test]
+fn the_rounds_query_returns_sessions_with_their_attempts() {
+    let h = harness();
+    {
+        let db = h.db.lock().unwrap();
+        let driver = DriverRepository::new(db.conn());
+        let key = {
+            use familiar_ai_core::BacklogDiscovery as _;
+            familiar_ai_core::FilesystemBacklogDiscovery
+                .resolve(std::path::Path::new(&h.repo))
+                .unwrap()
+                .key
+        };
+        driver.open_session("s1", &key, "{}").unwrap();
+        let sequence = driver
+            .record_attempt_started("s1", "PRD-1", "docs/prds/PRD-1.md", None)
+            .unwrap();
+        driver
+            .record_attempt_finished("s1", sequence, "completed", None, None, Some(1_000))
+            .unwrap();
+    }
+
+    let value = h
+        .source
+        .query(Query::Rounds {
+            repo: h.repo.clone(),
+            limit: 20,
+        })
+        .expect("rounds should be readable");
+
+    assert_eq!(value["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(value["total_sessions"], 1);
+    let attempts = value["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["prd_path"], "docs/prds/PRD-1.md");
+    assert_eq!(attempts[0]["outcome"], "completed");
+    assert_eq!(attempts[0]["session_id"], "s1");
+}
+
+/// A repository the driver has never run in must answer with an empty chart
+/// rather than an error: "no rounds yet" is a state, not a failure.
+#[test]
+fn a_repository_with_no_sessions_returns_an_empty_chart() {
+    let h = harness();
+    let value = h
+        .source
+        .query(Query::Rounds {
+            repo: h.repo.clone(),
+            limit: 20,
+        })
+        .expect("an empty history is not an error");
+    assert!(value["sessions"].as_array().unwrap().is_empty());
+    assert!(value["attempts"].as_array().unwrap().is_empty());
+    assert_eq!(value["total_sessions"], 0);
 }

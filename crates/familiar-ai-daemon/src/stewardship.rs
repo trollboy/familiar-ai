@@ -167,6 +167,38 @@ pub fn list_attempts(
     }))
 }
 
+/// The rounds the driver has run in this repository, and which PRD each one
+/// touched.
+///
+/// A "round" is a driver session: the unit the driver actually works in, one
+/// warrant at a time. Calendar days are the wrong axis for a backlog that
+/// advances in bursts and then sits still for a week.
+///
+/// Sessions come back oldest first — a waterfall reads left to right — while
+/// the `limit` selects the most *recent* ones, because a chart truncated at
+/// the far end should drop ancient history rather than today's work.
+pub fn list_rounds(
+    db: &Database,
+    repository: &RepositoryIdentity,
+    limit: usize,
+) -> Result<Value, StewardshipError> {
+    let driver = DriverRepository::new(db.conn());
+    let mut sessions = driver
+        .list_sessions_by_repository(&repository.key, None, limit)
+        .map_err(storage)?;
+    sessions.reverse();
+    let attempts = driver.rounds(&repository.key, limit).map_err(storage)?;
+    let total = driver.count_sessions(&repository.key).map_err(storage)?;
+    Ok(json!({
+        "repository_key": repository.key,
+        "sessions": sessions,
+        "attempts": attempts,
+        // So the view can say "showing the last 20 of 43" rather than
+        // implying the driver has only ever run 20 times.
+        "total_sessions": total,
+    }))
+}
+
 pub fn list_checkpoints(
     db: &Database,
     repository: &RepositoryIdentity,

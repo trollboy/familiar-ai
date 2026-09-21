@@ -300,6 +300,10 @@ pub struct BacklogView {
     /// reads at a glance.
     pub counts: Vec<(String, usize)>,
     pub open: Vec<BacklogRow>,
+    /// Every row, completed ones included. The waterfall shows finished work
+    /// as well as outstanding work — a chart of only what is left says
+    /// nothing about what the repository has actually done.
+    pub all: Vec<BacklogRow>,
     /// True when the page fetched was full, i.e. these are not all of them.
     pub truncated: bool,
 }
@@ -319,29 +323,33 @@ pub fn build_backlog_view(backlog: &Value) -> BacklogView {
     let rows = items(backlog);
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut open = Vec::new();
+    let mut all = Vec::new();
     for row in rows {
         let status = str_at(row, "status").to_string();
         match counts.iter_mut().find(|(s, _)| *s == status) {
             Some(entry) => entry.1 += 1,
             None => counts.push((status.clone(), 1)),
         }
+        let entry = BacklogRow {
+            prd_path: str_at(row, "prd_path").to_string(),
+            status: status.clone(),
+            updated_at: str_at(row, "updated_at").to_string(),
+            missing_since: row
+                .get("missing_since")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        };
         if status != "completed" {
-            open.push(BacklogRow {
-                prd_path: str_at(row, "prd_path").to_string(),
-                status,
-                updated_at: str_at(row, "updated_at").to_string(),
-                missing_since: row
-                    .get("missing_since")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
-            });
+            open.push(entry.clone());
         }
+        all.push(entry);
     }
     counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     BacklogView {
         counts,
         open,
+        all,
         truncated: backlog
             .get("next_cursor")
             .map(|c| !c.is_null())
@@ -1830,6 +1838,7 @@ mod tests {
         let view = BacklogView {
             counts: vec![],
             truncated: false,
+            all: vec![],
             open: vec![
                 row("free.md", "pending", false),
                 row("waiting.md", "pending", false),
@@ -1873,6 +1882,7 @@ mod tests {
         let view = BacklogView {
             counts: vec![],
             truncated: false,
+            all: vec![],
             open: vec![BacklogRow {
                 prd_path: "a.md".into(),
                 status: "pending".into(),
@@ -2411,5 +2421,614 @@ mod escalation_tests {
         let (title, body) = escalation_message(&view.groups[0]);
         assert!(title.contains("PRD-90"), "{title}");
         assert!(body.contains("scope_violation"), "{body}");
+    }
+}
+
+// ------------------------------------------------------------ rounds view
+
+/// One round: a driver session, and what it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Round {
+    /// 1-based position in the chart, left to right, oldest first.
+    pub ordinal: usize,
+    pub session_id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub termination_reason: Option<String>,
+}
+
+/// What happened to one PRD in one round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundOutcome {
+    Completed,
+    /// Stopped with work retained — the state a PRD sits in when a gate or a
+    /// scope finding halted it.
+    Retained,
+    /// Started and never recorded an end. Either running now, or the daemon
+    /// died mid-attempt; the ledger cannot tell those apart, so neither does
+    /// this.
+    Unfinished,
+}
+
+impl RoundOutcome {
+    /// The colour of the bar. Chosen to survive a dark theme, and to put
+    /// "retained" nearer to a warning than to a failure, because retained
+    /// work is waiting for a person rather than broken.
+    pub fn colour(&self) -> &'static str {
+        match self {
+            Self::Completed => "#2e7d32",
+            Self::Retained => "#b26a00",
+            Self::Unfinished => "#4a4a4a",
+        }
+    }
+
+    pub fn caption(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Retained => "retained",
+            Self::Unfinished => "unfinished",
+        }
+    }
+}
+
+/// One PRD's appearance in one round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundCell {
+    pub outcome: RoundOutcome,
+    pub sequence: i64,
+    pub retained_reason: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
+/// One PRD across every round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lane {
+    pub prd_path: String,
+    pub status: String,
+    /// One entry per round, in the same order as [`RoundsView::rounds`].
+    /// `None` where this PRD was not touched in that round.
+    pub cells: Vec<Option<RoundCell>>,
+    /// True when this PRD appears in at least one round.
+    pub recorded: bool,
+}
+
+impl Lane {
+    /// The first round this PRD appears in, used to sort the chart so the
+    /// waterfall steps down and to the right instead of scattering.
+    pub fn first_round(&self) -> Option<usize> {
+        self.cells.iter().position(Option::is_some)
+    }
+
+    pub fn attempts(&self) -> usize {
+        self.cells.iter().filter(|c| c.is_some()).count()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoundsView {
+    pub rounds: Vec<Round>,
+    /// PRDs that appear in at least one round, ordered by where they first
+    /// appear.
+    pub recorded: Vec<Lane>,
+    /// PRDs the ledger has nothing on. Kept, not dropped: a chart that shows
+    /// only what was recorded invites reading absence as inactivity.
+    pub unrecorded: Vec<Lane>,
+    /// How many sessions exist in total, against how many are drawn.
+    pub total_sessions: usize,
+}
+
+impl RoundsView {
+    /// The honest headline: how much of the backlog this chart can actually
+    /// place. Everything else is a count of what was never written down.
+    pub fn coverage(&self) -> (usize, usize) {
+        let total = self.recorded.len() + self.unrecorded.len();
+        (self.recorded.len(), total)
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.total_sessions > self.rounds.len()
+    }
+}
+
+/// Builds the waterfall from the rounds payload and the backlog rows.
+///
+/// Every backlog row becomes a lane, whether or not the driver ever touched
+/// it, because the question "what has this repository done" is not the same
+/// as "what did the driver do" — and on a repository where most PRDs were
+/// finished by hand, answering only the second one would be a lie of omission.
+pub fn build_rounds_view(rounds: &Value, backlog: &[BacklogRow]) -> RoundsView {
+    let sessions: Vec<Round> = rounds
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .map(|(index, session)| Round {
+            ordinal: index + 1,
+            session_id: str_at(session, "session_id").to_string(),
+            started_at: str_at(session, "started_at").to_string(),
+            ended_at: session
+                .get("ended_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            termination_reason: session
+                .get("termination_reason")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+        .collect();
+
+    let column_of: std::collections::HashMap<&str, usize> = sessions
+        .iter()
+        .enumerate()
+        .map(|(index, round)| (round.session_id.as_str(), index))
+        .collect();
+
+    let attempts = rounds
+        .get("attempts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    let mut recorded = Vec::new();
+    let mut unrecorded = Vec::new();
+    for row in backlog {
+        let mut cells: Vec<Option<RoundCell>> = vec![None; sessions.len()];
+        for attempt in attempts {
+            if str_at(attempt, "prd_path") != row.prd_path {
+                continue;
+            }
+            let Some(&column) = column_of.get(str_at(attempt, "session_id")) else {
+                continue;
+            };
+            let outcome = match attempt.get("outcome").and_then(Value::as_str) {
+                Some("completed") => RoundOutcome::Completed,
+                Some("retained") => RoundOutcome::Retained,
+                _ => RoundOutcome::Unfinished,
+            };
+            let cell = RoundCell {
+                outcome,
+                sequence: attempt
+                    .get("sequence")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+                retained_reason: attempt
+                    .get("retained_reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                duration_ms: attempt.get("duration_ms").and_then(Value::as_u64),
+            };
+            // A PRD can be attempted twice in one session (an escalation
+            // re-runs it). The later attempt is the one that decided the
+            // round, so it wins the cell.
+            match &cells[column] {
+                Some(existing) if existing.sequence > cell.sequence => {}
+                _ => cells[column] = Some(cell),
+            }
+        }
+        let recorded_here = cells.iter().any(Option::is_some);
+        let lane = Lane {
+            prd_path: row.prd_path.clone(),
+            status: row.status.clone(),
+            cells,
+            recorded: recorded_here,
+        };
+        if recorded_here {
+            recorded.push(lane);
+        } else {
+            unrecorded.push(lane);
+        }
+    }
+
+    // Earliest appearance first, so the chart steps forward in time. Ties
+    // break on path, so the order does not wobble between refreshes.
+    recorded.sort_by(|a, b| {
+        a.first_round()
+            .cmp(&b.first_round())
+            .then_with(|| a.prd_path.cmp(&b.prd_path))
+    });
+    unrecorded.sort_by(|a, b| a.prd_path.cmp(&b.prd_path));
+
+    RoundsView {
+        rounds: sessions,
+        recorded,
+        unrecorded,
+        total_sessions: rounds
+            .get("total_sessions")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
+    }
+}
+
+/// How wide one round's cell is, in monospace characters.
+///
+/// The whole strip is one Pango label rather than a widget per cell: a
+/// hundred-odd PRDs against twenty rounds is two thousand cells, and two
+/// thousand widgets is a window that takes a visible moment to open.
+/// Monospace plus a fixed width is what keeps the columns under the header.
+const CELL_WIDTH: usize = 3;
+
+/// The column headings: the round numbers, right-aligned over their columns.
+///
+/// Deliberately the same size as the lanes below. The heading started out
+/// `<small>`, which looks tidier and is wrong: a smaller font has a narrower
+/// monospace advance, so the headings drifted left of their own columns a
+/// little more with every round until, six columns along, the number sat over
+/// the wrong bar.
+pub fn rounds_header_markup(view: &RoundsView) -> String {
+    let mut out = String::from("<tt>");
+    for round in &view.rounds {
+        out.push_str(&format!("{:>width$}", round.ordinal, width = CELL_WIDTH));
+    }
+    out.push_str("</tt>");
+    out
+}
+
+/// One lane's strip of bars.
+pub fn lane_markup(lane: &Lane) -> String {
+    let mut out = String::from("<tt>");
+    for cell in &lane.cells {
+        match cell {
+            Some(cell) => out.push_str(&format!(
+                "<span background=\"{}\">{}</span>",
+                cell.outcome.colour(),
+                " ".repeat(CELL_WIDTH)
+            )),
+            // A dim marker rather than blank space, so the columns stay
+            // readable across a wide chart and an empty round is visibly a
+            // round rather than a gap in the drawing.
+            None => out.push_str(&format!(
+                "<span foreground=\"#555555\"> {} </span>",
+                "\u{00b7}"
+            )),
+        }
+    }
+    out.push_str("</tt>");
+    out
+}
+
+/// What a lane says on hover: which rounds touched it and how each ended.
+pub fn lane_tooltip(lane: &Lane, rounds: &[Round]) -> String {
+    if !lane.recorded {
+        return format!(
+            "{}\nNo recorded round. The ledger has no attempt for this PRD.",
+            lane.prd_path
+        );
+    }
+    let mut lines = vec![lane.prd_path.clone()];
+    for (index, cell) in lane.cells.iter().enumerate() {
+        let Some(cell) = cell else { continue };
+        let ordinal = rounds.get(index).map(|r| r.ordinal).unwrap_or(index + 1);
+        let mut line = format!("Round {ordinal}: {}", cell.outcome.caption());
+        if let Some(ms) = cell.duration_ms {
+            line.push_str(&format!(" in {}", human_duration(ms)));
+        }
+        if let Some(reason) = &cell.retained_reason {
+            line.push_str(&format!(" — {reason}"));
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+/// A duration a person can read, from milliseconds.
+pub fn human_duration(ms: u64) -> String {
+    let seconds = ms / 1000;
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m {}s", seconds % 60);
+    }
+    format!("{}h {}m", minutes / 60, minutes % 60)
+}
+
+/// The line that stops the chart from lying by omission.
+///
+/// Without it, a reader sees bars for a quarter of the backlog and concludes
+/// the rest never happened, when in fact most of it was finished outside the
+/// driver and simply never written to the ledger.
+pub fn coverage_note(view: &RoundsView) -> String {
+    let (placed, total) = view.coverage();
+    if total == 0 {
+        return "Nothing in the backlog.".to_string();
+    }
+    if placed == total {
+        return format!("All {total} PRDs are placed in a round.");
+    }
+    format!(
+        "{placed} of {total} PRDs appear in a recorded round. \
+         The other {} were never driven by a session, so the ledger has no \
+         round to place them in.",
+        total - placed
+    )
+}
+
+/// How the rounds axis itself is captioned, including the truncation it is
+/// hiding.
+pub fn rounds_caption(view: &RoundsView) -> String {
+    if view.rounds.is_empty() {
+        return "No rounds recorded — the driver has never run here.".to_string();
+    }
+    if view.truncated() {
+        return format!(
+            "Last {} of {} rounds, oldest on the left.",
+            view.rounds.len(),
+            view.total_sessions
+        );
+    }
+    format!("{} rounds, oldest on the left.", view.rounds.len())
+}
+
+#[cfg(test)]
+mod rounds_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(path: &str, status: &str) -> BacklogRow {
+        BacklogRow {
+            prd_path: path.to_string(),
+            status: status.to_string(),
+            updated_at: "2026-09-01T00:00:00Z".to_string(),
+            missing_since: None,
+        }
+    }
+
+    /// The page counted completed PRDs in its header and then showed only the
+    /// open ones. The chart needs the finished work too — that is most of
+    /// what a repository has done.
+    #[test]
+    fn the_backlog_view_keeps_completed_rows_as_well_as_open_ones() {
+        let backlog = json!({"items": [
+            {"prd_path": "a.md", "status": "completed", "updated_at": "t"},
+            {"prd_path": "b.md", "status": "pending", "updated_at": "t"},
+            {"prd_path": "c.md", "status": "completed", "updated_at": "t"},
+        ]});
+        let view = build_backlog_view(&backlog);
+        assert_eq!(
+            view.open.len(),
+            1,
+            "open is still only the outstanding work"
+        );
+        assert_eq!(view.all.len(), 3, "all is everything, completed included");
+        assert_eq!(
+            view.all
+                .iter()
+                .map(|r| r.prd_path.as_str())
+                .collect::<Vec<_>>(),
+            ["a.md", "b.md", "c.md"]
+        );
+    }
+
+    fn payload() -> Value {
+        json!({
+            "sessions": [
+                {"session_id": "s1", "started_at": "2026-09-01T00:00:00Z",
+                 "ended_at": "2026-09-01T01:00:00Z", "termination_reason": "prd_ceiling"},
+                {"session_id": "s2", "started_at": "2026-09-02T00:00:00Z",
+                 "ended_at": null, "termination_reason": null},
+            ],
+            "attempts": [
+                {"session_id": "s1", "sequence": 1, "prd_id": "PRD-1", "prd_path": "docs/prds/PRD-1.md",
+                 "started_at": "2026-09-01T00:00:00Z", "ended_at": "2026-09-01T00:30:00Z",
+                 "outcome": "completed", "retained_reason": null, "duration_ms": 1_800_000},
+                {"session_id": "s2", "sequence": 1, "prd_id": "PRD-2", "prd_path": "docs/prds/PRD-2.md",
+                 "started_at": "2026-09-02T00:00:00Z", "ended_at": null,
+                 "outcome": "retained", "retained_reason": "scope broadened", "duration_ms": null},
+            ],
+            "total_sessions": 5,
+        })
+    }
+
+    /// The finding that shaped this view: most of a real backlog has never
+    /// been near a driver session. Those PRDs must still appear, separately
+    /// and labelled, rather than being dropped because they have no bar.
+    #[test]
+    fn prds_with_no_recorded_round_are_kept_and_counted() {
+        let backlog = vec![
+            row("docs/prds/PRD-1.md", "completed"),
+            row("docs/prds/PRD-2.md", "in_progress"),
+            row("docs/prds/PRD-3.md", "completed"),
+            row("docs/prds/PRD-4.md", "pending"),
+        ];
+        let view = build_rounds_view(&payload(), &backlog);
+
+        assert_eq!(view.recorded.len(), 2);
+        assert_eq!(view.unrecorded.len(), 2);
+        assert_eq!(view.coverage(), (2, 4));
+        // Including a *completed* one: finished work with no ledger entry is
+        // exactly the case that must not read as "never happened".
+        let unrecorded: Vec<&str> = view
+            .unrecorded
+            .iter()
+            .map(|l| l.prd_path.as_str())
+            .collect();
+        assert_eq!(unrecorded, ["docs/prds/PRD-3.md", "docs/prds/PRD-4.md"]);
+    }
+
+    #[test]
+    fn the_coverage_note_names_what_is_missing() {
+        let backlog = vec![
+            row("docs/prds/PRD-1.md", "completed"),
+            row("docs/prds/PRD-3.md", "completed"),
+        ];
+        let view = build_rounds_view(&payload(), &backlog);
+        let note = coverage_note(&view);
+        assert!(note.contains("1 of 2"), "{note}");
+        assert!(note.contains("never driven by a session"), "{note}");
+    }
+
+    #[test]
+    fn full_coverage_says_so_without_a_caveat() {
+        let backlog = vec![
+            row("docs/prds/PRD-1.md", "completed"),
+            row("docs/prds/PRD-2.md", "in_progress"),
+        ];
+        let view = build_rounds_view(&payload(), &backlog);
+        assert_eq!(coverage_note(&view), "All 2 PRDs are placed in a round.");
+    }
+
+    #[test]
+    fn a_lane_carries_one_cell_per_round_in_session_order() {
+        let backlog = vec![row("docs/prds/PRD-2.md", "in_progress")];
+        let view = build_rounds_view(&payload(), &backlog);
+        let lane = &view.recorded[0];
+        assert_eq!(lane.cells.len(), 2, "one cell per round, filled or not");
+        assert!(lane.cells[0].is_none(), "PRD-2 was not in round 1");
+        assert_eq!(
+            lane.cells[1].as_ref().unwrap().outcome,
+            RoundOutcome::Retained
+        );
+        assert_eq!(lane.first_round(), Some(1));
+        assert_eq!(lane.attempts(), 1);
+    }
+
+    /// An attempt with no outcome has not finished. The ledger cannot tell a
+    /// running attempt from one whose daemon died, and neither should this.
+    #[test]
+    fn an_attempt_without_an_outcome_is_unfinished() {
+        let payload = json!({
+            "sessions": [{"session_id": "s1", "started_at": "2026-09-01T00:00:00Z",
+                          "ended_at": null, "termination_reason": null}],
+            "attempts": [{"session_id": "s1", "sequence": 1, "prd_id": "PRD-1",
+                          "prd_path": "docs/prds/PRD-1.md", "started_at": "2026-09-01T00:00:00Z",
+                          "ended_at": null, "outcome": null, "retained_reason": null,
+                          "duration_ms": null}],
+            "total_sessions": 1,
+        });
+        let view = build_rounds_view(&payload, &[row("docs/prds/PRD-1.md", "in_progress")]);
+        assert_eq!(
+            view.recorded[0].cells[0].as_ref().unwrap().outcome,
+            RoundOutcome::Unfinished
+        );
+    }
+
+    /// An escalation re-runs a PRD inside the same session. The round shows
+    /// how it ended, which is the later attempt, not the one it superseded.
+    #[test]
+    fn a_second_attempt_in_one_round_supersedes_the_first() {
+        let payload = json!({
+            "sessions": [{"session_id": "s1", "started_at": "2026-09-01T00:00:00Z",
+                          "ended_at": null, "termination_reason": null}],
+            "attempts": [
+                {"session_id": "s1", "sequence": 1, "prd_id": "PRD-1", "prd_path": "docs/prds/PRD-1.md",
+                 "started_at": "t", "ended_at": "t", "outcome": "retained",
+                 "retained_reason": "first try", "duration_ms": null},
+                {"session_id": "s1", "sequence": 2, "prd_id": "PRD-1", "prd_path": "docs/prds/PRD-1.md",
+                 "started_at": "t", "ended_at": "t", "outcome": "completed",
+                 "retained_reason": null, "duration_ms": null},
+            ],
+            "total_sessions": 1,
+        });
+        let view = build_rounds_view(&payload, &[row("docs/prds/PRD-1.md", "completed")]);
+        let cell = view.recorded[0].cells[0].as_ref().unwrap();
+        assert_eq!(cell.outcome, RoundOutcome::Completed);
+        assert_eq!(cell.sequence, 2);
+    }
+
+    /// The waterfall has to step forward: a lane that first appears in an
+    /// earlier round sits above one that appears later.
+    #[test]
+    fn lanes_are_ordered_by_where_they_first_appear() {
+        let backlog = vec![
+            row("docs/prds/PRD-2.md", "in_progress"),
+            row("docs/prds/PRD-1.md", "completed"),
+        ];
+        let view = build_rounds_view(&payload(), &backlog);
+        let order: Vec<&str> = view.recorded.iter().map(|l| l.prd_path.as_str()).collect();
+        assert_eq!(
+            order,
+            ["docs/prds/PRD-1.md", "docs/prds/PRD-2.md"],
+            "PRD-1 first appears in round 1, PRD-2 in round 2"
+        );
+    }
+
+    /// Header and lanes are drawn as separate labels, so they line up only if
+    /// both spend the same number of monospace characters per round *and*
+    /// render them at the same size.
+    #[test]
+    fn every_cell_is_the_same_width_as_its_heading() {
+        let backlog = vec![row("docs/prds/PRD-2.md", "in_progress")];
+        let view = build_rounds_view(&payload(), &backlog);
+
+        let header = rounds_header_markup(&view);
+        assert_eq!(visible_chars(&header), view.rounds.len() * 3, "{header}");
+
+        let lane = lane_markup(&view.recorded[0]);
+        assert_eq!(visible_chars(&lane), view.rounds.len() * 3, "{lane}");
+    }
+
+    /// Equal character counts are not equal widths if one side is drawn
+    /// smaller. The heading used `<small>` and drifted a little further left
+    /// with every column; by the sixth round the number sat over the wrong
+    /// bar. Neither side may carry a size tag.
+    #[test]
+    fn neither_the_heading_nor_the_lanes_change_font_size() {
+        let view = build_rounds_view(&payload(), &[row("docs/prds/PRD-2.md", "in_progress")]);
+        for markup in [rounds_header_markup(&view), lane_markup(&view.recorded[0])] {
+            for tag in ["<small>", "<big>", "size="] {
+                assert!(
+                    !markup.contains(tag),
+                    "{tag} changes the monospace advance and breaks alignment: {markup}"
+                );
+            }
+        }
+    }
+
+    /// Strips Pango tags, leaving what the reader actually sees.
+    fn visible_chars(markup: &str) -> usize {
+        let mut count = 0;
+        let mut in_tag = false;
+        for ch in markup.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => count += 1,
+                _ => {}
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn the_caption_admits_truncation() {
+        let view = build_rounds_view(&payload(), &[]);
+        assert!(view.truncated(), "2 of 5 sessions drawn");
+        let caption = rounds_caption(&view);
+        assert!(caption.contains("Last 2 of 5 rounds"), "{caption}");
+    }
+
+    #[test]
+    fn no_rounds_at_all_says_the_driver_never_ran() {
+        let empty = json!({"sessions": [], "attempts": [], "total_sessions": 0});
+        let view = build_rounds_view(&empty, &[row("docs/prds/PRD-1.md", "pending")]);
+        assert!(view.rounds.is_empty());
+        assert_eq!(view.unrecorded.len(), 1);
+        assert!(rounds_caption(&view).contains("never run here"));
+    }
+
+    #[test]
+    fn a_tooltip_names_the_round_the_outcome_and_the_reason() {
+        let backlog = vec![row("docs/prds/PRD-2.md", "in_progress")];
+        let view = build_rounds_view(&payload(), &backlog);
+        let tip = lane_tooltip(&view.recorded[0], &view.rounds);
+        assert!(tip.contains("Round 2: retained"), "{tip}");
+        assert!(tip.contains("scope broadened"), "{tip}");
+    }
+
+    #[test]
+    fn an_unrecorded_lane_says_why_it_has_no_bars() {
+        let view = build_rounds_view(&payload(), &[row("docs/prds/PRD-9.md", "completed")]);
+        let tip = lane_tooltip(&view.unrecorded[0], &view.rounds);
+        assert!(tip.contains("No recorded round"), "{tip}");
+    }
+
+    #[test]
+    fn durations_read_as_time_not_milliseconds() {
+        assert_eq!(human_duration(45_000), "45s");
+        assert_eq!(human_duration(1_800_000), "30m 0s");
+        assert_eq!(human_duration(5_400_000), "1h 30m");
     }
 }

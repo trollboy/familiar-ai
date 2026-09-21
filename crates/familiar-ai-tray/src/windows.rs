@@ -23,6 +23,13 @@ use crate::view;
 
 const PAD: i32 = 8;
 
+/// How many rounds the waterfall draws.
+///
+/// The most recent ones: a chart that has to be truncated should drop ancient
+/// history rather than this week's work. Twenty columns of three characters
+/// still fits beside the paths without a horizontal scrollbar.
+const ROUNDS_SHOWN: usize = 20;
+
 thread_local! {
     /// One window each, reused. Clicking a menu item twice should raise the
     /// window that is already open, not stack a second copy behind it.
@@ -1318,37 +1325,48 @@ fn backlog_row(
     progress: Option<&view::Progress>,
     blocked_reason: Option<&view::BlockedReason>,
     buttons_group: &gtk::SizeGroup,
+    path_group: &gtk::SizeGroup,
+    lane: Option<&view::Lane>,
+    rounds: &[view::Round],
     refresh: &Refresh,
     parent: &gtk::Window,
 ) -> gtk::Box {
     let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
     let line = gtk::Box::new(gtk::Orientation::Horizontal, PAD);
-    line.pack_start(
-        &markup(&format!(
-            "<tt>{}</tt>  <small>{}</small>",
-            esc(&row.prd_path),
-            esc(&row.status)
-        )),
-        false,
-        false,
-        0,
-    );
+    let identity = markup(&format!(
+        "<tt>{}</tt>  <small>{}</small>",
+        esc(&row.prd_path),
+        esc(&row.status)
+    ));
+    identity.set_xalign(0.0);
+    // One width for every path, so the bars beside them start on the same
+    // column and the chart reads as a chart rather than a ragged list.
+    path_group.add_widget(&identity);
+    line.pack_start(&identity, false, false, 0);
 
-    // Buttons live in their own box of uniform width, so they line up in
-    // columns instead of floating to a ragged right edge as the number of
-    // available actions changes from row to row.
+    // The lane itself: one label holding every round's cell.
+    if let Some(lane) = lane {
+        let bars = markup(&view::lane_markup(lane));
+        bars.set_tooltip_text(Some(&view::lane_tooltip(lane, rounds)));
+        line.pack_start(&bars, false, false, 0);
+    }
+
+    // One dropdown rather than a row of buttons. Four buttons per row, most
+    // of them inapplicable to most rows, crowded the thing the page is
+    // actually about; and the set changes per row, so they never lined up.
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, PAD / 2);
     buttons_group.add_widget(&actions);
+    let menu = gtk::Menu::new();
 
     let refusal = view::start_refusal(row, waiting_on);
-    let start = gtk::Button::with_label("Start");
+    let start = gtk::MenuItem::with_label("Start");
     if refusal.is_none() {
         let source = source.clone();
         let repo = repo.to_string();
         let prd_path = row.prd_path.clone();
         let refresh = refresh.clone();
         let parent = parent.clone();
-        start.connect_clicked(move |_| {
+        start.connect_activate(move |_| {
             run_action(
                 source.clone(),
                 Action::StartPrd {
@@ -1367,10 +1385,25 @@ fn backlog_row(
         start.set_tooltip_text(Some(reason));
     }
 
+    menu.append(&start);
+
+    let read = gtk::MenuItem::with_label("Read");
+    {
+        let source = source.clone();
+        let repo = repo.to_string();
+        let prd_path = row.prd_path.clone();
+        let parent = parent.clone();
+        read.connect_activate(move |_| show_prd_text(source.as_ref(), &repo, &prd_path, &parent));
+    }
+    menu.append(&read);
+
+    // The recovery actions are destructive and apply only to retained work.
+    // Behind a separator so they are not the neighbours of "Read".
     if row.status == "in_progress" {
+        menu.append(&gtk::SeparatorMenuItem::new());
         for (text, release) in [("Release", true), ("Force-complete", false)] {
-            let button = gtk::Button::with_label(text);
-            button.set_tooltip_text(Some(if release {
+            let item = gtk::MenuItem::with_label(text);
+            item.set_tooltip_text(Some(if release {
                 "Return this PRD to pending and discard the retained work."
             } else {
                 "Mark this PRD completed in the backlog without its gates being \
@@ -1381,7 +1414,7 @@ fn backlog_row(
             let prd_path = row.prd_path.clone();
             let refresh = refresh.clone();
             let parent = parent.clone();
-            button.connect_clicked(move |_| {
+            item.connect_activate(move |_| {
                 let action = if release {
                     Action::ReleasePrd {
                         repo: repo.clone(),
@@ -1399,20 +1432,15 @@ fn backlog_row(
                 };
                 run_action(source.clone(), action, &refresh, &parent);
             });
-            actions.pack_start(&button, false, false, 0);
+            menu.append(&item);
         }
     }
-    actions.pack_start(&start, false, false, 0);
 
-    let read = gtk::Button::with_label("Read");
-    {
-        let source = source.clone();
-        let repo = repo.to_string();
-        let prd_path = row.prd_path.clone();
-        let parent = parent.clone();
-        read.connect_clicked(move |_| show_prd_text(source.as_ref(), &repo, &prd_path, &parent));
-    }
-    actions.pack_start(&read, false, false, 0);
+    menu.show_all();
+    let button = gtk::MenuButton::new();
+    button.set_label("Actions");
+    button.set_popup(Some(&menu));
+    actions.pack_start(&button, false, false, 0);
     line.pack_end(&actions, false, false, 0);
     container.pack_start(&line, false, false, 0);
 
@@ -1480,6 +1508,17 @@ fn backlog_tab(
         })
         .map(|r| view::build_blocked_reasons(&r))
         .unwrap_or_default();
+    // The chart axis. A failure here costs the bars, not the page: the
+    // backlog is still worth showing without its history.
+    let rounds_value = source.query(Query::Rounds {
+        repo: repo.to_string(),
+        limit: ROUNDS_SHOWN,
+    });
+    let rounds_error = rounds_value.as_ref().err().cloned();
+    let rounds = rounds_value
+        .map(|value| view::build_rounds_view(&value, &v.all))
+        .unwrap_or_default();
+
     let dependencies = source.query(Query::Dependencies {
         repo: repo.to_string(),
     });
@@ -1524,9 +1563,40 @@ fn backlog_tab(
         );
     }
 
-    if v.open.is_empty() {
-        root.pack_start(&label("Nothing open."), false, false, 0);
+    if v.all.is_empty() {
+        root.pack_start(&label("Nothing in the backlog."), false, false, 0);
         return scrolled(&root).upcast();
+    }
+
+    // What the axis is, and how much of the backlog it can honestly place.
+    root.pack_start(
+        &markup(&format!(
+            "<small>{}</small>",
+            esc(&view::rounds_caption(&rounds))
+        )),
+        false,
+        false,
+        0,
+    );
+    root.pack_start(
+        &markup(&format!(
+            "<small>{}</small>",
+            esc(&view::coverage_note(&rounds))
+        )),
+        false,
+        false,
+        0,
+    );
+    if let Some(error) = &rounds_error {
+        root.pack_start(
+            &markup(&format!(
+                "<small>rounds could not be read, so no history is shown: {}</small>",
+                esc(error)
+            )),
+            false,
+            false,
+            0,
+        );
     }
 
     let filter = gtk::SearchEntry::new();
@@ -1535,13 +1605,42 @@ fn backlog_tab(
 
     let live = vbox();
     let stale = vbox();
+    let unplaced = vbox();
     let buttons_group = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+    let path_group = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+
+    // The column headings sit above the lanes, indented past the path column
+    // by the same size group that governs the paths themselves.
+    if !rounds.rounds.is_empty() {
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, PAD);
+        let spacer = markup("<tt> </tt>");
+        spacer.set_xalign(0.0);
+        path_group.add_widget(&spacer);
+        heading.pack_start(&spacer, false, false, 0);
+        heading.pack_start(
+            &markup(&view::rounds_header_markup(&rounds)),
+            false,
+            false,
+            0,
+        );
+        root.pack_start(&heading, false, false, 0);
+    }
+
     // Rows whose file still exists are the work; rows whose file has gone are
     // history the backlog has not caught up with. Interleaving them buried the
     // real work — most of this backlog is the second kind.
     let mut rows: Vec<(String, gtk::Box)> = Vec::new();
     let mut stale_count = 0usize;
-    for row in &v.open {
+    let mut unplaced_count = 0usize;
+    let lanes = rounds
+        .recorded
+        .iter()
+        .map(|lane| (lane, true))
+        .chain(rounds.unrecorded.iter().map(|lane| (lane, false)));
+    for (lane, placed) in lanes {
+        let Some(row) = v.all.iter().find(|r| r.prd_path == lane.prd_path) else {
+            continue;
+        };
         let waiting_on = blockers
             .iter()
             .find(|(path, _)| *path == row.prd_path)
@@ -1561,20 +1660,36 @@ fn backlog_tab(
                 .find(|(path, _)| *path == row.prd_path)
                 .map(|(_, r)| r),
             &buttons_group,
+            &path_group,
+            Some(lane),
+            &rounds.rounds,
             refresh,
             parent,
         );
         let target = if row.missing_since.is_some() {
             stale_count += 1;
             &stale
-        } else {
+        } else if placed {
             &live
+        } else {
+            unplaced_count += 1;
+            &unplaced
         };
         target.pack_start(&widget, false, false, 0);
         rows.push((row.prd_path.clone(), widget));
     }
 
     root.pack_start(&live, false, false, 0);
+    if unplaced_count > 0 {
+        let expander = gtk::Expander::new(None);
+        expander.set_label_widget(Some(&markup(&format!(
+            "<b>{unplaced_count}</b> <small>PRDs with no recorded round — finished or \
+             queued outside a driver session, so the ledger has nothing to chart</small>"
+        ))));
+        expander.add(&unplaced);
+        expander.set_margin_top(PAD);
+        root.pack_start(&expander, false, false, 0);
+    }
     if stale_count > 0 {
         let expander = gtk::Expander::new(None);
         expander.set_label_widget(Some(&markup(&format!(
