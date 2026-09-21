@@ -2070,6 +2070,16 @@ reinstall the binary, then rerun the 076 drive.
   microphone, Accessibility, or UI-automation permission is used or required.
   GTK remains intentionally available pending the real Linux graphical smoke
   gate required by the fail-closed migration plan.
+- **2026-09-21 parity correction:** the first Tauri presentation was a thin,
+  generic table/form shell and did not faithfully carry forward the mature GTK
+  information architecture. The desktop now serializes and consumes the same
+  tested `familiar-ai-tray::view` models used by GTK for inference health,
+  gates, dependency blockers, progress, rounds, executions, sessions, attempt
+  and review detail, budgets, configuration sections, and Gantt data. Its
+  controls are contextual rather than requiring operators to type internal
+  PRD, execution, or session identifiers. A desktop contract test pins that
+  shared-builder inventory so the two presentations cannot silently drift
+  again while GTK remains the migration oracle.
 
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 

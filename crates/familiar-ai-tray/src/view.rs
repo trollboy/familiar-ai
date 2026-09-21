@@ -64,7 +64,7 @@ pub fn escape_markup(text: &str) -> String {
 
 // ---------------------------------------------------------------- settings
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum BackendState {
     Healthy,
     Degraded,
@@ -81,7 +81,7 @@ impl BackendState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BackendRow {
     /// Identifier the test action sends back, e.g. `text_primary`.
     pub target: String,
@@ -91,7 +91,7 @@ pub struct BackendRow {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SettingsView {
     pub text_mode: String,
     pub text: Vec<BackendRow>,
@@ -152,7 +152,7 @@ pub fn build_settings_view(status: &Value) -> SettingsView {
 
 // ------------------------------------------------------------------- gates
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GateGroup {
     pub prd_id: String,
     pub prd_path: String,
@@ -161,7 +161,7 @@ pub struct GateGroup {
     pub recovery_commands: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GatesView {
     pub groups: Vec<GateGroup>,
     /// Stopped attempts before grouping; one PRD can stop many times.
@@ -175,7 +175,7 @@ pub struct GatesView {
 /// surface stays worth reading, and it should be provable without a desktop
 /// session. The count is what the badge draws; `to_announce` is what the
 /// notifier is handed; `seen` is what the caller remembers for next time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Escalation {
     pub count: usize,
     pub to_announce: Vec<GateGroup>,
@@ -294,7 +294,7 @@ pub fn build_gates_view(gates: &Value) -> GatesView {
 
 // ----------------------------------------------------------------- backlog
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BacklogView {
     /// Status counts in descending count order, so the shape of the backlog
     /// reads at a glance.
@@ -308,7 +308,7 @@ pub struct BacklogView {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BacklogRow {
     pub prd_path: String,
     pub status: String,
@@ -362,7 +362,7 @@ pub fn build_backlog_view(backlog: &Value) -> BacklogView {
 /// A count of "pending" invites you to add another pending item. The number
 /// that matters is how much can actually be started right now, which on a
 /// dependency graph with unfinished roots is a much smaller number.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BacklogSummary {
     /// Open, unblocked, and its file still exists.
     pub startable: usize,
@@ -424,7 +424,7 @@ pub fn build_backlog_summary(
 
 // ---------------------------------------------------------------- sessions
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionRow {
     pub session_id: String,
     pub started_at: String,
@@ -452,7 +452,7 @@ pub fn build_sessions_view(sessions: &Value) -> Vec<SessionRow> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AttemptRow {
     pub sequence: i64,
     pub prd_id: String,
@@ -465,7 +465,7 @@ pub struct AttemptRow {
     pub duration: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FindingRow {
     pub prd_id: String,
     pub path: String,
@@ -473,7 +473,7 @@ pub struct FindingRow {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionDetailView {
     pub spent: String,
     pub priced_attempts: i64,
@@ -646,7 +646,7 @@ pub fn attempt_review_markup(attempt: &AttemptRow) -> String {
 
 // -------------------------------------------------------------- executions
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExecutionRowView {
     pub execution_id: String,
     pub state: String,
@@ -724,7 +724,7 @@ pub fn project_state_label(state: &Value) -> String {
 // ----------------------------------------------------------------- choices
 
 /// One option a setting may take.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Choice {
     pub value: String,
     /// What the operator reads. Carries the reason an option cannot be used,
@@ -733,7 +733,7 @@ pub struct Choice {
     pub available: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum ChoiceSet {
     /// The value must be one of these.
     Closed(Vec<Choice>),
@@ -818,7 +818,7 @@ pub fn choices_for(path: &[String], catalogue: &Value) -> Option<ChoiceSet> {
 
 // ------------------------------------------------------------ dependencies
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Blocker {
     pub prd_id: String,
     pub status: String,
@@ -878,14 +878,14 @@ pub fn refusal_markup(reason: &str) -> String {
 
 // ------------------------------------------------------- why it is blocked
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BlockingFinding {
     pub path: String,
     pub decision: String,
     pub rule_detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BlockedReason {
     /// One line naming the cause, e.g. "scope broadened".
     pub headline: String,
@@ -1071,7 +1071,7 @@ pub const PIPELINE: [(&str, &str); 7] = [
     ("completed", "Done"),
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Progress {
     /// Index into [`PIPELINE`] of the furthest phase reached.
     pub reached: Option<usize>,
@@ -1137,7 +1137,7 @@ pub fn progress_markup(progress: &Progress) -> String {
 /// What kind of editor a setting needs. Derived from the value already in the
 /// file rather than from a hard-coded schema, so a section nobody anticipated
 /// still gets a usable widget.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum FieldKind {
     Bool,
     Integer,
@@ -1150,7 +1150,7 @@ pub enum FieldKind {
 /// Where a project's value came from. A setting shown on a project must say
 /// whether it is that project's own or the global default it inherits, or the
 /// operator cannot tell what changing it would affect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum FieldOrigin {
     /// Written in the global tables, or shown on the global form.
     Global,
@@ -1160,7 +1160,7 @@ pub enum FieldOrigin {
     Inherited,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConfigField {
     /// Path through the document; numeric segments index arrays.
     pub path: Vec<String>,
@@ -1170,7 +1170,7 @@ pub struct ConfigField {
     pub origin: FieldOrigin,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConfigSection {
     /// Dotted path, e.g. `agents.implementation`. Empty for the top level.
     pub title: String,
@@ -2427,7 +2427,7 @@ mod escalation_tests {
 // ------------------------------------------------------------ rounds view
 
 /// One round: a driver session, and what it did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Round {
     /// 1-based position in the chart, left to right, oldest first.
     pub ordinal: usize,
@@ -2438,7 +2438,7 @@ pub struct Round {
 }
 
 /// What happened to one PRD in one round.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RoundOutcome {
     Completed,
     /// Stopped with work retained — the state a PRD sits in when a gate or a
@@ -2472,7 +2472,7 @@ impl RoundOutcome {
 }
 
 /// One PRD's appearance in one round.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RoundCell {
     pub outcome: RoundOutcome,
     pub sequence: i64,
@@ -2481,7 +2481,7 @@ pub struct RoundCell {
 }
 
 /// One PRD across every round.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Lane {
     pub prd_path: String,
     pub status: String,
@@ -2504,7 +2504,7 @@ impl Lane {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct RoundsView {
     pub rounds: Vec<Round>,
     /// PRDs that appear in at least one round, ordered by where they first
@@ -3036,7 +3036,7 @@ mod rounds_tests {
 // ------------------------------------------------------------------ gantt
 
 /// One PRD's run inside a session, positioned in time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GanttBar {
     pub prd_id: String,
     pub outcome: String,
@@ -3054,14 +3054,14 @@ pub struct GanttBar {
 /// session spans minutes — a single linear scale would compress every run into
 /// the same pixel. This is the same reason the reference Gantt groups tasks
 /// under phases rather than laying a quarter out flat.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GanttSession {
     pub session_id: String,
     pub span_label: String,
     pub bars: Vec<GanttBar>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct GanttView {
     pub sessions: Vec<GanttSession>,
     /// PRDs that have never been driven, so have no run to chart.

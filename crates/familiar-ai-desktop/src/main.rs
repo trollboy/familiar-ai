@@ -1,5 +1,6 @@
 mod client;
 mod commands;
+mod presentation;
 mod windows;
 
 use std::sync::Arc;
@@ -28,7 +29,8 @@ fn main() {
             commands::connection_status,
             commands::operator_query,
             commands::operator_mutate,
-            commands::operator_observe
+            commands::operator_observe,
+            presentation::present
         ])
         .setup(|app| {
             let dashboard =

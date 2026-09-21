@@ -13,10 +13,8 @@
     <div class="brand"><span aria-hidden="true">🐈‍⬛</span><strong>Familiar</strong></div>
     <nav aria-label="Primary">
       <button data-route="dashboard">Dashboard</button>
-      <button data-route="backlog">Backlog</button>
-      <button data-route="execution">Execution</button>
       <button data-route="settings">Settings</button>
-      <button data-route="local-llm">Local LLM</button>
+      <button data-route="local-llm">Configure Local LLM</button>
     </nav>
     <div id="connection" role="status" aria-live="polite">Connecting…</div>
   </header>
@@ -36,8 +34,11 @@
       <label id="actor-label">Actor<input id="actor" autocomplete="name"></label>
       <label id="reason-label">Reason<textarea id="reason"></textarea></label>
       <p id="confirm-error" class="error" role="alert"></p>
-      <menu><button value="cancel">Cancel</button><button id="confirm-submit" value="default">Confirm</button></menu>
+      <menu><button value="cancel">Cancel</button><button id="confirm-submit" value="confirm">Confirm</button></menu>
     </form>
+  </dialog>
+  <dialog id="reader">
+    <form method="dialog" class="reader"><header><h2>PRD</h2><button value="close" aria-label="Close PRD">Close</button></header><pre></pre></form>
   </dialog>
 </body>
 </html>

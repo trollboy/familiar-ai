@@ -1343,6 +1343,7 @@ version = "0.1.0"
 dependencies = [
  "familiar-ai-core",
  "familiar-ai-daemon",
+ "familiar-ai-tray",
  "serde",
  "serde_json",
  "tauri",
@@ -1482,6 +1483,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "opener",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

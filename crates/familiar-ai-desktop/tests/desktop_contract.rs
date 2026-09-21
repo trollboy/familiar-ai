@@ -53,3 +53,31 @@ fn quitting_the_desktop_does_not_request_daemon_shutdown() {
     assert!(!main.contains("\"quit-desktop\" => { let _ = app.emit(\"familiar://request-stop\""));
     assert!(main.contains("\"stop-daemon\""));
 }
+
+#[test]
+fn tauri_reuses_the_gtk_presentation_contract() {
+    let adapter = include_str!("../src/presentation.rs");
+    let javascript = include_str!("../ui/app.js");
+    for builder in [
+        "build_settings_view",
+        "build_gates_view",
+        "build_backlog_view",
+        "build_blockers",
+        "build_blocked_reasons",
+        "build_progress",
+        "build_rounds_view",
+        "build_executions_view",
+        "build_sessions_view",
+        "build_session_detail",
+        "build_gantt_session",
+        "build_config_form",
+        "build_project_config_form",
+    ] {
+        assert!(adapter.contains(builder), "desktop omitted GTK view builder {builder}");
+    }
+    assert!(javascript.contains("invoke('present'"));
+    assert!(!javascript.contains("JSON.stringify(data"));
+    assert!(!javascript.contains("prd-path"));
+    assert!(!javascript.contains("execution-id"));
+    assert!(!javascript.contains("session-id"));
+}
