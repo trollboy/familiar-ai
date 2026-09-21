@@ -2005,12 +2005,16 @@ reinstall the binary, then rerun the 076 drive.
   Linux-only. The Linux-only Xvfb shutdown integration and GTK visual-preview
   example were also reachable from macOS all-target builds. Operators therefore
   installed `--no-default-features` binaries and the shipped macOS menu-bar path
-  was never part of the verified artifact.
+  was never part of the verified artifact. The first native build exposed the
+  runtime defect hidden behind that build gap: macOS constructed its
+  `NSStatusItem` and then slept in a plain Rust polling loop without pumping
+  AppKit events, so the daemon stayed healthy while no icon was presented.
 - **Fix:** the direct GTK feature is now declared only in the Linux dependency
   section; Linux keeps GTK windows and its Xvfb shutdown test. macOS builds and
   links the native AppKit menu-bar path, opens dashboard/configuration surfaces
-  through the browser or editor, and compiles a harmless stub for the GTK-only
-  visual fixture. A manifest regression pins the dependency boundary.
+  through the browser or editor, compiles a harmless stub for the GTK-only
+  visual fixture, and explicitly pumps AppKit's event queue on the main thread.
+  Regressions pin both the dependency boundary and native event dispatch.
 - **Evidence:** the tray-enabled macOS release links; macOS all-target checking
   passes; all 104 tray unit tests pass; strict tray Clippy passes; and the Linux
   dependency graph still contains `gtk` and `muda/gtk`. Docker was unavailable

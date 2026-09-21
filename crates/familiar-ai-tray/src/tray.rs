@@ -92,6 +92,20 @@ impl TrayApp {
                 .map_err(|e| FamiliarError::Config(format!("failed to initialize GTK: {e}")))?;
         }
 
+        #[cfg(target_os = "macos")]
+        let macos_app = {
+            use objc2::MainThreadMarker;
+            use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+            let mtm = MainThreadMarker::new().ok_or_else(|| {
+                FamiliarError::Config("macOS tray must run on the main thread".into())
+            })?;
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            app.finishLaunching();
+            app
+        };
+
         let icon = load_tray_icon()?;
 
         // Build initial menu
@@ -238,10 +252,34 @@ impl TrayApp {
 
         #[cfg(not(target_os = "linux"))]
         {
-            // macOS: simple loop polling menu events
+            // macOS needs its AppKit event queue pumped on this main thread.
+            // A plain sleeping Rust loop leaves the NSStatusItem constructed
+            // but never presented, which looks exactly like a missing tray.
             let refresh = self.refresher();
             let mut last_refresh = Instant::now();
             loop {
+                #[cfg(target_os = "macos")]
+                {
+                    use objc2_app_kit::NSEventMask;
+                    use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
+
+                    let now = NSDate::distantPast();
+                    // Imported Objective-C constants are extern statics; the
+                    // framework guarantees this one is initialized for the
+                    // process lifetime.
+                    let mode = unsafe { NSDefaultRunLoopMode };
+                    while let Some(event) = macos_app
+                        .nextEventMatchingMask_untilDate_inMode_dequeue(
+                            NSEventMask::Any,
+                            Some(&now),
+                            mode,
+                            true,
+                        )
+                    {
+                        macos_app.sendEvent(&event);
+                    }
+                    macos_app.updateWindows();
+                }
                 if let Ok(event) = menu_channel.try_recv() {
                     let cmd = ids_arc.lock().unwrap().resolve(&event.id);
                     if let Some(cmd) = cmd {
@@ -259,7 +297,7 @@ impl TrayApp {
                     last_refresh = Instant::now();
                     refresh.refresh_if_changed(&tray, &mut spec, &ids_arc);
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
 

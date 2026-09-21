@@ -124,6 +124,15 @@ fn gtk_is_a_linux_only_direct_dependency() {
 }
 
 #[test]
+fn macos_tray_pumps_the_native_event_queue() {
+    let source = read("crates/familiar-ai-tray/src/tray.rs");
+    assert!(source.contains("NSApplication::sharedApplication"));
+    assert!(source.contains("nextEventMatchingMask_untilDate_inMode_dequeue"));
+    assert!(source.contains("macos_app.sendEvent(&event)"));
+    assert!(source.contains("macos_app.updateWindows()"));
+}
+
+#[test]
 fn the_trays_tests_are_reachable_from_a_workspace_run() {
     // The regression that matters most is not any single assertion in the tray
     // — it is that the tray has assertions at all and that a workspace command
