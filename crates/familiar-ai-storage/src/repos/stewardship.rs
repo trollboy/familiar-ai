@@ -242,6 +242,16 @@ pub fn pending_human_gates(
 ) -> familiar_ai_core::Result<Vec<PendingGate>> {
     let mut gates = Vec::new();
     {
+        // Archiving a PRD leaves the old `docs/prds/<file>` row behind as
+        // pending while a new `docs/prds/done/<file>` row records it
+        // completed. An attempt recorded the path it ran under, so joining on
+        // prd_path matches the stale row and a finished PRD reads as still
+        // waiting: PRD-36, 40 and 43 all sat in "Waiting on you" while the
+        // backlog showed them done.
+        //
+        // Those stale rows already carry `missing_since`, because discovery
+        // knows the file is gone. Nothing can be run from a path that no
+        // longer exists, so nothing there is owed a decision.
         let mut stmt = conn
             .prepare(
                 "SELECT a.session_id,a.prd_id,a.prd_path,a.retained_reason,a.outcome \
@@ -250,6 +260,7 @@ pub fn pending_human_gates(
                    ON b.prd_path=a.prd_path AND b.repository_key=s.repository_key \
                  WHERE s.repository_key=?1 AND (a.outcome IS NULL OR a.outcome<>'completed') \
                    AND (b.status IS NULL OR b.status<>'completed') \
+                   AND b.missing_since IS NULL \
                  ORDER BY a.started_at DESC, a.sequence DESC LIMIT ?2",
             )
             .map_err(db)?;
@@ -286,6 +297,11 @@ pub fn pending_human_gates(
         }
     }
     {
+        // Same archiving problem as the stopped attempts above: a checkpoint
+        // records the path its PRD had when it ran, and archiving leaves that
+        // path behind as a stale row while the `done/` row carries the real
+        // status. PRD-43 sat in "Waiting on you" as a blocked checkpoint long
+        // after it was finished and filed away.
         let mut stmt = conn
             .prepare(
                 "SELECT c.prd_id,c.prd_path,c.phase,c.invalid_reason \
@@ -294,6 +310,7 @@ pub fn pending_human_gates(
                    ON b.prd_path=c.prd_path AND b.repository_key=c.repository_key \
                  WHERE c.repository_key=?1 AND c.phase IN ('blocked','invalid_checkpoint') \
                    AND (b.status IS NULL OR b.status<>'completed') \
+                   AND b.missing_since IS NULL \
                  ORDER BY c.prd_id LIMIT ?2",
             )
             .map_err(db)?;
@@ -514,6 +531,73 @@ mod tests {
         // entry that was never claimed and still holds retained work, so it
         // stays visible rather than being assumed decided.
         assert_eq!(prds, vec!["PRD-2", "PRD-3"]);
+    }
+
+    /// Archiving a PRD leaves its old `docs/prds/<file>` row behind as pending
+    /// while a new `docs/prds/done/<file>` row carries the real status. The
+    /// attempt and the checkpoint both recorded the old path, so joining on
+    /// prd_path finds the stale row and a finished PRD reads as still waiting.
+    ///
+    /// PRD-36, 40 and 43 all sat in "Waiting on you" this way while the
+    /// backlog tab showed them done — the same PRD giving two answers. The
+    /// stale rows carry `missing_since` because discovery knows the file is
+    /// gone, and nothing can be run from a path that no longer exists.
+    #[test]
+    fn pending_human_gates_omits_prds_whose_file_has_been_archived_away() {
+        let db = database();
+        let checkpoints = CheckpointRepository::new(db.conn());
+        checkpoints
+            .put(&ExecutionCheckpoint {
+                checkpoint_id: "cp-archived".into(),
+                repository_key: "/repo/.git".into(),
+                prd_id: "PRD-36".into(),
+                prd_path: "docs/prds/PRD-036.md".into(),
+                execution_id: None,
+                phase: "blocked".into(),
+                base_revision: "deadbeef".into(),
+                worktree_path: "/state/worktrees/PRD-36".into(),
+                branch_name: None,
+                diff_hash: "sha256:abc".into(),
+                changed_files_json: "[]".into(),
+                agent_identity: "claude-code".into(),
+                usage_json: "{}".into(),
+                test_evidence_json: "{}".into(),
+                invalid_reason: None,
+            })
+            .unwrap();
+        assert_eq!(
+            pending_human_gates(db.conn(), "/repo/.git", 10)
+                .unwrap()
+                .len(),
+            1,
+            "with no backlog row at all it is still a gate"
+        );
+
+        // The stale row: still `pending`, but its file moved to done/.
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_prds (repository_key,prd_path,prd_number,content_hash,\
+                 status,discovered_at,last_seen_at,missing_since,created_at,updated_at) \
+                 VALUES ('/repo/.git','docs/prds/PRD-036.md',36,'hash','pending','t','t','t','t','t')",
+                [],
+            )
+            .unwrap();
+        // The real row, under the archived path.
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_prds (repository_key,prd_path,prd_number,content_hash,\
+                 status,discovered_at,last_seen_at,created_at,updated_at) \
+                 VALUES ('/repo/.git','docs/prds/done/PRD-036.md',36,'hash','completed','t','t','t','t')",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            pending_human_gates(db.conn(), "/repo/.git", 10)
+                .unwrap()
+                .is_empty(),
+            "an archived PRD is not waiting on anyone"
+        );
     }
 
     /// A blocked checkpoint for a PRD the human already completed is likewise

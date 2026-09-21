@@ -1482,6 +1482,86 @@ fn backlog_row(
     container
 }
 
+/// The run chart: one block per drive session, bars positioned by wall clock.
+fn gantt_section(source: &Arc<dyn DataSource>, repo: &str) -> gtk::Widget {
+    const COLUMNS: usize = 44;
+    let body = vbox();
+
+    let sessions = match source.query(Query::Sessions {
+        repo: repo.to_string(),
+        limit: 6,
+    }) {
+        Ok(value) => value,
+        // A failed read costs the chart, not the page.
+        Err(error) => {
+            body.pack_start(
+                &markup(&format!(
+                    "<small>runs unavailable — {}</small>",
+                    esc(&error)
+                )),
+                false,
+                false,
+                0,
+            );
+            return body.upcast();
+        }
+    };
+
+    let mut drawn = 0usize;
+    for session in view::items(&sessions) {
+        let session_id = view::str_at(session, "session_id").to_string();
+        let Ok(attempts) = source.query(Query::Attempts {
+            repo: repo.to_string(),
+            session_id: session_id.clone(),
+        }) else {
+            continue;
+        };
+        let chart = view::build_gantt_session(session, &attempts, COLUMNS);
+        if chart.bars.is_empty() {
+            continue;
+        }
+        drawn += 1;
+
+        let header = markup(&format!("<b>{}</b>", esc(&chart.span_label)));
+        header.set_xalign(0.0);
+        body.pack_start(&header, false, false, 0);
+
+        let labels = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+        for bar in &chart.bars {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, PAD);
+            let name = markup(&format!("<tt>{}</tt>", esc(&bar.prd_id)));
+            name.set_xalign(0.0);
+            labels.add_widget(&name);
+            line.pack_start(&name, false, false, 0);
+
+            let track = markup(&view::gantt_bar_markup(bar, COLUMNS));
+            track.set_xalign(0.0);
+            line.pack_start(&track, false, false, 0);
+
+            let tail = markup(&format!(
+                "<small>{}  {}</small>",
+                esc(&bar.duration_label),
+                esc(&bar.detail)
+            ));
+            tail.set_xalign(0.0);
+            line.pack_start(&tail, false, false, 0);
+            body.pack_start(&line, false, false, 0);
+        }
+    }
+
+    if drawn == 0 {
+        body.pack_start(
+            &markup(
+                "<small>No driver session has run here yet, so there is nothing to chart.</small>",
+            ),
+            false,
+            false,
+            0,
+        );
+    }
+    body.upcast()
+}
+
 fn backlog_tab(
     source: Arc<dyn DataSource>,
     repo: &str,
@@ -1609,22 +1689,16 @@ fn backlog_tab(
     let buttons_group = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
     let path_group = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
 
-    // The column headings sit above the lanes, indented past the path column
-    // by the same size group that governs the paths themselves.
-    if !rounds.rounds.is_empty() {
-        let heading = gtk::Box::new(gtk::Orientation::Horizontal, PAD);
-        let spacer = markup("<tt> </tt>");
-        spacer.set_xalign(0.0);
-        path_group.add_widget(&spacer);
-        heading.pack_start(&spacer, false, false, 0);
-        heading.pack_start(
-            &markup(&view::rounds_header_markup(&rounds)),
-            false,
-            false,
-            0,
-        );
-        root.pack_start(&heading, false, false, 0);
-    }
+    // Runs, in time. A round number told you a PRD was in round 19 and
+    // nothing else: every row drew one cell, and four PRDs that ran at once
+    // looked identical to four that ran weeks apart. Sessions carry real
+    // start times and durations, so plot those instead — concurrency and
+    // length are the two things the grid could not express.
+    //
+    // Per session rather than one axis: attempts span months while a session
+    // spans minutes, and a single linear scale compresses every run into the
+    // same pixel.
+    root.pack_start(&gantt_section(&source, repo), false, false, 0);
 
     // Rows whose file still exists are the work; rows whose file has gone are
     // history the backlog has not caught up with. Interleaving them buried the

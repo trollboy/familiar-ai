@@ -8,11 +8,11 @@
 
 use serde_json::Value;
 
-fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
+pub(crate) fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn items(v: &Value) -> &[Value] {
+pub(crate) fn items(v: &Value) -> &[Value] {
     v.get("items")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
@@ -3030,5 +3030,264 @@ mod rounds_tests {
         assert_eq!(human_duration(45_000), "45s");
         assert_eq!(human_duration(1_800_000), "30m 0s");
         assert_eq!(human_duration(5_400_000), "1h 30m");
+    }
+}
+
+// ------------------------------------------------------------------ gantt
+
+/// One PRD's run inside a session, positioned in time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GanttBar {
+    pub prd_id: String,
+    pub outcome: String,
+    pub detail: String,
+    pub duration_label: String,
+    /// Columns from the session's start before the bar begins.
+    pub offset: usize,
+    /// Columns the bar spans. Never zero: a run that happened is visible.
+    pub width: usize,
+}
+
+/// One drive session, with its own time axis.
+///
+/// Sessions rather than one global axis because attempts span months while a
+/// session spans minutes — a single linear scale would compress every run into
+/// the same pixel. This is the same reason the reference Gantt groups tasks
+/// under phases rather than laying a quarter out flat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GanttSession {
+    pub session_id: String,
+    pub span_label: String,
+    pub bars: Vec<GanttBar>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GanttView {
+    pub sessions: Vec<GanttSession>,
+    /// PRDs that have never been driven, so have no run to chart.
+    pub undriven: usize,
+}
+
+fn parse_stamp(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+/// Lay one session's attempts out in time.
+///
+/// `columns` is the width of the chart in characters. Offsets and widths are
+/// proportional to wall-clock, so two attempts that ran at once sit under each
+/// other — which is the thing the round grid could not show and the whole
+/// reason to plot time at all.
+pub fn build_gantt_session(session: &Value, attempts: &Value, columns: usize) -> GanttSession {
+    let session_id = str_at(session, "session_id").to_string();
+    let rows = items(attempts);
+
+    let starts: Vec<i64> = rows
+        .iter()
+        .filter_map(|row| parse_stamp(str_at(row, "started_at")))
+        .map(|t| t.timestamp_millis())
+        .collect();
+    let origin = starts.iter().copied().min().unwrap_or(0);
+    let last_end = rows
+        .iter()
+        .filter_map(|row| {
+            let start = parse_stamp(str_at(row, "started_at"))?.timestamp_millis();
+            let ms = row.get("duration_ms").and_then(Value::as_i64).unwrap_or(0);
+            Some(start + ms)
+        })
+        .max()
+        .unwrap_or(origin);
+    let span = (last_end - origin).max(1);
+
+    let mut bars = Vec::new();
+    for row in rows.iter() {
+        let Some(started) = parse_stamp(str_at(row, "started_at")) else {
+            continue;
+        };
+        let start_ms = started.timestamp_millis();
+        let duration = row.get("duration_ms").and_then(Value::as_i64).unwrap_or(0);
+        let offset = (((start_ms - origin) as f64 / span as f64) * columns as f64) as usize;
+        // A run that happened is always at least one column wide; rounding a
+        // short attempt to nothing would say it never ran.
+        let width = ((duration as f64 / span as f64) * columns as f64)
+            .round()
+            .max(1.0) as usize;
+        let outcome = str_at(row, "outcome").to_string();
+        let detail = {
+            let reason = str_at(row, "retained_reason");
+            if reason.is_empty() {
+                outcome.clone()
+            } else {
+                reason.to_string()
+            }
+        };
+        bars.push(GanttBar {
+            prd_id: str_at(row, "prd_id").to_string(),
+            outcome,
+            detail,
+            duration_label: human_duration(duration.max(0) as u64),
+            offset: offset.min(columns.saturating_sub(1)),
+            width: width.min(columns.saturating_sub(offset).max(1)),
+        });
+    }
+    // Longest first: the run that dominated the session is the one worth
+    // seeing at a glance.
+    bars.sort_by(|a, b| b.width.cmp(&a.width).then(a.prd_id.cmp(&b.prd_id)));
+
+    let span_label = match (
+        parse_stamp(str_at(session, "started_at")),
+        parse_stamp(str_at(session, "ended_at")),
+    ) {
+        (Some(start), Some(end)) => format!(
+            "{} → {} · {}",
+            start.format("%Y-%m-%d %H:%M"),
+            end.format("%H:%M"),
+            human_duration((end - start).num_milliseconds().max(0) as u64)
+        ),
+        (Some(start), None) => format!("{} · running", start.format("%Y-%m-%d %H:%M")),
+        _ => String::new(),
+    };
+
+    GanttSession {
+        session_id,
+        span_label,
+        bars,
+    }
+}
+
+/// The bar itself, as monospace blocks.
+///
+/// Pango markup rather than a drawing area, so what the operator sees stays a
+/// tested pure function and GTK only lays it out — the idiom this crate
+/// already follows.
+pub fn gantt_bar_markup(bar: &GanttBar, columns: usize) -> String {
+    let colour = match bar.outcome.as_str() {
+        "completed" => "#4a9e5c",
+        "retained" => "#d6883b",
+        _ => "#7a7a7a",
+    };
+    let lead = " ".repeat(bar.offset.min(columns));
+    let body = "█".repeat(
+        bar.width
+            .clamp(1, columns.saturating_sub(bar.offset).max(1)),
+    );
+    let tail = columns.saturating_sub(bar.offset + bar.width);
+    format!(
+        "<tt>{lead}<span foreground=\"{colour}\">{body}</span>{}</tt>",
+        " ".repeat(tail)
+    )
+}
+
+#[cfg(test)]
+mod gantt_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn session() -> Value {
+        json!({
+            "session_id": "drive-1",
+            "started_at": "2026-09-19T11:23:48+00:00",
+            "ended_at": "2026-09-19T12:39:14+00:00"
+        })
+    }
+
+    /// Round 1's four PRDs all started at 11:27:41. The round grid drew one
+    /// dot each and could not show that; a time axis must.
+    #[test]
+    fn simultaneous_runs_line_up_under_each_other() {
+        let attempts = json!({"items": [
+            {"prd_id": "PRD-85",  "started_at": "2026-09-19T11:27:41+00:00", "duration_ms": 2297286, "outcome": "retained"},
+            {"prd_id": "PRD-90",  "started_at": "2026-09-19T11:27:41+00:00", "duration_ms": 1866000, "outcome": "retained"},
+            {"prd_id": "PRD-96",  "started_at": "2026-09-19T11:27:41+00:00", "duration_ms": 1045000, "outcome": "retained"},
+            {"prd_id": "PRD-100", "started_at": "2026-09-19T11:27:41+00:00", "duration_ms": 4292000, "outcome": "retained"}
+        ]});
+        let g = build_gantt_session(&session(), &attempts, 40);
+        assert_eq!(g.bars.len(), 4);
+        for bar in &g.bars {
+            assert_eq!(bar.offset, 0, "{} started with the others", bar.prd_id);
+        }
+        // Longest first, and the longest fills the axis it defines.
+        assert_eq!(g.bars[0].prd_id, "PRD-100");
+        assert_eq!(g.bars[0].width, 40);
+        // Width is proportional: 1045s against 4292s is roughly a quarter.
+        let shortest = g.bars.iter().find(|b| b.prd_id == "PRD-96").unwrap();
+        assert!(
+            (9..=11).contains(&shortest.width),
+            "expected about a quarter of 40, got {}",
+            shortest.width
+        );
+    }
+
+    #[test]
+    fn a_later_start_is_offset_from_the_first() {
+        let attempts = json!({"items": [
+            {"prd_id": "PRD-1", "started_at": "2026-09-19T11:00:00+00:00", "duration_ms": 600000, "outcome": "completed"},
+            {"prd_id": "PRD-2", "started_at": "2026-09-19T11:10:00+00:00", "duration_ms": 600000, "outcome": "completed"}
+        ]});
+        let g = build_gantt_session(&session(), &attempts, 40);
+        let first = g.bars.iter().find(|b| b.prd_id == "PRD-1").unwrap();
+        let second = g.bars.iter().find(|b| b.prd_id == "PRD-2").unwrap();
+        assert_eq!(first.offset, 0);
+        assert!(
+            second.offset >= 18,
+            "second ran after the first: {second:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_happened_is_never_invisible() {
+        // Rounding a short attempt to zero columns would say it never ran.
+        let attempts = json!({"items": [
+            {"prd_id": "PRD-long",  "started_at": "2026-09-19T11:00:00+00:00", "duration_ms": 7200000, "outcome": "completed"},
+            {"prd_id": "PRD-blink", "started_at": "2026-09-19T11:00:00+00:00", "duration_ms": 1000,    "outcome": "retained"}
+        ]});
+        let g = build_gantt_session(&session(), &attempts, 40);
+        let blink = g.bars.iter().find(|b| b.prd_id == "PRD-blink").unwrap();
+        assert!(blink.width >= 1, "a run that happened must be visible");
+    }
+
+    #[test]
+    fn the_bar_never_overruns_the_chart() {
+        let attempts = json!({"items": [
+            {"prd_id": "PRD-1", "started_at": "2026-09-19T11:00:00+00:00", "duration_ms": 600000, "outcome": "completed"},
+            {"prd_id": "PRD-2", "started_at": "2026-09-19T11:09:00+00:00", "duration_ms": 600000, "outcome": "retained"}
+        ]});
+        let g = build_gantt_session(&session(), &attempts, 40);
+        for bar in &g.bars {
+            assert!(
+                bar.offset + bar.width <= 40,
+                "{} runs off the axis: offset {} width {}",
+                bar.prd_id,
+                bar.offset,
+                bar.width
+            );
+            let markup = gantt_bar_markup(bar, 40);
+            assert!(markup.starts_with("<tt>") && markup.ends_with("</tt>"));
+        }
+    }
+
+    #[test]
+    fn outcome_is_legible_without_reading_the_label() {
+        let completed = GanttBar {
+            prd_id: "PRD-1".into(),
+            outcome: "completed".into(),
+            detail: "completed".into(),
+            duration_label: "10m".into(),
+            offset: 0,
+            width: 4,
+        };
+        let retained = GanttBar {
+            outcome: "retained".into(),
+            ..completed.clone()
+        };
+        assert!(gantt_bar_markup(&completed, 10).contains("#4a9e5c"));
+        assert!(gantt_bar_markup(&retained, 10).contains("#d6883b"));
+    }
+
+    #[test]
+    fn an_empty_session_charts_nothing_rather_than_dividing_by_zero() {
+        let g = build_gantt_session(&session(), &json!({"items": []}), 40);
+        assert!(g.bars.is_empty());
+        assert!(g.span_label.contains("2026-09-19 11:23"));
     }
 }
