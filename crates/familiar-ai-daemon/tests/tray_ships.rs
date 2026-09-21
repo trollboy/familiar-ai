@@ -100,6 +100,30 @@ fn the_tray_does_not_carry_its_own_lockfile_again() {
 }
 
 #[test]
+fn gtk_is_a_linux_only_direct_dependency() {
+    let manifest = directives(&read("crates/familiar-ai-tray/Cargo.toml"));
+    let (common, linux) = manifest
+        .split_once("[target.'cfg(target_os = \"linux\")'.dependencies]")
+        .expect("the tray manifest must have an explicit Linux dependency section");
+
+    assert!(
+        common.contains("muda = { version = \"0.17\", default-features = false }"),
+        "the cross-platform menu dependency must not enable GTK globally"
+    );
+    assert!(
+        !common
+            .lines()
+            .any(|line| line.trim_start().starts_with("gtk =")),
+        "GTK must not be a common dependency"
+    );
+    assert!(linux
+        .lines()
+        .any(|line| line.trim_start().starts_with("gtk =")));
+    assert!(linux
+        .contains("muda = { version = \"0.17\", default-features = false, features = [\"gtk\"] }"));
+}
+
+#[test]
 fn the_trays_tests_are_reachable_from_a_workspace_run() {
     // The regression that matters most is not any single assertion in the tray
     // — it is that the tray has assertions at all and that a workspace command

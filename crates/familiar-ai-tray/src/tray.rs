@@ -15,7 +15,9 @@ use familiar_ai_storage::{Database, ProjectRepository};
 
 use crate::commands::{DashboardTarget, TrayCommand};
 use crate::data::DataSource;
-use crate::icon::{load_tray_icon, tray_icon_with_count};
+use crate::icon::load_tray_icon;
+#[cfg(target_os = "linux")]
+use crate::icon::tray_icon_with_count;
 use crate::menu::{build_tooltip, MenuItemSpec};
 
 /// How often the drawn menu is compared against the state it describes.

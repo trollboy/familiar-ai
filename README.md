@@ -180,6 +180,11 @@ cd familiar-ai
 cargo build --release --no-default-features -p familiar-ai-daemon --bin familiar-ai
 install -m755 target/release/familiar-ai ~/.local/bin/
 
+# Optional desktop daemon. Linux uses GTK windows; macOS uses the native menu
+# bar and opens the dashboard/configuration surfaces in the browser or editor.
+cargo build --release -p familiar-ai-daemon --bin familiar-ai-daemon
+install -m755 target/release/familiar-ai-daemon ~/.local/bin/
+
 # Point it at a repository containing docs/prds/*.md
 familiar-ai                             # repository state and the one next command to run
 familiar-ai next                        # what would run, and why
@@ -400,8 +405,9 @@ Host commands are for repository inspection and version control only.
 
 Known environment quirks: the tester image excludes `.git/`, so a handful of
 git-dependent tests fail there by design; `rustfmt`/`clippy` need
-`rustup component add` at container runtime; the default `tray` feature has a
-pre-existing compile error, hence `--no-default-features`.
+`rustup component add` at container runtime. The default tray feature is
+cross-platform: GTK dependencies and visual fixtures are Linux-only, while
+macOS builds the native AppKit menu-bar path without GTK.
 
 ### Contributing
 

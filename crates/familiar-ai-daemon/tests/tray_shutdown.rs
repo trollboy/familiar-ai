@@ -11,7 +11,7 @@
 //! This test therefore insists on the combination that was never covered:
 //! the `tray` feature compiled in, `[tray] enabled = true`, and a real X
 //! server (Xvfb) for GTK to talk to.
-#![cfg(feature = "tray")]
+#![cfg(all(feature = "tray", target_os = "linux"))]
 
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};

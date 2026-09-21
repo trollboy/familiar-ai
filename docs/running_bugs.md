@@ -1996,6 +1996,27 @@ reinstall the binary, then rerun the 076 drive.
   and still undiagnosed; what changed is that it can now be caught rather
   than waited for.
 
+### FAM-BUG-066 — The default tray surface was not verified on macOS
+
+- **Status:** Fixed 2026-09-21 — native macOS release build and all-target checks pass
+- **Found:** 2026-09-21, following the platform warning in `docs/prds/SITREP.md`.
+- **Detail:** `familiar-ai-tray` enabled `muda`'s GTK feature in its common
+  dependency declaration, while its GTK crates and window implementation were
+  Linux-only. The Linux-only Xvfb shutdown integration and GTK visual-preview
+  example were also reachable from macOS all-target builds. Operators therefore
+  installed `--no-default-features` binaries and the shipped macOS menu-bar path
+  was never part of the verified artifact.
+- **Fix:** the direct GTK feature is now declared only in the Linux dependency
+  section; Linux keeps GTK windows and its Xvfb shutdown test. macOS builds and
+  links the native AppKit menu-bar path, opens dashboard/configuration surfaces
+  through the browser or editor, and compiles a harmless stub for the GTK-only
+  visual fixture. A manifest regression pins the dependency boundary.
+- **Evidence:** the tray-enabled macOS release links; macOS all-target checking
+  passes; all 104 tray unit tests pass; strict tray Clippy passes; and the Linux
+  dependency graph still contains `gtk` and `muda/gtk`. Docker was unavailable
+  on this Mac, so the existing Linux runtime/Xvfb test was preserved but not
+  rerun locally.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or
