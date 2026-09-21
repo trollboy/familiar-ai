@@ -17,6 +17,7 @@ members = [
     "crates/familiar-ai-testutil",
     "crates/familiar-ai-daemon",
     "crates/familiar-ai-tray",
+    "crates/familiar-ai-desktop",
 ]
 
 [workspace.package]

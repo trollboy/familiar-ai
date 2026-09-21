@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "Minimum capabilities for Familiar's bundled desktop windows",
+  "windows": ["dashboard", "settings", "local-llm"],
+  "permissions": [
+    "core:default",
+    "core:event:default"
+  ]
+}

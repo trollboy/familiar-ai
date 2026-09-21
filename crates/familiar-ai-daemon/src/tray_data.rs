@@ -13,13 +13,15 @@ use serde_json::{json, Value};
 use familiar_ai_core::control_plane::{
     Authority, CapabilityScope, ClientClass, ExecutionMode, Submission,
 };
+use familiar_ai_core::operator_ui::{
+    ConfigEdit, OperatorAction as Action, OperatorDataSource as DataSource, OperatorQuery as Query,
+};
 use familiar_ai_core::{
     validate_recovery_attribution, BacklogDiscovery, BacklogRecoveryAction,
     FilesystemBacklogDiscovery,
 };
 use familiar_ai_llm::InferenceRouter;
 use familiar_ai_storage::{Database, SqliteBacklogRepository};
-use familiar_ai_tray::data::{Action, ConfigEdit, DataSource, Query};
 
 use crate::control_plane::ControlPlaneService;
 use crate::stewardship;
@@ -27,23 +29,25 @@ use crate::stewardship;
 pub struct DaemonDataSource {
     db: Arc<Mutex<Database>>,
     router: Arc<InferenceRouter>,
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: tokio::runtime::Handle,
     control: ControlPlaneService,
     paths: familiar_ai_core::AppPaths,
     /// The same status the tray menu reads. Configuring inference has to
     /// update it, or the menu keeps offering to configure something that is
     /// now configured.
     status: Arc<Mutex<familiar_ai_core::AppStatus>>,
+    shutdown: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl DaemonDataSource {
     pub fn new(
         db: Arc<Mutex<Database>>,
         router: Arc<InferenceRouter>,
-        runtime: Arc<tokio::runtime::Runtime>,
+        runtime: tokio::runtime::Handle,
         control: ControlPlaneService,
         paths: familiar_ai_core::AppPaths,
         status: Arc<Mutex<familiar_ai_core::AppStatus>>,
+        shutdown: Option<tokio::sync::watch::Sender<bool>>,
     ) -> Self {
         Self {
             db,
@@ -52,6 +56,7 @@ impl DaemonDataSource {
             control,
             paths,
             status,
+            shutdown,
         }
     }
 
@@ -84,6 +89,14 @@ impl DaemonDataSource {
     /// by project id — and this is the one place that decides the mapping.
     fn project_id(repo: &str) -> &str {
         repo
+    }
+
+    fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.runtime.block_on(future))
+        } else {
+            self.runtime.block_on(future)
+        }
     }
 
     /// Every PRD the repository declares, needed to resolve a supplied path to
@@ -598,10 +611,10 @@ impl DataSource for DaemonDataSource {
         // never called from inside the runtime: the tray calls it from the GTK
         // main thread, or from a worker thread it spawned for a slow query.
         match query {
-            Query::InferenceStatus => Ok(json!(self.runtime.block_on(self.router.health()))),
-            Query::TestConnection { target } => Ok(json!(self
-                .runtime
-                .block_on(self.router.test_connection(&target)))),
+            Query::InferenceStatus => Ok(json!(self.block_on(self.router.health()))),
+            Query::TestConnection { target } => {
+                Ok(json!(self.block_on(self.router.test_connection(&target))))
+            }
             Query::PrdText { repo, prd_path } => {
                 // Contained to the repository: a `repo` and a `prd_path` from
                 // the backlog are both trusted, but joining them blindly would
@@ -825,6 +838,14 @@ impl DataSource for DaemonDataSource {
                 builtin_url,
                 builtin_model,
             } => self.save_inference_config(&mode, &builtin_url, &builtin_model),
+            Action::StopDaemon => {
+                self.shutdown
+                    .as_ref()
+                    .ok_or_else(|| "daemon shutdown is not available from this client".to_string())?
+                    .send(true)
+                    .map_err(|_| "daemon is already stopping".to_string())?;
+                Ok(json!({"stopping": true}))
+            }
         }
     }
 }

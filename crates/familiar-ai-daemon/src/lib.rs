@@ -14,6 +14,7 @@ pub mod local_transport;
 pub mod local_worker_runtime;
 pub mod model_residency;
 pub mod openai_billing;
+pub mod operator_ui;
 pub mod plan;
 pub mod preflight;
 pub mod report;
@@ -22,7 +23,6 @@ pub mod run;
 pub mod stewardship;
 pub mod supervisor;
 pub mod systemd;
-#[cfg(feature = "tray")]
 pub mod tray_data;
 pub mod worker_lock;
 pub mod worktree;

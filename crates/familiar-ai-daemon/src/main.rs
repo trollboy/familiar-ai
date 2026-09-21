@@ -268,10 +268,24 @@ async fn daemon_run(
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let _control_host = match familiar_ai_daemon::local_transport::LocalHost::bind(
+    let operator_source = Arc::new(familiar_ai_daemon::tray_data::DaemonDataSource::new(
+        state.db.clone(),
+        state.router.clone(),
+        tokio::runtime::Handle::current(),
+        state.control.clone(),
+        state.paths.clone(),
+        state.status.clone(),
+        Some(shutdown_tx.clone()),
+    ));
+    let operator = Arc::new(familiar_ai_daemon::operator_ui::OperatorDispatcher::new(
+        operator_source,
+        state.ownership.claim().generation,
+    ));
+    let _control_host = match familiar_ai_daemon::local_transport::LocalHost::bind_with_operator(
         &state.control_socket,
         state.ownership.claim().owner_nonce.clone(),
         state.control.clone(),
+        Some(operator),
     )
     .await
     {
@@ -642,10 +656,11 @@ fn main() -> ExitCode {
             Arc::new(familiar_ai_daemon::tray_data::DaemonDataSource::new(
                 state_arc.db.clone(),
                 state_arc.router.clone(),
-                runtime.clone(),
+                runtime.handle().clone(),
                 state_arc.control.clone(),
                 state_arc.paths.clone(),
                 state_arc.status.clone(),
+                Some(shutdown_tx.clone()),
             )) as Arc<dyn familiar_ai_tray::DataSource>,
         ),
         shutdown_rx.clone(),

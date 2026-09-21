@@ -161,8 +161,8 @@ containing changes. Landing work is a human act.
 
 ## Quick start
 
-**Requirements:** Rust (stable), Docker (for the test environment), Linux with
-kernel ≥ 5.13 or macOS, and at least one coding agent CLI on `PATH`
+**Requirements:** Rust (stable), Linux with kernel ≥ 5.13 or macOS, and at
+least one coding agent CLI on `PATH`
 (`claude` or `codex`).
 
 The CLI is a real prerequisite today, not a recommendation: `AgentAdapterKind`
@@ -180,10 +180,13 @@ cd familiar-ai
 cargo build --release --no-default-features -p familiar-ai-daemon --bin familiar-ai
 install -m755 target/release/familiar-ai ~/.local/bin/
 
-# Optional desktop daemon. Linux uses GTK windows; macOS uses the native menu
-# bar and opens the dashboard/configuration surfaces in the browser or editor.
-cargo build --release -p familiar-ai-daemon --bin familiar-ai-daemon
+# Build the headless daemon and cross-platform Tauri desktop. No Docker or
+# browser is required for ordinary build, installation, or use.
+cargo build --release -p familiar-ai-daemon --no-default-features --bin familiar-ai-daemon
+cargo build --release -p familiar-ai-desktop
 install -m755 target/release/familiar-ai-daemon ~/.local/bin/
+install -m755 target/release/familiar-ai-desktop ~/.local/bin/
+familiar-ai ops desktop install
 
 # Point it at a repository containing docs/prds/*.md
 familiar-ai                             # repository state and the one next command to run
@@ -370,8 +373,9 @@ From [`docs/philosophy.md`](docs/philosophy.md):
 
 ## Development
 
-**Tests, linters, formatters and migrations run in Docker**, so the environment
-is identical everywhere:
+The ordinary host build and desktop do not require Docker. The canonical
+repository gate currently also has a container entry point so its test
+environment is identical everywhere:
 
 ```bash
 docker compose build test

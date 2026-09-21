@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Familiar</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand"><span aria-hidden="true">🐈‍⬛</span><strong>Familiar</strong></div>
+    <nav aria-label="Primary">
+      <button data-route="dashboard">Dashboard</button>
+      <button data-route="backlog">Backlog</button>
+      <button data-route="execution">Execution</button>
+      <button data-route="settings">Settings</button>
+      <button data-route="local-llm">Local LLM</button>
+    </nav>
+    <div id="connection" role="status" aria-live="polite">Connecting…</div>
+  </header>
+  <main>
+    <aside>
+      <label for="repository">Repository</label>
+      <select id="repository"></select>
+      <button id="refresh">Refresh</button>
+    </aside>
+    <section id="content" tabindex="-1" aria-live="polite"></section>
+  </main>
+  <dialog id="confirm">
+    <form method="dialog">
+      <h2>Confirm action</h2>
+      <p id="confirm-summary"></p>
+      <p id="confirm-warning" class="warning"></p>
+      <label id="actor-label">Actor<input id="actor" autocomplete="name"></label>
+      <label id="reason-label">Reason<textarea id="reason"></textarea></label>
+      <p id="confirm-error" class="error" role="alert"></p>
+      <menu><button value="cancel">Cancel</button><button id="confirm-submit" value="default">Confirm</button></menu>
+    </form>
+  </dialog>
+</body>
+</html>

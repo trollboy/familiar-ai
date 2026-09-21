@@ -2029,7 +2029,9 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-067 — The shipped graphical product is not cross-platform
 
-- **Status:** Open — specified by PRD-104.
+- **Status:** In progress — PRD-104's Tauri shell is packaged and running on
+  macOS; the real Linux graphical smoke gate and final GTK/default cutover are
+  still required before closure.
 - **Found:** 2026-09-21, during live macOS verification after FAM-BUG-066.
 - **Detail:** Linux owns substantial in-process GTK windows, while macOS tray
   actions open the loopback dashboard in an external browser. Earlier macOS
@@ -2048,6 +2050,17 @@ reinstall the binary, then rerun the 076 drive.
   the cat tray icon and open Dashboard, Settings, and Configure Local LLM as
   application windows; the parity inventory, security boundary, lifecycle,
   packaging, and fresh-install tests in PRD-104 all pass.
+- **2026-09-21 implementation evidence:** added the versioned typed operator
+  protocol, bounded snapshot/event transport, idempotent Rust-side mutations,
+  Tauri tray and singleton Dashboard/Settings/Local LLM windows, independent
+  launchd/systemd definitions, and non-Docker packaging instructions. A
+  `Familiar.app` bundle was built, ad-hoc signed, passed strict `codesign`
+  verification, and ran under its independent launchd service. PID-based
+  lifecycle checks proved that restarting the idle daemon left the desktop
+  unchanged and restarting the desktop left the daemon unchanged. No screen,
+  microphone, Accessibility, or UI-automation permission is used or required.
+  GTK remains intentionally available pending the real Linux graphical smoke
+  gate required by the fail-closed migration plan.
 
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 

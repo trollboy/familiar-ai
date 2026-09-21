@@ -14,6 +14,7 @@ use familiar_ai_daemon::cli::backlog::BacklogCommand;
 use familiar_ai_daemon::cli::batch_review::BatchReviewCommand;
 use familiar_ai_daemon::cli::billing::BillingCommand;
 use familiar_ai_daemon::cli::control::ControlCommand;
+use familiar_ai_daemon::cli::desktop::DesktopCommand;
 use familiar_ai_daemon::cli::gate::GateCommand;
 use familiar_ai_daemon::cli::onboard::OnboardCommand;
 use familiar_ai_daemon::cli::operator::OperatorCommand;
@@ -340,6 +341,11 @@ enum OpsCommand {
     Worker {
         #[command(subcommand)]
         command: WorkerCommand,
+    },
+    /// Install and operate the cross-platform Familiar desktop and daemon.
+    Desktop {
+        #[command(subcommand)]
+        command: DesktopCommand,
     },
     /// Operator repairs: rebind a checkpoint, transition its phase, or ask
     /// the scheduler its achievable width. Each requires an explicit human
@@ -881,6 +887,9 @@ fn dispatch(command: Command) -> ExitCode {
                 }
                 OpsCommand::Worker { command } => {
                     familiar_ai_daemon::cli::worker::worker_command(command)
+                }
+                OpsCommand::Desktop { command } => {
+                    familiar_ai_daemon::cli::desktop::desktop(command)
                 }
                 OpsCommand::Operator { command } => {
                     familiar_ai_daemon::cli::operator::operator(command)

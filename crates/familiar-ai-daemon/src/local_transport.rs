@@ -4,12 +4,16 @@ use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::control_plane::ControlPlaneService;
+use crate::operator_ui::OperatorDispatcher;
 use crate::worker_lock::{ClaimState, WorkerLock};
 use familiar_ai_core::control_plane::{
     AgentCapabilityView, ControlEvent, ExecutionRecord, Submission, SubmissionAck,
+};
+use familiar_ai_core::operator_ui::{
+    OperatorEvent, OperatorMutation, OperatorQuery, OperatorReply,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +69,16 @@ pub enum ControlRequest {
     SubmitEvidence {
         payload_json: String,
     },
+    OperatorQuery {
+        query: OperatorQuery,
+    },
+    OperatorMutate {
+        mutation: OperatorMutation,
+    },
+    OperatorObserve {
+        after: u64,
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +92,10 @@ pub enum ControlResponse {
     Gate(String),
     AgentView(AgentCapabilityView),
     Cursor(i64),
+    Operator(std::result::Result<OperatorReply, familiar_ai_core::operator_ui::OperatorError>),
+    OperatorEvents(
+        std::result::Result<Vec<OperatorEvent>, familiar_ai_core::operator_ui::OperatorError>,
+    ),
     Error(String),
 }
 
@@ -102,6 +120,16 @@ impl LocalHost {
         owner_nonce: String,
         service: ControlPlaneService,
     ) -> Result<Self> {
+        Self::bind_with_operator(path, owner_nonce, service, None).await
+    }
+
+    #[cfg(unix)]
+    pub async fn bind_with_operator(
+        path: &Path,
+        owner_nonce: String,
+        service: ControlPlaneService,
+        operator: Option<std::sync::Arc<OperatorDispatcher>>,
+    ) -> Result<Self> {
         if let Ok(meta) = std::fs::symlink_metadata(path) {
             if !meta.file_type().is_socket() {
                 return Err(FamiliarError::Config(format!(
@@ -122,11 +150,12 @@ impl LocalHost {
                     accepted = listener.accept() => {
                         let Ok((stream, _)) = accepted else { break };
                         let service = service.clone();
+                        let operator = operator.clone();
                         let nonce = owner_nonce.clone();
                         let mut connection_stop = stop.clone();
                         connections.spawn(async move {
                             tokio::select! {
-                                result = serve_connection(stream, &nonce, service) => { let _ = result; }
+                                result = serve_connection(stream, &nonce, service, operator) => { let _ = result; }
                                 _ = connection_stop.changed() => {}
                             }
                         });
@@ -159,14 +188,13 @@ async fn serve_connection(
     stream: tokio::net::UnixStream,
     nonce: &str,
     service: ControlPlaneService,
+    operator: Option<std::sync::Arc<OperatorDispatcher>>,
 ) -> Result<()> {
     require_same_user(&stream)?;
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    let first = lines
-        .next_line()
-        .await
-        .map_err(FamiliarError::Io)?
+    let mut read = BufReader::new(read);
+    let first = read_bounded_line(&mut read)
+        .await?
         .ok_or_else(|| FamiliarError::Config("control-plane hello is required".into()))?;
     let ControlRequest::Hello(hello) = serde_json::from_str::<ControlRequest>(&first)
         .map_err(|e| FamiliarError::Config(format!("invalid control request: {e}")))?
@@ -189,7 +217,7 @@ async fn serve_connection(
         .map(|c| service.authenticate(c))
         .transpose();
     let mut foreground = Vec::new();
-    while let Some(line) = lines.next_line().await.map_err(FamiliarError::Io)? {
+    while let Some(line) = read_bounded_line(&mut read).await? {
         let request = match serde_json::from_str::<ControlRequest>(&line) {
             Ok(r) => r,
             Err(e) => {
@@ -211,6 +239,7 @@ async fn serve_connection(
             scope.as_ref(),
             hello.session_reference.as_deref(),
             &service,
+            operator.as_deref(),
         ) {
             Ok(r) => r,
             Err(e) => ControlResponse::Error(e.to_string()),
@@ -231,6 +260,7 @@ fn handle(
     >,
     credential: Option<&str>,
     service: &ControlPlaneService,
+    operator: Option<&OperatorDispatcher>,
 ) -> Result<ControlResponse> {
     let authorized = || {
         scope
@@ -331,6 +361,44 @@ fn handle(
                 &payload_json,
             )?))
         }
+        ControlRequest::OperatorQuery { query } => {
+            let auth = authorized()?;
+            if !auth
+                .authorities
+                .contains(&familiar_ai_core::control_plane::Authority::Observe)
+            {
+                return Err(FamiliarError::Config("authority denied: Observe".into()));
+            }
+            let dispatcher = operator
+                .ok_or_else(|| FamiliarError::Config("operator UI is unavailable".into()))?;
+            Ok(ControlResponse::Operator(dispatcher.query(query)))
+        }
+        ControlRequest::OperatorMutate { mutation } => {
+            let auth = authorized()?;
+            if !auth
+                .authorities
+                .contains(&familiar_ai_core::control_plane::Authority::Control)
+            {
+                return Err(FamiliarError::Config("authority denied: Control".into()));
+            }
+            let dispatcher = operator
+                .ok_or_else(|| FamiliarError::Config("operator UI is unavailable".into()))?;
+            Ok(ControlResponse::Operator(dispatcher.mutate(mutation)))
+        }
+        ControlRequest::OperatorObserve { after, limit } => {
+            let auth = authorized()?;
+            if !auth
+                .authorities
+                .contains(&familiar_ai_core::control_plane::Authority::Observe)
+            {
+                return Err(FamiliarError::Config("authority denied: Observe".into()));
+            }
+            let dispatcher = operator
+                .ok_or_else(|| FamiliarError::Config("operator UI is unavailable".into()))?;
+            Ok(ControlResponse::OperatorEvents(
+                dispatcher.observe(after, limit),
+            ))
+        }
         ControlRequest::Hello(_) => Err(FamiliarError::Config(
             "duplicate control-plane hello".into(),
         )),
@@ -343,12 +411,17 @@ async fn write_response<W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let mut bytes =
         serde_json::to_vec(response).map_err(|e| FamiliarError::Config(e.to_string()))?;
+    if bytes.len() > familiar_ai_core::operator_ui::MAX_OPERATOR_FRAME_BYTES {
+        return Err(FamiliarError::Config(
+            "local control response exceeds the bounded frame size".into(),
+        ));
+    }
     bytes.push(b'\n');
     write.write_all(&bytes).await.map_err(FamiliarError::Io)
 }
 
 pub struct LocalClient {
-    lines: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    read: BufReader<tokio::net::unix::OwnedReadHalf>,
     write: tokio::net::unix::OwnedWriteHalf,
 }
 
@@ -409,7 +482,7 @@ impl LocalClient {
             .map_err(FamiliarError::Io)?;
         let (read, write) = stream.into_split();
         let mut client = Self {
-            lines: BufReader::new(read).lines(),
+            read: BufReader::new(read),
             write,
         };
         match client.call(ControlRequest::Hello(hello)).await? {
@@ -423,19 +496,51 @@ impl LocalClient {
     pub async fn call(&mut self, request: ControlRequest) -> Result<ControlResponse> {
         let mut b =
             serde_json::to_vec(&request).map_err(|e| FamiliarError::Config(e.to_string()))?;
+        if b.len() > familiar_ai_core::operator_ui::MAX_OPERATOR_FRAME_BYTES {
+            return Err(FamiliarError::Config(
+                "local control request exceeds the bounded frame size".into(),
+            ));
+        }
         b.push(b'\n');
         self.write.write_all(&b).await.map_err(FamiliarError::Io)?;
-        let line = self
-            .lines
-            .next_line()
-            .await
-            .map_err(FamiliarError::Io)?
-            .ok_or_else(|| {
-                FamiliarError::Config("control-plane owner closed the connection".into())
-            })?;
+        let line = read_bounded_line(&mut self.read).await?.ok_or_else(|| {
+            FamiliarError::Config("control-plane owner closed the connection".into())
+        })?;
         serde_json::from_str(&line)
             .map_err(|e| FamiliarError::Config(format!("invalid control-plane response: {e}")))
     }
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(read: &mut R) -> Result<Option<String>> {
+    let mut bytes = Vec::new();
+    loop {
+        let available = read.fill_buf().await.map_err(FamiliarError::Io)?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if bytes.len() + take > familiar_ai_core::operator_ui::MAX_OPERATOR_FRAME_BYTES {
+            return Err(FamiliarError::Config(format!(
+                "local control frame exceeds {} bytes",
+                familiar_ai_core::operator_ui::MAX_OPERATOR_FRAME_BYTES
+            )));
+        }
+        bytes.extend_from_slice(&available[..take]);
+        read.consume(take);
+        if bytes.last() == Some(&b'\n') {
+            bytes.pop();
+            break;
+        }
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| FamiliarError::Config("local control frame is not UTF-8".into()))
 }
 
 pub fn negotiate(hello: &ClientHello) -> Result<ServerHello> {
@@ -481,6 +586,18 @@ mod tests {
     };
     use familiar_ai_storage::Database;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn oversized_local_frame_is_rejected_before_allocation_can_grow_unbounded() {
+        let input = vec![b'x'; familiar_ai_core::operator_ui::MAX_OPERATOR_FRAME_BYTES + 1];
+        let mut reader = tokio::io::BufReader::new(input.as_slice());
+        let error = read_bounded_line(&mut reader)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exceeds"));
+    }
+
     #[test]
     fn stale_protocol_names_remedy() {
         let e = negotiate(&ClientHello {

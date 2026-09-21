@@ -87,7 +87,15 @@ fn harness() -> Harness {
     let repo = repo_dir.to_string_lossy().into_owned();
     let status = Arc::new(Mutex::new(familiar_ai_core::AppStatus::new()));
     Harness {
-        source: DaemonDataSource::new(db.clone(), router, runtime, control, paths, status.clone()),
+        source: DaemonDataSource::new(
+            db.clone(),
+            router,
+            runtime.handle().clone(),
+            control,
+            paths,
+            status.clone(),
+            None,
+        ),
         db,
         status,
         repo,

@@ -6,6 +6,7 @@ pub mod error;
 pub mod git_env;
 pub mod models;
 pub mod onboarding;
+pub mod operator_ui;
 pub mod paths;
 pub mod probation;
 pub mod repository_path;
@@ -34,6 +35,10 @@ pub use config::{
     TrayConfig, TypedProhibitedChange, WatcherConfig,
 };
 pub use error::{FamiliarError, Result};
+pub use operator_ui::{
+    ConfigEdit as OperatorConfigEdit, OperatorAction, OperatorDataSource, OperatorError,
+    OperatorEvent, OperatorMutation, OperatorQuery, OperatorReply, OPERATOR_PROTOCOL_VERSION,
+};
 pub use paths::AppPaths;
 pub use repository_path::{
     git_common_directory, repository_origin_key, CanonicalFileIdentity, PathIdentityError,

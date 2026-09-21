@@ -30,6 +30,226 @@ pub struct Status {
     pub blockers: Vec<String>,
 }
 
+#[derive(Debug)]
+pub struct DesktopInstallSpec {
+    pub backend: Backend,
+    pub definitions: Vec<Spec>,
+    executables: [PathBuf; 2],
+}
+
+/// The daemon and desktop are supervised independently: stopping or crashing
+/// the UI cannot stop active work, and restarting the daemon does not require
+/// replacing the WebView process.
+pub fn desktop_install_spec(
+    daemon_executable: &Path,
+    desktop_executable: &Path,
+    paths: &AppPaths,
+) -> Result<DesktopInstallSpec, String> {
+    let backend = detect()?;
+    for (name, executable) in [
+        ("daemon executable", daemon_executable),
+        ("desktop executable", desktop_executable),
+    ] {
+        if !executable.is_absolute() {
+            return Err(format!(
+                "{name} must be an absolute path: {}",
+                executable.display()
+            ));
+        }
+    }
+    let toolchain_path = std::env::var("PATH")
+        .map_err(|_| "PATH is required for the audited desktop environment".to_string())?;
+    let definitions = match backend {
+        Backend::Launchd => {
+            let base = home_dir()?.join("Library/LaunchAgents");
+            vec![
+                Spec {
+                    backend,
+                    label: "com.trollboy.familiar.daemon".into(),
+                    definition: base.join("com.trollboy.familiar.daemon.plist"),
+                    rendered: desktop_launchd(
+                        "com.trollboy.familiar.daemon",
+                        daemon_executable,
+                        &paths.log_dir.join("daemon.stdout.log"),
+                        &paths.log_dir.join("daemon.stderr.log"),
+                        &toolchain_path,
+                        false,
+                    ),
+                },
+                Spec {
+                    backend,
+                    label: "com.trollboy.familiar.desktop".into(),
+                    definition: base.join("com.trollboy.familiar.desktop.plist"),
+                    rendered: desktop_launchd(
+                        "com.trollboy.familiar.desktop",
+                        desktop_executable,
+                        &paths.log_dir.join("desktop.stdout.log"),
+                        &paths.log_dir.join("desktop.stderr.log"),
+                        &toolchain_path,
+                        true,
+                    ),
+                },
+            ]
+        }
+        Backend::Systemd => {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or(home_dir()?.join(".config"))
+                .join("systemd/user");
+            vec![
+                Spec {
+                    backend,
+                    label: "familiar-ai-daemon".into(),
+                    definition: base.join("familiar-ai-daemon.service"),
+                    rendered: desktop_systemd(
+                        "Familiar daemon",
+                        daemon_executable,
+                        &toolchain_path,
+                        false,
+                    ),
+                },
+                Spec {
+                    backend,
+                    label: "familiar-ai-desktop".into(),
+                    definition: base.join("familiar-ai-desktop.service"),
+                    rendered: desktop_systemd(
+                        "Familiar desktop",
+                        desktop_executable,
+                        &toolchain_path,
+                        true,
+                    ),
+                },
+            ]
+        }
+    };
+    Ok(DesktopInstallSpec {
+        backend,
+        definitions,
+        executables: [
+            daemon_executable.to_path_buf(),
+            desktop_executable.to_path_buf(),
+        ],
+    })
+}
+
+pub fn install_desktop(spec: &DesktopInstallSpec, log_dir: &Path) -> Result<Vec<bool>, String> {
+    for (definition, executable) in spec.definitions.iter().zip(&spec.executables) {
+        if !executable.is_file() {
+            return Err(format!(
+                "{} executable does not exist: {}",
+                definition.label,
+                executable.display()
+            ));
+        }
+    }
+    fs::create_dir_all(log_dir).map_err(|e| format!("cannot create log directory: {e}"))?;
+    let mut changed = Vec::new();
+    for definition in &spec.definitions {
+        fs::create_dir_all(definition.definition.parent().expect("definition parent"))
+            .map_err(|e| format!("cannot create supervisor directory: {e}"))?;
+        let prior = fs::read_to_string(&definition.definition).ok();
+        let differs = prior.as_deref() != Some(&definition.rendered);
+        if differs && prior.is_some() {
+            deactivate(definition)?;
+        }
+        if differs {
+            fs::write(&definition.definition, &definition.rendered)
+                .map_err(|e| format!("cannot write {}: {e}", definition.definition.display()))?;
+        }
+        activate(definition)?;
+        changed.push(differs);
+    }
+    Ok(changed)
+}
+
+pub fn uninstall_desktop(spec: &DesktopInstallSpec) -> Result<Vec<bool>, String> {
+    let mut removed = Vec::new();
+    // UI first, daemon second: no UI reconnect storm while intentional
+    // daemon shutdown is in progress.
+    for definition in spec.definitions.iter().rev() {
+        deactivate(definition)?;
+        removed.push(match fs::remove_file(&definition.definition) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!(
+                    "cannot remove {}: {error}",
+                    definition.definition.display()
+                ))
+            }
+        });
+    }
+    Ok(removed)
+}
+
+pub fn desktop_status(spec: &DesktopInstallSpec) -> Vec<Status> {
+    spec.definitions
+        .iter()
+        .map(|definition| {
+            let installed = definition.definition.is_file();
+            let mut blockers = Vec::new();
+            if !installed {
+                blockers.push(format!(
+                    "definition is not installed: {}",
+                    definition.definition.display()
+                ));
+            }
+            let supervisor_state = query(definition).unwrap_or_else(|error| {
+                blockers.push(error);
+                "unavailable".into()
+            });
+            Status {
+                backend: definition.backend,
+                definition: definition.definition.clone(),
+                installed,
+                supervisor_state,
+                blockers,
+            }
+        })
+        .collect()
+}
+
+fn desktop_launchd(
+    label: &str,
+    executable: &Path,
+    stdout: &Path,
+    stderr: &Path,
+    toolchain_path: &str,
+    interactive: bool,
+) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{}</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>10</integer>\n<key>ProcessType</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string></dict>\n<key>StandardOutPath</key><string>{}</string>\n<key>StandardErrorPath</key><string>{}</string>\n</dict></plist>\n",
+        xml_escape(label),
+        xml_escape(&executable.display().to_string()),
+        if interactive { "Interactive" } else { "Background" },
+        xml_escape(toolchain_path),
+        xml_escape(&stdout.display().to_string()),
+        xml_escape(&stderr.display().to_string()),
+    )
+}
+
+fn desktop_systemd(description: &str, executable: &Path, path: &str, graphical: bool) -> String {
+    let target = if graphical {
+        "graphical-session.target"
+    } else {
+        "default.target"
+    };
+    format!(
+        "[Unit]\nDescription={description}\nStartLimitIntervalSec=300\nStartLimitBurst=5\n\n[Service]\nType=simple\nExecStart={}\nEnvironment=\"PATH={}\"\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy={target}\n",
+        executable.display().to_string().replace(' ', "\\x20").replace('%', "%%"),
+        path.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"),
+    )
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 pub fn detect() -> Result<Backend, String> {
     #[cfg(target_os = "macos")]
     {
@@ -331,5 +551,45 @@ mod tests {
             fs::read_to_string(temp.path().join("report")).unwrap(),
             "one report\n"
         );
+    }
+
+    #[test]
+    fn desktop_services_are_independent_and_restart_only_on_failure() {
+        let daemon = desktop_launchd(
+            "com.example.daemon",
+            Path::new("/opt/familiar-ai-daemon"),
+            Path::new("/tmp/daemon.out"),
+            Path::new("/tmp/daemon.err"),
+            "/usr/bin:/bin",
+            false,
+        );
+        let desktop = desktop_launchd(
+            "com.example.desktop",
+            Path::new("/opt/Familiar.app/Contents/MacOS/familiar-ai-desktop"),
+            Path::new("/tmp/desktop.out"),
+            Path::new("/tmp/desktop.err"),
+            "/usr/bin:/bin",
+            true,
+        );
+        assert!(daemon.contains("<string>Background</string>"));
+        assert!(desktop.contains("<string>Interactive</string>"));
+        assert!(daemon.contains("<key>SuccessfulExit</key><false/>"));
+        assert_ne!(daemon, desktop);
+
+        let linux_daemon = desktop_systemd(
+            "Familiar daemon",
+            Path::new("/opt/familiar-ai-daemon"),
+            "/usr/bin:/bin",
+            false,
+        );
+        let linux_desktop = desktop_systemd(
+            "Familiar desktop",
+            Path::new("/opt/familiar-ai-desktop"),
+            "/usr/bin:/bin",
+            true,
+        );
+        assert!(linux_daemon.contains("WantedBy=default.target"));
+        assert!(linux_desktop.contains("WantedBy=graphical-session.target"));
+        assert!(linux_desktop.contains("Restart=on-failure"));
     }
 }
