@@ -100,6 +100,15 @@ async fn execute(
             "PATH",
             std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
         )
+        // This process is the control-plane owner, and the command it is
+        // launching is its own work. Without this the child contends with the
+        // parent that spawned it and can never acquire the lock — the tray's
+        // Start and Re-drive both dispatch commands that take it, and both
+        // failed on every click (FAM-BUG-062).
+        .env(
+            crate::worker_lock::DELEGATION_ENV,
+            std::process::id().to_string(),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

@@ -16,6 +16,28 @@ use crate::control_plane::ControlPlaneService;
 /// The one mutation claim shared by daemon hosting and CLI fallback. The
 /// repository argument remains for source compatibility but ownership is
 /// intentionally per installation, never per repository.
+/// The environment variable by which the control-plane owner tells a command
+/// it spawned that it acts on the owner's behalf.
+///
+/// A command the owner dispatched is the owner's own work. Without this it
+/// contends with the parent that launched it and can never succeed: the tray's
+/// Start and Re-drive both dispatch `familiar-ai run`/`resume` through the
+/// control plane, and both acquire this lock, and the daemon dispatching them
+/// already holds it (FAM-BUG-062).
+pub const DELEGATION_ENV: &str = "FAMILIAR_AI_DELEGATED_BY";
+
+/// Whether this process was spawned by the live owner named in the claim.
+///
+/// Deliberately narrow: the variable must name the *same* pid the claim
+/// records, and that pid must still be the live owner. An inherited or stale
+/// value therefore authorises nothing.
+fn delegated_by(claim: &OwnershipClaim) -> bool {
+    std::env::var(DELEGATION_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .is_some_and(|pid| pid == claim.owner_pid)
+}
+
 pub struct WorkerLock {
     path: PathBuf,
     claim: OwnershipClaim,
@@ -88,6 +110,15 @@ impl WorkerLock {
             Ok(original) => {
                 if let Ok(existing) = serde_json::from_str::<OwnershipClaim>(&original) {
                     if claim_process_matches(&existing) {
+                        // A command the owner dispatched runs as the owner's
+                        // delegate rather than contending with it. Exclusion
+                        // is preserved on both sides: anyone who is not the
+                        // owner's child is still refused below, and two
+                        // delegates still exclude each other through their own
+                        // O_EXCL lock.
+                        if delegated_by(&existing) {
+                            return Self::acquire_delegation(runtime_dir, &existing);
+                        }
                         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!(
                             "Familiar control-plane owner pid {} is live; socket state must be diagnosed and explicit recovery used", existing.owner_pid)));
                     }
@@ -133,6 +164,44 @@ impl WorkerLock {
             )),
             Err(e) => Err(e),
         }
+    }
+
+    /// Take the delegation lock on behalf of a live owner.
+    ///
+    /// Separate from the claim so the owner keeps its own, and `O_EXCL` so two
+    /// delegates cannot run at once — which is the property the claim exists
+    /// to guarantee and the one a naive bypass would have thrown away.
+    fn acquire_delegation(runtime_dir: &Path, owner: &OwnershipClaim) -> io::Result<Self> {
+        let path = runtime_dir.join("control-plane.delegate");
+        if let Ok(existing) = fs::read_to_string(&path) {
+            if let Ok(claim) = serde_json::from_str::<OwnershipClaim>(&existing) {
+                if claim_process_matches(&claim) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "another delegate of control-plane owner pid {} is live (pid {})",
+                            owner.owner_pid, claim.owner_pid
+                        ),
+                    ));
+                }
+            }
+            // The previous delegate is gone; its lock is not authority.
+            let _ = fs::remove_file(&path);
+        }
+        let claim = OwnershipClaim {
+            owner_pid: std::process::id(),
+            process_start_identity: process_start_identity(std::process::id()).unwrap_or_default(),
+            ..owner.clone()
+        };
+        let body = serde_json::to_string(&claim)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        io::Write::write_all(&mut file, body.as_bytes())?;
+        file.sync_all()?;
+        Ok(Self { path, claim })
     }
 
     pub fn claim(&self) -> &OwnershipClaim {

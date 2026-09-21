@@ -743,6 +743,27 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
   unattended sessions. Open; surfaced 2026-08-31 during PRD-077
   verification.
 
+## 2026-09-21 — actions taken in the window report nothing
+
+### FAM-BUG-063 — A dispatched command's output is discarded, so failures are silent
+
+- **Status:** Open
+- **Found:** 2026-09-21, while diagnosing FAM-BUG-062.
+- **Detail:** `control_worker` spawns every dispatched command with
+  `.stdout(Stdio::null()).stderr(Stdio::null())`. When the owner clicked
+  Re-drive, the child failed with `cannot acquire mutating orchestrator
+  ownership` and that message went nowhere — not to the daemon log, not to
+  the UI, not to the execution record beyond `state = failed`.
+- **Impact:** this is why FAM-BUG-062 survived. It is also the third
+  instance of the same pattern in two days: the tray's Release and
+  Force-complete buttons failed validation on every click since they
+  shipped, Re-drive failed on every click, and all three were
+  indistinguishable from a button that does nothing.
+- **Expected fix:** capture the child's output into the execution record so a
+  failed execution can say why, and surface that in the window. PRD-102 put a
+  count on the icon and a signpost in the menu, but an action taken *inside*
+  the window still reports nothing at all.
+
 ## Backfilled entries
 
 These two were recorded only as bullets inside dated narrative below, so no
@@ -761,7 +782,20 @@ left where it is; these give them a findable entry.
 
 ### FAM-BUG-062 — Re-drive dispatches a command that needs a lock the daemon holds
 
-- **Status:** Open
+- **Status:** Fixed 2026-09-21 — a command the owner dispatched now runs as
+  the owner's delegate. `control_worker` passes `FAMILIAR_AI_DELEGATED_BY`
+  with its own pid when it spawns, and `WorkerLock` yields to a process that
+  names the live owner exactly. Exclusion is preserved on both sides:
+  anything that is not the owner's child is still refused, and two delegates
+  still exclude each other through their own `O_EXCL` lock — the property
+  the claim exists for, which a naive bypass would have thrown away.
+  Verified against the live daemon: the same command refuses without the
+  variable and proceeds with it. Four regressions in `gate_escalation_ui.rs`
+  cover the delegate, the stranger, a wrong pid, and two delegates.
+- **Note:** `Action::StartPrd` had the identical defect — it dispatches
+  `familiar-ai run`, which takes the same lock — so the tray's two primary
+  actions were both dead. Both are fixed by the same change.
+- **Prior status:** Open
 
 
 `Action::ResumePrd` submits `["familiar-ai", "resume", <prd>]` to the

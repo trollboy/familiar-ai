@@ -57,3 +57,82 @@ fn the_actor_the_tray_sends_satisfies_the_ledgers_form() {
         validate_recovery_attribution(BacklogRecoveryAction::Release, "human:tray", "why").is_ok()
     );
 }
+
+// ---------------------------------------------------------------------------
+// FAM-BUG-062: a command the owner dispatched must not contend with the owner.
+// ---------------------------------------------------------------------------
+
+use familiar_ai_daemon::worker_lock::{WorkerLock, DELEGATION_ENV};
+
+/// These manipulate a process-global environment variable, so they run behind
+/// one mutex rather than as parallel threads in the same binary. That is the
+/// lesson from the XDG race fixed on 2026-09-20: `cargo test` runs tests as
+/// threads, and a global mutated by one is visible to all of them.
+static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn a_stranger_is_still_refused_while_the_owner_is_live() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let _owner = WorkerLock::acquire(dir.path()).expect("the owner takes the claim");
+
+    std::env::remove_var(DELEGATION_ENV);
+    let refused = WorkerLock::acquire(dir.path());
+    assert!(
+        refused.is_err(),
+        "a process that is not the owner's delegate must still be refused"
+    );
+}
+
+#[test]
+fn a_delegate_of_the_live_owner_proceeds() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let owner = WorkerLock::acquire(dir.path()).expect("the owner takes the claim");
+
+    // The owner tells its child who dispatched it.
+    std::env::set_var(DELEGATION_ENV, owner.claim().owner_pid.to_string());
+    let delegate = WorkerLock::acquire(dir.path());
+    std::env::remove_var(DELEGATION_ENV);
+    assert!(
+        delegate.is_ok(),
+        "the owner's own dispatched command must be able to run: {:?}",
+        delegate.err()
+    );
+}
+
+#[test]
+fn naming_the_wrong_owner_authorises_nothing() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let owner = WorkerLock::acquire(dir.path()).expect("the owner takes the claim");
+
+    // A stale or inherited value must not be a skeleton key.
+    std::env::set_var(DELEGATION_ENV, (owner.claim().owner_pid + 1).to_string());
+    let refused = WorkerLock::acquire(dir.path());
+    std::env::remove_var(DELEGATION_ENV);
+    assert!(
+        refused.is_err(),
+        "delegation must name the live owner exactly"
+    );
+}
+
+#[test]
+fn two_delegates_still_exclude_each_other() {
+    // The whole point of the claim is that one mutator runs at a time.
+    // Delegation must not trade that away for convenience.
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let owner = WorkerLock::acquire(dir.path()).expect("the owner takes the claim");
+
+    std::env::set_var(DELEGATION_ENV, owner.claim().owner_pid.to_string());
+    let first = WorkerLock::acquire(dir.path()).expect("the first delegate proceeds");
+    let second = WorkerLock::acquire(dir.path());
+    std::env::remove_var(DELEGATION_ENV);
+
+    assert!(
+        second.is_err(),
+        "a second delegate must wait: exclusion is the property being preserved"
+    );
+    drop(first);
+}

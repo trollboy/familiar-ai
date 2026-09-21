@@ -89,7 +89,7 @@ fn every_entry_declares_a_state_a_reader_can_classify() {
         }
         if let Some(rest) = line.trim_start().strip_prefix("- **Status:**") {
             saw_status = true;
-            let first = rest.trim().split_whitespace().next().unwrap_or("");
+            let first = rest.split_whitespace().next().unwrap_or("");
             let first = first.trim_end_matches(&[',', '.', ':'][..]);
             if !KNOWN.iter().any(|known| known.eq_ignore_ascii_case(first)) {
                 offenders.push(format!(
@@ -131,7 +131,7 @@ fn the_open_count_is_answerable() {
             current.clone(),
             line.trim_start().strip_prefix("- **Status:**"),
         ) {
-            let first = rest.trim().split_whitespace().next().unwrap_or("");
+            let first = rest.split_whitespace().next().unwrap_or("");
             if first.eq_ignore_ascii_case("Open") || first.eq_ignore_ascii_case("Reopened") {
                 open.push(id);
             }
