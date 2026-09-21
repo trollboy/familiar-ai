@@ -877,7 +877,13 @@ impl BlockingPolicy {
             if finding.status == FindingStatus::AcceptedRisk {
                 return Err(ReviewValidationError::AgentAcceptedRisk);
             }
-            finding.blocking = self.is_blocking(finding.category, finding.severity);
+            // Only an open finding can block. A reviewer that reports a
+            // finding as `Resolved` — because the remediation stage fixed it
+            // in this very cycle — is describing history, not an objection.
+            // Promoting it by category alone stopped PRD-100 on a finding
+            // whose own claim began "Resolved." and then described the fix.
+            finding.blocking = finding.status == FindingStatus::Open
+                && self.is_blocking(finding.category, finding.severity);
         }
         for prior in &request.prior_findings {
             let finding = result

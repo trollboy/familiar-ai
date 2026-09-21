@@ -159,3 +159,135 @@ fn migration_032_persists_waiver_and_verification_truth_dimensions() {
     assert!(columns.contains(&"environment_identity_json".into()));
     assert!(columns.contains(&"classification".into()));
 }
+
+/// A reviewer that reports a finding as `Resolved` is describing history —
+/// the remediation stage fixed it inside this same cycle — not raising an
+/// objection. Promoting it to blocking by category alone stops a landing on
+/// a finding whose own claim begins "Resolved." and then narrates the fix.
+///
+/// PRD-100 stopped exactly this way on 2026-09-21: two security_issue
+/// findings, one `Resolved` and one `Open`, both promoted because
+/// `is_blocking` consults category and severity and never status.
+#[test]
+fn a_resolved_finding_does_not_block_the_landing() {
+    use familiar_ai_review::{
+        ChangedFile, FindingCategory, FindingEvidence, FindingSeverity, FindingStatus,
+        GitChangeKind, LineRange, ReviewFinding,
+    };
+
+    let assignment = |role| AgentAssignment {
+        adapter_id: "fixture-agent".into(),
+        agent_id: "fixture-agent".into(),
+        provider: None,
+        requested_model: None,
+        role,
+        session_id: Some("blocking".into()),
+    };
+    let request = ReviewRequest {
+        review_id: "blocking-review".into(),
+        task: ReviewTask {
+            task_id: "blocking".into(),
+            objective: "status decides blocking".into(),
+            acceptance_criteria: vec![],
+            base_revision: "base".into(),
+            allowed_paths: vec![],
+            prohibited_changes: vec![],
+            verification_plan_id: "blocking".into(),
+        },
+        implementation: assignment(AgentRole::Implementation),
+        reviewer: assignment(AgentRole::Review),
+        base_revision: "base".into(),
+        candidate_revision: Some("candidate".into()),
+        changed_files: vec![ChangedFile {
+            path: "src/touched.rs".into(),
+            kind: GitChangeKind::Modified,
+            old_path: None,
+            line_summary: vec![LineRange { start: 1, end: 2 }],
+        }],
+        diff: EvidenceRef {
+            content_hash: "fnv1a64:candidate".into(),
+            media_type: "text/x-diff".into(),
+            byte_size: 0,
+            repository: "fixture-repository".into(),
+            revision: "candidate".into(),
+            storage_ref: "fixture".into(),
+            truncated: false,
+            omitted_bytes: 0,
+        },
+        disclosed_diff: String::new(),
+        contracts: vec![],
+        invariants: vec![],
+        verification: vec![],
+        prior_findings: vec![],
+        budget: ReviewPackageBudget {
+            max_bytes: 1,
+            max_estimated_tokens: 1,
+        },
+        manifest: ReviewPackageManifest {
+            manifest_hash: "blocking-manifest".into(),
+            diff_hash: "fnv1a64:candidate".into(),
+            included_sources: vec![],
+            omissions: vec![],
+            total_bytes: 0,
+            estimated_tokens: 0,
+        },
+    };
+
+    let finding = |id: &str, status| ReviewFinding {
+        finding_id: id.into(),
+        category: FindingCategory::SecurityIssue,
+        severity: FindingSeverity::High,
+        blocking: false,
+        title: id.into(),
+        claim: "claim".into(),
+        evidence: vec![FindingEvidence::FileRange {
+            path: "src/touched.rs".into(),
+            range: LineRange { start: 1, end: 2 },
+        }],
+        remediation: "remediation".into(),
+        status,
+        supersedes: None,
+        acceptance_criterion_id: None,
+    };
+    let result = ReviewResult {
+        review_id: request.review_id.clone(),
+        reviewer: AgentObservation {
+            assignment: request.reviewer.clone(),
+            agent_version: None,
+            reported_model: None,
+            unavailable_fields: BTreeMap::new(),
+        },
+        started_at: "2026-09-21T08:00:00Z".into(),
+        ended_at: "2026-09-21T08:00:00Z".into(),
+        duration_ms: 1,
+        findings: vec![
+            finding("already-fixed", FindingStatus::Resolved),
+            finding("still-open", FindingStatus::Open),
+        ],
+        reviewed_manifest_hash: request.manifest.manifest_hash.clone(),
+        usage: ExecutionUsage::default(),
+        disposition: ReviewDisposition::RemediationRequired,
+        unavailable_fields: BTreeMap::new(),
+    };
+
+    let applied = BlockingPolicy::default()
+        .apply_and_validate(&request, result)
+        .expect("the package validates");
+
+    let blocking_of = |id: &str| {
+        applied
+            .findings
+            .iter()
+            .find(|f| f.finding_id == id)
+            .expect("finding present")
+            .blocking
+    };
+    assert!(
+        !blocking_of("already-fixed"),
+        "a resolved finding describes a fix, not an objection"
+    );
+    assert!(
+        blocking_of("still-open"),
+        "an open security_issue must still block"
+    );
+}
