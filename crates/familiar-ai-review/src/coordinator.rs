@@ -890,6 +890,23 @@ impl ReviewCoordinator<'_> {
                     !paths.is_empty() && paths.iter().all(|path| adjudicated.contains(path))
                 }
             };
+            // Every open finding carries into the next review, not only the
+            // blocking ones. A reviewer that is never told what the previous
+            // pass raised cannot dispose of it, so a non-blocking finding was
+            // simply forgotten between attempts: three reviews of PRD-100
+            // produced 4, then 2, then 5 findings with no overlap at all.
+            let carry_forward: Vec<FindingReference> = result
+                .findings
+                .iter()
+                .filter(|f| f.status == FindingStatus::Open)
+                .map(|f| FindingReference {
+                    finding_id: f.finding_id.clone(),
+                    status: f.status,
+                    claim: f.claim.clone(),
+                    category: f.category,
+                    evidence: f.evidence.clone(),
+                })
+                .collect();
             let blocking: Vec<_> = deduplicate_findings(
                 result
                     .findings
@@ -1216,16 +1233,7 @@ impl ReviewCoordinator<'_> {
                     format!("required check(s) ran and did not pass: {failed}"),
                 );
             }
-            prior = blocking
-                .into_iter()
-                .map(|f| FindingReference {
-                    finding_id: f.finding_id,
-                    status: f.status,
-                    claim: f.claim,
-                    category: f.category,
-                    evidence: f.evidence,
-                })
-                .collect();
+            prior = carry_forward;
         }
     }
     fn reserve(

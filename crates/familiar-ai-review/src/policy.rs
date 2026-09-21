@@ -807,6 +807,12 @@ pub fn scope_rule_summary(
 pub struct BlockingPolicy {
     pub blocking_severities: BTreeSet<FindingSeverity>,
     pub blocking_categories: BTreeSet<FindingCategory>,
+    /// The least severity at which a blocking *category* stops a landing.
+    /// Severity alone still blocks through `blocking_severities` regardless
+    /// of this floor; this only bounds the category rule, which otherwise
+    /// blocks on an `Informational` note purely for being filed under
+    /// `SecurityIssue`.
+    pub blocking_category_floor: FindingSeverity,
 }
 
 impl Default for BlockingPolicy {
@@ -820,13 +826,19 @@ impl Default for BlockingPolicy {
                 FindingCategory::ScopeViolation,
             ]
             .into(),
+            blocking_category_floor: FindingSeverity::Medium,
         }
     }
 }
 
 impl BlockingPolicy {
     pub fn is_blocking(&self, category: FindingCategory, severity: FindingSeverity) -> bool {
-        self.blocking_categories.contains(&category) || self.blocking_severities.contains(&severity)
+        // `FindingSeverity` orders most-severe-first, so "at least the floor"
+        // is `<=`. A category match below the floor is still reported; it
+        // just does not stop the landing on its own.
+        let category_blocks = self.blocking_categories.contains(&category)
+            && severity <= self.blocking_category_floor;
+        category_blocks || self.blocking_severities.contains(&severity)
     }
     pub fn apply_and_validate(
         &self,
@@ -1083,6 +1095,11 @@ pub fn check_independence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The category rule carries a severity floor. Before it did not, and a
+    /// `Low`/`SecurityIssue` note stopped a landing on category alone —
+    /// PRD-100 was held that way by `f5-denied-read-path-only-covers-two-\
+    /// capabilities`. The floor bounds the category rule only: a `High` or
+    /// `Critical` finding still blocks whatever its category.
     #[test]
     fn default_matrix_blocks_required_values() {
         let p = BlockingPolicy::default();
@@ -1092,9 +1109,17 @@ mod tests {
             FindingCategory::SecurityIssue,
             FindingCategory::ScopeViolation,
         ] {
-            assert!(p.is_blocking(category, FindingSeverity::Informational));
+            // At and above the floor the category blocks on its own.
+            assert!(p.is_blocking(category, FindingSeverity::Medium));
+            assert!(p.is_blocking(category, FindingSeverity::High));
+            // Below it the finding is still reported, but does not stop a
+            // landing by category alone.
+            assert!(!p.is_blocking(category, FindingSeverity::Low));
+            assert!(!p.is_blocking(category, FindingSeverity::Informational));
         }
+        // Severity blocks irrespective of category, and still does.
         assert!(p.is_blocking(FindingCategory::TestGap, FindingSeverity::High));
+        assert!(p.is_blocking(FindingCategory::TestGap, FindingSeverity::Critical));
         assert!(!p.is_blocking(FindingCategory::TestGap, FindingSeverity::Medium));
     }
 
