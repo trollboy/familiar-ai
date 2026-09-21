@@ -33,6 +33,9 @@ pub struct RoundAttempt {
     /// `completed`, `retained`, or absent while the attempt is still running.
     pub outcome: Option<String>,
     pub retained_reason: Option<String>,
+    /// The stopping error in its own words, when there was one. Never a
+    /// taxonomy token — that is `retained_reason`'s job.
+    pub retained_detail: Option<String>,
     pub duration_ms: Option<u64>,
 }
 
@@ -46,6 +49,9 @@ pub struct DriverAttempt {
     pub ended_at: Option<String>,
     pub outcome: Option<String>,
     pub retained_reason: Option<String>,
+    /// The stopping error in its own words, when there was one. Never a
+    /// taxonomy token — that is `retained_reason`'s job.
+    pub retained_detail: Option<String>,
     pub known_cost_microusd: Option<u64>,
     pub duration_ms: Option<u64>,
     pub adapter_id: Option<String>,
@@ -287,6 +293,9 @@ impl<'a> DriverRepository<'a> {
         Ok(next)
     }
 
+    /// Finishes an attempt without recording stopping detail. Callers that
+    /// hold the stopping error use [`Self::record_attempt_finished_with_detail`]
+    /// so the text lands in the ledger instead of only on stderr.
     #[allow(clippy::too_many_arguments)]
     pub fn record_attempt_finished(
         &self,
@@ -297,11 +306,37 @@ impl<'a> DriverRepository<'a> {
         known_cost_microusd: Option<u64>,
         duration_ms: Option<u64>,
     ) -> familiar_ai_core::Result<()> {
+        self.record_attempt_finished_with_detail(
+            session_id,
+            sequence,
+            outcome,
+            retained_reason,
+            None,
+            known_cost_microusd,
+            duration_ms,
+        )
+    }
+
+    /// Finishes an attempt, recording both its taxonomy token and the
+    /// stopping error in its own words. `retained_detail` is never a
+    /// taxonomy token: appending detail to `retained_reason` costs the row
+    /// its class and its recovery command.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_attempt_finished_with_detail(
+        &self,
+        session_id: &str,
+        sequence: i64,
+        outcome: &str,
+        retained_reason: Option<&str>,
+        retained_detail: Option<&str>,
+        known_cost_microusd: Option<u64>,
+        duration_ms: Option<u64>,
+    ) -> familiar_ai_core::Result<()> {
         let changed = self
             .conn
             .execute(
                 "UPDATE driver_attempts SET ended_at=?1,outcome=?2,retained_reason=?3,\
-                 known_cost_microusd=?4,duration_ms=?5 WHERE session_id=?6 AND sequence=?7",
+                 known_cost_microusd=?4,duration_ms=?5,retained_detail=?8 WHERE session_id=?6 AND sequence=?7",
                 params![
                     Utc::now().to_rfc3339(),
                     outcome,
@@ -309,7 +344,8 @@ impl<'a> DriverRepository<'a> {
                     known_cost_microusd.map(|v| v as i64),
                     duration_ms.map(|v| v as i64),
                     session_id,
-                    sequence
+                    sequence,
+                    retained_detail
                 ],
             )
             .map_err(db)?;
@@ -478,7 +514,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch,escalated_from_sequence,escalation_reason FROM driver_attempts \
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch,escalated_from_sequence,escalation_reason,retained_detail FROM driver_attempts \
                  WHERE session_id=?1 ORDER BY sequence",
             )
             .map_err(db)?;
@@ -507,6 +543,7 @@ impl<'a> DriverRepository<'a> {
                     branch: row.get(19)?,
                     escalated_from_sequence: row.get(20)?,
                     escalation_reason: row.get(21)?,
+                    retained_detail: row.get(22)?,
                 })
             })
             .map_err(db)?;
@@ -526,7 +563,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT sequence,prd_id,prd_path,execution_id,started_at,ended_at,outcome,\
-                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch,escalated_from_sequence,escalation_reason FROM driver_attempts \
+                retained_reason,known_cost_microusd,duration_ms,adapter_id,model,exit_code,signal,last_durable_phase,review_configuration_source,execution_context_configuration_source,component_id,worktree_path,branch,escalated_from_sequence,escalation_reason,retained_detail FROM driver_attempts \
                  WHERE session_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3",
             )
             .map_err(db)?;
@@ -557,6 +594,7 @@ impl<'a> DriverRepository<'a> {
                         branch: row.get(19)?,
                         escalated_from_sequence: row.get(20)?,
                         escalation_reason: row.get(21)?,
+                        retained_detail: row.get(22)?,
                     })
                 },
             )
@@ -570,7 +608,7 @@ impl<'a> DriverRepository<'a> {
         prd_id: &str,
     ) -> familiar_ai_core::Result<Option<DriverAttempt>> {
         self.conn.query_row(
-            "SELECT a.sequence,a.prd_id,a.prd_path,a.execution_id,a.started_at,a.ended_at,a.outcome,a.retained_reason,a.known_cost_microusd,a.duration_ms,a.adapter_id,a.model,a.exit_code,a.signal,a.last_durable_phase,a.review_configuration_source,a.execution_context_configuration_source,a.component_id,a.worktree_path,a.branch,a.escalated_from_sequence,a.escalation_reason FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.prd_id=?2 ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
+            "SELECT a.sequence,a.prd_id,a.prd_path,a.execution_id,a.started_at,a.ended_at,a.outcome,a.retained_reason,a.known_cost_microusd,a.duration_ms,a.adapter_id,a.model,a.exit_code,a.signal,a.last_durable_phase,a.review_configuration_source,a.execution_context_configuration_source,a.component_id,a.worktree_path,a.branch,a.escalated_from_sequence,a.escalation_reason,a.retained_detail FROM driver_attempts a JOIN driver_sessions s ON s.session_id=a.session_id WHERE s.repository_key=?1 AND a.prd_id=?2 ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
             params![repository_key, prd_id],
             |row| Ok(DriverAttempt {
                 sequence: row.get(0)?, prd_id: row.get(1)?, prd_path: row.get(2)?,
@@ -583,6 +621,7 @@ impl<'a> DriverRepository<'a> {
                 review_configuration_source: row.get(15)?, execution_context_configuration_source: row.get(16)?,
                 component_id: row.get(17)?, worktree_path: row.get(18)?, branch: row.get(19)?,
                 escalated_from_sequence: row.get(20)?, escalation_reason: row.get(21)?,
+                    retained_detail: row.get(22)?,
             }),
         ).optional().map_err(db)
     }
@@ -615,7 +654,7 @@ impl<'a> DriverRepository<'a> {
             .conn
             .prepare(
                 "SELECT a.session_id,a.sequence,a.prd_id,a.prd_path,a.started_at,a.ended_at,\
-                 a.outcome,a.retained_reason,a.duration_ms FROM driver_attempts a \
+                 a.outcome,a.retained_reason,a.duration_ms,a.retained_detail FROM driver_attempts a \
                  JOIN driver_sessions s ON s.session_id=a.session_id \
                  WHERE s.repository_key=?1 AND s.session_id IN \
                    (SELECT session_id FROM driver_sessions WHERE repository_key=?1 \
@@ -634,6 +673,7 @@ impl<'a> DriverRepository<'a> {
                     ended_at: row.get(5)?,
                     outcome: row.get(6)?,
                     retained_reason: row.get(7)?,
+                    retained_detail: row.get(9)?,
                     duration_ms: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
                 })
             })
@@ -727,6 +767,59 @@ mod tests {
 
         assert_eq!(repository.count_sessions("/repo/.git").unwrap(), 3);
         assert_eq!(repository.count_sessions("/elsewhere/.git").unwrap(), 1);
+    }
+
+    /// The taxonomy token and the stopping error are separate columns on
+    /// purpose: a classifier and a recovery lookup both key off the token, so
+    /// detail folded into it silently costs the row its class. Both must
+    /// survive the round trip, and the token must come back clean.
+    #[test]
+    fn the_stopping_error_is_stored_beside_its_class_not_inside_it() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        repository.open_session("s1", "/repo/.git", "{}").unwrap();
+        let stopped = repository
+            .record_attempt_started("s1", "PRD-1", "docs/prds/PRD-1.md", None)
+            .unwrap();
+        repository
+            .record_attempt_finished_with_detail(
+                "s1",
+                stopped,
+                "retained",
+                Some("verification_failed"),
+                Some("cargo test --workspace: 3 failed in familiar-ai-daemon"),
+                None,
+                Some(2_000),
+            )
+            .unwrap();
+
+        let attempt = &repository.attempts("s1").unwrap()[0];
+        assert_eq!(
+            attempt.retained_reason.as_deref(),
+            Some("verification_failed")
+        );
+        assert_eq!(
+            attempt.retained_detail.as_deref(),
+            Some("cargo test --workspace: 3 failed in familiar-ai-daemon"),
+        );
+        // The rounds view carries it too, or the dashboard cannot show it.
+        let rounds = repository.rounds("/repo/.git", 10).unwrap();
+        assert_eq!(
+            rounds[0].retained_detail.as_deref(),
+            Some("cargo test --workspace: 3 failed in familiar-ai-daemon"),
+        );
+
+        // The plain entry point still works and records no detail rather than
+        // an empty string standing in for one.
+        let bare = repository
+            .record_attempt_started("s1", "PRD-2", "docs/prds/PRD-2.md", None)
+            .unwrap();
+        repository
+            .record_attempt_finished("s1", bare, "completed", None, None, Some(1))
+            .unwrap();
+        let attempts = repository.attempts("s1").unwrap();
+        let completed = attempts.iter().find(|a| a.prd_id == "PRD-2").unwrap();
+        assert_eq!(completed.retained_detail, None);
     }
 
     /// An unfinished attempt has no outcome. The chart distinguishes that from

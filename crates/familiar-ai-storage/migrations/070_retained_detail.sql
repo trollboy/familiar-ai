@@ -1,0 +1,12 @@
+-- Why an attempt stopped, in its own words.
+--
+-- `retained_reason` is a closed vocabulary (see
+-- familiar-ai-storage::repos::session_rollup::STALL_TAXONOMY): a classifier
+-- reads it, a recovery command is looked up by it. Detail appended to that
+-- token costs the row both — which is how six spectra attempts recorded
+-- "review_failed: configuration failed: ..." and classified as `unclassified`.
+--
+-- So detail gets its own column. The driver already had the error text in
+-- hand at the moment it retained an attempt; it printed it to stderr and
+-- dropped it. This is where it goes instead.
+ALTER TABLE driver_attempts ADD COLUMN retained_detail TEXT NULL;

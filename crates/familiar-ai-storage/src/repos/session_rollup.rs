@@ -342,11 +342,21 @@ pub fn classify_attempt_stall(
         None if outcome.is_none() => "interrupted",
         None => "unclassified",
     };
+    named_class(key)
+        // A reason that carried free-form detail still names its class in the
+        // token before the first colon ("review_failed: configuration failed:
+        // enabled review requires ..."). Without this the detail costs the row
+        // both its class and its recovery command.
+        .or_else(|| named_class(key.split(':').next().unwrap_or(key).trim()))
+        .unwrap_or("unclassified")
+}
+
+/// The taxonomy class named exactly by `key`, if the vocabulary has one.
+fn named_class(key: &str) -> Option<&'static str> {
     STALL_TAXONOMY
         .iter()
         .find(|class| class.name == key)
         .map(|class| class.name)
-        .unwrap_or("unclassified")
 }
 
 /// The one executable recovery command (or unrecoverable reason) for a
@@ -779,6 +789,44 @@ pub fn autonomy_for_window(
 
 #[cfg(test)]
 mod tests {
+
+    /// Six real attempts recorded `review_failed: configuration failed: ...`.
+    /// Exact-match classification dropped every one of them to `unclassified`,
+    /// costing them both their class and the recovery command keyed to it.
+    /// Detail in the reason string must not cost the row its classification.
+    #[test]
+    fn a_reason_carrying_detail_still_names_its_class() {
+        assert_eq!(
+            classify_attempt_stall(
+                Some(
+                    "review_failed: configuration failed: enabled review requires an \
+                     explicit PRD Acceptance Criteria section"
+                ),
+                Some("retained"),
+            ),
+            "review_failed",
+        );
+        // The recovery command follows the class, which is the whole point.
+        assert_eq!(
+            stall_recovery("review_failed", "PRD-177a", "docs/prds/PRD-177a.md"),
+            stall_recovery(
+                classify_attempt_stall(Some("review_failed: anything at all"), Some("retained")),
+                "PRD-177a",
+                "docs/prds/PRD-177a.md",
+            ),
+        );
+        // A bare token is unaffected, and a genuinely unknown class still
+        // lands in `unclassified` rather than being invented.
+        assert_eq!(
+            classify_attempt_stall(Some("scope_broadened"), Some("retained")),
+            "scope_broadened",
+        );
+        assert_eq!(
+            classify_attempt_stall(Some("nonsense_class: with detail"), Some("retained")),
+            "unclassified",
+        );
+    }
+
     use super::*;
     use crate::repos::checkpoint::{CheckpointRepository, ExecutionCheckpoint};
     use crate::repos::project::ProjectRepository;

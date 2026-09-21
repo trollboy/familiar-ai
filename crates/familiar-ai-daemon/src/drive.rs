@@ -1840,9 +1840,17 @@ pub fn drive(
                         }
                     }
                     let unclassified = result.is_err() && trace.retained_reason.is_none();
-                    if let Err(error) = &result {
-                        eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
-                    }
+                    // The stopping error is legible here and nowhere later. A
+                    // taxonomy token says which class of thing went wrong; this
+                    // says what actually happened, which is what an operator
+                    // needs to act. Printing it to stderr threw it away.
+                    let retained_detail = match &result {
+                        Err(error) => {
+                            eprintln!("drive: attempt {sequence} {} failed: {error}", target.id);
+                            Some(stopping_detail(&error.to_string()))
+                        }
+                        Ok(_) => None,
+                    };
                     // Review success is not completion. Commit the candidate,
                     // land it against the latest persisted integration revision,
                     // then atomically expose completion to dependency selection.
@@ -2142,14 +2150,17 @@ pub fn drive(
                     // ownership record survive on disk as durable evidence.
                     drop(worktree);
                     let _ = component_id;
-                    if let Err(error) = DriverRepository::new(db.conn()).record_attempt_finished(
-                        &session_id,
-                        sequence,
-                        outcome,
-                        retained_reason,
-                        cost,
-                        Some(duration_ms),
-                    ) {
+                    if let Err(error) = DriverRepository::new(db.conn())
+                        .record_attempt_finished_with_detail(
+                            &session_id,
+                            sequence,
+                            outcome,
+                            retained_reason,
+                            retained_detail.as_deref(),
+                            cost,
+                            Some(duration_ms),
+                        )
+                    {
                         eprintln!("drive: cannot record attempt outcome: {error}");
                         batch_stop = Some(DriveTermination::StorageFailure);
                         continue;
@@ -2810,8 +2821,42 @@ fn attempt_tokens(db: &Database, execution_id: &str) -> Option<u64> {
         .input_tokens
 }
 
+/// The stopping error, normalized for the ledger: whitespace collapsed so a
+/// multi-line failure stays readable in a one-line listing, and bounded so a
+/// runaway error cannot crowd out the rest of the history. Empty input yields
+/// `None` — an absent detail is honest, an empty string is noise.
+fn stopping_detail(raw: &str) -> String {
+    const LIMIT: usize = 2000;
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= LIMIT {
+        return collapsed;
+    }
+    let kept: String = collapsed.chars().take(LIMIT).collect();
+    format!("{kept}… (truncated)")
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A stopping error is worth storing only if it stays readable in a
+    /// one-line listing and cannot crowd out the rest of the history.
+    #[test]
+    fn stopping_detail_collapses_and_bounds_the_error() {
+        assert_eq!(
+            stopping_detail("verification failed:\n  cargo test\n\n  3 failed"),
+            "verification failed: cargo test 3 failed",
+        );
+        let long = "x".repeat(5_000);
+        let bounded = stopping_detail(&long);
+        assert!(bounded.ends_with("… (truncated)"));
+        assert_eq!(
+            bounded.chars().count(),
+            2_000 + "… (truncated)".chars().count()
+        );
+        // Nothing to say is said as nothing, not as whitespace.
+        assert_eq!(stopping_detail("   \n  "), "");
+    }
+
     use super::*;
 
     #[test]

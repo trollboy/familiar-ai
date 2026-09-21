@@ -883,7 +883,8 @@ async function toggleSession(i, sessionId) {
         return '<tr><td>' + esc(a.sequence) + '</td><td class="mono">' + esc(a.prd_id) + '</td>' +
           '<td>' + esc(a.model || '') + '</td>' +
           '<td><span class="pill ' + (bad ? 'bad' : 'good') + '">' + esc(a.outcome) + '</span>' +
-          (a.retained_reason ? '<br><small class="muted">' + esc(a.retained_reason) + '</small>' : '') + '</td>' +
+          (a.retained_reason ? '<br><small class="muted">' + esc(a.retained_reason) + '</small>' : '') +
+          (a.retained_detail ? '<br><small class="muted" title="' + esc(a.retained_detail) + '">' + esc(a.retained_detail.slice(0, 160)) + '</small>' : '') + '</td>' +
           '<td>' + (rev ? esc(rev.disposition) +
             (rev.blocking_findings && rev.blocking_findings.length
               ? '<br><small class="err">' + rev.blocking_findings.length + ' blocking</small>' : '')

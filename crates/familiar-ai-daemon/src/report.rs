@@ -322,6 +322,11 @@ fn render_stopped(db: &Database, out: &mut String, stopped: &[&DriverAttempt]) {
             "  {}  {}  reason={reason}",
             attempt.prd_id, attempt.prd_path
         );
+        // The class says which bucket; the detail says what actually happened.
+        // An operator acts on the second one.
+        if let Some(detail) = attempt.retained_detail.as_deref() {
+            let _ = writeln!(out, "      detail: {detail}");
+        }
         render_workspace(out, attempt);
         let _ = writeln!(
             out,
