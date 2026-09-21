@@ -1078,7 +1078,16 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-030 — Workspace suite hangs on macOS at/after the mcp integration binary
 
-- **Status:** CLOSED 2026-09-01 — fix candidate 5f517db validated by a clean
+- **Status:** REOPENED 2026-09-21 — PRD-104 verification repeatedly imposed
+  roughly 60–90 seconds before each freshly linked macOS test executable,
+  both inside and outside the Codex sandbox. No individual test hung, and all
+  suites reached were green, but three full-workspace attempts were stopped
+  after progressing into daemon integration binaries because the per-binary
+  delay made completion take hours. Focused PRD-104 tests and strict lint
+  complete normally. This is build/test execution friction, not a desktop
+  permission requirement; no Screen Recording, microphone, Accessibility, or
+  UI automation is used.
+- **Prior closure:** CLOSED 2026-09-01 — fix candidate 5f517db validated by a clean
   unattended Mac run (`mac-build-speed-20260901T113450Z`): build 3m50s warm,
   full suite completed in 281s, no stall. The historical 45-minute runs were
   cold-build time (41GB target/), not the hang. The suite's exit 101 on that
