@@ -109,9 +109,37 @@ async fn execute(
             crate::worker_lock::DELEGATION_ENV,
             std::process::id().to_string(),
         )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::piped());
+    // FAM-BUG-063: a dispatched command used to run with stdout and stderr
+    // set to null, so when one failed the record said `worker_failed` and
+    // nothing else — not the exit code, not a message, nothing to act on.
+    // That is why FAM-BUG-062 survived: the tray's Re-drive failed on every
+    // click with `cannot acquire mutating orchestrator ownership` and that
+    // sentence went nowhere.
+    //
+    // A file rather than a pipe: the child is detached and long-lived, and a
+    // pipe nobody drains fills and blocks it. This is the same shape the
+    // daemon's own LogGuard already uses.
+    let output_log = capability_dir.join(format!("{}.log", id.replace(':', "_")));
+    match std::fs::File::create(&output_log) {
+        Ok(file) => {
+            let errors = file.try_clone().ok();
+            command.stdout(Stdio::from(file));
+            match errors {
+                Some(errors) => {
+                    command.stderr(Stdio::from(errors));
+                }
+                None => {
+                    command.stderr(Stdio::null());
+                }
+            }
+        }
+        Err(error) => {
+            // Losing the log must not lose the run.
+            tracing::warn!(%error, path = %output_log.display(), "could not open worker output log");
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
     if let Ok(Some(root)) = service.project_root(&record.project_id) {
         command.current_dir(root);
     }
@@ -238,8 +266,14 @@ async fn execute(
         Some(Ok(status)) if status.success() => {
             let _ = service.finish(&id, ExecutionState::Completed, "worker_completed");
         }
-        Some(Ok(_)) => {
-            let _ = service.finish(&id, ExecutionState::Failed, "worker_failed");
+        Some(Ok(status)) => {
+            // Say what failed and how, so a failed execution is actionable
+            // without re-running it.
+            let _ = service.finish(
+                &id,
+                ExecutionState::Failed,
+                &worker_failure_reason(status, &output_log),
+            );
         }
         Some(Err(_)) => {
             let _ = service.finish(&id, ExecutionState::Failed, "worker_wait_failed");
@@ -248,6 +282,35 @@ async fn execute(
     if let Some((path, credential)) = session_cleanup {
         let _ = std::fs::remove_file(path);
         let _ = service.revoke_session(&credential);
+    }
+}
+
+/// What a failed worker records, beyond the fact that it failed.
+///
+/// Reads the tail of the child's own output, because the useful sentence is
+/// almost always the last one. Capped so one catastrophic run cannot write an
+/// unbounded row, and the log path is named either way so the full output is
+/// reachable.
+fn worker_failure_reason(status: std::process::ExitStatus, log: &std::path::Path) -> String {
+    const TAIL: usize = 400;
+    let code = status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".into());
+    let detail = std::fs::read_to_string(log)
+        .ok()
+        .map(|body| {
+            let trimmed = body.trim_end();
+            let start = trimmed.len().saturating_sub(TAIL);
+            trimmed[start..].trim().replace('\n', " | ")
+        })
+        .filter(|detail| !detail.is_empty());
+    match detail {
+        Some(detail) => format!(
+            "worker_failed exit={code}: {detail} (log: {})",
+            log.display()
+        ),
+        None => format!("worker_failed exit={code} (log: {})", log.display()),
     }
 }
 

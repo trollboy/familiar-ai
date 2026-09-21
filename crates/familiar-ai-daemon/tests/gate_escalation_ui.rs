@@ -136,3 +136,121 @@ fn two_delegates_still_exclude_each_other() {
     );
     drop(first);
 }
+
+// ---------------------------------------------------------------------------
+// FAM-BUG-064: completion is the last durable write, after the candidate lands.
+// ---------------------------------------------------------------------------
+
+/// PRD-90 was marked `completed` on 2026-09-21 while its eight changed files
+/// sat uncommitted in a worktree and `main` never moved. The resume completed
+/// the backlog inline and left landing to its caller, so a failure between the
+/// two — a locked database, in that instance — produced a PRD claiming done
+/// with nothing delivered.
+///
+/// Completion is immutable (`docs/contracts/completion-is-immutable.md`), so a
+/// false completion cannot be taken back. Preventing it is the only remedy,
+/// which makes the ordering a correctness property rather than a preference.
+#[test]
+fn the_resume_path_does_not_complete_before_landing() {
+    let run = std::fs::read_to_string("../familiar-ai-daemon/src/run.rs")
+        .or_else(|_| std::fs::read_to_string("crates/familiar-ai-daemon/src/run.rs"))
+        .expect("run.rs must be readable");
+
+    // The resume entry point must defer completion to its caller.
+    // Cut at the next item, whichever form it takes. Splitting on "\nfn "
+    // alone reads straight past a `pub fn` boundary into the next function —
+    // which is how this assertion first failed against correct code.
+    let body = run
+        .split_once("pub fn resume_implemented_checkpoint")
+        .map(|(_, tail)| {
+            let end = ["\nfn ", "\npub fn ", "\npub(crate) fn "]
+                .iter()
+                .filter_map(|marker| tail.find(marker))
+                .min()
+                .unwrap_or(tail.len());
+            tail[..end].to_string()
+        })
+        .expect("resume_implemented_checkpoint must exist");
+    assert!(
+        !body.contains("(\"completed\", \"resume_completed\")"),
+        "resume must not write a `completed` phase before its candidate has landed"
+    );
+    assert!(
+        !body.contains("(\"integrated\", \"backlog_completion_committed\")"),
+        "a phase claiming integration must not be written by a path that does not integrate"
+    );
+
+    let resume = std::fs::read_to_string("../familiar-ai-daemon/src/resume.rs")
+        .or_else(|_| std::fs::read_to_string("crates/familiar-ai-daemon/src/resume.rs"))
+        .expect("resume.rs must be readable");
+
+    // And the caller completes only inside the landed arm, binding the commit.
+    let landed = resume
+        .split_once("match land_candidate(")
+        .map(|(_, tail)| {
+            tail.split("Err(error) => {")
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .expect("resume must land candidates");
+    assert!(
+        landed.contains("complete_landed"),
+        "completion must happen in the arm where landing succeeded"
+    );
+    assert!(
+        resume.contains("approve_and_complete"),
+        "completion must bind the commit that carries the work"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FAM-BUG-063: a failed dispatched command says what happened.
+// ---------------------------------------------------------------------------
+
+/// A dispatched command used to run with stdout and stderr set to null, and a
+/// non-zero exit recorded the reason `worker_failed` — no code, no message,
+/// nothing to act on. That is the entirety of what the tray's Re-drive
+/// produced when it failed on every click, and it is why FAM-BUG-062 went
+/// undiagnosed: the sentence naming the cause was written to /dev/null.
+#[test]
+fn a_failed_worker_records_more_than_the_fact_that_it_failed() {
+    let worker = std::fs::read_to_string("../familiar-ai-daemon/src/control_worker.rs")
+        .or_else(|_| std::fs::read_to_string("crates/familiar-ai-daemon/src/control_worker.rs"))
+        .expect("control_worker.rs must be readable");
+
+    assert!(
+        !worker.contains("ExecutionState::Failed, \"worker_failed\")"),
+        "a bare `worker_failed` tells the operator nothing; record the exit code and the output"
+    );
+    assert!(
+        worker.contains("worker_failure_reason"),
+        "the failure reason must be derived from the run, not a constant"
+    );
+
+    // The child's output has to go somewhere readable. A pipe nobody drains
+    // would fill and block a detached, long-lived child, so it is a file.
+    let spawn = worker
+        .split_once(".stdin(Stdio::piped())")
+        .map(|(_, tail)| {
+            tail.split("if let Ok(Some(root))")
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .expect("the worker must configure the child's stdio");
+    assert!(
+        spawn.contains("File::create"),
+        "the child's output must be captured to a file it cannot block on"
+    );
+    assert!(
+        spawn.contains("output_log"),
+        "the capture path must be named so the record can point at it"
+    );
+
+    // Losing the log must not lose the run.
+    assert!(
+        spawn.contains("could not open worker output log"),
+        "a log that cannot be opened is a warning, not a failed execution"
+    );
+}

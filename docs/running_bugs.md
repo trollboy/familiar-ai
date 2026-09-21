@@ -86,7 +86,18 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-006 — First model enable can create an invalid mixed configuration
 
-- **Status:** Open — the corruption guard is fixed (committed in `4f0305e`); the migration UX remains open
+- **Status:** Fixed — the corruption guard landed in `4f0305e`, and the
+  migration UX it was waiting on shipped with PRD-075 (now in
+  `docs/prds/done/`). `familiar-ai config migrate agents --actor ACTOR` is a
+  shipped command that takes an actor and writes a backup before touching the
+  file, and enabling a registry model while legacy `[agents]` is present now
+  refuses with that exact command rather than producing a mixed
+  configuration: "cannot enable a registry model while legacy [agents] is
+  configured; run `familiar-ai config migrate agents --actor ACTOR`, then
+  retry". That is precisely what the Expected fix below asked for. Closed
+  2026-09-21 on inspection; it had been done for some time and nobody closed
+  the entry.
+- **Prior status:** Open — the corruption guard is fixed (committed in `4f0305e`); the migration UX remains open
 - **Disposition (2026-08-31):** transferred to **PRD-075** (audited lossless
   `[agents]` → `[worker_registry]` migration command, plus the generalized
   invariant: every configuration mutation validates the complete proposed
@@ -747,7 +758,25 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
 
 ### FAM-BUG-064 — The backlog reaches `completed` before the candidate reaches `main`
 
-- **Status:** Open
+- **Status:** Fixed 2026-09-21 — completion is now the last durable write.
+  `resume_implemented_checkpoint` defers completion and stops at `approved`;
+  the caller lands the candidate and only then calls `approve_and_complete`,
+  which writes the approval and the completion in one transaction with the
+  merge commit bound to it. A failure before landing now leaves the PRD
+  resumable instead of claiming done.
+
+  This is the order the code's own contract already specified — "the driver
+  alone may integrate and then commit backlog completion" — and the resume
+  path had it inverted. It also removes a phase label that was lying:
+  `("integrated", "backlog_completion_committed")` claimed integration while
+  meaning bookkeeping, and a path that does not integrate no longer writes
+  it.
+
+  Pinned by `the_resume_path_does_not_complete_before_landing`. Because
+  completion is immutable, preventing a false one is the only remedy
+  available, which makes the ordering a correctness property rather than a
+  preference.
+- **Prior status:** Open
 - **Found:** 2026-09-21, re-driving PRD-90 after FAM-BUG-062 was fixed.
 - **Detail:** The resume passed verification, returned a clean independent
   review (`ReadyForHumanApproval`, `CleanReview`), wrote
@@ -778,7 +807,20 @@ NEXT, closed evidence, or an explicit direct-fix assignment:
 
 ### FAM-BUG-063 — A dispatched command's output is discarded, so failures are silent
 
-- **Status:** Open
+- **Status:** Fixed 2026-09-21 — the child's stdout and stderr go to a
+  per-execution log, and a non-zero exit records its code plus the tail of
+  that output and the log path, instead of the bare string `worker_failed`.
+
+  A file rather than a pipe, deliberately: these children are detached and
+  long-lived, and a pipe nobody drains fills and blocks the child — the
+  capture would have caused a worse bug than it fixed. Losing the log is a
+  warning, not a failed execution; failing a run because its logging failed
+  would be the tail wagging the dog.
+
+  Pinned by `a_failed_worker_records_more_than_the_fact_that_it_failed`. All
+  three dead buttons found this session — Release, Force-complete and
+  Re-drive — would have announced themselves on the first click.
+- **Prior status:** Open
 - **Found:** 2026-09-21, while diagnosing FAM-BUG-062.
 - **Detail:** `control_worker` spawns every dispatched command with
   `.stdout(Stdio::null()).stderr(Stdio::null())`. When the owner clicked
@@ -1536,7 +1578,18 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-050 — Daemon shutdown is unbounded and unsignalled before readiness
 
-- **Status:** Open — three layers fixed, one remaining
+- **Status:** Fixed 2026-09-21 — the fourth layer no longer reproduces.
+  `daemon_starts_and_stops_on_sigterm` passed three consecutive times under
+  the full contended load of `tests-green-crates` in Docker, which is the
+  condition that produced it. FAM-BUG-047's lesson was applied deliberately:
+  standalone runs do not falsify a load-dependent failure, and that entry was
+  closed wrongly once on sixteen of them. These were loaded runs.
+
+  **The gate's only blind spot is gone with it.** `--skip
+  daemon_starts_and_stops_on_sigterm` has been in the required check since
+  2026-09-03, tied by name to this entry; it is removed, so the daemon crate
+  is now gated in full.
+- **Prior status:** Open — three layers fixed, one remaining
 - **Found:** while diagnosing PRD-063's verification failure, which turned
   out to be innocent: `daemon_starts_and_stops_on_sigterm` fails in Docker
   on `main` too. Each fix revealed the next layer, and each is a real
@@ -1584,7 +1637,22 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-051 — A directory in `expected_files` grants unchecked scope authority
 
-- **Status:** Open — mitigated for the current wave, root cause unfixed
+- **Status:** Fixed 2026-09-21. The root cause named below — overlap decided
+  on equality rather than containment — is gone: `scope_entries_overlap` in
+  `drive.rs` now matches `Directory` against `ExactFile` and `Directory`
+  against `Directory` by prefix, so a PRD declaring `crates/` conflicts with
+  everything beneath it instead of appearing disjoint. Only PRD-092 still
+  carries a bare directory (`scripts/`), and it is now correctly read as the
+  prefix claim it is.
+
+  The narrow harm is closed separately, because the scheduler deliberately
+  exempts `crates/familiar-ai-storage/migrations/` from overlap detection
+  (PRD-066 allocates those numbers instead), so containment alone would not
+  catch it. `migration_allocation.rs` now fails the build when two queued
+  PRDs claim the same migration number, as well as when one claims a number
+  already applied. Verified by pointing PRD-086 at PRD-085'"'"'s number and
+  watching it fail with `066 claimed by PRD-085.md, PRD-086.md`.
+- **Prior status:** Open — mitigated for the current wave, root cause unfixed
 - **Found:** 2026-09-05, planning the audit-remediation wave. Eight PRDs
   declared `crates/familiar-ai-storage/migrations/` — a directory, not a
   file — and `achievable_width()` reported them as mutually disjoint.

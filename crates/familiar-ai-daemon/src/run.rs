@@ -982,19 +982,26 @@ pub fn resume_implemented_checkpoint(
         agents,
         config,
         paths,
-        false,
+        // Defer completion. This function used to complete the backlog inline
+        // and let its caller land the candidate afterwards, so any failure
+        // between the two left a PRD claiming done with its work uncommitted
+        // in a worktree — which is what happened to PRD-90 on 2026-09-21
+        // (FAM-BUG-064). The contract on `execute_reviewed_candidate` already
+        // said the right order: integrate, and then commit completion.
+        true,
         None,
         &mut trace,
         None,
         None,
     )?;
     let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+    // Stops at `approved`. The caller lands the candidate and completes with
+    // the resulting commit bound to it; phases claiming integration are that
+    // caller's to write, once integration has actually happened.
     for (phase, detail) in [
         ("verified", "required_verification_passed"),
         ("reviewed", "independent_review_clean"),
         ("approved", "review_disposition_ready"),
-        ("integrated", "backlog_completion_committed"),
-        ("completed", "resume_completed"),
     ] {
         checkpoints
             .transition(&checkpoint.checkpoint_id, phase, detail)

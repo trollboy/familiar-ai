@@ -50,7 +50,7 @@ where
                 })?,
         )
     };
-    let db = Database::open(&config.database.resolve_path(&paths.data_dir))
+    let mut db = Database::open(&config.database.resolve_path(&paths.data_dir))
         .map_err(|error| error.to_string())?;
     if !dry_run {
         db.run_migrations().map_err(|error| error.to_string())?;
@@ -228,7 +228,21 @@ where
                     // branch through the same merge machinery drive uses — no
                     // manual Git operations.
                     match land_candidate(&repository.worktree, &worktree, &id) {
-                        Ok(merged) => output.push(format!("landed\t{id}\t{merged}")),
+                        Ok(merged) => {
+                            output.push(format!("landed\t{id}\t{merged}"));
+                            // Completion is the LAST durable write, and it
+                            // binds the commit that carries the work. The run
+                            // above stops at `approved` precisely so that a
+                            // failure before this point leaves the PRD
+                            // resumable rather than claiming done with its
+                            // work uncommitted (FAM-BUG-064).
+                            if let Err(error) =
+                                complete_landed(&mut db, &repository, &discovered, &id, &merged)
+                            {
+                                failed_prds.insert(id.clone());
+                                failures.push(format!("{id}: completion_failed: {error}"));
+                            }
+                        }
                         Err(error) => {
                             failed_prds.insert(id.clone());
                             failures.push(format!("{id}: landing_failed: {error}"));
@@ -507,6 +521,41 @@ pub fn discover_with_legacy(
 /// Commits the candidate in its worktree if needed, merges via the drive
 /// merge machinery, and fast-forwards the checked-out branch — failing
 /// closed if the operator's tree moved underneath.
+/// Complete a PRD whose candidate has just landed, binding the commit.
+///
+/// Split out so the ordering is visible: nothing here runs until
+/// `land_candidate` has returned a merge commit. `approve_and_complete` writes
+/// the approval and the completion in one transaction, so a PRD cannot end up
+/// approved-but-not-completed either.
+fn complete_landed(
+    db: &mut Database,
+    repository: &familiar_ai_core::RepositoryIdentity,
+    discovered: &[familiar_ai_core::DiscoveredPrd],
+    prd_id: &str,
+    commit: &str,
+) -> Result<(), String> {
+    let target = discovered
+        .iter()
+        .find(|candidate| candidate.id.to_string() == prd_id)
+        .ok_or_else(|| format!("{prd_id} is no longer in the backlog"))?
+        .clone();
+    let checkpoint = familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .get(&repository.key, prd_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no durable checkpoint for {prd_id}"))?;
+    familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
+        .approve_and_complete(
+            repository,
+            &target,
+            "system:familiar-ai-resume",
+            &format!("candidate landed as {commit}"),
+            &checkpoint.diff_hash,
+            commit,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn land_candidate(
     repository_worktree: &Path,
     candidate_worktree: &Path,

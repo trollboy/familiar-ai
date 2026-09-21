@@ -153,3 +153,60 @@ fn no_queued_prd_declares_a_migration_number_that_is_already_taken() {
         collisions.join("\n")
     );
 }
+
+#[test]
+fn no_two_queued_prds_claim_the_same_migration_number() {
+    // The other half of FAM-BUG-051's narrow harm. The check above catches a
+    // PRD claiming a number that is already applied; this catches two PRDs
+    // claiming the same unapplied one. Both were real: PRD-71 and PRD-72 both
+    // minted `057` and collided at merge, which cost a session, and eight PRDs
+    // once declared the migrations directory rather than a filename so the
+    // scheduler reported them mutually disjoint on the way in.
+    //
+    // The scheduler exempts `crates/familiar-ai-storage/migrations/` from
+    // overlap detection by design (PRD-066 allocates the numbers instead), so
+    // nothing else will catch this.
+    let mut claims: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let prd_dir = repo_root().join("docs/prds");
+    for entry in fs::read_dir(&prd_dir).expect("docs/prds must exist") {
+        let path = entry.expect("readable entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        for line in body.lines() {
+            // Only declarations, not prose that happens to mention a path.
+            if !line.trim_start().starts_with("- ") {
+                continue;
+            }
+            let Some(start) = line.find("migrations/") else {
+                continue;
+            };
+            let number: String = line[start + "migrations/".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if number.len() == 3 {
+                let holders = claims.entry(number).or_default();
+                if !holders.contains(&name) {
+                    holders.push(name.clone());
+                }
+            }
+        }
+    }
+
+    let contested: Vec<String> = claims
+        .iter()
+        .filter(|(_, holders)| holders.len() > 1)
+        .map(|(number, holders)| format!("{number} claimed by {}", holders.join(", ")))
+        .collect();
+    assert!(
+        contested.is_empty(),
+        "two PRDs cannot mint the same migration; they will collide at merge and \
+         the scheduler will report them disjoint on the way in:\n{}",
+        contested.join("\n")
+    );
+}
