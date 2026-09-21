@@ -18,6 +18,8 @@ pub fn present(kind: String, input: Value) -> Result<Value, String> {
             let blocked_reasons = view::build_blocked_reasons(required(&input, "blocked_reasons")?);
             let progress = view::build_progress(required(&input, "checkpoints")?);
             let rounds = view::build_rounds_view(required(&input, "rounds")?, &backlog.all);
+            let dependency_gantt =
+                view::build_dependency_gantt(required(&input, "dependencies")?, &backlog.all);
             let summary = view::build_backlog_summary(&backlog, &blockers);
             serde_json::to_value(json!({
                 "backlog": backlog,
@@ -25,6 +27,7 @@ pub fn present(kind: String, input: Value) -> Result<Value, String> {
                 "blocked_reasons": blocked_reasons,
                 "progress": progress,
                 "rounds": rounds,
+                "dependency_gantt": dependency_gantt,
                 "summary": summary,
             }))
         }

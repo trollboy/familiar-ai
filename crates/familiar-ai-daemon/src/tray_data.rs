@@ -251,6 +251,19 @@ impl DaemonDataSource {
         let items: Vec<Value> = discovered
             .iter()
             .map(|prd| {
+                let depends_on: Vec<Value> = prd
+                    .dependencies
+                    .iter()
+                    .map(|dep| {
+                        let dep_id = dep.to_string();
+                        let status = status_of_id
+                            .get(&dep_id)
+                            .and_then(|status| *status)
+                            .map(String::as_str)
+                            .unwrap_or("not found");
+                        json!({"prd_id": dep_id, "status": status})
+                    })
+                    .collect();
                 let blocked_by: Vec<Value> = prd
                     .dependencies
                     .iter()
@@ -268,6 +281,7 @@ impl DaemonDataSource {
                 json!({
                     "prd_path": prd.path.to_string(),
                     "prd_id": prd.id.to_string(),
+                    "depends_on": depends_on,
                     "blocked_by": blocked_by,
                 })
             })

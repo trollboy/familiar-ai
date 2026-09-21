@@ -63,6 +63,7 @@ fn tauri_reuses_the_gtk_presentation_contract() {
         "build_gates_view",
         "build_backlog_view",
         "build_blockers",
+        "build_dependency_gantt",
         "build_blocked_reasons",
         "build_progress",
         "build_rounds_view",
@@ -73,7 +74,10 @@ fn tauri_reuses_the_gtk_presentation_contract() {
         "build_config_form",
         "build_project_config_form",
     ] {
-        assert!(adapter.contains(builder), "desktop omitted GTK view builder {builder}");
+        assert!(
+            adapter.contains(builder),
+            "desktop omitted GTK view builder {builder}"
+        );
     }
     assert!(javascript.contains("invoke('present'"));
     assert!(!javascript.contains("JSON.stringify(data"));

@@ -847,6 +847,108 @@ pub fn build_blockers(dependencies: &Value) -> Vec<(String, Vec<Blocker>)> {
         .collect()
 }
 
+/// A dependency DAG arranged as execution waves. Wave zero can be worked now;
+/// each later wave becomes eligible only after all of its incoming edges have
+/// completed. This is a planning chart, not a claim that durations are known.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DependencyGanttNode {
+    pub prd_id: String,
+    pub prd_path: String,
+    pub status: String,
+    pub wave: usize,
+    pub depends_on: Vec<String>,
+    pub unlocks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DependencyGantt {
+    pub waves: Vec<Vec<DependencyGanttNode>>,
+    pub max_wave: usize,
+}
+
+/// Builds the complete declared dependency graph, including already-completed
+/// edges. The daemon validates cycles at discovery; the bounded relaxation is
+/// defensive so malformed legacy data cannot hang the UI.
+pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> DependencyGantt {
+    use std::collections::HashMap;
+
+    let status_by_path: HashMap<&str, &str> = backlog
+        .iter()
+        .map(|row| (row.prd_path.as_str(), row.status.as_str()))
+        .collect();
+    let entries = items(dependencies);
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+    let mut paths: HashMap<String, String> = HashMap::new();
+    for entry in entries {
+        let id = str_at(entry, "prd_id").to_string();
+        paths.insert(id.clone(), str_at(entry, "prd_path").to_string());
+        parents.insert(
+            id,
+            entry
+                .get("depends_on")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .map(|parent| str_at(parent, "prd_id").to_string())
+                .collect(),
+        );
+    }
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    for (child, dependencies) in &parents {
+        for parent in dependencies {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(child.clone());
+        }
+    }
+    let mut depths: HashMap<String, usize> = parents.keys().map(|id| (id.clone(), 0)).collect();
+    for _ in 0..parents.len() {
+        let previous = depths.clone();
+        let mut changed = false;
+        for (id, dependencies) in &parents {
+            let depth = dependencies
+                .iter()
+                .filter_map(|parent| previous.get(parent))
+                .map(|depth| depth + 1)
+                .max()
+                .unwrap_or(0);
+            if depths.get(id).copied().unwrap_or(0) != depth {
+                depths.insert(id.clone(), depth);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let max_wave = depths.values().copied().max().unwrap_or(0);
+    let mut waves = vec![Vec::new(); max_wave + 1];
+    for (id, depends_on) in parents {
+        let path = paths.remove(&id).unwrap_or_default();
+        let wave = depths.get(&id).copied().unwrap_or(0).min(max_wave);
+        let mut unlocks = children.remove(&id).unwrap_or_default();
+        unlocks.sort();
+        waves[wave].push(DependencyGanttNode {
+            prd_id: id,
+            status: status_by_path
+                .get(path.as_str())
+                .copied()
+                .unwrap_or("not found")
+                .to_string(),
+            prd_path: path,
+            wave,
+            depends_on,
+            unlocks,
+        });
+    }
+    for wave in &mut waves {
+        wave.sort_by(|a, b| a.prd_id.cmp(&b.prd_id));
+    }
+    DependencyGantt { waves, max_wave }
+}
+
 /// Why Start is not offered for a row, or `None` when it is.
 ///
 /// Both refusals mirror something the runner would do anyway: it refuses a PRD
@@ -1823,6 +1925,37 @@ mod tests {
         assert!(reason.contains("PRD-1 (pending)"), "{reason}");
         // A dependency that cannot be found at all is named rather than hidden.
         assert!(reason.contains("PRD-9 (not found)"), "{reason}");
+    }
+
+    #[test]
+    fn dependency_gantt_places_children_after_every_parent() {
+        let row = |path: &str| BacklogRow {
+            prd_path: path.to_string(),
+            status: "pending".to_string(),
+            updated_at: "2026-09-21T00:00:00Z".to_string(),
+            missing_since: None,
+        };
+        let dependencies = json!({"items": [
+            {"prd_id":"PRD-03","prd_path":"docs/prds/PRD-003.md","depends_on":[]},
+            {"prd_id":"PRD-95","prd_path":"docs/prds/PRD-095.md","depends_on":[{"prd_id":"PRD-03","status":"pending"}]},
+            {"prd_id":"PRD-06","prd_path":"docs/prds/PRD-006.md","depends_on":[{"prd_id":"PRD-03","status":"pending"}]},
+            {"prd_id":"PRD-494","prd_path":"docs/prds/PRD-494.md","depends_on":[{"prd_id":"PRD-95","status":"pending"},{"prd_id":"PRD-06","status":"pending"}]},
+            {"prd_id":"PRD-01","prd_path":"docs/prds/PRD-001.md","depends_on":[{"prd_id":"PRD-494","status":"pending"}]}
+        ]});
+        let backlog = [
+            row("docs/prds/PRD-003.md"),
+            row("docs/prds/PRD-095.md"),
+            row("docs/prds/PRD-006.md"),
+            row("docs/prds/PRD-494.md"),
+            row("docs/prds/PRD-001.md"),
+        ];
+        let chart = build_dependency_gantt(&dependencies, &backlog);
+        assert_eq!(chart.max_wave, 3);
+        assert_eq!(chart.waves[0][0].prd_id, "PRD-03");
+        assert_eq!(chart.waves[0][0].unlocks, ["PRD-06", "PRD-95"]);
+        assert_eq!(chart.waves[1].len(), 2);
+        assert_eq!(chart.waves[2][0].prd_id, "PRD-494");
+        assert_eq!(chart.waves[3][0].prd_id, "PRD-01");
     }
 
     /// The point of the summary: "33 pending" invites a 34th, while
