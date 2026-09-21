@@ -1437,6 +1437,11 @@ fn model_enable(
                 AgentAdapterKind::Ollama => "ollama",
                 AgentAdapterKind::ClaudeCode => "claude-code",
                 AgentAdapterKind::Codex => "codex",
+                // Never constructed by the `match provider_name` above,
+                // which only ever selects a CLI-driven adapter; kept
+                // exhaustive so a future provider_name branch cannot
+                // silently forget this table.
+                AgentAdapterKind::RawAgentLoop => "raw-agent-loop",
             });
             table["provider"] = value(provider_name);
             table["model"] = value(model);

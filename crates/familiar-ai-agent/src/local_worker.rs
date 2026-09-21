@@ -9,21 +9,15 @@
 //! capabilities, pricing, or semantics. Each keeps its own runtime id,
 //! capability profile, and empirical identity.
 //!
-//! **Production dispatch status:** this adapter, the PRD-064 reservation
-//! glue in `familiar_ai_daemon::local_worker_runtime`, and the PRD-051
-//! telemetry sink are complete and exercised end-to-end against fake
-//! endpoints (see `tests/local_worker.rs` and the daemon crate's
-//! `tests/local_worker_runtime.rs`), but no call site in
-//! `familiar_ai_daemon::run`'s worker-selection/execution path constructs
-//! this type yet — that path only builds the CLI-driven `CodingAgent`
-//! adapters (`codex`, `claude-code`, `ollama`-via-Codex-harness). Wiring a
-//! `provider = "local"` registry entry through to a real execution is
-//! deferred, matching every other PRD-058 raw-runtime adapter already in
-//! this workspace (`AnthropicAdapter`, the OpenAI and xAI adapters): fully
-//! implemented and tested, none reachable from production dispatch either.
-//! `familiar_ai_daemon::run::resolved_worker_plan` refuses (`Err`) any
-//! stage selection that lands on a `local`-profile worker rather than
-//! silently building the wrong CLI-driven adapter in this type's place.
+//! **Production dispatch status (PRD-100):** this adapter is reachable from
+//! production dispatch. `familiar_ai_daemon::run`'s worker-selection path
+//! constructs it through `familiar_ai_agent::raw_agent::RawAgent` (bridging
+//! this `InferenceAdapter` into `CodingAgent`), selected by
+//! `builtin_adapter_factories()` under the `"ollama"`/`"unsloth"` runtime
+//! ids — not the CLI-driven `CodexFactory` those ids used to resolve to.
+//! `familiar_ai_daemon::run::resolved_worker_plan` no longer refuses a
+//! `local`-profile worker's selection; see
+//! `docs/contracts/agent-loop.md`'s "Worker dispatch" section.
 
 use async_trait::async_trait;
 

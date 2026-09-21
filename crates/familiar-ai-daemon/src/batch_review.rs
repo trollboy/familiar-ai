@@ -923,8 +923,27 @@ fn resume_now(config: &Config, paths: &AppPaths, row: &BatchReviewRow) {
                 return;
             }
         };
-        let implementation = crate::run::build_agent(&implementation_entry);
-        let reviewer = crate::run::build_agent(&reviewer_entry);
+        let worker_registry_configured = config.worker_registry.is_some();
+        let implementation = match crate::run::build_agent_or_deferred(
+            &implementation_entry,
+            worker_registry_configured,
+        ) {
+            Ok(agent) => agent,
+            Err(error) => {
+                tracing::warn!(prd_id, error = %error, "batch review resume: implementation agent construction failed");
+                return;
+            }
+        };
+        let reviewer = match crate::run::build_agent_or_deferred(
+            &reviewer_entry,
+            worker_registry_configured,
+        ) {
+            Ok(agent) => agent,
+            Err(error) => {
+                tracing::warn!(prd_id, error = %error, "batch review resume: reviewer agent construction failed");
+                return;
+            }
+        };
         let remediation_entry = match crate::run::resolved_remediation_entry(&config) {
             Ok(entry) => entry,
             Err(error) => {
@@ -932,7 +951,16 @@ fn resume_now(config: &Config, paths: &AppPaths, row: &BatchReviewRow) {
                 return;
             }
         };
-        let remediation = crate::run::build_agent(&remediation_entry);
+        let remediation = match crate::run::build_agent_or_deferred(
+            &remediation_entry,
+            worker_registry_configured,
+        ) {
+            Ok(agent) => agent,
+            Err(error) => {
+                tracing::warn!(prd_id, error = %error, "batch review resume: remediation agent construction failed");
+                return;
+            }
+        };
         let agents = crate::run::AgentSet {
             implementation: implementation.as_ref(),
             reviewer: reviewer.as_ref(),

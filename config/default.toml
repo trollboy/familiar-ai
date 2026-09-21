@@ -301,8 +301,14 @@ max_verification_log_bytes = 256000
 # context_tokens = 200000
 # estimated_cost_microusd = 0
 # available = true
-# Ollama uses adapter = "ollama" and model = "qwen3:8b"; Familiar invokes it
-# through the existing Codex OSS adapter path.
+# Ollama uses adapter = "ollama" and model = "qwen3:8b"; with no [local]
+# block declared, the endpoint defaults to the conventional loopback
+# address (http://127.0.0.1:11434). A [local] block is only needed to
+# point at a non-default endpoint or to declare a hardware/resource
+# profile. Ollama, this raw hosted Anthropic worker below, and any other
+# worker naming a runtime that is not "codex" or "claude-code" all execute
+# through Familiar's own PRD-058 raw-model agent loop (PRD-100) — never a
+# vendor CLI subprocess — and require [agent_runtime] enabled = true below.
 #
 # A raw hosted Anthropic worker (PRD-059) — distinct for routing, accounting,
 # and empirical history from any Claude Code worker of the same model, since
@@ -471,6 +477,9 @@ generated_artifact = "human_review"
 
 # PRD-058: the Familiar-owned raw-model agent loop. Disabled by default; no
 # existing harness-driven execution path changes when this stays absent.
+# PRD-100: `enabled = true` here is required for any worker_registry entry
+# whose runtime is not "codex" or "claude-code" (anthropic-api, openai-api,
+# ollama, unsloth, ...) — that worker is refused at construction otherwise.
 [agent_runtime]
 # enabled = false
 # offered_capabilities = ["read-file", "search-list", "report-progress", "submit-evidence", "request-escalation"]

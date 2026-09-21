@@ -5,6 +5,7 @@ mod codex;
 mod isolation;
 pub mod local_worker;
 pub mod openai;
+pub mod raw_agent;
 pub mod raw_runtime;
 mod registry;
 pub mod token_discipline;
@@ -24,6 +25,7 @@ pub use codex::CodexAgent;
 pub use isolation::isolated_command;
 #[cfg(unix)]
 pub use isolation::{finish_watchdog, spawn_watchdog, Watchdog};
+pub use raw_agent::{RawAgent, RawAgentHost, RawAgentSpec, RawCredential, RawWorkerContext};
 pub use registry::{
     builtin_adapter_factories, AdapterFactories, AdapterFactory, CandidateEvaluation,
     RejectionReason, RouteError, RouteRequest, RouteRule, SelectionRecord, WorkerCapability,

@@ -307,6 +307,78 @@ sanitization every other observation follows.
   and tool results are always inserted as `ToolResult` data, never as
   directives the loop interprets.
 
+## Worker dispatch (PRD-100)
+
+Every worker Familiar can select to implement, review, or remediate a PRD is
+constructed through exactly one registry:
+`familiar_ai_agent::registry::AdapterFactories`
+(`familiar_ai_agent::builtin_adapter_factories`), keyed by a worker's own
+`runtime` string. This loop is reachable from that registry like any other
+adapter — it is not a separate, parallel dispatch path.
+
+- **`RawAgent`** (`familiar_ai_agent::raw_agent::RawAgent`) is the bridge:
+  it implements `CodingAgent` over an injected
+  `InferenceAdapter` and this contract's own `run_loop`, so every existing
+  stage-selection, preflight, and execution call site drives it exactly as
+  it drives `ClaudeCodeAgent` or `CodexAgent` — no orchestration code
+  changes to reach it. Nothing in `run_loop` itself changes to support this
+  bridge; `RawAgent::execute` composes the same public loop-core surface
+  every test in this contract already exercises.
+- **Registration, not inference, decides what exists.**
+  `builtin_adapter_factories()` registers a factory per raw runtime id
+  (`anthropic-api`, `openai-api`, `ollama`, `unsloth`, ...); a worker naming
+  any other runtime is refused at construction (`AdapterFactories::build`)
+  with a diagnostic naming both the unrecognised runtime and the full
+  registered set — before any inference call, never discovered later at
+  dispatch.
+- **The type that names a worker's execution mechanism can express this.**
+  `familiar_ai_core::config::AgentAdapterKind` gained a fourth variant,
+  `RawAgentLoop`, alongside `Codex`, `ClaudeCode`, and `Ollama`. A worker's
+  open `runtime` field (`RegistryWorkerConfig::runtime`) is authoritative at
+  the point `as_agent_entry()` constructs this enum: `"codex"`,
+  `"claude-code"`, and `"ollama"` map to their own named variant, and every
+  other runtime — every raw-loop provider, and anything Familiar does not
+  yet recognise — maps to `RawAgentLoop`, never silently to `Codex`.
+- **Ollama runs through the owned loop, not the Codex CLI.** The `ollama`
+  runtime id used to be backed by the same factory as `codex` (a worker
+  declaring it was actually invoking the Codex CLI with an Ollama-prefixed
+  model string). It is now backed by `RawAgent` over
+  `familiar_ai_agent::local_worker::LocalInferenceAdapter`, so a local model
+  no longer requires a vendor CLI to be driven. `unsloth` is dispatched the
+  same way.
+- **Identical authority, no exceptions.** The concrete resources a
+  raw-runtime worker runs with — `familiar_ai_daemon::agent_runtime::SqliteRawAgentHost`,
+  injected as `familiar_ai_agent::raw_agent::RawAgentHost` — are the same
+  SQLite-backed write-ahead journal, sandboxed executor, and PRD-013
+  write-scope authorizer this contract already defines for every worker,
+  plus a PRD-064 budget reservation acquired before the loop is ever
+  allowed to submit a single inference attempt. `run_loop`'s own
+  `mint_attempt_id` hook cannot itself refuse a submission (it is
+  infallible by contract), so the reservation is acquired once per
+  execution, sized to that execution's configured cost ceiling (or a
+  minimal structural draw when none is configured): every attempt the loop
+  may go on to make draws against it, and a refused reservation means zero
+  attempts run, not an unbounded one. `agent_runtime.enabled` must be
+  `true` for any worker naming a non-CLI runtime; it is refused at
+  construction otherwise, with the same fail-closed diagnostic as an
+  unregistered runtime.
+- **Cross-provider stage independence is unaffected.** Worker selection
+  (`familiar_ai_agent::registry::WorkerRegistry::select`) enforces reviewer
+  independence against a candidate's recorded `(provider, model)` identity
+  exactly as before; a raw-runtime implementer and a raw-runtime reviewer
+  on different providers satisfy it the same way a Claude Code implementer
+  and a Codex reviewer always did.
+- **Edit outcomes are measurable.** Every raw-runtime attempt's
+  `agent_runtime_evidence` row (below) records each capability call's
+  disposition — offered, validated, authorized, executed, or refused —
+  exactly as it does for every other raw-runtime worker; a real PRD cycle
+  run through `RawAgent` is not a special case for this contract's own
+  evidence and accounting guarantees.
+- **The CLI paths are unchanged.** `codex` and `claude-code` dispatch
+  through `CodexFactory`/`ClaudeCodeFactory` exactly as before, never
+  consult `agent_runtime`, and remain the configured default; a repository
+  that declares no raw worker sees no behavioral difference.
+
 ## Stop reasons
 
 The closed, honest set (`familiar_ai_agent::raw_runtime::StopReason`):
@@ -353,3 +425,15 @@ directly against `SandboxedToolExecutor`: anchor-divergence rejection,
 crash-replay identity for a targeted edit, bounded command results with
 lossless worktree retention, an explicit-range requirement on oversized
 file reads, and byte-for-byte defaults when token discipline is disabled.
+
+`crates/familiar-ai-daemon/tests/raw_worker_dispatch.rs` covers PRD-100's
+dispatch layer: a worker declaring a raw runtime, constructed through
+`builtin_adapter_factories()` exactly as production code does, completing a
+full attempt as a `CodingAgent` over a real HTTP round trip against a
+loopback-only `wiremock` fake (never a live or billable endpoint), with a
+deliberately nonexistent `executable` proving no vendor CLI is ever
+spawned; an unregistered runtime refused by name; and a refused budget
+reservation stopping the whole execution before the adapter is ever
+reached. `familiar-ai-core/src/config/registry_workers.rs` and
+`familiar-ai-daemon/src/run.rs` carry their own unit tests for the
+config/routing-level pieces this file does not re-cover.

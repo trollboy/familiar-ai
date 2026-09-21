@@ -42,7 +42,7 @@ pub fn plan(command: Option<PlanCommand>, design_docs: &[PathBuf]) -> Result<(),
     let limits = config.planner.as_ref().ok_or("[planner] is required")?;
     match command {
         None => {
-            let agent = build_agent(&limits.agent);
+            let agent = build_agent(&limits.agent)?;
             let (id, summary) = generate_plan(
                 &repository.worktree,
                 design_docs,
