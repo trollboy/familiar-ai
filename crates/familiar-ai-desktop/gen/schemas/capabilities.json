@@ -1,0 +1,1 @@
+{"desktop":{"identifier":"desktop","description":"Minimum capabilities for Familiar's bundled desktop windows","local":true,"windows":["dashboard","settings","local-llm"],"permissions":["core:default","core:event:default"]}}

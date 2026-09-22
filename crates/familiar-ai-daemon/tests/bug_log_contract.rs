@@ -65,7 +65,11 @@ fn every_bug_mentioned_has_an_entry_of_its_own() {
 #[test]
 fn every_entry_declares_a_state_a_reader_can_classify() {
     let body = bug_log();
-    const KNOWN: [&str; 4] = ["Open", "Fixed", "Closed", "Reopened"];
+    // `In progress` is two words and had to be matched as a phrase: taking
+    // only the first word rejected it as "In". It is a real state the rest of
+    // the system already names (`backlog_prds.status = 'in_progress'`) and is
+    // distinct from `Open` — someone is on it right now.
+    const KNOWN: [&str; 5] = ["Open", "Fixed", "Closed", "Reopened", "In progress"];
 
     let mut offenders = Vec::new();
     let mut current: Option<String> = None;
@@ -89,11 +93,15 @@ fn every_entry_declares_a_state_a_reader_can_classify() {
         }
         if let Some(rest) = line.trim_start().strip_prefix("- **Status:**") {
             saw_status = true;
-            let first = rest.split_whitespace().next().unwrap_or("");
-            let first = first.trim_end_matches(&[',', '.', ':'][..]);
-            if !KNOWN.iter().any(|known| known.eq_ignore_ascii_case(first)) {
+            let head = rest.trim_start();
+            let matched = KNOWN.iter().any(|known| {
+                head.get(..known.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(known))
+            });
+            if !matched {
+                let shown: String = head.chars().take(24).collect();
                 offenders.push(format!(
-                    "{id} status starts with {first:?}; use one of {KNOWN:?}"
+                    "{id} status starts with {shown:?}; use one of {KNOWN:?}"
                 ));
             }
         }

@@ -145,9 +145,15 @@ fn no_verification_step_is_declared_outside_the_single_definition() {
                     offenders.push(format!("{label}:{}: {text}", number + 1));
                 }
             }
-            // `cargo build` is allowed only as the documented install command,
-            // which builds the product rather than verifying it.
-            if text.contains("cargo build") && !text.contains("--bin familiar-ai") {
+            // `cargo build` is allowed only as a documented install command,
+            // which builds a product rather than verifying it. That means it
+            // has to name what it builds: there is more than one product now
+            // (`familiar-ai-desktop` ships alongside the daemon), so a bare
+            // `cargo build` is still an offender because it builds everything
+            // and says nothing about why.
+            let names_a_product =
+                text.contains("--bin familiar-ai") || text.contains("-p familiar-ai");
+            if text.contains("cargo build") && !names_a_product {
                 offenders.push(format!("{label}:{}: {text}", number + 1));
             }
         }
