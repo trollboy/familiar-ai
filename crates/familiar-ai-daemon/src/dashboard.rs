@@ -27,6 +27,10 @@ pub struct DashboardState {
     pub status: Arc<Mutex<AppStatus>>,
     pub router: Arc<InferenceRouter>,
     pub start_time: DateTime<Utc>,
+    /// PRD-108: same bounded reconcile-on-read fallback the tray/desktop
+    /// transport uses, so the HTTP dashboard's backlog reads from the same
+    /// reconciled view rather than an independently stale one.
+    pub reconciler: Arc<familiar_ai_daemon::backlog_reconciler::BacklogReconciler>,
 }
 
 pub async fn run_dashboard(
@@ -248,6 +252,13 @@ async fn stewardship_backlog(
         Ok(identity) => identity,
         Err(response) => return *response,
     };
+    // PRD-108: repair whatever the watcher missed before reading, bounded so
+    // repeated polling of this route cannot become a continuous full scan.
+    if let Some(repo) = params.get("repo") {
+        state
+            .reconciler
+            .reconcile_if_stale(std::path::Path::new(repo));
+    }
     let db = state.db.lock().unwrap();
     let status = params.get("status").map(String::as_str);
     let cursor = params.get("cursor").map(String::as_str);
@@ -923,13 +934,19 @@ mod tests {
     use tower::ServiceExt;
 
     fn make_state() -> DashboardState {
-        let db = Database::open_in_memory().unwrap();
-        db.run_migrations().unwrap();
+        let db = Arc::new(Mutex::new(Database::open_in_memory().unwrap()));
+        db.lock().unwrap().run_migrations().unwrap();
         DashboardState {
-            db: Arc::new(Mutex::new(db)),
+            db: db.clone(),
             status: Arc::new(Mutex::new(AppStatus::new())),
             router: Arc::new(InferenceRouter::new(&InferenceConfig::default())),
             start_time: Utc::now(),
+            reconciler: familiar_ai_daemon::backlog_reconciler::BacklogReconciler::new(
+                db,
+                familiar_ai_core::Config::default(),
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_secs(3),
+            ),
         }
     }
 

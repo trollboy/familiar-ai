@@ -47,6 +47,10 @@ struct DaemonState {
     router: Arc<InferenceRouter>,
     control: familiar_ai_daemon::control_plane::ControlPlaneService,
     control_socket: PathBuf,
+    /// PRD-108: owns backlog discovery/reconciliation for every configured
+    /// repository. Reconciled once here, synchronously, before anything that
+    /// could serve a client (control socket, dashboard, tray) exists.
+    reconciler: Arc<familiar_ai_daemon::backlog_reconciler::BacklogReconciler>,
 }
 
 fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::LogGuard)> {
@@ -160,6 +164,23 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
         db_lock.conn().execute("UPDATE control_plane_claim_generations SET generation=?1 WHERE singleton=1 AND generation<?1",[ownership.claim().generation as i64]).map_err(|e|familiar_ai_core::FamiliarError::Database(e.to_string()))?;
     }
 
+    // PRD-108: reconcile every configured repository's backlog before
+    // anything else exists that could serve a stale one — no control
+    // socket, no dashboard, no tray window yet. This is synchronous and
+    // runs before the tokio runtime does, in every entry point below.
+    // 30s, not the watcher's ~1s debounce: this is a fallback for what the
+    // watcher missed, not a poll cadence, and an unchanged-backlog
+    // reconciliation no longer publishes an operator event (see
+    // `BacklogReconciler::backlog_changed`), so this bound only affects how
+    // fast a missed change surfaces on read, not the client's refresh rate.
+    let reconciler = familiar_ai_daemon::backlog_reconciler::BacklogReconciler::new(
+        db.clone(),
+        config.clone(),
+        Duration::from_millis(config.watcher.debounce_ms.max(50)),
+        Duration::from_secs(30),
+    );
+    reconciler.reconcile_all_configured();
+
     let pid_path = config
         .daemon
         .pid_file
@@ -255,6 +276,7 @@ fn bootstrap() -> familiar_ai_core::Result<(DaemonState, familiar_ai_logging::Lo
             router,
             control,
             control_socket,
+            reconciler,
         },
         log_guard,
     ))
@@ -276,11 +298,16 @@ async fn daemon_run(
         state.paths.clone(),
         state.status.clone(),
         Some(shutdown_tx.clone()),
+        state.reconciler.clone(),
     ));
     let operator = Arc::new(familiar_ai_daemon::operator_ui::OperatorDispatcher::new(
         operator_source,
         state.ownership.claim().generation,
     ));
+    // PRD-108: from here on, a successful watcher/read-fallback
+    // reconciliation publishes one operator event so connected Tauri/GTK
+    // clients refresh through their existing gap/restart logic.
+    state.reconciler.set_event_sink(operator.clone());
     let _control_host = match familiar_ai_daemon::local_transport::LocalHost::bind_with_operator(
         &state.control_socket,
         state.ownership.claim().owner_nonce.clone(),
@@ -360,6 +387,7 @@ async fn daemon_run(
         let context_service = familiar_ai_daemon::context_service::ContextService::with_cache_dir(
             state.paths.data_dir.join("repomaps"),
         );
+        let reconciler_for_watcher = state.reconciler.clone();
         let handler_task = tokio::spawn(async move {
             handle_watcher_events(
                 event_rx,
@@ -368,6 +396,7 @@ async fn daemon_run(
                 summary_tx_clone,
                 max_size,
                 context_service,
+                reconciler_for_watcher,
             )
             .await;
         });
@@ -450,6 +479,7 @@ async fn daemon_run(
             status: state.status.clone(),
             router: state.router.clone(),
             start_time: chrono::Utc::now(),
+            reconciler: state.reconciler.clone(),
         };
         let dash_shutdown = shutdown_rx.clone();
         let bind = state.config.dashboard.bind_address.clone();
@@ -661,6 +691,7 @@ fn main() -> ExitCode {
                 state_arc.paths.clone(),
                 state_arc.status.clone(),
                 Some(shutdown_tx.clone()),
+                state_arc.reconciler.clone(),
             )) as Arc<dyn familiar_ai_tray::DataSource>,
         ),
         shutdown_rx.clone(),
@@ -747,9 +778,14 @@ async fn handle_watcher_events(
     summary_tx: Option<mpsc::Sender<SummaryRequest>>,
     max_file_size_bytes: u64,
     context_service: familiar_ai_daemon::context_service::ContextService,
+    reconciler: Arc<familiar_ai_daemon::backlog_reconciler::BacklogReconciler>,
 ) {
     while let Some(event) = rx.recv().await {
         context_service.apply(&event);
+        // PRD-108: a hint, not the source of truth. Only events whose
+        // resolved paths fall under a repository's configured active or
+        // archived PRD locations schedule a debounced reconciliation.
+        reconciler.observe_event(&event);
         match event {
             WatcherEvent::RepoDiscovered { repo_root } => {
                 let repo_str = repo_root.to_string_lossy().to_string();

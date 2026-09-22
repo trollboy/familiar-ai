@@ -23,6 +23,7 @@ use familiar_ai_core::{
 use familiar_ai_llm::InferenceRouter;
 use familiar_ai_storage::{Database, SqliteBacklogRepository};
 
+use crate::backlog_reconciler::BacklogReconciler;
 use crate::control_plane::ControlPlaneService;
 use crate::stewardship;
 
@@ -37,9 +38,14 @@ pub struct DaemonDataSource {
     /// now configured.
     status: Arc<Mutex<familiar_ai_core::AppStatus>>,
     shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    /// PRD-108: bounded reconcile-on-read fallback, shared with the watcher
+    /// and startup reconciliation paths, so backlog and dependency queries
+    /// read one reconciled repository view instead of drifting apart.
+    reconciler: Arc<BacklogReconciler>,
 }
 
 impl DaemonDataSource {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Mutex<Database>>,
         router: Arc<InferenceRouter>,
@@ -48,6 +54,7 @@ impl DaemonDataSource {
         paths: familiar_ai_core::AppPaths,
         status: Arc<Mutex<familiar_ai_core::AppStatus>>,
         shutdown: Option<tokio::sync::watch::Sender<bool>>,
+        reconciler: Arc<BacklogReconciler>,
     ) -> Self {
         Self {
             db,
@@ -57,6 +64,7 @@ impl DaemonDataSource {
             paths,
             status,
             shutdown,
+            reconciler,
         }
     }
 
@@ -217,6 +225,11 @@ impl DaemonDataSource {
     /// discovered at all is unmet too, and named, because that is a real state
     /// this backlog reaches when a PRD is moved or deleted.
     fn dependencies(&self, repo: &str) -> Result<Value, String> {
+        // PRD-108: repair whatever a watcher gap missed before joining
+        // discovery against the ledger, bounded so this cannot become a
+        // continuous full-tree scan under repeated polling.
+        self.reconciler
+            .reconcile_if_stale(std::path::Path::new(repo));
         let discovered = self.discovered(repo)?;
         let identity = Self::identity(repo)?;
         let statuses: std::collections::HashMap<String, String> = {
@@ -256,11 +269,17 @@ impl DaemonDataSource {
                     .iter()
                     .map(|dep| {
                         let dep_id = dep.to_string();
-                        let status = status_of_id
-                            .get(&dep_id)
-                            .and_then(|status| *status)
-                            .map(String::as_str)
-                            .unwrap_or("not found");
+                        // PRD-108: `status_of_id` holding the key at all
+                        // means the dependency's file was discovered; only
+                        // its ledger row is missing (reconciliation has not
+                        // caught up yet). That is never "not found" — the
+                        // file is right there — so it is named for what it
+                        // actually is: not yet enrolled in the ledger.
+                        let status = match status_of_id.get(&dep_id) {
+                            Some(Some(status)) => status.as_str(),
+                            Some(None) => "unenrolled",
+                            None => "not found",
+                        };
                         json!({"prd_id": dep_id, "status": status})
                     })
                     .collect();
@@ -272,9 +291,10 @@ impl DaemonDataSource {
                         match status_of_id.get(&dep_id) {
                             Some(Some(status)) if status.as_str() == "completed" => None,
                             Some(Some(status)) => Some(json!({"prd_id": dep_id, "status": status})),
-                            // Declared but not discovered, or discovered with
-                            // no backlog row yet.
-                            _ => Some(json!({"prd_id": dep_id, "status": "not found"})),
+                            // Discovered on disk, no backlog row yet.
+                            Some(None) => Some(json!({"prd_id": dep_id, "status": "unenrolled"})),
+                            // Declared but no matching file exists at all.
+                            None => Some(json!({"prd_id": dep_id, "status": "not found"})),
                         }
                     })
                     .collect();
@@ -671,6 +691,21 @@ impl DataSource for DaemonDataSource {
             }
             Query::Dependencies { repo } => self.dependencies(&repo),
             Query::BlockedReasons { repo } => self.blocked_reasons(&repo),
+            Query::Backlog { repo, limit } => {
+                // PRD-108: same bounded reconcile-on-read fallback as
+                // `dependencies`, so the two share one reconciled view
+                // rather than reading different epochs. Must run before the
+                // database lock below is taken — `reconcile_if_stale` takes
+                // it itself, and the lock is not reentrant.
+                self.reconciler
+                    .reconcile_if_stale(std::path::Path::new(&repo));
+                let db = self
+                    .db
+                    .lock()
+                    .map_err(|_| "database lock poisoned".to_string())?;
+                stewardship::list_backlog(&db, &Self::identity(&repo)?, None, None, limit)
+                    .map_err(|e| e.to_string())
+            }
             Query::ConfigChoices => Ok(self.config_choices()),
             Query::DiscoverModels => Ok(self.discover_models()),
             Query::InferenceSettings => {
@@ -708,9 +743,6 @@ impl DataSource for DaemonDataSource {
                     Query::Gates { repo } => {
                         stewardship::list_pending_human_gates(&db, &Self::identity(&repo)?, 100)
                     }
-                    Query::Backlog { repo, limit } => {
-                        stewardship::list_backlog(&db, &Self::identity(&repo)?, None, None, limit)
-                    }
                     Query::Sessions { repo, limit } => {
                         stewardship::list_sessions(&db, &Self::identity(&repo)?, None, limit)
                     }
@@ -740,6 +772,7 @@ impl DataSource for DaemonDataSource {
                     | Query::Checkpoints { .. }
                     | Query::Dependencies { .. }
                     | Query::BlockedReasons { .. }
+                    | Query::Backlog { .. }
                     | Query::DiscoverModels => unreachable!(),
                 };
                 value.map_err(|e| e.to_string())

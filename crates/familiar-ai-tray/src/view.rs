@@ -932,10 +932,14 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
         unlocks.sort();
         waves[wave].push(DependencyGanttNode {
             prd_id: id,
+            // PRD-108: `path` came from the `dependencies` query, i.e. this
+            // PRD was discovered on disk. A missing entry here means the
+            // ledger has not caught up yet, not that the file is absent —
+            // "not found" claimed the latter and was wrong.
             status: status_by_path
                 .get(path.as_str())
                 .copied()
-                .unwrap_or("not found")
+                .unwrap_or("unenrolled")
                 .to_string(),
             prd_path: path,
             wave,
