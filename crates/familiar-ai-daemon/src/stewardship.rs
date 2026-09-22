@@ -95,18 +95,123 @@ pub fn list_repositories(db: &Database) -> Result<Value, StewardshipError> {
     Ok(json!({"repositories": items}))
 }
 
+/// PRD-109: the derived lifecycle of one PRD on this host, from the records
+/// that already exist — the latest driver attempt, the durable checkpoint,
+/// and pending scope decisions — plus what the caller knows about the file
+/// and the ledger row. Nothing is stored; see `docs/contracts/prd-lifecycle.md`.
+pub fn prd_lifecycle(
+    db: &Database,
+    repository_key: &str,
+    prd_id: &str,
+    file_status: Option<&str>,
+    archived: bool,
+    ledger_status: Option<&str>,
+) -> Result<familiar_ai_core::DerivedLifecycle, StewardshipError> {
+    let latest_attempt = DriverRepository::new(db.conn())
+        .latest_attempt_for_prd(repository_key, prd_id)
+        .map_err(storage)?
+        .map(|attempt| familiar_ai_core::AttemptFacts {
+            outcome: attempt.outcome,
+            retained_reason: attempt.retained_reason,
+            last_durable_phase: attempt.last_durable_phase,
+        });
+    let checkpoint_phase = CheckpointRepository::new(db.conn())
+        .get(repository_key, prd_id)
+        .map_err(storage)?
+        .map(|checkpoint| checkpoint.phase);
+    let pending_human_gate = OrchestrationRepository::new(db.conn())
+        .pending_scope_decisions(repository_key)
+        .map_err(storage)?
+        .iter()
+        .any(|decision| decision.prd_id == prd_id);
+    Ok(familiar_ai_core::derive_lifecycle(
+        &familiar_ai_core::LifecycleInputs {
+            file_status: file_status.map(str::to_owned),
+            archived,
+            ledger_status: ledger_status.map(str::to_owned),
+            latest_attempt,
+            checkpoint_phase,
+            pending_human_gate,
+        },
+    ))
+}
+
+/// `layout` is the repository's configured backlog layout — directories,
+/// metadata policy and risk vocabulary. With it, each row also carries the
+/// PRD file's own front-matter status, which is where the human-owned
+/// lifecycle states live. Without it (`None`) the lifecycle is derived from
+/// the ledger, the latest attempt and the checkpoint alone; the default
+/// layout is deliberately not used, because its empty risk vocabulary
+/// rejects every structured PRD that declares one.
 pub fn list_backlog(
     db: &Database,
     repository: &RepositoryIdentity,
+    layout: Option<&familiar_ai_core::BacklogLayout>,
     status: Option<&str>,
     cursor: Option<&str>,
     limit: usize,
 ) -> Result<Value, StewardshipError> {
-    let items =
+    use familiar_ai_core::{FilesystemBacklogDiscovery, PrdId};
+
+    let rows =
         list_backlog_entries(db.conn(), &repository.key, status, cursor, limit).map_err(storage)?;
-    let next_cursor = (items.len() == limit)
-        .then(|| items.last().map(|item| item.prd_path.clone()))
+    let next_cursor = (rows.len() == limit)
+        .then(|| rows.last().map(|item| item.prd_path.clone()))
         .flatten();
+    // PRD-109: the file is the record every host shares, and it is where the
+    // human-owned states live. One discovery pass per query; the reconciler
+    // (PRD-108) keeps the rows current, this keeps the file's word beside them.
+    // A malformed PRD elsewhere in the tree must not take the whole listing
+    // down, so a failed discovery degrades to ledger-only derivation.
+    let discovered: std::collections::HashMap<String, (String, Option<String>, bool)> = layout
+        .and_then(|layout| {
+            FilesystemBacklogDiscovery
+                .discover_with_layout(repository, layout)
+                .ok()
+        })
+        .map(|prds| {
+            prds.into_iter()
+                .map(|prd| {
+                    (
+                        prd.path.to_string(),
+                        (
+                            prd.id.to_string(),
+                            prd.metadata.status.clone(),
+                            prd.location == familiar_ai_core::PrdLocation::Archived,
+                        ),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let (prd_id, file_status, archived) =
+            discovered.get(&row.prd_path).cloned().unwrap_or_else(|| {
+                let suffix = row.prd_suffix.as_deref().and_then(|s| s.chars().next());
+                (
+                    PrdId::with_suffix(row.prd_number as u64, suffix).to_string(),
+                    None,
+                    false,
+                )
+            });
+        let derived = prd_lifecycle(
+            db,
+            &repository.key,
+            &prd_id,
+            file_status.as_deref(),
+            archived,
+            Some(row.status.as_str()),
+        )?;
+        let mut value = serde_json::to_value(&row)
+            .map_err(|error| StewardshipError::Storage(error.to_string()))?;
+        value["prd_id"] = json!(prd_id);
+        value["lifecycle"] = json!(derived.lifecycle);
+        if let Some(divergence) = derived.divergence {
+            value["lifecycle_divergence"] = json!(divergence);
+        }
+        items.push(value);
+    }
     Ok(json!({
         "repository_key": repository.key,
         "items": items,

@@ -114,13 +114,30 @@ pub fn stewardship_command(command: StewardshipCommand) -> Result<(), String> {
             status,
             cursor,
             limit,
-        } => crate::stewardship::list_backlog(
-            &db,
-            &repository,
-            status.as_deref(),
-            cursor.as_deref(),
-            limit,
-        ),
+        } => {
+            // PRD-109: the configured layout carries the risk vocabulary the
+            // PRD files declare against; without it discovery rejects them
+            // and the file's own status could not ride beside the row.
+            let layout = crate::cli::shared::effective_repository_config(
+                &familiar_ai_core::AppPaths::resolve().map_err(|e| e.to_string())?,
+                &cwd,
+            )
+            .and_then(|config| {
+                config
+                    .repository(&repository.worktree)
+                    .map(|repository| repository.layout())
+                    .map_err(|e| e.to_string())
+            })
+            .ok();
+            crate::stewardship::list_backlog(
+                &db,
+                &repository,
+                layout.as_ref(),
+                status.as_deref(),
+                cursor.as_deref(),
+                limit,
+            )
+        }
         StewardshipCommand::Sessions { cursor, limit } => {
             crate::stewardship::list_sessions(&db, &repository, cursor.as_deref(), limit)
         }

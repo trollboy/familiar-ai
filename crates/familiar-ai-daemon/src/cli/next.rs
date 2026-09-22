@@ -65,11 +65,24 @@ pub fn next() -> Result<(), String> {
             return Err(error.to_string());
         }
     };
+    // PRD-109: the derived lifecycle beside the raw ledger status. A PRD
+    // `next` just selected has no live attempt, so the file and the row are
+    // the only inputs that can apply here.
+    let file_status = discovered
+        .iter()
+        .find(|prd| prd.path == selected.path)
+        .and_then(|prd| prd.metadata.status.clone());
+    let lifecycle = familiar_ai_core::derive_lifecycle(&familiar_ai_core::LifecycleInputs {
+        file_status,
+        ledger_status: Some(selected.status.as_str().to_string()),
+        ..Default::default()
+    });
     println!(
-        "{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}",
         selected.id,
         selected.path,
         selected.status.as_str(),
+        lifecycle.lifecycle,
         selected.title
     );
     Ok(())

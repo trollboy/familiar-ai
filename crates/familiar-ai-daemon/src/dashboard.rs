@@ -262,9 +262,14 @@ async fn stewardship_backlog(
     let db = state.db.lock().unwrap();
     let status = params.get("status").map(String::as_str);
     let cursor = params.get("cursor").map(String::as_str);
+    // PRD-109: the loopback dashboard has no repository configuration in
+    // hand, so its rows derive the lifecycle from the ledger, the latest
+    // attempt and the checkpoint; the file's own status rides on the
+    // operator transport the desktop and tray use.
     match familiar_ai_daemon::stewardship::list_backlog(
         &db,
         &identity,
+        None,
         status,
         cursor,
         parse_limit(&params),

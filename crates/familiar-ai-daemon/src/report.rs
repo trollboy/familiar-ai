@@ -87,7 +87,24 @@ pub fn render(
     render_judgment(&mut out, &session, &stopped, &pending_scope);
     let autonomy =
         familiar_ai_storage::session_autonomy(db.conn(), &session.session_id).map_err(storage)?;
-    render_autonomy(&mut out, &autonomy, min_unattended_percent);
+    // PRD-109: each PRD's derived lifecycle beside its autonomy outcome.
+    let lifecycles: std::collections::HashMap<String, String> = autonomy
+        .prds
+        .iter()
+        .filter_map(|prd| {
+            crate::stewardship::prd_lifecycle(
+                db,
+                &session.repository_key,
+                &prd.prd_id,
+                None,
+                false,
+                None,
+            )
+            .ok()
+            .map(|derived| (prd.prd_id.clone(), derived.lifecycle.as_str().to_string()))
+        })
+        .collect();
+    render_autonomy(&mut out, &autonomy, min_unattended_percent, &lifecycles);
     Ok(familiar_ai_agent::redact_sensitive(out))
 }
 
@@ -100,9 +117,16 @@ fn render_autonomy(
     out: &mut String,
     autonomy: &familiar_ai_storage::SessionAutonomy,
     min_unattended_percent: u32,
+    lifecycles: &std::collections::HashMap<String, String>,
 ) {
     use familiar_ai_storage::{PrdAutonomyOutcome, StallRecovery};
 
+    let lifecycle = |prd_id: &str| {
+        lifecycles
+            .get(prd_id)
+            .map(|state| format!(" lifecycle={state}"))
+            .unwrap_or_default()
+    };
     let assisted = autonomy.assisted();
     let stalled = autonomy.stalled();
     let _ = writeln!(
@@ -116,7 +140,13 @@ fn render_autonomy(
         let PrdAutonomyOutcome::Assisted { commands } = &prd.outcome else {
             continue;
         };
-        let _ = writeln!(out, "  assisted: {} {}", prd.prd_id, prd.prd_path);
+        let _ = writeln!(
+            out,
+            "  assisted: {} {}{}",
+            prd.prd_id,
+            prd.prd_path,
+            lifecycle(&prd.prd_id)
+        );
         for command in commands {
             let _ = writeln!(out, "    {command}");
         }
@@ -131,8 +161,10 @@ fn render_autonomy(
         };
         let _ = writeln!(
             out,
-            "  stalled: {} {} class={stall_class}",
-            prd.prd_id, prd.prd_path
+            "  stalled: {} {} class={stall_class}{}",
+            prd.prd_id,
+            prd.prd_path,
+            lifecycle(&prd.prd_id)
         );
         match recovery {
             StallRecovery::Command(command) => {
@@ -827,7 +859,7 @@ mod tests {
              \n\
              AUTONOMY\n  \
              unattended=1 assisted=0 stalled=1\n  \
-             stalled: PRD-18 docs/prds/PRD-018.md class=review_disabled\n    \
+             stalled: PRD-18 docs/prds/PRD-018.md class=review_disabled lifecycle=failed\n    \
              familiar-ai resume PRD-18\n",
             started = session.started_at,
             ended = session.ended_at.unwrap(),

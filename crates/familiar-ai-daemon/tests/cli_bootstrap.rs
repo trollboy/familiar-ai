@@ -52,7 +52,7 @@ fn first_next_applies_manifest_then_is_silent_and_idempotent() {
     );
     assert_eq!(
         first.stdout,
-        b"PRD-10\tdocs/prds/PRD-010.md\tpending\tCurrent\n"
+        b"PRD-10\tdocs/prds/PRD-010.md\tpending\tready\tCurrent\n"
     );
     assert!(String::from_utf8_lossy(&first.stderr)
         .starts_with("historical backlog bootstrap applied: run=bootstrap-"));

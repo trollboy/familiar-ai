@@ -101,7 +101,8 @@ fn cli_and_dashboard_boundary_agree_on_backlog() {
 
     let db = Database::open(&database).unwrap();
     let direct =
-        familiar_ai_daemon::stewardship::list_backlog(&db, &identity, None, None, 20).unwrap();
+        familiar_ai_daemon::stewardship::list_backlog(&db, &identity, None, None, None, 20)
+            .unwrap();
 
     assert_eq!(cli, direct);
 }

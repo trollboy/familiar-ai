@@ -49,3 +49,16 @@ without front matter. Numbered-slug body prose remains opaque. Strict mode
 rejects every document without v1 front matter. Discovery is always read-only.
 `familiar-ai backlog metadata-check` emits one deterministic diagnostic per
 document and fails while legacy documents remain; it never rewrites files.
+
+## Lifecycle (PRD-109)
+
+The front-matter `status` carries only the human-owned states of the PRD
+lifecycle: `draft`, `ready` and `blocked`, plus `in_progress` and
+`completed` as historical spellings a human may leave in place. Familiar
+never writes a lifecycle state into a PRD file. The single ten-state
+lifecycle every operator surface shows — Draft, Ready, Implementing,
+Testing, Reviewed, Approved, Completed, Blocked, Failed, AwaitingFeedback —
+is derived from this field together with the ledger, the latest attempt,
+the checkpoint and the pending human gates, as `prd-lifecycle.md` defines.
+A `draft`, `in_progress` or `blocked` front-matter status holds the PRD out
+of selection on every host (FAM-BUG-074).

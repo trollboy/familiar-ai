@@ -4,6 +4,7 @@ pub mod config;
 pub mod control_plane;
 pub mod error;
 pub mod git_env;
+pub mod lifecycle;
 pub mod models;
 pub mod onboarding;
 pub mod operator_ui;
@@ -35,6 +36,10 @@ pub use config::{
     TrayConfig, TypedProhibitedChange, WatcherConfig,
 };
 pub use error::{FamiliarError, Result};
+pub use lifecycle::{
+    derive as derive_lifecycle, is_human_gate_reason, AttemptFacts, DerivedLifecycle,
+    LifecycleInputs, PrdLifecycle, HUMAN_GATE_REASONS,
+};
 pub use operator_ui::{
     ConfigEdit as OperatorConfigEdit, OperatorAction, OperatorDataSource, OperatorError,
     OperatorEvent, OperatorMutation, OperatorQuery, OperatorReply, OPERATOR_PROTOCOL_VERSION,

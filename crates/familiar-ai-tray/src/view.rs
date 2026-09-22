@@ -312,6 +312,11 @@ pub struct BacklogView {
 pub struct BacklogRow {
     pub prd_path: String,
     pub status: String,
+    /// PRD-109: the single derived lifecycle state (`draft`, `ready`,
+    /// `implementing`, `testing`, `reviewed`, `approved`, `completed`,
+    /// `blocked`, `failed`, `awaiting_feedback`). Falls back to the raw
+    /// ledger status when a daemon predating PRD-109 answers.
+    pub lifecycle: String,
     pub updated_at: String,
     /// Set when the file behind this entry has disappeared from the working
     /// tree. The row survives so the state is visible, but nothing can be run
@@ -330,9 +335,14 @@ pub fn build_backlog_view(backlog: &Value) -> BacklogView {
             Some(entry) => entry.1 += 1,
             None => counts.push((status.clone(), 1)),
         }
+        let lifecycle = match str_at(row, "lifecycle") {
+            "" => status.clone(),
+            lifecycle => lifecycle.to_string(),
+        };
         let entry = BacklogRow {
             prd_path: str_at(row, "prd_path").to_string(),
             status: status.clone(),
+            lifecycle,
             updated_at: str_at(row, "updated_at").to_string(),
             missing_since: row
                 .get("missing_since")
@@ -855,6 +865,9 @@ pub struct DependencyGanttNode {
     pub prd_id: String,
     pub prd_path: String,
     pub status: String,
+    /// PRD-109: the derived lifecycle from the backlog row, falling back to
+    /// the raw status when the row is missing or the daemon predates it.
+    pub lifecycle: String,
     pub wave: usize,
     pub depends_on: Vec<String>,
     pub unlocks: Vec<String>,
@@ -875,6 +888,10 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
     let status_by_path: HashMap<&str, &str> = backlog
         .iter()
         .map(|row| (row.prd_path.as_str(), row.status.as_str()))
+        .collect();
+    let lifecycle_by_path: HashMap<&str, &str> = backlog
+        .iter()
+        .map(|row| (row.prd_path.as_str(), row.lifecycle.as_str()))
         .collect();
     let entries = items(dependencies);
     let mut parents: HashMap<String, Vec<String>> = HashMap::new();
@@ -930,17 +947,24 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
         let wave = depths.get(&id).copied().unwrap_or(0).min(max_wave);
         let mut unlocks = children.remove(&id).unwrap_or_default();
         unlocks.sort();
+        // PRD-108: `path` came from the `dependencies` query, i.e. this
+        // PRD was discovered on disk. A missing entry here means the
+        // ledger has not caught up yet, not that the file is absent —
+        // "not found" claimed the latter and was wrong.
+        let status = status_by_path
+            .get(path.as_str())
+            .copied()
+            .unwrap_or("unenrolled")
+            .to_string();
+        let lifecycle = lifecycle_by_path
+            .get(path.as_str())
+            .filter(|state| !state.is_empty())
+            .map(|state| state.to_string())
+            .unwrap_or_else(|| status.clone());
         waves[wave].push(DependencyGanttNode {
             prd_id: id,
-            // PRD-108: `path` came from the `dependencies` query, i.e. this
-            // PRD was discovered on disk. A missing entry here means the
-            // ledger has not caught up yet, not that the file is absent —
-            // "not found" claimed the latter and was wrong.
-            status: status_by_path
-                .get(path.as_str())
-                .copied()
-                .unwrap_or("unenrolled")
-                .to_string(),
+            status,
+            lifecycle,
             prd_path: path,
             wave,
             depends_on,
@@ -1922,6 +1946,7 @@ mod tests {
         let row = BacklogRow {
             prd_path: "b.md".into(),
             status: "pending".into(),
+            lifecycle: String::new(),
             updated_at: String::new(),
             missing_since: None,
         };
@@ -1936,6 +1961,7 @@ mod tests {
         let row = |path: &str| BacklogRow {
             prd_path: path.to_string(),
             status: "pending".to_string(),
+            lifecycle: String::new(),
             updated_at: "2026-09-21T00:00:00Z".to_string(),
             missing_since: None,
         };
@@ -1969,6 +1995,7 @@ mod tests {
         let row = |path: &str, status: &str, missing: bool| BacklogRow {
             prd_path: path.into(),
             status: status.into(),
+            lifecycle: String::new(),
             updated_at: String::new(),
             missing_since: missing.then(|| "2026-08-09".to_string()),
         };
@@ -2023,6 +2050,7 @@ mod tests {
             open: vec![BacklogRow {
                 prd_path: "a.md".into(),
                 status: "pending".into(),
+                lifecycle: String::new(),
                 updated_at: String::new(),
                 missing_since: None,
             }],
@@ -2036,6 +2064,7 @@ mod tests {
         let row = BacklogRow {
             prd_path: "a.md".into(),
             status: "pending".into(),
+            lifecycle: String::new(),
             updated_at: String::new(),
             missing_since: None,
         };
@@ -2049,6 +2078,7 @@ mod tests {
         let row = BacklogRow {
             prd_path: "gone.md".into(),
             status: "pending".into(),
+            lifecycle: String::new(),
             updated_at: String::new(),
             missing_since: Some("2026-08-09T08:20:17Z".into()),
         };
@@ -2908,6 +2938,7 @@ mod rounds_tests {
         BacklogRow {
             prd_path: path.to_string(),
             status: status.to_string(),
+            lifecycle: String::new(),
             updated_at: "2026-09-01T00:00:00Z".to_string(),
             missing_since: None,
         }

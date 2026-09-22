@@ -51,7 +51,7 @@ fn next_is_stable_read_only_and_prints_exact_line() {
         );
         assert_eq!(
             output.stdout,
-            b"PRD-9\tdocs/prds/PRD-009.md\tpending\tDeterministic Backlog Manager\n"
+            b"PRD-9\tdocs/prds/PRD-009.md\tpending\tready\tDeterministic Backlog Manager\n"
         );
         assert!(output.stderr.is_empty());
     }
@@ -95,7 +95,7 @@ fn fresh_database_selects_active_work_after_archived_dependency() {
     );
     assert_eq!(
         output.stdout,
-        b"PRD-2\tdocs/prds/PRD-002.md\tpending\tRemaining\n"
+        b"PRD-2\tdocs/prds/PRD-002.md\tpending\tready\tRemaining\n"
     );
     let db = familiar_ai_storage::Database::open(&database).unwrap();
     let archived: (String, i64) = db
@@ -174,7 +174,7 @@ fn archiving_a_prd_with_history_leaves_next_working() {
     );
     assert_eq!(
         output.stdout,
-        b"PRD-2\tdocs/prds/PRD-002.md\tpending\tRemaining\n"
+        b"PRD-2\tdocs/prds/PRD-002.md\tpending\tready\tRemaining\n"
     );
 }
 
@@ -282,7 +282,7 @@ fn numbered_slug_profile_bootstraps_archived_and_selects_child_before_umbrella()
     );
     assert_eq!(
         output.stdout,
-        b"PRD 0139a\tdocs/prd/todo/0139a-child.md\tpending\tChild A\n"
+        b"PRD 0139a\tdocs/prd/todo/0139a-child.md\tpending\tready\tChild A\n"
     );
     let db = familiar_ai_storage::Database::open(&database).unwrap();
     let archived: (String, Option<String>) = db.conn().query_row("SELECT status,prd_suffix FROM backlog_prds WHERE prd_path='docs/prd/done/0138-finished.md'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();

@@ -109,16 +109,24 @@ impl DaemonDataSource {
 
     /// Every PRD the repository declares, needed to resolve a supplied path to
     /// a real backlog entry before mutating it.
-    fn discovered(&self, repo: &str) -> Result<Vec<familiar_ai_core::DiscoveredPrd>, String> {
-        let repository = Self::identity(repo)?;
+    /// The repository's configured backlog layout: directories, metadata
+    /// policy and risk vocabulary. Every discovery and every lifecycle
+    /// derivation goes through this so the tray and the desktop read the
+    /// same PRD files the driver does.
+    fn layout(&self, repo: &str) -> Result<familiar_ai_core::BacklogLayout, String> {
         let config = crate::cli::shared::effective_repository_config(
             &self.paths,
             std::path::Path::new(repo),
         )?;
-        let layout = config
+        Ok(config
             .repository(std::path::Path::new(repo))
             .map_err(|e| e.to_string())?
-            .layout();
+            .layout())
+    }
+
+    fn discovered(&self, repo: &str) -> Result<Vec<familiar_ai_core::DiscoveredPrd>, String> {
+        let repository = Self::identity(repo)?;
+        let layout = self.layout(repo)?;
         FilesystemBacklogDiscovery
             .discover_with_layout(&repository, &layout)
             .map_err(|e| e.to_string())
@@ -237,8 +245,10 @@ impl DaemonDataSource {
                 .db
                 .lock()
                 .map_err(|_| "database lock poisoned".to_string())?;
-            let backlog = stewardship::list_backlog(&db, &identity, None, None, 2000)
-                .map_err(|e| e.to_string())?;
+            let layout = self.layout(repo).ok();
+            let backlog =
+                stewardship::list_backlog(&db, &identity, layout.as_ref(), None, None, 2000)
+                    .map_err(|e| e.to_string())?;
             backlog
                 .get("items")
                 .and_then(Value::as_array)
@@ -703,8 +713,16 @@ impl DataSource for DaemonDataSource {
                     .db
                     .lock()
                     .map_err(|_| "database lock poisoned".to_string())?;
-                stewardship::list_backlog(&db, &Self::identity(&repo)?, None, None, limit)
-                    .map_err(|e| e.to_string())
+                let layout = self.layout(&repo).ok();
+                stewardship::list_backlog(
+                    &db,
+                    &Self::identity(&repo)?,
+                    layout.as_ref(),
+                    None,
+                    None,
+                    limit,
+                )
+                .map_err(|e| e.to_string())
             }
             Query::ConfigChoices => Ok(self.config_choices()),
             Query::DiscoverModels => Ok(self.discover_models()),
