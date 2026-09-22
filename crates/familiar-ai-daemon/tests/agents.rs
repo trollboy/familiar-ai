@@ -195,8 +195,14 @@ estimated_cost_microusd = 2
     assert_ne!(ordinary_records[0], records[0]);
 }
 
+/// `AgentEntryConfig`'s own defaulting for an explicit `adapter = "ollama"`
+/// is unchanged by PRD-100 and still names `"codex"` as its legacy fallback
+/// executable label. Actual dispatch for a `worker_registry` entry no
+/// longer follows this label: `builtin_adapter_factories()` now backs the
+/// `"ollama"` runtime id with `RawAgent` over `LocalInferenceAdapter`, not
+/// the Codex CLI factory this constant historically named.
 #[test]
-fn ollama_registry_entry_uses_existing_codex_oss_adapter() {
+fn ollama_registry_entry_retains_its_legacy_agent_entry_defaults() {
     let entry = familiar_ai_core::config::RegistryWorkerConfig {
         adapter: Some(AgentAdapterKind::Ollama),
         provider: "ollama".into(),
@@ -294,13 +300,15 @@ fn build_agent_maps_each_adapter_to_its_invocation_shape() {
         adapter: AgentAdapterKind::Codex,
         executable: Some(codex_exe.to_string_lossy().into_owned()),
         ..AgentEntryConfig::default()
-    });
+    })
+    .unwrap();
     let claude_agent = build_agent(&AgentEntryConfig {
         adapter: AgentAdapterKind::ClaudeCode,
         executable: Some(claude_exe.to_string_lossy().into_owned()),
         permission_mode: Some(AgentPermissionMode::AcceptEdits),
         ..AgentEntryConfig::default()
-    });
+    })
+    .unwrap();
     for agent in [&codex_agent, &claude_agent] {
         assert_eq!(
             agent.isolation_capability(),

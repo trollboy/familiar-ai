@@ -84,8 +84,22 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
                     );
                     let check_id = format!("worker.{:?}", record.stage).to_ascii_lowercase();
                     if probed_agents.insert(key.clone()) {
-                        let agent = crate::run::build_agent(&worker.as_agent_entry());
-                        checks.push(agent_check(&check_id, agent.as_ref()));
+                        // A raw-runtime worker (`Ollama`/`RawAgentLoop`) has
+                        // no `RawWorkerContext` here — that requires an
+                        // execution id, database path, worktree, and PRD
+                        // text this session-level probe never has. Its real
+                        // `CodingAgent` is constructed later, per execution,
+                        // by `build_selected_agents`; a registered worker is
+                        // never refused here for lacking what only that
+                        // later construction needs.
+                        match crate::run::build_agent_or_deferred(&worker.as_agent_entry(), true) {
+                            Ok(agent) => checks.push(agent_check(&check_id, agent.as_ref())),
+                            Err(detail) => checks.push(PreflightCheck {
+                                check_id: check_id.clone(),
+                                status: PreflightStatus::Failed,
+                                detail,
+                            }),
+                        }
                     } else {
                         checks.push(deduplicated_check(&check_id, &key));
                     }
@@ -736,5 +750,94 @@ mod tests {
             .checks
             .iter()
             .all(|check| check.check_id != "provider_auth.unused"));
+    }
+
+    /// `raw-worker-refused-by-legacy-build-agent` remediation: a correctly
+    /// configured raw-runtime worker (PRD-100) has no `RawWorkerContext`
+    /// available here — that needs an execution id, database path,
+    /// worktree, and PRD text this session-level probe never has, and which
+    /// only `build_selected_agents` supplies, later, per execution. Before
+    /// this fix, `crate::run::build_agent` refused every such worker
+    /// unconditionally, so a `worker_registry`-only raw worker (no `codex`
+    /// or `claude-code` anywhere in the configuration) always reported
+    /// `Failed` here, even though the worker itself was fully configured and
+    /// would execute correctly.
+    #[test]
+    fn a_registered_raw_runtime_worker_does_not_fail_preflight() {
+        use familiar_ai_core::config::{
+            LocalEndpointConfig, LocalRuntimeKind, LocalWorkerConfig, RegistryWorkerConfig,
+            WorkerCapabilityConfig, WorkerRegistryConfig,
+        };
+
+        let config = Config {
+            worker_registry: Some(WorkerRegistryConfig {
+                workers: BTreeMap::from([(
+                    "local-ollama".to_owned(),
+                    RegistryWorkerConfig {
+                        adapter: None,
+                        provider: "local".into(),
+                        model: "llama3".into(),
+                        runtime: Some("ollama".into()),
+                        model_artifact: None,
+                        auth_profile: None,
+                        capability_profile: None,
+                        runtime_config: None,
+                        local: Some(LocalWorkerConfig {
+                            runtime_kind: LocalRuntimeKind::Ollama,
+                            endpoint: LocalEndpointConfig {
+                                base_url: "http://127.0.0.1:11434".into(),
+                                tls: false,
+                            },
+                            resources: Default::default(),
+                        }),
+                        executable: None,
+                        capabilities: vec![
+                            WorkerCapabilityConfig::Implementation,
+                            WorkerCapabilityConfig::Remediation,
+                        ],
+                        fresh_process_isolation: true,
+                        context_tokens: 0,
+                        estimated_cost_microusd: None,
+                        available: true,
+                        effort: None,
+                        permission_mode: None,
+                        extra_args: vec![],
+                    },
+                )]),
+                capability_profiles: BTreeMap::new(),
+                routing: Default::default(),
+            }),
+            ..Config::default()
+        };
+        // Review stays disabled: the point of this test is the raw-runtime
+        // dispatch path, not review-independence routing.
+        assert!(!config.review.enabled);
+
+        let agent = AvailableAgent;
+        let temp = tempfile::tempdir().unwrap();
+        let report = run(
+            &AgentSet {
+                implementation: &agent,
+                reviewer: &agent,
+                remediation: &agent,
+            },
+            &config,
+            temp.path(),
+        );
+
+        let worker_checks: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|check| check.check_id.starts_with("worker."))
+            .collect();
+        assert!(!worker_checks.is_empty(), "{report:?}");
+        for check in worker_checks {
+            assert_eq!(
+                check.status,
+                PreflightStatus::Passed,
+                "a registered raw-runtime worker must not fail preflight for lacking a \
+                 RawWorkerContext it was never meant to have here: {check:?}"
+            );
+        }
     }
 }

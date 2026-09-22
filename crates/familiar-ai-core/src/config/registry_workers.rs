@@ -10,8 +10,17 @@ pub enum AgentAdapterKind {
     #[default]
     Codex,
     ClaudeCode,
-    /// Ollama is invoked through the existing Codex OSS adapter.
+    /// Ollama executes through Familiar's own PRD-058 raw-model agent loop
+    /// (`familiar_ai_agent::raw_agent::RawAgent`), not a vendor CLI.
     Ollama,
+    /// Executes through Familiar's own PRD-058 raw-model agent loop
+    /// (`familiar_ai_agent::raw_agent::RawAgent`) over a directly-held
+    /// `InferenceAdapter`, rather than a vendor CLI subprocess. The specific
+    /// provider/runtime (`anthropic-api`, `openai-api`, `unsloth`, ...) is
+    /// carried by the worker's own open `runtime` string (`RegistryWorkerConfig`);
+    /// this variant only distinguishes "not a CLI" for validation/defaulting
+    /// purposes (PRD-100).
+    RawAgentLoop,
 }
 
 impl AgentAdapterKind {
@@ -20,6 +29,7 @@ impl AgentAdapterKind {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude-code",
             Self::Ollama => "ollama",
+            Self::RawAgentLoop => "raw-agent-loop",
         }
     }
     pub fn default_executable(&self) -> &'static str {
@@ -27,6 +37,12 @@ impl AgentAdapterKind {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude",
             Self::Ollama => "codex",
+            // Never a real executable: the owned loop holds an
+            // `InferenceAdapter` directly rather than spawning a subprocess.
+            // A non-empty, honest placeholder satisfies `WorkerRegistry`'s
+            // non-empty-executable admission check without ever claiming to
+            // be a vendor CLI.
+            Self::RawAgentLoop => "raw-agent-loop",
         }
     }
 }
@@ -127,7 +143,7 @@ impl AgentEntryConfig {
         }
         if matches!(
             self.adapter,
-            AgentAdapterKind::Codex | AgentAdapterKind::Ollama
+            AgentAdapterKind::Codex | AgentAdapterKind::Ollama | AgentAdapterKind::RawAgentLoop
         ) && (self.effort.is_some() || self.permission_mode.is_some())
         {
             return Err(format!(
@@ -382,21 +398,14 @@ pub struct LocalResourceProfileConfig {
 /// (`familiar_ai_agent::local_worker::LocalInferenceAdapter`, the PRD-064
 /// reservation glue in `familiar_ai_daemon::local_worker_runtime`, and the
 /// PRD-051 telemetry sink all exist and are exercised end-to-end by their
-/// own fake-endpoint test suites). It does **not** yet make the entry
+/// own fake-endpoint test suites). As of PRD-100, it also makes the entry
 /// reachable from `familiar_ai_daemon::run`'s worker-selection/execution
-/// path: that path (`build_agent`/`AdapterFactories`, keyed by
-/// `familiar_ai_core::config::AgentAdapterKind`) only knows the CLI-driven
-/// adapters (`codex`, `claude-code`, `ollama`-via-Codex-harness). Routing a
-/// `provider = "local"` entry into a real execution is deferred to a
-/// follow-up change, matching the identical, pre-existing state of every
-/// other PRD-058 raw-runtime adapter in this workspace (Anthropic, OpenAI,
-/// xAI: fully implemented and tested, none reachable from production
-/// dispatch either). Until that follow-up lands,
-/// `familiar_ai_daemon::run::resolved_worker_plan` fails closed rather than
-/// silently misdispatching: a selected worker declaring this block returns
-/// an explicit `Err` before any `CodingAgent` is built, because its
-/// `runtime` (e.g. `"ollama"`) can otherwise collide with an unrelated
-/// pre-existing CLI-driven adapter id of the same name.
+/// path: `build_selected_agents` dispatches it through
+/// `familiar_ai_agent::raw_agent::RawAgent` over `LocalInferenceAdapter`,
+/// selected by `AdapterFactories` under this worker's own `runtime` id
+/// (`"ollama"`/`"unsloth"`) — the same open string `AgentAdapterKind`
+/// resolves to its `RawAgentLoop` variant for, never the CLI-driven
+/// adapter that id used to collide with.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LocalWorkerConfig {
@@ -725,7 +734,18 @@ impl RegistryWorkerConfig {
         let adapter = self.adapter.unwrap_or(match self.runtime.as_deref() {
             Some("claude-code") => AgentAdapterKind::ClaudeCode,
             Some("ollama") => AgentAdapterKind::Ollama,
-            _ => AgentAdapterKind::Codex,
+            Some("codex") => AgentAdapterKind::Codex,
+            // Every other runtime — every raw-loop provider (`anthropic-api`,
+            // `openai-api`, `unsloth`, ...) and anything Familiar does not
+            // yet recognise — names a non-CLI worker. Silently falling
+            // through to `AgentAdapterKind::Codex` here converted a declared
+            // raw-API worker into a vendor subprocess with no diagnostic
+            // (PRD-100). The actual fail-closed refusal for a runtime with
+            // no registered adapter factory happens where it belongs, at
+            // adapter-factory construction
+            // (`familiar_ai_agent::AdapterFactories::build`), which names
+            // both the runtime and the registered set.
+            _ => AgentAdapterKind::RawAgentLoop,
         });
         let model = if self.model == "__legacy_cli_default__" {
             None
@@ -1087,6 +1107,92 @@ impl AgentsConfig {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod raw_runtime_dispatch_tests {
+    use super::*;
+
+    fn worker_with_runtime(runtime: &str) -> RegistryWorkerConfig {
+        RegistryWorkerConfig {
+            adapter: None,
+            provider: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+            runtime: Some(runtime.into()),
+            model_artifact: None,
+            auth_profile: Some("env-anthropic-key".into()),
+            capability_profile: None,
+            runtime_config: None,
+            local: None,
+            executable: None,
+            capabilities: vec![WorkerCapabilityConfig::Implementation],
+            fresh_process_isolation: true,
+            context_tokens: 0,
+            estimated_cost_microusd: None,
+            available: true,
+            effort: None,
+            permission_mode: None,
+            extra_args: vec![],
+        }
+    }
+
+    /// PRD-100: `runtime = "anthropic-api"` names Familiar's own raw-model
+    /// agent loop, never a vendor CLI. Before this fix, `as_agent_entry`'s
+    /// wildcard match silently converted this into
+    /// `AgentAdapterKind::Codex`, so a declared raw-API worker was executed
+    /// as a Codex CLI subprocess with no diagnostic.
+    #[test]
+    fn runtime_anthropic_api_never_resolves_to_a_cli_adapter() {
+        let worker = worker_with_runtime("anthropic-api");
+        let entry = worker.as_agent_entry();
+        assert_eq!(entry.adapter, AgentAdapterKind::RawAgentLoop);
+        assert_ne!(entry.adapter, AgentAdapterKind::Codex);
+        assert_ne!(entry.adapter, AgentAdapterKind::ClaudeCode);
+    }
+
+    /// An entirely unrecognised runtime string also never becomes Codex —
+    /// it is treated the same as any other non-CLI runtime. The actual
+    /// fail-closed refusal (naming the runtime and the registered set)
+    /// happens at adapter-factory construction, not here.
+    #[test]
+    fn a_completely_unknown_runtime_still_never_becomes_codex() {
+        let worker = worker_with_runtime("some-runtime-nobody-registered");
+        let entry = worker.as_agent_entry();
+        assert_eq!(entry.adapter, AgentAdapterKind::RawAgentLoop);
+    }
+
+    /// Constructing a worker whose runtime is the owned loop succeeds and
+    /// is representable end to end: `AgentAdapterKind` can name it, and
+    /// registry validation admits it.
+    #[test]
+    fn a_worker_whose_runtime_is_the_owned_loop_constructs_and_validates() {
+        let worker = worker_with_runtime("anthropic-api");
+        assert_eq!(worker.runtime_id().unwrap(), "anthropic-api");
+        let registry = WorkerRegistryConfig {
+            workers: BTreeMap::from([("claude-api".to_owned(), worker)]),
+            capability_profiles: BTreeMap::new(),
+            routing: WorkerRoutingConfig::default(),
+        };
+        registry
+            .validate(&std::collections::BTreeSet::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn known_cli_runtimes_still_map_to_their_own_variant() {
+        assert_eq!(
+            worker_with_runtime("codex").as_agent_entry().adapter,
+            AgentAdapterKind::Codex
+        );
+        assert_eq!(
+            worker_with_runtime("claude-code").as_agent_entry().adapter,
+            AgentAdapterKind::ClaudeCode
+        );
+        assert_eq!(
+            worker_with_runtime("ollama").as_agent_entry().adapter,
+            AgentAdapterKind::Ollama
+        );
     }
 }
 

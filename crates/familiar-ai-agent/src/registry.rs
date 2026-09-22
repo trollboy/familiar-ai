@@ -2,8 +2,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
+use familiar_ai_llm::attempt::InferenceAdapter;
+
+use crate::anthropic::{AnthropicAdapter, AnthropicAdapterConfig};
+use crate::local_worker::LocalInferenceAdapter;
+use crate::openai::OpenAiInferenceAdapter;
+use crate::raw_agent::{RawAgent, RawAgentSpec, RawWorkerContext};
 use crate::{ClaudeCodeAgent, ClaudeCodeSettings, CodexAgent, CodingAgent};
+use familiar_ai_llm::local_runtime::{LocalAuthToken, LocalChatConfig, LocalRuntimeKind};
+use familiar_ai_llm::openai_api::OpenAiResponsesConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorkerStage {
@@ -60,9 +69,18 @@ pub struct WorkerDescriptor {
 
 /// Contract implemented by built-in and future Fable/OpenCode adapters.
 /// Orchestration deals only in descriptors and this constructor boundary.
+/// `raw` carries the execution-scoped resources (durable journal, sandboxed
+/// executor, PRD-013 write-scope authorizer, budget-reservation gate, and a
+/// resolved credential/endpoint) a raw-runtime (PRD-100) factory needs;
+/// every CLI-driven factory ignores it. `None` for the legacy non-registry
+/// `[agents]` construction path, which never selects a raw runtime.
 pub trait AdapterFactory: Send + Sync {
     fn adapter_id(&self) -> &str;
-    fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String>;
+    fn build(
+        &self,
+        worker: &WorkerDescriptor,
+        raw: Option<&RawWorkerContext>,
+    ) -> Result<Box<dyn CodingAgent>, String>;
 }
 
 /// Adapter construction registry. Adding an adapter means registering another
@@ -93,11 +111,24 @@ impl AdapterFactories {
         self.factories.keys().cloned().collect()
     }
 
-    pub fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String> {
+    /// A configured runtime with no registered factory is refused here, by
+    /// name, naming the registered set — never discovered later, mid-session,
+    /// at dispatch (PRD-100).
+    pub fn build(
+        &self,
+        worker: &WorkerDescriptor,
+        raw: Option<&RawWorkerContext>,
+    ) -> Result<Box<dyn CodingAgent>, String> {
         self.factories
             .get(&worker.runtime_id)
-            .ok_or_else(|| format!("no adapter factory registered for {:?}", worker.runtime_id))?
-            .build(worker)
+            .ok_or_else(|| {
+                format!(
+                    "no adapter factory registered for runtime {:?}; registered runtimes: {:?}",
+                    worker.runtime_id,
+                    self.ids()
+                )
+            })?
+            .build(worker, raw)
     }
 }
 
@@ -110,7 +141,11 @@ impl AdapterFactory for CodexFactory {
         self.id
     }
 
-    fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String> {
+    fn build(
+        &self,
+        worker: &WorkerDescriptor,
+        _raw: Option<&RawWorkerContext>,
+    ) -> Result<Box<dyn CodingAgent>, String> {
         Ok(Box::new(CodexAgent::new(worker.executable.clone())))
     }
 }
@@ -122,7 +157,11 @@ impl AdapterFactory for ClaudeCodeFactory {
         "claude-code"
     }
 
-    fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String> {
+    fn build(
+        &self,
+        worker: &WorkerDescriptor,
+        _raw: Option<&RawWorkerContext>,
+    ) -> Result<Box<dyn CodingAgent>, String> {
         Ok(Box::new(ClaudeCodeAgent::new(ClaudeCodeSettings {
             executable: worker.executable.clone(),
             model: (!worker.model.is_empty()).then(|| worker.model.clone()),
@@ -134,15 +173,144 @@ impl AdapterFactory for ClaudeCodeFactory {
     }
 }
 
+/// Backs every PRD-100 owned-loop runtime: `RawAgent` bridging
+/// `familiar_ai_llm::attempt::InferenceAdapter` into `CodingAgent`. One
+/// instance per registered runtime id; `build` constructs the specific
+/// `InferenceAdapter` that runtime id names from the resolved credential/
+/// endpoint the host supplied in `raw`.
+struct RawAgentFactory {
+    runtime_id: &'static str,
+}
+
+impl AdapterFactory for RawAgentFactory {
+    fn adapter_id(&self) -> &str {
+        self.runtime_id
+    }
+
+    fn build(
+        &self,
+        worker: &WorkerDescriptor,
+        raw: Option<&RawWorkerContext>,
+    ) -> Result<Box<dyn CodingAgent>, String> {
+        let raw = raw.ok_or_else(|| {
+            format!(
+                "runtime {:?} requires raw-execution context, which was not supplied",
+                self.runtime_id
+            )
+        })?;
+        let adapter: Arc<dyn InferenceAdapter> = match self.runtime_id {
+            id if id == familiar_ai_llm::anthropic_api::RUNTIME_ID => {
+                let credential = raw
+                    .credential
+                    .as_ref()
+                    .ok_or_else(|| {
+                        format!(
+                            "runtime {id:?} requires a resolved credential (worker auth_profile)"
+                        )
+                    })?
+                    .expose_for_request()
+                    .to_string();
+                Arc::new(
+                    AnthropicAdapter::with_credential_resolver(
+                        AnthropicAdapterConfig::default(),
+                        Box::new(familiar_ai_llm::anthropic_api::StaticCredentialResolver(
+                            credential,
+                        )),
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+            }
+            id if id == crate::openai::RUNTIME_ID => {
+                let credential = raw
+                    .credential
+                    .as_ref()
+                    .ok_or_else(|| {
+                        format!(
+                            "runtime {id:?} requires a resolved credential (worker auth_profile)"
+                        )
+                    })?
+                    .expose_for_request()
+                    .to_string();
+                Arc::new(OpenAiInferenceAdapter::new(
+                    credential,
+                    OpenAiResponsesConfig::default(),
+                )?)
+            }
+            "ollama" | "unsloth" => {
+                let endpoint = raw.local_endpoint.clone().ok_or_else(|| {
+                    format!(
+                        "runtime {:?} requires a worker_registry local endpoint",
+                        self.runtime_id
+                    )
+                })?;
+                let runtime = if self.runtime_id == "ollama" {
+                    LocalRuntimeKind::Ollama
+                } else {
+                    LocalRuntimeKind::Unsloth
+                };
+                Arc::new(LocalInferenceAdapter::new(
+                    runtime,
+                    LocalAuthToken::new(
+                        raw.credential
+                            .as_ref()
+                            .map(|credential| credential.expose_for_request().to_string()),
+                    ),
+                    LocalChatConfig {
+                        base_url: endpoint.base_url,
+                        ..LocalChatConfig::default()
+                    },
+                )?)
+            }
+            other => {
+                return Err(format!(
+                    "no construction rule for registered raw runtime {other:?}"
+                ))
+            }
+        };
+        Ok(Box::new(RawAgent::new(
+            adapter,
+            raw.host.clone(),
+            RawAgentSpec {
+                worker_spec_identity: worker.spec_identity.clone(),
+                worker_empirical_version: worker.empirical_version.clone(),
+                model: worker.model.clone(),
+                prompt_template_version: raw.prompt_template_version.clone(),
+                ceilings: raw.ceilings,
+                offered_capabilities: raw.offered_capabilities.clone(),
+            },
+        )))
+    }
+}
+
 pub fn builtin_adapter_factories() -> AdapterFactories {
     let mut factories = AdapterFactories::default();
     factories
         .register(Box::new(CodexFactory { id: "codex" }))
         .unwrap();
-    factories
-        .register(Box::new(CodexFactory { id: "ollama" }))
-        .unwrap();
     factories.register(Box::new(ClaudeCodeFactory)).unwrap();
+    // Familiar's own PRD-058 raw-model agent loop. Ollama — a local model —
+    // used to be invoked through the Codex CLI factory; it now executes
+    // through the owned loop like every other raw runtime (PRD-100).
+    factories
+        .register(Box::new(RawAgentFactory {
+            runtime_id: familiar_ai_llm::anthropic_api::RUNTIME_ID,
+        }))
+        .unwrap();
+    factories
+        .register(Box::new(RawAgentFactory {
+            runtime_id: crate::openai::RUNTIME_ID,
+        }))
+        .unwrap();
+    factories
+        .register(Box::new(RawAgentFactory {
+            runtime_id: "ollama",
+        }))
+        .unwrap();
+    factories
+        .register(Box::new(RawAgentFactory {
+            runtime_id: "unsloth",
+        }))
+        .unwrap();
     factories
 }
 
@@ -490,7 +658,11 @@ mod tests {
         fn adapter_id(&self) -> &str {
             "custom"
         }
-        fn build(&self, worker: &WorkerDescriptor) -> Result<Box<dyn CodingAgent>, String> {
+        fn build(
+            &self,
+            worker: &WorkerDescriptor,
+            _raw: Option<&RawWorkerContext>,
+        ) -> Result<Box<dyn CodingAgent>, String> {
             Ok(Box::new(CodexAgent::new(worker.executable.clone())))
         }
     }
@@ -630,7 +802,7 @@ mod tests {
         factories.register(Box::new(CustomFactory)).unwrap();
         let mut descriptor = worker("custom-worker", 1);
         descriptor.runtime_id = "custom".into();
-        assert!(factories.build(&descriptor).is_ok());
+        assert!(factories.build(&descriptor, None).is_ok());
     }
 
     #[test]

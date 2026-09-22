@@ -524,16 +524,19 @@ fn conservative_bootstrap_still_defines_a_never_observed_pool() {
 }
 
 // ---------------------------------------------------------------------
-// Production dispatch is not wired yet (see this crate's
-// `local_worker_runtime` module docs): a `provider = "local"` worker's
-// `runtime` (e.g. `"ollama"`) can collide with an unrelated pre-existing
-// CLI-driven adapter id of the same name. `run::resolved_worker_plan` must
-// fail closed rather than silently building the wrong, unverified,
-// unreserved, untelemetered CLI-driven agent in its place.
+// PRD-100: production dispatch for a `provider = "local"` worker is now
+// wired through `familiar_ai_agent::raw_agent::RawAgent` over
+// `LocalInferenceAdapter`, selected by its own `runtime` id
+// (`ollama`/`unsloth`) exactly like any other raw-loop worker.
+// `run::resolved_worker_plan` no longer refuses a selection landing on one
+// — the collision this used to guard against (an unverified, unreserved,
+// untelemetered CLI-driven agent built in its place) cannot happen because
+// `builtin_adapter_factories()` backs those runtime ids with the owned loop,
+// not a CLI factory.
 // ---------------------------------------------------------------------
 
 #[test]
-fn worker_selection_refuses_a_local_profile_worker_instead_of_misdispatching_it() {
+fn worker_selection_selects_a_local_profile_worker_for_the_owned_loop() {
     use familiar_ai_core::config::{
         LocalEndpointConfig, LocalRuntimeKind as ConfigLocalRuntimeKind, LocalWorkerConfig,
         RegistryWorkerConfig, WorkerCapabilityConfig, WorkerRegistryConfig, LOCAL_PROVIDER,
@@ -581,10 +584,11 @@ fn worker_selection_refuses_a_local_profile_worker_instead_of_misdispatching_it(
         ..Config::default()
     };
 
-    let error = resolved_worker_plan(&config, &RouteContext::default())
-        .expect_err("a local-profile worker must never be silently dispatched");
-    assert!(
-        error.contains("llama3-ollama") && error.contains("local"),
-        "error must name the offending worker and explain the local-dispatch gap, got: {error}"
+    let (implementation, _, records) = resolved_worker_plan(&config, &RouteContext::default())
+        .expect("a local-profile worker is selectable through the owned loop (PRD-100)");
+    assert_eq!(
+        implementation.adapter,
+        familiar_ai_core::AgentAdapterKind::Ollama
     );
+    assert_eq!(records[0].selected_worker, "llama3-ollama");
 }

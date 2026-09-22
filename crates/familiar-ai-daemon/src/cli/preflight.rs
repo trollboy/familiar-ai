@@ -16,9 +16,9 @@ pub fn preflight_command() -> Result<(), String> {
         .resolve(&current)
         .map_err(|error| error.to_string())?;
     let (implementation_entry, reviewer_entry) = resolved_agent_entries(&config)?;
-    let implementation = build_agent(&implementation_entry);
-    let reviewer = build_agent(&reviewer_entry);
-    let remediation = build_agent(&resolved_remediation_entry(&config)?);
+    let implementation = build_agent(&implementation_entry)?;
+    let reviewer = build_agent(&reviewer_entry)?;
+    let remediation = build_agent(&resolved_remediation_entry(&config)?)?;
     let report = crate::preflight::run(
         &AgentSet {
             implementation: implementation.as_ref(),

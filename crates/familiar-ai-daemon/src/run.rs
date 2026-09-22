@@ -21,8 +21,8 @@ use familiar_ai_context::{
 };
 use familiar_ai_core::config::WorkerCapabilityConfig;
 use familiar_ai_core::{
-    admit_run_prd, resolve_run_prd, structured_prd_metadata, validate_graph, AgentEntryConfig,
-    AppPaths, BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice,
+    admit_run_prd, resolve_run_prd, structured_prd_metadata, validate_graph, AgentAdapterKind,
+    AgentEntryConfig, AppPaths, BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice,
     FilesystemBacklogDiscovery, ScopeClassPolicyConfig, ScopeDeclarationModeConfig,
     ScopeFileClassName,
 };
@@ -295,12 +295,19 @@ impl PreparedRun {
         let (implementation_entry, reviewer_entry) =
             resolved_agent_entries(&config).map_err(RunError::Config)?;
         let remediation_entry = resolved_remediation_entry(&config).map_err(RunError::Config)?;
+        let worker_registry_configured = config.worker_registry.is_some();
         Ok(Self {
             paths,
             repository: identity.worktree,
-            implementation: build_agent(&implementation_entry),
-            reviewer: build_agent(&reviewer_entry),
-            remediation: build_agent(&remediation_entry),
+            implementation: build_agent_or_deferred(
+                &implementation_entry,
+                worker_registry_configured,
+            )
+            .map_err(RunError::Config)?,
+            reviewer: build_agent_or_deferred(&reviewer_entry, worker_registry_configured)
+                .map_err(RunError::Config)?,
+            remediation: build_agent_or_deferred(&remediation_entry, worker_registry_configured)
+                .map_err(RunError::Config)?,
             config,
             _ownership: ownership,
         })
@@ -493,30 +500,14 @@ pub fn resolved_worker_plan(
     if let Some(record) = &review {
         records.push(record.clone());
     }
-    // A worker declaring a PRD-063 `local` profile is meant to run through
-    // `familiar_ai_agent::local_worker::LocalInferenceAdapter` and the
-    // PRD-064 reservation/telemetry glue in `local_worker_runtime` — not
-    // through this crate's CLI-driven `AgentAdapterKind` dispatch, which
-    // has no way to represent it (its `runtime`, e.g. `"ollama"`, can
-    // collide with an unrelated pre-existing CLI-driven adapter id) and
-    // would otherwise silently execute it through the wrong, unverified,
-    // unreserved, untelemetered path. Production dispatch for local
-    // workers is not wired yet (`docs/contracts/local-worker-runtime.md`),
-    // so a selection landing on one must fail closed here, before any
-    // `CodingAgent` is built, rather than silently misdispatching.
-    for record in &records {
-        let selected = &configured.workers[&record.selected_worker];
-        if selected.local.is_some() {
-            return Err(format!(
-                "worker_registry.workers.{} is a provider=\"local\" worker selected for {:?}; \
-                 production dispatch for local workers is not yet wired through \
-                 familiar_ai_daemon::run (see docs/contracts/local-worker-runtime.md) — until \
-                 that follow-up lands, exclude it from routing (set available = false, or \
-                 repoint any pin/rule that selects it)",
-                record.selected_worker, record.stage
-            ));
-        }
-    }
+    // A worker declaring a PRD-063 `local` profile runs through
+    // `familiar_ai_agent::raw_agent::RawAgent` over
+    // `familiar_ai_agent::local_worker::LocalInferenceAdapter`, dispatched
+    // by its own `runtime` id (`ollama`/`unsloth`) exactly like any other
+    // raw-loop worker (PRD-100). Production dispatch for local workers used
+    // to fail closed here before that bridge existed; now that
+    // `build_selected_agents` constructs it, a selection landing on one is
+    // ordinary routing, not a barrier.
     let reviewer_id = review
         .as_ref()
         .map(|r| r.selected_worker.as_str())
@@ -573,7 +564,24 @@ pub fn next_implementation_worker(
 
 /// Deterministic constructor: adapter enum to concrete agent, nothing else.
 /// Performs no probing, filesystem checks, or model calls.
-pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
+///
+/// The legacy `[agents]` shape can still declare a non-CLI
+/// `AgentAdapterKind` (`Ollama`, `RawAgentLoop`) directly; neither has a
+/// factory that succeeds without a `RawWorkerContext`, which this path never
+/// has. Refused by name here, at configuration-resolution time, rather than
+/// discovered as a panic inside `AdapterFactories::build`.
+pub fn build_agent(entry: &AgentEntryConfig) -> Result<Box<dyn CodingAgent>, String> {
+    if matches!(
+        entry.adapter,
+        AgentAdapterKind::Ollama | AgentAdapterKind::RawAgentLoop
+    ) {
+        return Err(format!(
+            "[agents] adapter {:?} executes through Familiar's own raw-model agent loop, which \
+             requires a worker_registry entry (runtime/auth_profile/local endpoint); it cannot be \
+             constructed from the legacy [agents] shape",
+            entry.adapter.as_str()
+        ));
+    }
     let descriptor = WorkerDescriptor {
         id: "legacy".into(),
         spec_identity: format!(
@@ -595,9 +603,69 @@ pub fn build_agent(entry: &AgentEntryConfig) -> Box<dyn CodingAgent> {
         permission_mode: entry.permission_mode.map(|value| value.as_str().into()),
         extra_args: entry.extra_args.clone(),
     };
-    builtin_adapter_factories()
-        .build(&descriptor)
-        .expect("built-in adapter factory must be registered")
+    builtin_adapter_factories().build(&descriptor, None)
+}
+
+/// Stands in for a raw-runtime worker's `CodingAgent` at every call site that
+/// only needs a typed `AgentSet` before a specific PRD attempt (and the
+/// `execution_id`/database path/worktree/PRD text a `RawWorkerContext`
+/// requires) is known: `preflight`, `drive`, `resume`, `batch_review`, and
+/// `PreparedRun`. Every one of those call sites hands its `AgentSet` down
+/// into `execute_tracked_inner`/`resume_implemented_checkpoint`, which always
+/// replaces it with the real agent `build_selected_agents` constructs once a
+/// worker registry is configured. `preflight` is the one caller that reads
+/// this placeholder directly; its default `preflight()` no-op (matching
+/// every other `CodingAgent`, including the real `RawAgent`) is exactly the
+/// same "nothing to probe without execution context" answer the real agent
+/// would give. `execute` is otherwise unreachable in production and exists
+/// only to fail loudly, by name, if that invariant is ever violated.
+struct DeferredRawAgent {
+    runtime_id: String,
+}
+
+impl CodingAgent for DeferredRawAgent {
+    fn execute(
+        &self,
+        _request: ExecutionRequest<'_>,
+        _output: &mut dyn io::Write,
+    ) -> Result<ExecutionResult, AgentExecutionError> {
+        Err(AgentExecutionError::Launch {
+            executable: self.runtime_id.clone(),
+            source: Box::new(io::Error::other(format!(
+                "runtime {:?} executes through Familiar's own raw-model agent loop and must be \
+                 constructed per execution by build_selected_agents; this deferred placeholder \
+                 was invoked directly instead",
+                self.runtime_id
+            ))),
+            result: Box::new(ExecutionResult::default()),
+        })
+    }
+}
+
+/// As [`build_agent`], but tolerant of a raw-runtime (`Ollama`/`RawAgentLoop`)
+/// adapter when `worker_registry_configured` is true: such an `entry` can
+/// only have come from `worker.as_agent_entry()` (`resolved_agent_entries`/
+/// `resolved_remediation_entry` return registry-derived entries whenever
+/// `config.worker_registry` is `Some`), and the worker it names is
+/// constructed for real, later, per execution, by `build_selected_agents`.
+/// Without a configured registry, a raw-runtime `entry` can only be the true
+/// legacy `[agents]` shape, which never carries a `RawWorkerContext` and is
+/// refused exactly as `build_agent` already refuses it.
+pub fn build_agent_or_deferred(
+    entry: &AgentEntryConfig,
+    worker_registry_configured: bool,
+) -> Result<Box<dyn CodingAgent>, String> {
+    if worker_registry_configured
+        && matches!(
+            entry.adapter,
+            AgentAdapterKind::Ollama | AgentAdapterKind::RawAgentLoop
+        )
+    {
+        return Ok(Box::new(DeferredRawAgent {
+            runtime_id: entry.adapter.as_str().into(),
+        }));
+    }
+    build_agent(entry)
 }
 
 fn worker_descriptor(
@@ -638,9 +706,163 @@ type OwnedAgentSet = (
     Box<dyn CodingAgent>,
 );
 
+/// Resolves a worker's `auth_profile` (a `[providers.<name>]` entry) into a
+/// plaintext credential via PRD-074's existing credential-store descriptors
+/// — this PRD introduces no credential handling of its own. `Ok(None)`
+/// means the worker declares no `auth_profile` (a local endpoint that needs
+/// none); a declared profile that fails to resolve is `Err`, never silently
+/// treated as "no credential needed".
+fn resolve_raw_credential(
+    config: &Config,
+    worker: &familiar_ai_core::config::RegistryWorkerConfig,
+) -> Result<Option<familiar_ai_agent::RawCredential>, String> {
+    let Some(profile) = worker.auth_profile.as_deref() else {
+        return Ok(None);
+    };
+    let auth = config.auth_profiles.get(profile).ok_or_else(|| {
+        format!("names auth_profile {profile:?}, which is not a configured [auth_profiles.*] entry")
+    })?;
+    let resolved =
+        crate::config_cli::resolve_auth_with_store(auth, &crate::config_cli::SystemCredentialStore)
+            .map_err(|error| {
+                format!("cannot resolve credential for auth_profile {profile:?}: {error}")
+            })?;
+    Ok(resolved.map(|credential| {
+        familiar_ai_agent::RawCredential::new(credential.expose_for_request().to_string())
+    }))
+}
+
+/// Builds the PRD-100 execution-scoped resources a raw-runtime worker's
+/// `AdapterFactory` needs: the SQLite-backed host bound to this exact
+/// execution, the resolved credential/endpoint its `InferenceAdapter`
+/// needs, and this stage's declared ceilings/offered capabilities.
+/// `agent_runtime.enabled` gates this explicitly — a raw worker is refused
+/// rather than run against default/unaudited sandbox settings.
+/// A pre-PRD-100 `adapter = "ollama"` worker declared no `[local]` block at
+/// all — the documented shape was just `adapter = "ollama"` plus a model —
+/// and dispatched anyway, through the Codex CLI driving an Ollama-prefixed
+/// model string. PRD-100 moved `ollama` onto the owned loop, which needs an
+/// endpoint `RawAgentFactory::build` can require; without a default here,
+/// that documented zero-`[local]` shape stops dispatching with "requires a
+/// worker_registry local endpoint" instead of running against the
+/// conventional loopback address Ollama listens on by default. `unsloth`
+/// has no such legacy shape to preserve — it was never dispatchable before
+/// PRD-100 — and keeps requiring an explicit `[local]` block.
+fn default_local_endpoint(
+    runtime_id: &str,
+) -> Option<familiar_ai_core::config::LocalEndpointConfig> {
+    (runtime_id == "ollama").then(|| familiar_ai_core::config::LocalEndpointConfig {
+        base_url: "http://127.0.0.1:11434".into(),
+        tls: false,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_raw_worker_context(
+    config: &Config,
+    worker: &familiar_ai_core::config::RegistryWorkerConfig,
+    stage: WorkerStage,
+    worker_id: &str,
+    runtime_id: &str,
+    execution_id: &str,
+    database_path: &Path,
+    project_id: &str,
+    worktree_root: &Path,
+    prd_markdown: &str,
+) -> Result<familiar_ai_agent::RawWorkerContext, String> {
+    if !config.agent_runtime.enabled {
+        return Err(format!(
+            "worker {worker_id:?} declares runtime {runtime_id:?}, which executes through \
+             Familiar's own raw-model agent loop; agent_runtime.enabled must be true to use it"
+        ));
+    }
+    let credential = resolve_raw_credential(config, worker)?;
+    let local_endpoint = worker
+        .local
+        .as_ref()
+        .map(|local| local.endpoint.clone())
+        .or_else(|| default_local_endpoint(runtime_id));
+
+    // Phase-1 discipline (docs/contracts/agent-loop.md): review is offered
+    // only the read-only-plus-reporting capability set, independent of the
+    // globally configured `agent_runtime.offered_capabilities`, which
+    // governs the implementer/remediation stages.
+    let offered_capabilities: Vec<familiar_ai_agent::raw_runtime::CapabilityId> =
+        if stage == WorkerStage::Review {
+            use familiar_ai_agent::raw_runtime::CapabilityId as C;
+            vec![
+                C::ReadFile,
+                C::SearchList,
+                C::ReportProgress,
+                C::SubmitEvidence,
+                C::RequestEscalation,
+            ]
+        } else {
+            config
+                .agent_runtime
+                .offered_capabilities
+                .iter()
+                .filter_map(|value| familiar_ai_agent::raw_runtime::CapabilityId::parse(value))
+                .collect()
+        };
+    let allowed_write_paths = if offered_capabilities
+        .contains(&familiar_ai_agent::raw_runtime::CapabilityId::ApplyEdit)
+    {
+        crate::agent_runtime::write_scope_authorizer_from_prd(
+            prd_markdown,
+            offered_capabilities.clone(),
+            &config.agent_runtime.sandbox,
+        )
+        .map_err(|error| format!("cannot derive write scope for worker: {error}"))?
+        .allowed_write_paths
+    } else {
+        Vec::new()
+    };
+    let ceilings = familiar_ai_agent::raw_runtime::LoopCeilings {
+        max_iterations: config.agent_runtime.ceilings.max_iterations,
+        max_output_tokens: config.agent_runtime.ceilings.max_output_tokens,
+        max_wall_clock_ms: config.agent_runtime.ceilings.max_wall_clock_ms,
+    };
+    let stage_label = format!("{stage:?}").to_ascii_lowercase();
+    let host = crate::agent_runtime::SqliteRawAgentHost::new(
+        database_path.to_path_buf(),
+        execution_id.to_owned(),
+        project_id.to_owned(),
+        worker_id.to_owned(),
+        stage_label,
+        runtime_id.to_owned(),
+        (!worker.model.is_empty()).then(|| worker.model.clone()),
+        worktree_root.to_path_buf(),
+        config.agent_runtime.sandbox.clone(),
+        config.agent_runtime.token_discipline.clone(),
+        allowed_write_paths,
+        offered_capabilities.clone(),
+        config
+            .agent_runtime
+            .ceilings
+            .max_wall_clock_ms
+            .unwrap_or(120_000),
+        1 << 20,
+    );
+    Ok(familiar_ai_agent::RawWorkerContext {
+        host: std::sync::Arc::new(host),
+        ceilings,
+        offered_capabilities,
+        prompt_template_version: "agent-loop-prompt/1".into(),
+        credential,
+        local_endpoint,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_selected_agents(
     config: &Config,
     route_context: &RouteContext,
+    execution_id: &str,
+    database_path: &Path,
+    project_id: &str,
+    worktree_root: &Path,
+    prd_markdown: &str,
 ) -> Result<Option<OwnedAgentSet>, RunError> {
     let Some(registry) = &config.worker_registry else {
         return Ok(None);
@@ -663,12 +885,37 @@ fn build_selected_agents(
                 WorkerCapabilityConfig::NarrowTask => WorkerCapability::NarrowTask,
             })
             .collect();
+        let runtime_id = worker.runtime_id().map_err(RunError::Config)?;
+        // Every CLI-driven runtime this workspace ships is named here
+        // explicitly; anything else — every raw-loop provider and any
+        // future runtime — needs a `RawWorkerContext`. `AdapterFactories`
+        // itself is still the fail-closed authority on whether a runtime
+        // is actually constructible: an unregistered name is refused there
+        // by name, naming the registered set.
+        let raw_context = if matches!(runtime_id, "codex" | "claude-code") {
+            None
+        } else {
+            Some(
+                build_raw_worker_context(
+                    config,
+                    worker,
+                    stage,
+                    &record.selected_worker,
+                    runtime_id,
+                    execution_id,
+                    database_path,
+                    project_id,
+                    worktree_root,
+                    prd_markdown,
+                )
+                .map_err(RunError::Config)?,
+            )
+        };
         builtin_adapter_factories()
-            .build(&worker_descriptor(
-                &record.selected_worker,
-                worker,
-                capabilities,
-            ))
+            .build(
+                &worker_descriptor(&record.selected_worker, worker, capabilities),
+                raw_context.as_ref(),
+            )
             .map_err(RunError::Config)
     };
     let implementation = build_stage(WorkerStage::Implementation)?;
@@ -967,7 +1214,18 @@ pub fn resume_implemented_checkpoint(
         retained_detail: None,
     };
     let route_context = route_context_for_prd(&prd_path)?;
-    let owned_agents = build_selected_agents(config, &route_context)?;
+    let prd_markdown = std::fs::read_to_string(&prd_path).map_err(|error| {
+        RunError::Config(format!("cannot read PRD for raw-runtime routing: {error}"))
+    })?;
+    let owned_agents = build_selected_agents(
+        config,
+        &route_context,
+        execution_id,
+        &database_path,
+        &repository.key,
+        &candidate.worktree,
+        &prd_markdown,
+    )?;
     let selected_agents = owned_agents.as_ref().map(borrowed_agent_set);
     let agents = selected_agents.as_ref().unwrap_or(agents);
     let completed = finish_implementation(
@@ -1172,10 +1430,29 @@ fn execute_tracked_inner(
         }
     }
     let config = &effective_config;
+    // Minted here (rather than at its historical later call site) because a
+    // PRD-100 raw-runtime worker's `SqliteRawAgentHost` must be constructed
+    // with this same execution id — its journal, evidence, and budget
+    // reservation all key on it. `new_id` and `resolve_path` are both pure;
+    // moving them earlier changes no observable behavior for the CLI path.
+    let id = new_id();
+    trace.execution_id = Some(id.clone());
+    let database_path = config.database.resolve_path(&paths.data_dir);
+    let prd_markdown = std::fs::read_to_string(prd_path).map_err(|error| {
+        RunError::Config(format!("cannot read PRD for raw-runtime routing: {error}"))
+    })?;
     // Registry selection owns construction of the executors it selected. This
     // prevents library callers from supplying a different trait object than
     // the one that passed routing and preflight.
-    let owned_agents = build_selected_agents(config, &route_context)?;
+    let owned_agents = build_selected_agents(
+        config,
+        &route_context,
+        &id,
+        &database_path,
+        &repository.key,
+        &repository.worktree,
+        &prd_markdown,
+    )?;
     let selected_agents = owned_agents.as_ref().map(borrowed_agent_set);
     let agents = selected_agents.as_ref().unwrap_or(agents);
     let profile = context_profile(&repository_config);
@@ -1238,15 +1515,12 @@ fn execute_tracked_inner(
     }
     let output_register = configured_output_register(config, "implementation")?;
     prompt = inject_output_register(&prompt, output_register);
-    let database_path = config.database.resolve_path(&paths.data_dir);
     let mut db = Database::open(&database_path).map_err(|e| RunError::Storage(e.to_string()))?;
     db.run_migrations()
         .map_err(|e| RunError::Storage(e.to_string()))?;
     ReviewRepository::new(db.conn())
         .recover_incomplete()
         .map_err(|e| RunError::Storage(e.to_string()))?;
-    let id = new_id();
-    trace.execution_id = Some(id.clone());
     // Contradictory agent configuration must fail closed before any claim,
     // regardless of which caller constructed the agents.
     let implementation_entry = resolved_agent_entries(config).map_err(RunError::Config)?.0;
@@ -1525,19 +1799,21 @@ fn execute_tracked_inner(
     let finalization = terminal(&timer, result, outcome, unavailable, config);
     finalize(&db, &id, &finalization)
         .map_err(|e| retained_traced(trace, &target, "history_failed", e))?;
-    persist_accounting_observations(
-        &db,
-        &id,
-        &started_at,
-        result,
-        outcome,
-        implementation_entry.adapter.as_str(),
-        &context.repository.worktree,
-        &finalization,
-        output_register,
-        config,
-    )
-    .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
+    if !implementation_usage_is_persisted_by_the_host(&implementation_entry.adapter) {
+        persist_accounting_observations(
+            &db,
+            &id,
+            &started_at,
+            result,
+            outcome,
+            implementation_entry.adapter.as_str(),
+            &context.repository.worktree,
+            &finalization,
+            output_register,
+            config,
+        )
+        .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
+    }
     if execution.is_err() {
         persist_probation_outcome(
             &db,
@@ -2886,6 +3162,20 @@ fn finalize(db: &Database, id: &str, value: &ExecutionFinalization) -> Result<()
         })
 }
 
+/// Whether the implementation stage's PRD-051 usage rows are written by the
+/// worker's own host rather than by this harness. The owned raw loop's
+/// `SqliteRawAgentHost::finish` persists one observation per attempt with
+/// the full identity (`persist_run_outcome`); writing the aggregate row here
+/// as well recorded every raw implementation twice, under two adapter labels
+/// and two source hashes, which `append_observation`'s hash dedup cannot
+/// catch. CLI workers have no host-side writer and keep the harness row.
+fn implementation_usage_is_persisted_by_the_host(adapter: &AgentAdapterKind) -> bool {
+    matches!(
+        adapter,
+        AgentAdapterKind::RawAgentLoop | AgentAdapterKind::Ollama
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_accounting_observations(
     db: &Database,
@@ -3241,6 +3531,7 @@ fn build_repository_map(repository: &Path) -> Vec<u8> {
 mod tests {
     use super::*;
     use familiar_ai_context::{ContextDocument, DocumentKind, InclusionReason, RepositoryContext};
+    use familiar_ai_core::AgentAdapterKind;
     use familiar_ai_review::{
         FindingCategory, FindingEvidence, FindingSeverity, FindingStatus, ReviewDisposition,
         ReviewFinding, ReviewRequest, ReviewResult,
@@ -4525,5 +4816,452 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    // -------------------------------------------------------------------
+    // PRD-100: raw-runtime worker dispatch
+    // -------------------------------------------------------------------
+
+    fn sample_prd_markdown() -> &'static str {
+        "# PRD-100: Sample\n\n## Expected Files\n\n- `src/lib.rs`\n"
+    }
+
+    fn raw_worker(
+        runtime: &str,
+        provider: &str,
+        auth_profile: Option<&str>,
+    ) -> familiar_ai_core::config::RegistryWorkerConfig {
+        familiar_ai_core::config::RegistryWorkerConfig {
+            adapter: None,
+            provider: provider.into(),
+            model: "test-model".into(),
+            runtime: Some(runtime.into()),
+            model_artifact: None,
+            auth_profile: auth_profile.map(str::to_owned),
+            capability_profile: None,
+            runtime_config: None,
+            local: None,
+            executable: None,
+            capabilities: vec![WorkerCapabilityConfig::Implementation],
+            fresh_process_isolation: true,
+            context_tokens: 0,
+            estimated_cost_microusd: None,
+            available: true,
+            effort: None,
+            permission_mode: None,
+            extra_args: vec![],
+        }
+    }
+
+    fn local_ollama_worker() -> familiar_ai_core::config::RegistryWorkerConfig {
+        let mut worker = raw_worker("ollama", "local", None);
+        worker.local = Some(familiar_ai_core::config::LocalWorkerConfig {
+            runtime_kind: familiar_ai_core::config::LocalRuntimeKind::Ollama,
+            endpoint: familiar_ai_core::config::LocalEndpointConfig {
+                base_url: "http://127.0.0.1:11434".into(),
+                tls: false,
+            },
+            resources: Default::default(),
+        });
+        worker
+    }
+
+    #[test]
+    fn raw_worker_context_is_refused_when_agent_runtime_is_disabled() {
+        let config = Config::default();
+        assert!(!config.agent_runtime.enabled);
+        let worker = raw_worker("anthropic-api", "anthropic", None);
+        let temp = tempfile::tempdir().unwrap();
+        let error = build_raw_worker_context(
+            &config,
+            &worker,
+            WorkerStage::Implementation,
+            "claude-api",
+            "anthropic-api",
+            "exec_1",
+            &temp.path().join("db.sqlite"),
+            "proj",
+            temp.path(),
+            sample_prd_markdown(),
+        )
+        .err()
+        .expect("agent_runtime disabled must refuse construction");
+        assert!(error.contains("agent_runtime.enabled"), "{error}");
+    }
+
+    #[test]
+    fn raw_worker_context_builds_when_agent_runtime_is_enabled() {
+        let mut config = Config::default();
+        config.agent_runtime.enabled = true;
+        let worker = local_ollama_worker();
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = build_raw_worker_context(
+            &config,
+            &worker,
+            WorkerStage::Implementation,
+            "local-ollama",
+            "ollama",
+            "exec_2",
+            &temp.path().join("db.sqlite"),
+            "proj",
+            temp.path(),
+            sample_prd_markdown(),
+        )
+        .unwrap();
+        assert!(ctx.local_endpoint.is_some());
+        assert!(ctx.credential.is_none());
+    }
+
+    /// F3 regression: a pre-PRD-100 `adapter = "ollama"` entry declared no
+    /// `[local]` block at all (the documented shape was just `adapter =
+    /// "ollama"` plus a model) and dispatched through the Codex CLI. With
+    /// `ollama` now routed through the owned loop, that same worker shape
+    /// must still resolve — against the conventional loopback endpoint —
+    /// instead of failing with "requires a worker_registry local endpoint".
+    #[test]
+    fn legacy_ollama_worker_with_no_local_block_defaults_to_the_loopback_endpoint() {
+        let mut config = Config::default();
+        config.agent_runtime.enabled = true;
+        let worker = raw_worker("ollama", "local", None);
+        assert!(
+            worker.local.is_none(),
+            "this test only covers the pre-PRD-100 shape"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = build_raw_worker_context(
+            &config,
+            &worker,
+            WorkerStage::Implementation,
+            "legacy-ollama",
+            "ollama",
+            "exec_legacy_ollama",
+            &temp.path().join("db.sqlite"),
+            "proj",
+            temp.path(),
+            sample_prd_markdown(),
+        )
+        .expect("a pre-PRD-100 ollama worker with no [local] block must still resolve");
+        let endpoint = ctx
+            .local_endpoint
+            .expect("ollama must default to the conventional loopback endpoint");
+        assert_eq!(endpoint.base_url, "http://127.0.0.1:11434");
+    }
+
+    /// `unsloth` has no pre-PRD-100 dispatchable shape to preserve, so it
+    /// keeps requiring an explicit `[local]` block rather than defaulting.
+    #[test]
+    fn unsloth_worker_with_no_local_block_is_still_refused() {
+        let mut config = Config::default();
+        config.agent_runtime.enabled = true;
+        let worker = raw_worker("unsloth", "local", None);
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = build_raw_worker_context(
+            &config,
+            &worker,
+            WorkerStage::Implementation,
+            "legacy-unsloth",
+            "unsloth",
+            "exec_legacy_unsloth",
+            &temp.path().join("db.sqlite"),
+            "proj",
+            temp.path(),
+            sample_prd_markdown(),
+        )
+        .unwrap();
+        assert!(ctx.local_endpoint.is_none());
+    }
+
+    #[test]
+    fn raw_worker_context_review_stage_is_offered_only_read_only_capabilities() {
+        let mut config = Config::default();
+        config.agent_runtime.enabled = true;
+        config.agent_runtime.offered_capabilities = vec![
+            "read-file".into(),
+            "apply-edit".into(),
+            "run-command".into(),
+        ];
+        let worker = local_ollama_worker();
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = build_raw_worker_context(
+            &config,
+            &worker,
+            WorkerStage::Review,
+            "local-ollama",
+            "ollama",
+            "exec_3",
+            &temp.path().join("db.sqlite"),
+            "proj",
+            temp.path(),
+            sample_prd_markdown(),
+        )
+        .unwrap();
+        use familiar_ai_agent::raw_runtime::CapabilityId;
+        assert!(!ctx.offered_capabilities.contains(&CapabilityId::ApplyEdit));
+        assert!(!ctx.offered_capabilities.contains(&CapabilityId::RunCommand));
+        assert!(ctx.offered_capabilities.contains(&CapabilityId::ReadFile));
+    }
+
+    #[test]
+    fn unresolvable_auth_profile_is_refused_by_name() {
+        let mut config = Config::default();
+        config.agent_runtime.enabled = true;
+        let worker = raw_worker("anthropic-api", "anthropic", Some("missing-profile"));
+        let temp = tempfile::tempdir().unwrap();
+        let error = build_raw_worker_context(
+            &config,
+            &worker,
+            WorkerStage::Implementation,
+            "claude-api",
+            "anthropic-api",
+            "exec_4",
+            &temp.path().join("db.sqlite"),
+            "proj",
+            temp.path(),
+            sample_prd_markdown(),
+        )
+        .err()
+        .expect("an unresolvable auth_profile must refuse construction");
+        assert!(error.contains("missing-profile"), "{error}");
+    }
+
+    /// PRD-100 acceptance: existing `claude-code`/`codex` workers are
+    /// unchanged, and a repository declaring no raw worker sees no
+    /// behavioral difference — in particular, CLI dispatch never requires
+    /// `agent_runtime.enabled`, which defaults to `false`.
+    #[test]
+    fn cli_worker_dispatch_never_requires_agent_runtime_to_be_enabled() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            temp.path(),
+            r#"
+[worker_registry.workers.codex]
+adapter = "codex"
+provider = "openai"
+model = "gpt"
+capabilities = ["implementation", "review", "remediation"]
+fresh_process_isolation = true
+context_tokens = 2000
+estimated_cost_microusd = 1
+"#,
+        )
+        .unwrap();
+        let config = Config::load(Some(temp.path())).unwrap();
+        assert!(!config.agent_runtime.enabled);
+        let owned = build_selected_agents(
+            &config,
+            &RouteContext::default(),
+            "exec_5",
+            Path::new("/nonexistent/db.sqlite"),
+            "proj",
+            Path::new("/nonexistent/worktree"),
+            "# no expected files section",
+        )
+        .unwrap();
+        assert!(owned.is_some());
+    }
+
+    /// A raw-runtime worker is selectable for every stage through the
+    /// existing PRD-031/PRD-044 routing, and an independent reviewer's
+    /// identity differs from the implementer's — cross-provider review
+    /// independence enforced against the recorded identity, with no vendor
+    /// CLI in the mix at all.
+    #[test]
+    fn raw_runtime_workers_are_selectable_for_every_stage_with_independent_review() {
+        use familiar_ai_core::config::{RegistryWorkerConfig, WorkerRegistryConfig};
+
+        let claude_api = raw_worker("anthropic-api", "anthropic", Some("env-anthropic-key"));
+        let claude_api = RegistryWorkerConfig {
+            model: "claude-sonnet-5".into(),
+            capabilities: vec![
+                WorkerCapabilityConfig::Implementation,
+                WorkerCapabilityConfig::Review,
+                WorkerCapabilityConfig::Remediation,
+            ],
+            context_tokens: 200_000,
+            estimated_cost_microusd: Some(5),
+            ..claude_api
+        };
+        let local_ollama = local_ollama_worker();
+        let local_ollama = RegistryWorkerConfig {
+            model: "llama3".into(),
+            capabilities: vec![
+                WorkerCapabilityConfig::Implementation,
+                WorkerCapabilityConfig::Review,
+                WorkerCapabilityConfig::Remediation,
+            ],
+            context_tokens: 8_000,
+            estimated_cost_microusd: Some(1),
+            ..local_ollama
+        };
+
+        let mut config = Config::default();
+        config.auth_profiles.insert(
+            "env-anthropic-key".into(),
+            familiar_ai_core::config::AuthDescriptor::Env(
+                "ANTHROPIC_API_KEY_TEST_PRD_100_NEVER_SET".into(),
+            ),
+        );
+        config.worker_registry = Some(WorkerRegistryConfig {
+            workers: BTreeMap::from([
+                ("claude-api".to_owned(), claude_api),
+                ("local-ollama".to_owned(), local_ollama),
+            ]),
+            capability_profiles: BTreeMap::new(),
+            routing: Default::default(),
+        });
+        config.review.enabled = true;
+
+        let (implementation, reviewer, records) =
+            resolved_worker_plan(&config, &RouteContext::default()).unwrap();
+
+        // Cheapest eligible worker wins implementation/remediation.
+        assert_eq!(implementation.adapter, AgentAdapterKind::Ollama);
+        // The only independent (distinct provider+model) candidate left for
+        // review is the raw hosted-API worker.
+        assert_eq!(reviewer.adapter, AgentAdapterKind::RawAgentLoop);
+
+        let registry = config.worker_registry.as_ref().unwrap();
+        for stage in [
+            WorkerStage::Implementation,
+            WorkerStage::Review,
+            WorkerStage::Remediation,
+        ] {
+            assert!(
+                records.iter().any(|record| record.stage == stage),
+                "{stage:?} worker was not selected"
+            );
+        }
+        let implementation_provider = &registry.workers[&records
+            .iter()
+            .find(|record| record.stage == WorkerStage::Implementation)
+            .unwrap()
+            .selected_worker]
+            .provider;
+        let review_provider = &registry.workers[&records
+            .iter()
+            .find(|record| record.stage == WorkerStage::Review)
+            .unwrap()
+            .selected_worker]
+            .provider;
+        assert_ne!(
+            implementation_provider, review_provider,
+            "implementer and reviewer must record distinct provider identities"
+        );
+    }
+
+    /// An unregistered runtime is refused by name, naming the registered
+    /// set, at adapter-factory construction — never discovered later at
+    /// dispatch.
+    #[test]
+    fn unregistered_runtime_is_refused_naming_the_registered_set() {
+        let descriptor = WorkerDescriptor {
+            id: "mystery".into(),
+            spec_identity: "wspec-sha256:test".into(),
+            empirical_version: "wver-sha256:test".into(),
+            runtime_id: "totally-unregistered-runtime".into(),
+            provider: "nobody".into(),
+            model: "nothing".into(),
+            executable: "nothing".into(),
+            capabilities: Default::default(),
+            fresh_process_isolation: false,
+            context_tokens: 0,
+            estimated_cost_microusd: None,
+            available: true,
+            effort: None,
+            permission_mode: None,
+            extra_args: vec![],
+        };
+        let error = builtin_adapter_factories()
+            .build(&descriptor, None)
+            .err()
+            .expect("an unregistered runtime must be refused");
+        assert!(error.contains("totally-unregistered-runtime"), "{error}");
+        assert!(error.contains("codex"), "{error}");
+        assert!(error.contains("anthropic-api"), "{error}");
+    }
+
+    /// `build_agent` is the legacy `[agents]` construction path, which can
+    /// still declare a non-CLI `AgentAdapterKind` directly and never carries
+    /// a `RawWorkerContext`. Before this fix it panicked via
+    /// `.expect("built-in adapter factory must be registered")` for both
+    /// `Ollama` and `RawAgentLoop`; it must instead return a named `Err`.
+    #[test]
+    fn build_agent_refuses_a_non_cli_adapter_by_name_instead_of_panicking() {
+        for adapter in [AgentAdapterKind::Ollama, AgentAdapterKind::RawAgentLoop] {
+            let error = build_agent(&AgentEntryConfig {
+                adapter,
+                ..AgentEntryConfig::default()
+            })
+            .err()
+            .unwrap_or_else(|| {
+                panic!("adapter {adapter:?} must be refused, not silently constructed")
+            });
+            assert!(
+                error.contains(adapter.as_str()),
+                "diagnostic must name the refused adapter: {error}"
+            );
+        }
+    }
+
+    /// `raw-worker-refused-by-legacy-build-agent` remediation: unlike
+    /// `build_agent`, `build_agent_or_deferred` must not refuse a raw-kind
+    /// `entry` when a worker registry is configured — such an `entry` can
+    /// only have come from `worker.as_agent_entry()`, and the worker it
+    /// names is constructed for real, later, by `build_selected_agents`.
+    /// `preflight`, `drive`, `resume`, `batch_review`, and `PreparedRun` all
+    /// call this before that later construction ever runs.
+    #[test]
+    fn build_agent_or_deferred_tolerates_a_raw_adapter_only_when_a_registry_is_configured() {
+        for adapter in [AgentAdapterKind::Ollama, AgentAdapterKind::RawAgentLoop] {
+            let entry = AgentEntryConfig {
+                adapter,
+                ..AgentEntryConfig::default()
+            };
+            let deferred = build_agent_or_deferred(&entry, true)
+                .unwrap_or_else(|error| panic!("a registry-derived {adapter:?} worker must not be refused here, since build_selected_agents constructs it for real: {error}"));
+            deferred
+                .preflight()
+                .expect("the deferred placeholder must answer preflight exactly as the real RawAgent's default no-op would");
+
+            let error = build_agent_or_deferred(&entry, false)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "without a worker registry, {adapter:?} can only be the true legacy \
+                         [agents] shape, which never carries a RawWorkerContext and must still \
+                         be refused"
+                    )
+                });
+            assert!(
+                error.contains(adapter.as_str()),
+                "diagnostic must name the refused adapter: {error}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod raw_accounting_ownership_tests {
+    use super::*;
+
+    /// Review finding (double PRD-051 recording): the harness must not append
+    /// an aggregate implementation observation for a worker whose host
+    /// already persisted one row per attempt. Widening this predicate to a
+    /// CLI worker would drop that worker's only usage row; narrowing it
+    /// would double-count the owned loop again.
+    #[test]
+    fn only_owned_loop_workers_have_host_persisted_usage() {
+        assert!(implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::RawAgentLoop
+        ));
+        assert!(implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::Ollama
+        ));
+        assert!(!implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::ClaudeCode
+        ));
+        assert!(!implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::Codex
+        ));
     }
 }

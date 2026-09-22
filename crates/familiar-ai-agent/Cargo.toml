@@ -13,7 +13,7 @@ serde_json.workspace = true
 libc.workspace = true
 ring.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["time", "macros", "rt"] }
+tokio = { workspace = true, features = ["time", "macros", "rt", "net"] }
 
 # Review isolation is enforced by the kernel's Landlock API on Linux; other
 # platforms use their own mechanism (macOS sandbox-exec) or fail closed.

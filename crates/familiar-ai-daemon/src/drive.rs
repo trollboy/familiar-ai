@@ -60,9 +60,15 @@ pub fn execute_configured(
         config.driver.worktree_root = value.to_string_lossy().into_owned();
     }
     let (implementation_entry, reviewer_entry) = crate::run::resolved_agent_entries(&config)?;
-    let implementation = crate::run::build_agent(&implementation_entry);
-    let reviewer = crate::run::build_agent(&reviewer_entry);
-    let remediation = crate::run::build_agent(&crate::run::resolved_remediation_entry(&config)?);
+    let worker_registry_configured = config.worker_registry.is_some();
+    let implementation =
+        crate::run::build_agent_or_deferred(&implementation_entry, worker_registry_configured)?;
+    let reviewer =
+        crate::run::build_agent_or_deferred(&reviewer_entry, worker_registry_configured)?;
+    let remediation = crate::run::build_agent_or_deferred(
+        &crate::run::resolved_remediation_entry(&config)?,
+        worker_registry_configured,
+    )?;
     let mut warrant = DriveWarrant::from_config(&config).tightened_by(
         max_prds,
         max_cost_microusd,

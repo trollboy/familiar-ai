@@ -11,31 +11,22 @@
 //! release/expire/recover call is the ordinary PRD-064
 //! `ReservationRepository` API.
 //!
-//! **Production dispatch status:** these functions are complete and
-//! exercised end-to-end against a fake endpoint (`tests/
-//! local_worker_runtime.rs`: reservation acquisition, the real PRD-058
-//! loop, reservation resolution, telemetry persistence, memory-pressure
-//! overrun, endpoint disappearance), but no call site in this crate's
-//! `run` module invokes them yet — worker-selection/execution there
-//! (`build_agent`/`AdapterFactories`) only builds the CLI-driven
-//! `CodingAgent` adapters (`codex`, `claude-code`,
-//! `ollama`-via-Codex-harness), so a `provider = "local"` registry entry is
-//! config-validated but not yet routed to an execution. This mirrors the
-//! identical, pre-existing gap for every other PRD-058 raw-runtime adapter
-//! in this workspace (Anthropic, OpenAI, xAI): fully implemented and
-//! tested, none reachable from production dispatch either. Closing that gap
-//! for local workers specifically — without inventing the shared
-//! raw-runtime dispatch mechanism all four providers are waiting on — is
+//! **Production dispatch status:** as of PRD-100, `run::resolved_worker_plan`
+//! selects a `provider = "local"` registry entry like any other worker, and
+//! `run::build_selected_agents` constructs it through
+//! `familiar_ai_agent::raw_agent::RawAgent` over
+//! `familiar_ai_agent::local_worker::LocalInferenceAdapter` — never the
+//! CLI-driven path a same-named runtime id used to resolve to. The
+//! *hardware*-reservation and telemetry functions in this module
+//! (`define_pools_from_resource_profile`, `acquire_with_unknown_capacity_policy`,
+//! `persist_local_telemetry`, and friends) remain exercised only against a
+//! fake endpoint here and are not yet invoked from that dispatch path —
+//! `RawAgent`'s own budget reservation
+//! (`familiar_ai_daemon::agent_runtime::SqliteRawAgentHost`) is the
+//! provider-neutral PRD-064 nanoUSD-budget gate every raw-runtime worker
+//! uses, a distinct concern from this module's local-hardware capacity
+//! accounting. Wiring hardware-aware scheduling into that dispatch path is
 //! deferred to a follow-up change.
-//!
-//! Until that follow-up lands, `run::resolved_worker_plan` fails closed
-//! (`Err`, before any `CodingAgent` is built) whenever a stage selection
-//! lands on a worker declaring a `local` profile, rather than silently
-//! misdispatching it through the CLI-driven path: a local worker's
-//! `runtime` (e.g. `"ollama"`) can otherwise collide with an unrelated
-//! pre-existing CLI-driven adapter id of the same name, which would
-//! silently execute the worker through the wrong, unverified, unreserved,
-//! untelemetered path instead of refusing outright.
 
 use chrono::{DateTime, Utc};
 

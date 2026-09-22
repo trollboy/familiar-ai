@@ -12,28 +12,38 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use chrono::Utc;
 use rusqlite::Connection;
 
+use familiar_ai_agent::raw_agent::RawAgentHost;
 use familiar_ai_agent::raw_runtime::{
     resume_decision_for, AttemptUsage, AuthorityContext, CallRecord, CapabilityId, ExecutionError,
     ExecutionOutcome, JournalIntent, JournalResult, OfferedTool, ResumeDecision, RunOutcome,
-    ScopeAuthorizer, SideEffectClass, StopReason, ToolExecutor, ToolJournal, ValidatedCall,
+    ScopeAuthorizer, SideEffectClass, StopReason, ToolAuthorizer, ToolExecutor, ToolJournal,
+    ValidatedCall,
 };
 use familiar_ai_agent::token_discipline::{self, EditForm};
 #[cfg(unix)]
 use familiar_ai_agent::{finish_watchdog, spawn_watchdog};
 use familiar_ai_core::config::{AgentRuntimeSandboxConfig, TokenDisciplineConfig};
+use familiar_ai_core::{
+    GrantMode, ReservationOwnerIdentity, ResourceRequest, ResourceType, UnknownConsumptionPolicy,
+};
 use familiar_ai_llm::token_discipline::{
     bound_tool_result, file_read_requirement, slice_lines, FileReadRequirement, ToolResultWindow,
 };
 use familiar_ai_review::parse_expected_files;
 use familiar_ai_storage::repos::accounting::{AccountingRepository, UsageObservation};
 use familiar_ai_storage::repos::agent_runtime::{AgentRuntimeRepository, ToolResultOutcome};
+use familiar_ai_storage::repos::reservation::{
+    AcquireOutcome, ReservationRepository, SettlementObservation,
+};
 use familiar_ai_storage::repos::worker_selection::{
     WorkerSelectionRecord, WorkerSelectionRepository,
 };
+use familiar_ai_storage::Database;
 
 fn side_effect_str(class: SideEffectClass) -> &'static str {
     match class {
@@ -1145,4 +1155,729 @@ pub fn resume_readiness(
         }
     }
     Ok(ResumeReadiness::Ready)
+}
+
+// ---------------------------------------------------------------------
+// PRD-100: SqliteRawAgentHost — the concrete
+// `familiar_ai_agent::raw_agent::RawAgentHost` every owned-loop worker uses.
+// Bundles exactly the same SQLite-backed journal, sandboxed executor,
+// PRD-013 write-scope authorizer, and PRD-051 persistence this module
+// already supplies to the CLI-driven path, plus a PRD-064 budget
+// reservation gate scoped to one execution.
+// ---------------------------------------------------------------------
+
+/// Owns a database path and execution id rather than a borrowed
+/// `Connection`, opening a fresh connection per call. `RawAgentHost`'s
+/// methods return owned, `'static` trait objects (`familiar-ai-agent` never
+/// depends on `rusqlite`), so a journal bound to a borrowed connection
+/// cannot be handed back across that boundary — this is the owning
+/// equivalent of [`SqliteToolJournal`].
+struct OwningSqliteToolJournal {
+    execution_id: String,
+    /// Opened once, when the host hands out this journal, and held for its
+    /// whole lifetime rather than reopened per call. A transient failure to
+    /// open no longer surfaces as "no result recorded" from a call that ran
+    /// moments earlier through the same, then-healthy, connection; it
+    /// surfaces once, here, and every subsequent read/write on this journal
+    /// instance fails closed from the same recorded error instead of
+    /// re-attempting an open that a resumed loop cannot distinguish from
+    /// "never happened".
+    db: Result<Database, String>,
+}
+
+impl ToolJournal for OwningSqliteToolJournal {
+    fn record_intent(&mut self, intent: &JournalIntent) -> Result<(), String> {
+        let db = self.db.as_ref().map_err(|error| error.clone())?;
+        SqliteToolJournal::new(db.conn(), self.execution_id.clone()).record_intent(intent)
+    }
+
+    fn record_result(&mut self, call_id: &str, result: &JournalResult) -> Result<(), String> {
+        let db = self.db.as_ref().map_err(|error| error.clone())?;
+        SqliteToolJournal::new(db.conn(), self.execution_id.clone()).record_result(call_id, result)
+    }
+
+    /// The write-ahead journal's whole purpose is to make a destructive
+    /// call's already-executed status decisive. An unreadable journal
+    /// cannot prove "not done" — treating it as `None` (as a fresh,
+    /// never-called journal would report) converts an already-executed
+    /// destructive call into a replay candidate the instant the database
+    /// becomes briefly unreadable. Reporting a synthetic failed result
+    /// instead blocks re-execution unconditionally: the loop treats the
+    /// call as already resolved (unfavorably) rather than guessing it is
+    /// safe to run again.
+    fn result_for(&self, call_id: &str) -> Option<JournalResult> {
+        match self.db.as_ref() {
+            Ok(db) => SqliteToolJournal::new(db.conn(), self.execution_id.clone()).result_for(call_id),
+            Err(error) => Some(JournalResult::Failed {
+                detail: format!(
+                    "journal database unreadable, refusing to treat call {call_id:?} as not-yet-executed: {error}"
+                ),
+            }),
+        }
+    }
+
+    /// Purely an evidence field (`resume_point.journal_high_water_mark`);
+    /// actual resume decisions read `pending_intents` straight from
+    /// storage, never this count. Still, silently reporting 0 when the
+    /// database cannot be read claims "empty journal" for a journal whose
+    /// true size is unknown, so an unreadable database reports the
+    /// conservative sentinel `usize::MAX` instead of a fabricated count.
+    fn len(&self) -> usize {
+        match self.db.as_ref() {
+            Ok(db) => SqliteToolJournal::new(db.conn(), self.execution_id.clone()).len(),
+            Err(_) => usize::MAX,
+        }
+    }
+}
+
+/// The SQLite-backed `RawAgentHost` every PRD-100 owned-loop worker uses.
+/// Built fresh per execution (`familiar_ai_daemon::run`), since the
+/// PRD-013 write-scope it authorizes against and the execution id its
+/// journal/evidence key on are themselves per-attempt facts — never cached
+/// or reused across PRD attempts the way a `Box<dyn CodingAgent>` for a CLI
+/// worker can be.
+pub struct SqliteRawAgentHost {
+    pub database_path: PathBuf,
+    pub execution_id: String,
+    pub project_id: String,
+    pub worker_id: String,
+    pub stage: String,
+    pub runtime_id: String,
+    pub model_identity: Option<String>,
+    pub worktree_root: PathBuf,
+    pub sandbox: AgentRuntimeSandboxConfig,
+    pub token_discipline: TokenDisciplineConfig,
+    pub allowed_write_paths: Vec<String>,
+    pub granted_capabilities: Vec<CapabilityId>,
+    pub command_timeout_ms: u64,
+    pub max_output_bytes: usize,
+    reservation_id: Mutex<Option<String>>,
+    /// PRD-100 remediation (N1): `build_selected_agents` constructs one
+    /// `SqliteRawAgentHost` per stage and hands it back as a `Box<dyn
+    /// CodingAgent>` that is reused for every `execute()` call against that
+    /// stage — a remediation round, a review re-run, or a retried
+    /// implementation attempt. Scoping `reservation_pool_id`/
+    /// `owner_instance_id` by stage alone means the first `execute()` call
+    /// defines a pool sized to exactly its own request and consumes it via
+    /// `finish`'s settle; a second `execute()` on the same host then
+    /// re-acquires against an exhausted pool under a reservation-owner id
+    /// migration 042 requires to be globally unique, and is refused before
+    /// the adapter is ever reached. This counter is incremented once per
+    /// `reserve_execution_budget` call so every attempt within the stage
+    /// draws its own freshly-defined pool under its own reservation owner.
+    attempt_sequence: Mutex<u64>,
+}
+
+impl SqliteRawAgentHost {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        database_path: PathBuf,
+        execution_id: String,
+        project_id: String,
+        worker_id: String,
+        stage: String,
+        runtime_id: String,
+        model_identity: Option<String>,
+        worktree_root: PathBuf,
+        sandbox: AgentRuntimeSandboxConfig,
+        token_discipline: TokenDisciplineConfig,
+        allowed_write_paths: Vec<String>,
+        granted_capabilities: Vec<CapabilityId>,
+        command_timeout_ms: u64,
+        max_output_bytes: usize,
+    ) -> Self {
+        Self {
+            database_path,
+            execution_id,
+            project_id,
+            worker_id,
+            stage,
+            runtime_id,
+            model_identity,
+            worktree_root,
+            sandbox,
+            token_discipline,
+            allowed_write_paths,
+            granted_capabilities,
+            command_timeout_ms,
+            max_output_bytes,
+            reservation_id: Mutex::new(None),
+            attempt_sequence: Mutex::new(0),
+        }
+    }
+
+    /// Scoped by stage as well as execution: `build_selected_agents`
+    /// constructs a separate `SqliteRawAgentHost` per stage
+    /// (implementation/review/remediation) that all share one
+    /// `execution_id`. An execution-id-only pool id means the first stage
+    /// to run defines the pool sized to its own request, consumes it, and
+    /// every later stage's `acquire` against the same exhausted pool is
+    /// refused before it can submit a single inference attempt — silently
+    /// defeating cross-provider independent review. Each stage now defines
+    /// and draws from its own pool.
+    ///
+    /// Also scoped by attempt (see `attempt_sequence`'s doc comment): this
+    /// returns the pool id the *next* `reserve_execution_budget` call will
+    /// define/draw from, without mutating the counter — callers (including
+    /// tests) that need to pre-define a pool before reserving read the same
+    /// id `reserve_execution_budget` is about to use.
+    #[cfg(test)]
+    fn reservation_pool_id(&self) -> String {
+        let attempt = *self
+            .attempt_sequence
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.reservation_pool_id_for_attempt(attempt)
+    }
+
+    fn reservation_pool_id_for_attempt(&self, attempt: u64) -> String {
+        format!(
+            "raw-agent-budget:{}:{}:{attempt}",
+            self.execution_id, self.stage
+        )
+    }
+}
+
+impl RawAgentHost for SqliteRawAgentHost {
+    fn journal(&self) -> Box<dyn ToolJournal> {
+        Box::new(OwningSqliteToolJournal {
+            execution_id: self.execution_id.clone(),
+            db: Database::open(&self.database_path).map_err(|error| error.to_string()),
+        })
+    }
+
+    /// Confined to the calling request's own `working_directory`, never
+    /// `self.worktree_root`: `build_selected_agents` constructs and reuses
+    /// one `SqliteRawAgentHost` per stage across every `execute()` call on
+    /// that stage, but the isolated-review contract
+    /// (`StructuredReviewAdapter::review`, `familiar-ai-review`) runs a
+    /// review call against a freshly created temporary workspace, never the
+    /// repository worktree `self.worktree_root` was constructed with. Using
+    /// the construction-time root here would authorize every call against
+    /// the request's `working_directory` (`RequestScopedAuthorizer`) while
+    /// executing against a different tree entirely.
+    fn executor(&self, working_directory: &Path) -> Box<dyn ToolExecutor> {
+        Box::new(SandboxedToolExecutor {
+            worktree_root: working_directory.to_path_buf(),
+            sandbox: self.sandbox.clone(),
+            command_timeout_ms: self.command_timeout_ms,
+            max_output_bytes: self.max_output_bytes,
+            token_discipline: self.token_discipline.clone(),
+        })
+    }
+
+    fn authorizer(&self) -> Box<dyn ToolAuthorizer> {
+        Box::new(ScopeAuthorizer {
+            granted_capabilities: self.granted_capabilities.clone(),
+            allowed_write_paths: self.allowed_write_paths.clone(),
+            allowed_commands: self.sandbox.allowed_commands.clone(),
+            network_allowed: self.sandbox.network_allowed,
+        })
+    }
+
+    /// `attempt_id` carries the same per-host attempt sequence number
+    /// `reserve_execution_budget` just consumed for this call (see its
+    /// `attempt_sequence` doc comment) — `authority()` is always called
+    /// after `reserve_execution_budget` within one `RawAgent::execute` call,
+    /// so this is stable for that call and distinct from every other
+    /// `execute()` call on this same host. `RawAgent::execute` folds it into
+    /// every `AttemptId` it mints for this call, so two `execute()` calls
+    /// sharing one `execution_id` (a remediation round, a review re-run)
+    /// never collide on `agent_runtime_attempts`' primary key the way a
+    /// counter that restarted at zero every call once did.
+    fn authority(&self) -> AuthorityContext {
+        let attempt = *self
+            .attempt_sequence
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        AuthorityContext {
+            project_id: self.project_id.clone(),
+            execution_id: self.execution_id.clone(),
+            attempt_id: attempt.to_string(),
+            worker_id: self.worker_id.clone(),
+        }
+    }
+
+    /// `run_loop`'s `mint_attempt_id` hook is infallible, so the loop core
+    /// itself offers no seam to refuse an individual submission. This
+    /// acquires one PRD-064 reservation, scoped to this execution alone
+    /// (`reservation_pool_id`), before the loop is ever invoked — every
+    /// attempt the loop may go on to make draws against it, and a refusal
+    /// here means zero attempts run. A configured cost ceiling sizes the
+    /// reservation exactly; an absent ceiling still requires the gate to
+    /// succeed structurally (a minimal one-nanoUSD draw against effectively
+    /// unlimited capacity), so "no reservation" is never silently treated
+    /// as "unlimited budget, proceed anyway".
+    fn reserve_execution_budget(&self, max_cost_microusd: Option<u64>) -> Result<(), String> {
+        let (capacity, amount) = match max_cost_microusd {
+            Some(value) => {
+                let nanousd = value
+                    .checked_mul(1_000)
+                    .ok_or("cost ceiling exceeds nanoUSD range")?
+                    .max(1);
+                (nanousd, nanousd)
+            }
+            None => (i64::MAX as u64, 1),
+        };
+        // Consumed once per `reserve_execution_budget` call, before the
+        // pool/owner ids are built: every `execute()` call this host serves
+        // (a fresh attempt within the stage — a remediation round, a review
+        // re-run, a retried implementation attempt) gets a pool and owner
+        // id no earlier attempt has ever defined or drawn from, so a prior
+        // attempt's settled reservation can never refuse this one.
+        let attempt = {
+            let mut counter = self
+                .attempt_sequence
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let current = *counter;
+            *counter += 1;
+            current
+        };
+        let pool_id = self.reservation_pool_id_for_attempt(attempt);
+        let mut db = Database::open(&self.database_path).map_err(|error| error.to_string())?;
+        let mut repo = ReservationRepository::new(db.conn_mut());
+        // This pool id is unique per execution/stage/attempt, so in ordinary
+        // operation it is never already defined. Guarding on
+        // `pool_is_defined` rather than defining unconditionally means a
+        // smaller capacity someone else deliberately constrained this pool
+        // to (an operator override, or a test simulating exhaustion) is
+        // never silently widened back out by this call.
+        if !repo
+            .pool_is_defined(&pool_id, &ResourceType::NanousdBudget)
+            .map_err(|error| error.to_string())?
+        {
+            repo.define_pool(&pool_id, &ResourceType::NanousdBudget, capacity, false)
+                .map_err(|error| error.to_string())?;
+        }
+        // `owner_instance_id` is globally unique in `resource_reservations`
+        // (migration 042), so — like `reservation_pool_id` — it must be
+        // scoped by attempt as well as stage and execution: two attempts
+        // within one stage are two distinct reservation owners, not one
+        // owner acquiring twice.
+        let owner_instance_id = format!("raw-agent:{}:{}:{attempt}", self.execution_id, self.stage);
+        let owner = ReservationOwnerIdentity {
+            owner_instance_id: owner_instance_id.clone(),
+            installation_id: None,
+            nonce_or_generation: owner_instance_id,
+            owner_kind: "raw-agent".into(),
+            project_id: self.project_id.clone(),
+            execution_id: self.execution_id.clone(),
+            component_id: self.stage.clone(),
+        };
+        let requests = vec![ResourceRequest {
+            pool_id: pool_id.clone(),
+            resource_type: ResourceType::NanousdBudget,
+            amount,
+        }];
+        match repo
+            .acquire(&owner, &requests, GrantMode::AllOrNothing, None)
+            .map_err(|error| error.to_string())?
+        {
+            AcquireOutcome::Granted(grant) => {
+                *self
+                    .reservation_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(grant.reservation_id);
+                Ok(())
+            }
+            AcquireOutcome::Refused { .. } => Err(format!(
+                "no budget reservation available for execution {:?}",
+                self.execution_id
+            )),
+        }
+    }
+
+    fn abandon_execution(&self, detail: &str) -> Result<(), String> {
+        // Nothing ran: no attempt, no usage, no evidence. The reservation is
+        // released rather than settled, and no run outcome is persisted — a
+        // run that never happened must not appear in the ledger as one that
+        // did. `take()` so a later `finish` on this host cannot settle a
+        // reservation that was already released.
+        let reservation_id = self
+            .reservation_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let Some(reservation_id) = reservation_id else {
+            return Ok(());
+        };
+        let mut db = Database::open(&self.database_path).map_err(|error| error.to_string())?;
+        let mut repo = ReservationRepository::new(db.conn_mut());
+        let actor = format!("raw-agent:{}", self.execution_id);
+        tracing::warn!(
+            execution_id = %self.execution_id,
+            reservation_id = %reservation_id,
+            detail,
+            "releasing the budget reservation of an execution that never reached the loop"
+        );
+        repo.release(&reservation_id, &actor)
+            .map_err(|error| error.to_string())
+    }
+
+    fn finish(&self, outcome: &RunOutcome, effective_model: &str) -> Result<(), String> {
+        let mut db = Database::open(&self.database_path).map_err(|error| error.to_string())?;
+        let reservation_id = self
+            .reservation_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(reservation_id) = reservation_id {
+            let mut repo = ReservationRepository::new(db.conn_mut());
+            let actor = format!("raw-agent:{}", self.execution_id);
+            match outcome.stop_reason {
+                StopReason::Cancelled => {
+                    repo.release(&reservation_id, &actor)
+                        .map_err(|error| error.to_string())?;
+                }
+                StopReason::Timeout | StopReason::ProviderFailure { .. } => {
+                    repo.settle(
+                        &reservation_id,
+                        SettlementObservation::Unknown {
+                            policy: UnknownConsumptionPolicy::HoldReservation,
+                        },
+                        &actor,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                _ => {
+                    repo.settle(
+                        &reservation_id,
+                        SettlementObservation::Unknown {
+                            policy: UnknownConsumptionPolicy::SettleReservedAmount,
+                        },
+                        &actor,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        // Settlement is terminal. Clear the id so the caller's
+        // `ReservationGuard`, which stays armed until this function returns
+        // `Ok`, finds nothing to release if `persist_run_outcome` below
+        // fails — and so a later `finish` on this host cannot settle twice.
+        *self
+            .reservation_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        // The model the attempts ran against, as computed once by
+        // `RawAgent::execute` — not `self.model_identity`, which is the
+        // worker's configured model captured at construction and is wrong
+        // whenever the request carried an override.
+        persist_run_outcome(
+            db.conn(),
+            &self.execution_id,
+            &self.stage,
+            &self.worker_id,
+            &self.runtime_id,
+            Some(effective_model),
+            None,
+            &self.token_discipline,
+            outcome,
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod raw_agent_host_tests {
+    use super::*;
+    use familiar_ai_agent::raw_runtime::{LoopEvidence, ResumePoint};
+
+    fn setup(execution_id: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("db.sqlite");
+        let db = Database::open(&database_path).unwrap();
+        db.run_migrations().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO execution_history(execution_id,started_at,agent,outcome,repository,worktree,prd_path,unavailable_fields) VALUES(?1,?2,'raw-runtime','running','repo','wt','docs/prds/PRD-100.md','[]')",
+                rusqlite::params![execution_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        (dir, database_path)
+    }
+
+    fn host(
+        database_path: PathBuf,
+        execution_id: &str,
+        worktree_root: PathBuf,
+    ) -> SqliteRawAgentHost {
+        host_with_stage(database_path, execution_id, "implementation", worktree_root)
+    }
+
+    fn host_with_stage(
+        database_path: PathBuf,
+        execution_id: &str,
+        stage: &str,
+        worktree_root: PathBuf,
+    ) -> SqliteRawAgentHost {
+        SqliteRawAgentHost::new(
+            database_path,
+            execution_id.into(),
+            "proj_1".into(),
+            format!("worker_{stage}"),
+            stage.into(),
+            "anthropic-api".into(),
+            Some("claude-sonnet-5".into()),
+            worktree_root,
+            AgentRuntimeSandboxConfig::default(),
+            TokenDisciplineConfig::default(),
+            vec!["src/lib.rs".into()],
+            vec![CapabilityId::ApplyEdit],
+            2_000,
+            4096,
+        )
+    }
+
+    fn stub_outcome(stop_reason: StopReason) -> RunOutcome {
+        RunOutcome {
+            stop_reason,
+            attempts: vec![],
+            evidence: LoopEvidence {
+                prompt_template_version: "v1".into(),
+                worker_spec_identity: "wspec-sha256:test".into(),
+                worker_empirical_version: "wver-sha256:test".into(),
+                offered_tools: vec![] as Vec<OfferedTool>,
+                calls: vec![],
+                stop_reason,
+                resume_point: ResumePoint {
+                    conversation_messages: 0,
+                    journal_high_water_mark: 0,
+                },
+                iterations: 1,
+            },
+            final_text: None,
+        }
+    }
+
+    #[test]
+    fn reservation_succeeds_with_a_configured_ceiling_and_is_committed_on_completion() {
+        let (_dir, database_path) = setup("exec_1");
+        let worktree = tempfile::tempdir().unwrap();
+        let host = host(
+            database_path.clone(),
+            "exec_1",
+            worktree.path().to_path_buf(),
+        );
+        host.reserve_execution_budget(Some(1_000)).unwrap();
+        host.finish(
+            &stub_outcome(StopReason::Completed {
+                structured_output: false,
+            }),
+            "fake-model",
+        )
+        .unwrap();
+
+        let db = Database::open(&database_path).unwrap();
+        let state: String = db
+            .conn()
+            .query_row(
+                "SELECT state FROM resource_reservations WHERE execution_id='exec_1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "committed");
+    }
+
+    /// Remediation regression (`reservation-leaked-on-pre-loop-failure`),
+    /// host half: an execution that acquired its reservation and then failed
+    /// before the loop ran hands the host `abandon_execution`, and the
+    /// `resource_reservations` row reaches the terminal `released` state
+    /// rather than staying `held`. A later `finish` on the same host must
+    /// not touch the released row.
+    #[test]
+    fn an_abandoned_execution_releases_its_reservation_row() {
+        let (_dir, database_path) = setup("exec_abandoned");
+        let worktree = tempfile::tempdir().unwrap();
+        let host = host(
+            database_path.clone(),
+            "exec_abandoned",
+            worktree.path().to_path_buf(),
+        );
+        host.reserve_execution_budget(Some(1_000)).unwrap();
+        host.abandon_execution("injected pre-loop failure").unwrap();
+
+        let db = Database::open(&database_path).unwrap();
+        let state: String = db
+            .conn()
+            .query_row(
+                "SELECT state FROM resource_reservations WHERE execution_id='exec_abandoned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "released");
+        assert!(
+            host.reservation_id.lock().unwrap().is_none(),
+            "an abandoned reservation must not be settled again by a later finish"
+        );
+    }
+
+    /// PRD-100 acceptance criterion: an attempt without a reservation cannot
+    /// run. A pool too small to grant the requested amount refuses the
+    /// reservation outright.
+    #[test]
+    fn insufficient_pool_capacity_refuses_the_reservation() {
+        let (_dir, database_path) = setup("exec_2");
+        let worktree = tempfile::tempdir().unwrap();
+        let host = host(
+            database_path.clone(),
+            "exec_2",
+            worktree.path().to_path_buf(),
+        );
+        // Pre-define a pool far smaller than the requested ceiling so the
+        // acquire step is refused rather than granted.
+        {
+            let mut db = Database::open(&database_path).unwrap();
+            let mut repo = ReservationRepository::new(db.conn_mut());
+            repo.define_pool(
+                &host.reservation_pool_id(),
+                &ResourceType::NanousdBudget,
+                10,
+                false,
+            )
+            .unwrap();
+        }
+        let error = host.reserve_execution_budget(Some(1_000_000)).unwrap_err();
+        assert!(error.contains("no budget reservation available"), "{error}");
+    }
+
+    /// N1 regression: `build_selected_agents` constructs one
+    /// `SqliteRawAgentHost` per stage and `RawAgent::execute` composes
+    /// `reserve_execution_budget` + `finish` on that same host for every
+    /// attempt within the stage — a remediation round, a review re-run, or a
+    /// retried implementation attempt, not just a second stage. Before
+    /// scoping the pool id and `owner_instance_id` by attempt as well as
+    /// stage, the first attempt defined a pool sized to exactly its own
+    /// request and consumed it via `finish`'s settle; the second attempt's
+    /// `acquire` against that same exhausted pool, under a reservation-owner
+    /// id migration 042 requires to be globally unique, was always refused
+    /// before the adapter could ever be reached.
+    #[test]
+    fn a_second_attempt_on_the_same_host_after_finish_still_gets_a_reservation() {
+        let (_dir, database_path) = setup("exec_remediation_round");
+        let worktree = tempfile::tempdir().unwrap();
+        let host = host(
+            database_path,
+            "exec_remediation_round",
+            worktree.path().to_path_buf(),
+        );
+
+        host.reserve_execution_budget(Some(1_000))
+            .expect("first attempt must be granted a reservation");
+        host.finish(
+            &stub_outcome(StopReason::Completed {
+                structured_output: false,
+            }),
+            "fake-model",
+        )
+        .expect("first attempt's reservation must settle cleanly");
+
+        host.reserve_execution_budget(Some(1_000)).expect(
+            "a second attempt on the same host, after the first attempt's reservation settled, \
+             must still be granted its own reservation rather than refused against an \
+             already-exhausted pool",
+        );
+        host.finish(
+            &stub_outcome(StopReason::Completed {
+                structured_output: false,
+            }),
+            "fake-model",
+        )
+        .expect("second attempt's reservation must settle cleanly");
+    }
+
+    /// F1 regression: `build_selected_agents` constructs one
+    /// `SqliteRawAgentHost` per stage but all of them share one
+    /// `execution_id`. Before scoping the reservation pool id by stage, the
+    /// first stage to reserve defined a pool sized to its own request,
+    /// consumed it, and the second stage's `acquire` against that same
+    /// exhausted pool was always refused — defeating cross-provider
+    /// independent review before a single inference attempt could run.
+    #[test]
+    fn implementation_and_review_stages_sharing_one_execution_id_each_get_a_reservation() {
+        let (_dir, database_path) = setup("exec_shared");
+        let worktree = tempfile::tempdir().unwrap();
+        let implementation_host = host_with_stage(
+            database_path.clone(),
+            "exec_shared",
+            "implementation",
+            worktree.path().to_path_buf(),
+        );
+        let review_host = host_with_stage(
+            database_path.clone(),
+            "exec_shared",
+            "review",
+            worktree.path().to_path_buf(),
+        );
+
+        implementation_host
+            .reserve_execution_budget(Some(1_000))
+            .expect("implementation stage must be granted its own reservation");
+        review_host
+            .reserve_execution_budget(Some(1_000))
+            .expect("review stage must be granted its own reservation, not refused by the implementation stage's pool");
+
+        assert_ne!(
+            implementation_host.reservation_pool_id(),
+            review_host.reservation_pool_id(),
+            "each stage must draw from its own budget pool"
+        );
+    }
+
+    #[test]
+    fn write_outside_allowed_paths_is_refused_by_the_authorizer() {
+        let (_dir, database_path) = setup("exec_3");
+        let worktree = tempfile::tempdir().unwrap();
+        let host = host(database_path, "exec_3", worktree.path().to_path_buf());
+        let authorizer = host.authorizer();
+        let authority = host.authority();
+        let call = ValidatedCall {
+            call_id: "c1".into(),
+            capability: CapabilityId::ApplyEdit,
+            arguments: serde_json::json!({"path": "secrets/keys.pem", "content": "x"}),
+            argument_hash: "h".into(),
+        };
+        assert!(matches!(
+            authorizer.authorize(&call, &authority),
+            familiar_ai_agent::raw_runtime::AuthorizationDecision::Refused { .. }
+        ));
+    }
+
+    /// F2 regression: an unreadable journal database must fail closed, not
+    /// report `None` — which `process_tool_call` treats identically to
+    /// "this call has never run", making a resumed loop replay an
+    /// already-executed (possibly destructive) call the instant its
+    /// database briefly cannot be opened.
+    #[test]
+    fn journal_open_failure_fails_closed_instead_of_reporting_no_result() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory can never be opened as a SQLite database file, giving
+        // a deterministic, permission-independent open failure.
+        let unreadable_path = dir.path().join("not-a-database");
+        std::fs::create_dir(&unreadable_path).unwrap();
+
+        let journal = OwningSqliteToolJournal {
+            execution_id: "exec_unreadable".into(),
+            db: Database::open(&unreadable_path).map_err(|error| error.to_string()),
+        };
+        assert!(
+            journal.db.is_err(),
+            "the database open must actually fail for this test to be meaningful"
+        );
+
+        let prior = journal.result_for("destructive-call-1");
+        assert!(
+            matches!(prior, Some(JournalResult::Failed { .. })),
+            "an unreadable journal must fail closed instead of reporting 'no result recorded': {prior:?}"
+        );
+
+        assert_eq!(
+            journal.len(),
+            usize::MAX,
+            "an unreadable journal must not silently claim to be empty"
+        );
+    }
 }
