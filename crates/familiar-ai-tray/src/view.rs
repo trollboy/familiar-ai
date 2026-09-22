@@ -317,6 +317,7 @@ pub struct BacklogRow {
     /// `blocked`, `failed`, `awaiting_feedback`). Falls back to the raw
     /// ledger status when a daemon predating PRD-109 answers.
     pub lifecycle: String,
+    pub lifecycle_divergence: Option<String>,
     pub updated_at: String,
     /// Set when the file behind this entry has disappeared from the working
     /// tree. The row survives so the state is visible, but nothing can be run
@@ -343,6 +344,11 @@ pub fn build_backlog_view(backlog: &Value) -> BacklogView {
             prd_path: str_at(row, "prd_path").to_string(),
             status: status.clone(),
             lifecycle,
+            lifecycle_divergence: row
+                .get("lifecycle_divergence")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             updated_at: str_at(row, "updated_at").to_string(),
             missing_since: row
                 .get("missing_since")
@@ -868,6 +874,7 @@ pub struct DependencyGanttNode {
     /// PRD-109: the derived lifecycle from the backlog row, falling back to
     /// the raw status when the row is missing or the daemon predates it.
     pub lifecycle: String,
+    pub lifecycle_divergence: Option<String>,
     pub wave: usize,
     pub depends_on: Vec<String>,
     pub unlocks: Vec<String>,
@@ -892,6 +899,10 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
     let lifecycle_by_path: HashMap<&str, &str> = backlog
         .iter()
         .map(|row| (row.prd_path.as_str(), row.lifecycle.as_str()))
+        .collect();
+    let divergence_by_path: HashMap<&str, Option<&str>> = backlog
+        .iter()
+        .map(|row| (row.prd_path.as_str(), row.lifecycle_divergence.as_deref()))
         .collect();
     let entries = items(dependencies);
     let mut parents: HashMap<String, Vec<String>> = HashMap::new();
@@ -965,6 +976,10 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
             prd_id: id,
             status,
             lifecycle,
+            lifecycle_divergence: divergence_by_path
+                .get(path.as_str())
+                .and_then(|value| *value)
+                .map(str::to_string),
             prd_path: path,
             wave,
             depends_on,
@@ -1947,6 +1962,7 @@ mod tests {
             prd_path: "b.md".into(),
             status: "pending".into(),
             lifecycle: String::new(),
+            lifecycle_divergence: None,
             updated_at: String::new(),
             missing_since: None,
         };
@@ -1962,6 +1978,7 @@ mod tests {
             prd_path: path.to_string(),
             status: "pending".to_string(),
             lifecycle: String::new(),
+            lifecycle_divergence: None,
             updated_at: "2026-09-21T00:00:00Z".to_string(),
             missing_since: None,
         };
@@ -1996,6 +2013,7 @@ mod tests {
             prd_path: path.into(),
             status: status.into(),
             lifecycle: String::new(),
+            lifecycle_divergence: None,
             updated_at: String::new(),
             missing_since: missing.then(|| "2026-08-09".to_string()),
         };
@@ -2051,6 +2069,7 @@ mod tests {
                 prd_path: "a.md".into(),
                 status: "pending".into(),
                 lifecycle: String::new(),
+                lifecycle_divergence: None,
                 updated_at: String::new(),
                 missing_since: None,
             }],
@@ -2065,6 +2084,7 @@ mod tests {
             prd_path: "a.md".into(),
             status: "pending".into(),
             lifecycle: String::new(),
+            lifecycle_divergence: None,
             updated_at: String::new(),
             missing_since: None,
         };
@@ -2079,6 +2099,7 @@ mod tests {
             prd_path: "gone.md".into(),
             status: "pending".into(),
             lifecycle: String::new(),
+            lifecycle_divergence: None,
             updated_at: String::new(),
             missing_since: Some("2026-08-09T08:20:17Z".into()),
         };
@@ -2939,6 +2960,7 @@ mod rounds_tests {
             prd_path: path.to_string(),
             status: status.to_string(),
             lifecycle: String::new(),
+            lifecycle_divergence: None,
             updated_at: "2026-09-01T00:00:00Z".to_string(),
             missing_since: None,
         }

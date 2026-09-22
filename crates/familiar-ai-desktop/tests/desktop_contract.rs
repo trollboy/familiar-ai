@@ -91,7 +91,18 @@ fn status_pills_have_explicit_contrast_and_normalized_names() {
     let javascript = include_str!("../ui/app.js");
     let css = include_str!("../ui/styles.css");
     assert!(javascript.contains("replace(/[^a-z0-9]+/g,'-')"));
-    for status in ["completed", "not-found", "in-progress", "not-registered"] {
+    for status in [
+        "draft",
+        "ready",
+        "implementing",
+        "testing",
+        "reviewed",
+        "approved",
+        "completed",
+        "blocked",
+        "failed",
+        "awaiting-feedback",
+    ] {
         assert!(
             css.contains(&format!(".status-{status}")),
             "missing explicit pill style for {status}"
@@ -104,14 +115,17 @@ fn status_pills_have_explicit_contrast_and_normalized_names() {
 fn backlog_can_hide_completed_prds_without_losing_the_dependency_graph() {
     let javascript = include_str!("../ui/app.js");
     assert!(javascript.contains("id=\"hide-completed\""));
-    assert!(javascript.contains("n.dataset.status==='completed'"));
+    assert!(javascript.contains("n.dataset.lifecycle==='completed'"));
     assert!(javascript.contains("state.hideCompleted"));
+    assert!(javascript.contains("id=\"lifecycle-filter\""));
+    assert!(javascript.contains("Ledger: ${esc(node.status)}"));
 }
 
 #[test]
 fn dependency_waves_have_gated_batch_launch_controls() {
     let javascript = include_str!("../ui/app.js");
     assert!(javascript.contains(">Launch wave</button>"));
+    assert!(javascript.contains("lifecycle(n)==='ready'"));
     assert!(javascript.contains("launchable.length===unfinished.length"));
     assert!(javascript.contains("Promise.all(paths.map(path=>mutate({action:'start_prd'"));
     assert!(javascript.contains("disabled title="));
