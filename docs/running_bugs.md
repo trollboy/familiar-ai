@@ -243,6 +243,44 @@ appears with no entry, or with a status a reader cannot classify.
   `every_selection_decision_the_driver_emits_is_persistable` inserts each
   one against a migrated database.
 
+### FAM-BUG-079 — The daemon never reconciled the backlog itself, so the dashboard and dependency Gantt could disagree with the filesystem
+
+- **Status:** Fixed 2026-09-22 (PRD-108).
+- **Found:** 2026-09-22, implementing PRD-108. `familiar-ai-core::backlog`'s
+  discovery and `reconcile_and_snapshot` were only ever invoked from
+  synchronous CLI paths (`next`, `run`, `drive`, `backlog`, `resume`) — never
+  from the long-running daemon. The daemon's watcher updated file summaries
+  and generic lifecycle rows but never touched the backlog.
+- **Detail:** `DaemonDataSource::dependencies` discovered PRDs live off disk
+  on every call, but joined them against `stewardship::list_backlog`'s
+  ledger read, which reflected whatever a CLI invocation had last written —
+  possibly nothing, possibly stale. A PRD pulled in while the daemon was
+  running had no ledger row and its dependents rendered its status as
+  `"not found"`, even though the file existed and could be read; the first
+  dependency-Gantt implementation rendered exactly this. A PRD moved into
+  `docs/prds/done/` could likewise sit unreconciled, its old path still
+  looking like open work until some CLI command happened to reconcile it.
+- **Fix:** a new `BacklogReconciler`
+  (`familiar-ai-daemon::backlog_reconciler`) owns discovery and
+  reconciliation for the daemon, invoked from three places: once for every
+  configured repository at startup before the control socket or dashboard
+  exist; debounced and coalesced per repository from watcher events whose
+  paths fall under a repository's configured PRD locations; and a bounded,
+  single-flight reconcile-on-read fallback for the operator `backlog` and
+  `dependencies` queries and the HTTP dashboard's `/stewardship/backlog`.
+  A reconciliation that actually changes the backlog publishes one
+  `OperatorDispatcher` event so connected Tauri/GTK clients refresh through
+  their existing gap/restart logic; a no-op reconciliation (in particular,
+  the read fallback re-checking an already-current repository) publishes
+  nothing, so polling a repository with nothing new to discover cannot turn
+  into a self-sustaining refresh loop. A failed reconciliation preserves the
+  prior snapshot and records a repository-scoped diagnostic. A dependency
+  whose file is discovered but has no ledger row yet is now labeled
+  `"unenrolled"`, never `"not found"`
+  — that label is reserved for a dependency with no matching file at all.
+  Pinned by `crates/familiar-ai-daemon/tests/watcher_backlog_reconciliation.rs`
+  against a real temporary Git repository and a real `FileWatcher`.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable

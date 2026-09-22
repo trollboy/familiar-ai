@@ -1,4 +1,5 @@
 pub mod agent_runtime;
+pub mod backlog_reconciler;
 pub mod batch_review;
 pub mod billing;
 pub mod cli;

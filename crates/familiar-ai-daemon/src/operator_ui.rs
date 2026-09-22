@@ -92,6 +92,30 @@ impl OperatorDispatcher {
         Ok(reply)
     }
 
+    /// Publish one ordered operator change event that was not caused by a
+    /// client mutation — a backlog reconciliation committed by the daemon's
+    /// own watcher/startup/read-fallback paths (PRD-108), rather than
+    /// something a Tauri or GTK client asked for through [`Self::mutate`].
+    /// Bumps the revision the same way `mutate` does, so `observe` callers
+    /// cannot distinguish the two — a connected client refreshes either way.
+    pub fn record_event(&self, topic: impl Into<String>) -> Result<u64, OperatorError> {
+        let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| OperatorError::unavailable("operator event state is unavailable"))?;
+        events.push_back(OperatorEvent {
+            protocol_version: OPERATOR_PROTOCOL_VERSION,
+            daemon_generation: self.daemon_generation,
+            sequence: revision,
+            topic: topic.into(),
+        });
+        while events.len() > MAX_DEDUPLICATION_ENTRIES {
+            events.pop_front();
+        }
+        Ok(revision)
+    }
+
     pub fn observe(&self, after: u64, limit: usize) -> Result<Vec<OperatorEvent>, OperatorError> {
         if limit == 0 || limit > 200 {
             return Err(OperatorError::invalid(

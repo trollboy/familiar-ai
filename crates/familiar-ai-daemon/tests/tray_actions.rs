@@ -86,6 +86,12 @@ fn harness() -> Harness {
     };
     let repo = repo_dir.to_string_lossy().into_owned();
     let status = Arc::new(Mutex::new(familiar_ai_core::AppStatus::new()));
+    let reconciler = familiar_ai_daemon::backlog_reconciler::BacklogReconciler::new(
+        db.clone(),
+        familiar_ai_core::Config::default(),
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_secs(3600),
+    );
     Harness {
         source: DaemonDataSource::new(
             db.clone(),
@@ -95,6 +101,7 @@ fn harness() -> Harness {
             paths,
             status.clone(),
             None,
+            reconciler,
         ),
         db,
         status,
