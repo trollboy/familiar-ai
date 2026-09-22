@@ -771,6 +771,27 @@ model = "legacy"
         assert!(policy.validate().unwrap_err().contains("implementer"));
     }
 
+    /// PRD-097: `forge = "none"` needs no adapter executable at all — there
+    /// is no forge command to run it through — but every other forge still
+    /// requires a configured `provider_argv`.
+    #[test]
+    fn no_forge_delivery_needs_no_provider_argv() {
+        let mut policy = DeliveryConfig {
+            mode: DeliveryMode::ReviewedPrManual,
+            max_deliveries_per_session: 1,
+            remote: "origin".into(),
+            base: "main".into(),
+            forge: Forge::None,
+            ..DeliveryConfig::default()
+        };
+        assert!(policy.validate().is_ok());
+        policy.forge = Forge::Github;
+        assert!(policy
+            .validate()
+            .unwrap_err()
+            .contains("configured provider_argv"));
+    }
+
     #[test]
     fn persistent_worker_requires_finite_throttled_runs() {
         let mut worker = WorkerConfig {
@@ -811,6 +832,73 @@ model = "legacy"
         assert!(from(serde_json::json!({"enabled": false}))
             .validate()
             .is_ok());
+    }
+
+    /// PRD-097: `forge` is validated closed exactly as provider kinds are —
+    /// an unknown identity fails deserialization rather than silently
+    /// behaving like GitHub. An omitted `forge` always defaults to `github`,
+    /// the pre-PRD-097 baseline, regardless of whether `provider_argv`
+    /// happens to be populated: inferring `none` from an empty
+    /// `provider_argv` let a missing or mistyped adapter executable
+    /// validate as an intentional "no forge" section instead of failing
+    /// closed (see `delivery_enabled_without_provider_argv_or_explicit_forge_none_fails_validation`
+    /// below). `Forge::None` is reserved for a section that spells
+    /// `forge = "none"` explicitly.
+    #[test]
+    fn forge_identity_is_closed_and_defaults_to_github_when_omitted() {
+        let from =
+            |json: serde_json::Value| -> DeliveryConfig { serde_json::from_value(json).unwrap() };
+        assert_eq!(from(serde_json::json!({})).forge, Forge::Github);
+        assert_eq!(
+            from(serde_json::json!({"provider_argv": ["gh"]})).forge,
+            Forge::Github
+        );
+        assert_eq!(
+            from(serde_json::json!({"forge": "gitlab", "provider_argv": ["glab"]})).forge,
+            Forge::Gitlab
+        );
+        assert_eq!(
+            from(serde_json::json!({"forge": "gitea"})).forge,
+            Forge::Gitea
+        );
+        assert_eq!(
+            from(serde_json::json!({"provider_argv": ["gh"], "forge": "none"})).forge,
+            Forge::None
+        );
+        assert_eq!(
+            from(serde_json::json!({"forge": "none"})).forge,
+            Forge::None
+        );
+
+        let error =
+            serde_json::from_value::<DeliveryConfig>(serde_json::json!({"forge": "bitbucket"}))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("bitbucket"), "{error}");
+    }
+
+    /// PRD-097 remediation: a section that enables delivery but never
+    /// declares `forge = "none"` must still fail validation when it has no
+    /// `provider_argv` — an omitted or mistyped adapter executable is a
+    /// misconfiguration, not a silent, successful stop at
+    /// `awaiting_manual_publication`.
+    #[test]
+    fn delivery_enabled_without_provider_argv_or_explicit_forge_none_fails_validation() {
+        let policy = DeliveryConfig {
+            mode: DeliveryMode::ReviewedPrManual,
+            max_deliveries_per_session: 1,
+            remote: "origin".into(),
+            base: "main".into(),
+            // `forge` deliberately left at the struct default (`Github`) to
+            // stand in for an omitted `forge` field, with `provider_argv`
+            // left empty as if the operator forgot to configure it.
+            ..DeliveryConfig::default()
+        };
+        assert_eq!(policy.forge, Forge::Github);
+        assert!(policy
+            .validate()
+            .unwrap_err()
+            .contains("configured provider_argv"));
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod control_plane;
 pub mod control_worker;
 pub mod delivery;
 pub mod drive;
+pub mod forge;
 pub mod launchd;
 pub mod local_transport;
 pub mod local_worker_runtime;

@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use familiar_ai_core::{DeliveryConfig, DeliveryMode};
 use familiar_ai_daemon::delivery::{deliver_with, CommandRunner, DeliveryJournal};
+use familiar_ai_daemon::forge::ChangeRequestId;
 use familiar_ai_daemon::worktree::WorktreeOwnership;
 use familiar_ai_storage::{Database, DriverRepository};
 
@@ -94,7 +95,11 @@ fn published_delivery_resume_skips_prior_external_effects() {
             prd_id: owner.prd_id,
             worktree: owner.worktree,
             branch: "familiar/session-security/PRD-037".into(),
-            pr_number: Some(37),
+            change_request: Some(ChangeRequestId {
+                id: "37".into(),
+                display: None,
+                url: None,
+            }),
             phase: "published".into(),
             detail: Some("reboot-equivalent interruption".into()),
             updated_at: "2026-08-30T00:00:00Z".into(),
@@ -218,7 +223,14 @@ fn ambiguous_pr_create_is_reconciled_without_repeating_external_effects() {
 
     let delivered = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(delivered.phase, "awaiting_merge_authority");
-    assert_eq!(delivered.pr_number, Some(37));
+    assert_eq!(
+        delivered.change_request,
+        Some(ChangeRequestId {
+            id: "37".into(),
+            display: None,
+            url: None
+        })
+    );
     let calls_after_ambiguous_result = runner.calls.lock().unwrap().len();
 
     let resumed = deliver_with(&ownership, &policy, "repo", &runner).unwrap();

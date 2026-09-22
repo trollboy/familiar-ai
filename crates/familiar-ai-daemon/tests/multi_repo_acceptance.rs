@@ -24,6 +24,7 @@ use familiar_ai_core::{
 };
 use familiar_ai_daemon::delivery::{deliver_with, CommandRunner};
 use familiar_ai_daemon::drive::{drive, DriveWarrant};
+use familiar_ai_daemon::forge::ChangeRequestId;
 use familiar_ai_daemon::plan;
 use familiar_ai_daemon::run::AgentSet;
 use familiar_ai_daemon::worktree::{recover_incomplete, WorktreeOwnership};
@@ -990,7 +991,14 @@ fn manual_reviewed_pr_delivery_stops_before_merge_or_deploy() {
     let runner = ScriptedRunner::new();
     let delivered = deliver_with(&ownership, &policy, "repo", &runner).unwrap();
     assert_eq!(delivered.phase, "awaiting_merge_authority");
-    assert_eq!(delivered.pr_number, Some(37));
+    assert_eq!(
+        delivered.change_request,
+        Some(ChangeRequestId {
+            id: "37".into(),
+            display: None,
+            url: None
+        })
+    );
     let calls = runner.calls.lock().unwrap();
     assert!(!calls.iter().any(|call| call.iter().any(|v| v == "merge")));
     assert!(!calls
