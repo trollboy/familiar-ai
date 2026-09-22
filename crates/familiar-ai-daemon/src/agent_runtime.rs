@@ -1552,6 +1552,14 @@ impl RawAgentHost for SqliteRawAgentHost {
                 }
             }
         }
+        // Settlement is terminal. Clear the id so the caller's
+        // `ReservationGuard`, which stays armed until this function returns
+        // `Ok`, finds nothing to release if `persist_run_outcome` below
+        // fails — and so a later `finish` on this host cannot settle twice.
+        *self
+            .reservation_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         // The model the attempts ran against, as computed once by
         // `RawAgent::execute` — not `self.model_identity`, which is the
         // worker's configured model captured at construction and is wrong

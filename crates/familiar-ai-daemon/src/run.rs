@@ -1799,19 +1799,21 @@ fn execute_tracked_inner(
     let finalization = terminal(&timer, result, outcome, unavailable, config);
     finalize(&db, &id, &finalization)
         .map_err(|e| retained_traced(trace, &target, "history_failed", e))?;
-    persist_accounting_observations(
-        &db,
-        &id,
-        &started_at,
-        result,
-        outcome,
-        implementation_entry.adapter.as_str(),
-        &context.repository.worktree,
-        &finalization,
-        output_register,
-        config,
-    )
-    .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
+    if !implementation_usage_is_persisted_by_the_host(&implementation_entry.adapter) {
+        persist_accounting_observations(
+            &db,
+            &id,
+            &started_at,
+            result,
+            outcome,
+            implementation_entry.adapter.as_str(),
+            &context.repository.worktree,
+            &finalization,
+            output_register,
+            config,
+        )
+        .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
+    }
     if execution.is_err() {
         persist_probation_outcome(
             &db,
@@ -3158,6 +3160,20 @@ fn finalize(db: &Database, id: &str, value: &ExecutionFinalization) -> Result<()
             execution_id: id.into(),
             detail: e.to_string(),
         })
+}
+
+/// Whether the implementation stage's PRD-051 usage rows are written by the
+/// worker's own host rather than by this harness. The owned raw loop's
+/// `SqliteRawAgentHost::finish` persists one observation per attempt with
+/// the full identity (`persist_run_outcome`); writing the aggregate row here
+/// as well recorded every raw implementation twice, under two adapter labels
+/// and two source hashes, which `append_observation`'s hash dedup cannot
+/// catch. CLI workers have no host-side writer and keep the harness row.
+fn implementation_usage_is_persisted_by_the_host(adapter: &AgentAdapterKind) -> bool {
+    matches!(
+        adapter,
+        AgentAdapterKind::RawAgentLoop | AgentAdapterKind::Ollama
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5221,5 +5237,31 @@ estimated_cost_microusd = 1
                 "diagnostic must name the refused adapter: {error}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod raw_accounting_ownership_tests {
+    use super::*;
+
+    /// Review finding (double PRD-051 recording): the harness must not append
+    /// an aggregate implementation observation for a worker whose host
+    /// already persisted one row per attempt. Widening this predicate to a
+    /// CLI worker would drop that worker's only usage row; narrowing it
+    /// would double-count the owned loop again.
+    #[test]
+    fn only_owned_loop_workers_have_host_persisted_usage() {
+        assert!(implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::RawAgentLoop
+        ));
+        assert!(implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::Ollama
+        ));
+        assert!(!implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::ClaudeCode
+        ));
+        assert!(!implementation_usage_is_persisted_by_the_host(
+            &AgentAdapterKind::Codex
+        ));
     }
 }

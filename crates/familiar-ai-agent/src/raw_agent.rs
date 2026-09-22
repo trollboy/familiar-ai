@@ -414,17 +414,32 @@ impl CodingAgent for RawAgent {
         // one did, colliding on `agent_runtime_attempts`' primary key.
         let attempt_scope = authority.attempt_id.clone();
 
-        // A per-request timeout narrows the worker's own configured ceiling
-        // rather than replacing it outright — either one stopping the loop
-        // is a legitimate `StopReason::Timeout`.
-        let max_wall_clock_ms = match (self.spec.ceilings.max_wall_clock_ms, request.timeout_ms) {
-            (Some(configured), Some(requested)) => Some(configured.min(requested)),
-            (Some(configured), None) => Some(configured),
-            (None, Some(requested)) => Some(requested),
-            (None, None) => None,
-        };
+        // A per-request timeout, and the warrant's per-execution duration
+        // ceiling, each narrow the worker's own configured ceiling rather
+        // than replacing it — whichever is tightest stops the loop, and
+        // every one of them is a legitimate `StopReason::Timeout`.
+        let max_wall_clock_ms = [
+            self.spec.ceilings.max_wall_clock_ms,
+            request.timeout_ms,
+            request.budget.max_duration_ms.map(|value| value.get()),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        // The warrant's per-execution token ceiling binds the loop the same
+        // way: `run_loop` stops with `TokenOrContextCeiling` once cumulative
+        // output tokens reach `max_output_tokens`, so folding the budget in
+        // here is what makes `budget_capability().tokens` a true statement.
+        let max_output_tokens = [
+            self.spec.ceilings.max_output_tokens,
+            request.budget.max_tokens.map(|value| value.get()),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let ceilings = LoopCeilings {
             max_wall_clock_ms,
+            max_output_tokens,
             ..self.spec.ceilings
         };
 
@@ -481,14 +496,20 @@ impl CodingAgent for RawAgent {
 
         let _ = write!(output, "{}", outcome.final_text.as_deref().unwrap_or(""));
 
-        // The loop reached a terminal outcome; `finish` now owns the
-        // reservation's settlement.
-        reservation_guard.armed = false;
-        if let Err(detail) = self.host.finish(&outcome, &effective_model) {
-            return Err(AgentExecutionError::Output {
-                source: Box::new(std::io::Error::other(detail)),
-                result: Box::new(self.execution_result(&outcome, &effective_model)),
-            });
+        // The guard stays armed *through* `finish`: a `finish` that fails
+        // before it settles (for example `Database::open`) must still
+        // release the reservation, and the guard's `Drop` on the early
+        // return below is what does that. The host clears its reservation
+        // id once settlement succeeds, so a `finish` that fails *after*
+        // settling leaves the guard nothing to release.
+        match self.host.finish(&outcome, &effective_model) {
+            Ok(()) => reservation_guard.armed = false,
+            Err(detail) => {
+                return Err(AgentExecutionError::Output {
+                    source: Box::new(std::io::Error::other(detail)),
+                    result: Box::new(self.execution_result(&outcome, &effective_model)),
+                });
+            }
         }
 
         let result = self.execution_result(&outcome, &effective_model);
@@ -507,9 +528,20 @@ impl CodingAgent for RawAgent {
         }
     }
 
+    /// What this agent can honestly promise to enforce per execution.
+    /// Tokens and duration are folded into the loop's own ceilings in
+    /// `execute`, so the loop stops on them. Cost is *not* claimed: the
+    /// PRD-064 reservation sizes a pool before the loop runs, but nothing
+    /// in the loop prices tokens or stops on a cost figure, and
+    /// `StopReason::BudgetStop` has no producer. Claiming `cost: true`
+    /// would let the `UnenforceableBudget` gate in `run.rs` admit a cost
+    /// warrant that nothing enforces — the silent-spend shape the owner's
+    /// cost rule exists to prevent. A per-execution cost ceiling on a raw
+    /// worker is therefore refused by name until the loop can price its
+    /// attempts (PRD-086 supplies the basis).
     fn budget_capability(&self) -> BudgetCapability {
         BudgetCapability {
-            cost: true,
+            cost: false,
             tokens: true,
             duration: true,
             cost_always_zero: false,
@@ -746,6 +778,66 @@ mod tests {
             "accounting must be handed the model the attempt ran on"
         );
         assert_ne!(spec().model, "override-model");
+    }
+
+    /// Review finding (budget authority): `budget_capability` claims
+    /// `tokens`, so a warrant's `max_tokens` must actually stop the loop.
+    /// The first turn spends five output tokens on a tool call; with a
+    /// one-token budget the loop must stop with `TokenOrContextCeiling`
+    /// before the second turn is ever submitted. Dropping the fold of
+    /// `budget.max_tokens` into `max_output_tokens` fails this test.
+    #[test]
+    fn a_token_budget_stops_the_loop_at_the_ceiling() {
+        let adapter = Arc::new(FakeInferenceAdapter::new(vec![
+            ScriptedTurn {
+                events: vec![
+                    StreamEvent::ToolCallDelta {
+                        call_id: "call_1".into(),
+                        capability_id: "report-progress".into(),
+                        arguments_fragment: "{\"message\":\"working\"}".into(),
+                    },
+                    StreamEvent::ToolCallComplete {
+                        call_id: "call_1".into(),
+                    },
+                ],
+                outcome: Ok(SubmitOutcome {
+                    stop_reason: AdapterStopReason::ToolUse,
+                    usage: UsageCategories {
+                        output_tokens: Some(5),
+                        ..Default::default()
+                    },
+                    provider_request_id: None,
+                    provider_idempotency_key: None,
+                }),
+            },
+            ScriptedTurn {
+                events: vec![StreamEvent::TextDelta("done".into())],
+                outcome: Ok(SubmitOutcome {
+                    stop_reason: AdapterStopReason::EndTurn,
+                    usage: UsageCategories::default(),
+                    provider_request_id: None,
+                    provider_idempotency_key: None,
+                }),
+            },
+        ]));
+        let host = Arc::new(TestHost::new(true));
+        let agent = RawAgent::new(adapter, host.clone(), spec());
+        let temp = tempfile::tempdir().unwrap();
+        let mut output = Vec::new();
+        let request = ExecutionRequest {
+            budget: ExecutionBudget {
+                max_cost_microusd: None,
+                max_tokens: std::num::NonZeroU64::new(1),
+                max_duration_ms: None,
+            },
+            ..base_request(temp.path())
+        };
+        let _ = agent.execute(request, &mut output);
+        assert_eq!(
+            *host.finish_called.lock().unwrap(),
+            Some(StopReason::TokenOrContextCeiling),
+            "a one-token warrant must stop the loop after the first turn"
+        );
     }
 
     /// Remediation regression (`reservation-leaked-on-pre-loop-failure`):
