@@ -107,3 +107,12 @@ fn backlog_can_hide_completed_prds_without_losing_the_dependency_graph() {
     assert!(javascript.contains("n.dataset.status==='completed'"));
     assert!(javascript.contains("state.hideCompleted"));
 }
+
+#[test]
+fn dependency_waves_have_gated_batch_launch_controls() {
+    let javascript = include_str!("../ui/app.js");
+    assert!(javascript.contains(">Launch wave</button>"));
+    assert!(javascript.contains("launchable.length===unfinished.length"));
+    assert!(javascript.contains("Promise.all(paths.map(path=>mutate({action:'start_prd'"));
+    assert!(javascript.contains("disabled title="));
+}
