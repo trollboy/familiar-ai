@@ -13,6 +13,7 @@ WORKDIR /app
 # quietly skipping the crate, which is the whole point of un-excluding it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libgtk-3-dev libayatana-appindicator3-dev \
+    libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-llvm-cov
 RUN rustup component add llvm-tools-preview

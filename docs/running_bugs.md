@@ -158,7 +158,11 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-076 — The verification image cannot compile the workspace, so every drive dies in preflight at zero cost
 
-- **Status:** Open
+- **Status:** Open — image half fixed 2026-09-22: the tester stage now installs
+  `libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev`, and
+  the `lint` verification check passes in the rebuilt image in 2m52s. The
+  retained-output half — the capture keeping the head of stdout and
+  dropping the tail where the error is — stays open.
 - **Found:** 2026-09-22, the first hands-off run of PRD-103
   (session `drive-00001790079983258612-0002341699-000000`): `preflight_failed`
   on `verification.lint`, exit 101, four minutes in, `attempted=0`, $0.
