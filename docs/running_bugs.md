@@ -352,6 +352,39 @@ appears with no entry, or with a status a reader cannot classify.
   are per host. Until one exists, git carries claims (branches) and
   completions (archive moves), and a host should pull before it plans.
 
+### FAM-BUG-082 — `human_review_required` cannot tell "a human should decide" from "the review machinery failed"
+
+- **Status:** Open — this occurrence (PRD-97) landed by hand after a human review, recorded as a FAM-BUG-019 recurrence.
+- **Found:** 2026-09-22, the fourth hands-off run (PRD-97, session
+  `drive-00001790092661105835-0003486999-000000`). Implementation and every
+  required verification check passed. The independent reviewer then
+  produced the same finding, `gitlab-bang-id-fed-back-to-argv`, on all
+  three attempts, each rejected by `ReviewValidationError::InvalidEvidence`
+  because the finding lacked its category's minimum evidence; the retry
+  limit tripped and the attempt was retained `human_review_required` at
+  $5.72.
+- **Detail:** two different things now share one retained reason. A
+  reviewer that *wants* a human (a genuine judgment call) and a reviewer
+  that *could not produce a valid review* (a defect in the reviewer, the
+  validation rule, or the prompt) both end as `human_review_required`, and
+  PRD-109's lifecycle therefore shows both as AwaitingFeedback. The owner
+  was asked to decide something that was not a decision: the finding was
+  wrong about the code, which stores GitLab's bare IID as the id and the
+  `!123` form only as display, and the candidate's own test
+  `gitlab_consuming_verbs_use_the_bare_parsed_id_not_the_bang_display`
+  already pinned it. Three validation rejections of the same finding is
+  also a retry that could never succeed, the FAM-BUG-054 shape one stage
+  later: nothing changed between attempts.
+- **Resolution this time:** human review of the candidate; landed as
+  `bca551e` with the PRD archived in the integration commit.
+- **Expected fix:** a cycle that stops because every review attempt failed
+  validation retains as a distinct class (`review_failed`, which the stall
+  taxonomy already names) rather than `human_review_required`, so the
+  lifecycle reads Failed and the firing table counts it as a defect; and a
+  second identical validation rejection reroutes to a different reviewer or
+  stops immediately rather than spending the third attempt on the same
+  model repeating itself.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable
