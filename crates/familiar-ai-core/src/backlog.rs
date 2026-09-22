@@ -354,7 +354,27 @@ pub enum IneligibilityReason {
     StatusInProgress,
     StatusCompleted,
     StatusBlocked,
-    DependenciesIncomplete { dependencies: Vec<PrdId> },
+    DependenciesIncomplete {
+        dependencies: Vec<PrdId>,
+    },
+    /// FAM-BUG-074: the PRD's own front matter says it is not ready to run
+    /// (`draft`, `in_progress`, `blocked`), whatever this host's row says.
+    /// Each host keeps its own store, so a PRD another machine has claimed
+    /// is `pending` here; the file is the one record both machines share.
+    FrontMatterStatus(&'static str),
+}
+
+/// FAM-BUG-074: the front-matter statuses that hold a PRD out of selection on
+/// every surface — `next`, `run` admission, and the drive's batch selection —
+/// regardless of the reconciled row. `ready` and an absent status are
+/// selectable; `completed` is left to location, which is truth for archives.
+pub fn front_matter_hold(prd: &DiscoveredPrd) -> Option<&'static str> {
+    match prd.metadata.status.as_deref() {
+        Some("draft") => Some("draft"),
+        Some("in_progress") => Some("in_progress"),
+        Some("blocked") => Some("blocked"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -505,6 +525,12 @@ pub fn admit_run_prd(entries: &[BacklogEntry], target: &DiscoveredPrd) -> Result
             path: target.path.clone(),
         });
     }
+    if let Some(status) = front_matter_hold(target) {
+        return Err(BacklogError::RunStatus {
+            path: target.path.clone(),
+            status,
+        });
+    }
     let entry = entries
         .iter()
         .find(|entry| entry.prd.path == target.path)
@@ -598,6 +624,11 @@ where
             if entry.prd.location == PrdLocation::Archived {
                 continue;
             }
+            if let Some(status) = front_matter_hold(&entry.prd) {
+                let reason = IneligibilityReason::FrontMatterStatus(status);
+                reasons.push(format!("{}={}", entry.prd.id, reason_text(&reason)));
+                continue;
+            }
             let incomplete: Vec<_> = entry
                 .prd
                 .dependencies
@@ -636,6 +667,9 @@ fn reason_text(reason: &IneligibilityReason) -> String {
         IneligibilityReason::StatusInProgress => "in_progress".into(),
         IneligibilityReason::StatusCompleted => "completed".into(),
         IneligibilityReason::StatusBlocked => "blocked".into(),
+        IneligibilityReason::FrontMatterStatus(status) => {
+            format!("front matter status {status}")
+        }
         IneligibilityReason::DependenciesIncomplete { dependencies } => format!(
             "dependencies incomplete [{}]",
             dependencies
@@ -1576,6 +1610,43 @@ mod tests {
             })
         ));
     }
+    /// FAM-BUG-074: a PRD whose own front matter says `draft`, `in_progress`
+    /// or `blocked` is never admitted, even when this host's reconciled row is
+    /// `pending` — which is exactly what a PRD claimed on another machine
+    /// looks like here. `ready` and no status at all stay admissible.
+    #[test]
+    fn front_matter_status_holds_a_prd_out_of_admission() {
+        let mut target = DiscoveredPrd {
+            id: PrdId::new(3),
+            number: 3,
+            path: RepositoryPath::new("docs/prds/PRD-003.md").unwrap(),
+            location: PrdLocation::Active,
+            title: "Three".into(),
+            dependencies: vec![],
+            metadata: PrdMetadata::default(),
+            content_hash: "three".into(),
+        };
+        let entries = vec![BacklogEntry {
+            prd: target.clone(),
+            status: BacklogStatus::Pending,
+        }];
+        assert!(admit_run_prd(&entries, &target).is_ok());
+        for held in ["draft", "in_progress", "blocked"] {
+            target.metadata.status = Some(held.into());
+            assert_eq!(front_matter_hold(&target), Some(held));
+            assert!(
+                matches!(
+                    admit_run_prd(&entries, &target),
+                    Err(BacklogError::RunStatus { status, .. }) if status == held
+                ),
+                "front matter {held} must refuse admission by name"
+            );
+        }
+        target.metadata.status = Some("ready".into());
+        assert_eq!(front_matter_hold(&target), None);
+        assert!(admit_run_prd(&entries, &target).is_ok());
+    }
+
     #[test]
     fn discovery_parses_and_sorts_dependencies() {
         let root = tempdir().unwrap();

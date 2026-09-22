@@ -802,6 +802,18 @@ fn select_batch(
         if attempted.contains(&entry.prd.id) {
             continue;
         }
+        // FAM-BUG-074: each host keeps its own store, so a PRD another
+        // machine has claimed — or that its author marked draft or blocked —
+        // is `pending` here. The file's own status is the one record both
+        // machines share, and it holds the PRD out of selection by name.
+        if let Some(status) = familiar_ai_core::backlog::front_matter_hold(&entry.prd) {
+            decisions.push(SelectionDecision {
+                prd_id: entry.prd.id.clone(),
+                decision: "front_matter_hold",
+                detail: format!("front matter status {status}; not selectable from this host"),
+            });
+            continue;
+        }
         let unmet: Vec<&PrdId> = entry
             .prd
             .dependencies

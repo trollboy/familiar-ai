@@ -55,7 +55,14 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-072 — The attempts ledger mixes another repository's fixture rows into this project's numbers
 
-- **Status:** Open
+- **Status:** Open — narrowed 2026-09-22. Every shipped reader is already
+  repository-scoped: `attempts(session_id)`, `latest_attempt_for_prd`, the
+  rounds query and PRD-085's autonomy queries all join `driver_sessions`
+  on `repository_key`. The unscoped reads were hand-written SQL in three
+  documents. What remains is that no shipped command answers the
+  retained-reason histogram, so a human opens sqlite and gets it wrong;
+  that command is PRD-098's scope and this entry stays open until it
+  ships.
 - **Found:** 2026-09-22, auditing the queue against the ledger.
 - **Detail:** 13 of the 43 rows in `driver_attempts` belong to sessions
   whose `repository_key` is `~/Projects/spectra` (ids `PRD-177a`,
@@ -74,7 +81,16 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-073 — The resume-landing path integrates without recording the integration
 
-- **Status:** Open
+- **Status:** Fixed 2026-09-22 — `DriverRepository::mark_latest_attempt_integrated`
+  finds the latest unintegrated attempt for the PRD in this repository and
+  stamps `integrated_at`, `candidate_revision` and phase `integrated`;
+  `complete_landed` in `resume.rs` calls it right after
+  `approve_and_complete`, so a resumed landing now leaves the same row the
+  merge queue leaves. Pinned by
+  `marking_the_latest_attempt_integrated_is_scoped_and_idempotent`: scoped
+  to the repository, exactly once, no-op when nothing is waiting. The
+  historical rows for PRD-60, 76, 85 and 96 are not backfilled; the ledger
+  keeps the undercount as a fact about the past.
 - **Found:** 2026-09-22, reconciling `main` against `driver_attempts`.
 - **Detail:** `main` carries five `familiar: integrate reviewed candidate`
   commits; `driver_attempts.integrated_at` has two rows (PRD-53, PRD-81).
@@ -91,7 +107,15 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-074 — A PRD claimed on another host is pending and eligible here
 
-- **Status:** Open
+- **Status:** Fixed 2026-09-22 — `front_matter_hold` in `backlog.rs` names
+  `draft`, `in_progress` and `blocked` as holds, and all three selection
+  surfaces consult it: `next` reports
+  `front matter status <s>`, `run` admission refuses with `RunStatus`, and
+  the drive's batch selection records a durable `front_matter_hold`
+  decision and moves on. `ready` and an absent status stay selectable;
+  `completed` is left to location. Pinned by
+  `front_matter_status_holds_a_prd_out_of_admission`. This also delivers
+  the `draft` half of PRD-093's seventh criterion ahead of that PRD.
 - **Found:** 2026-09-22, answering whether PRD-104 could be picked up by
   the Linux driver while the macOS session implements it.
 - **Detail:** backlog discovery inserts a newly seen PRD file as `pending`
@@ -107,6 +131,30 @@ appears with no entry, or with a status a reader cannot classify.
   `in_progress`), or the multi-host lease from PRD-091 is consulted at
   selection. Until then, drives on this host should name their PRDs
   explicitly.
+
+### FAM-BUG-075 — A terminal cannot submit a drive to the resident daemon
+
+- **Status:** Open
+- **Found:** 2026-09-22, launching PRD-103 hands-off through the designed
+  path while the daemon held the control-plane claim.
+- **Detail:** `familiar-ai ops control submit <project> -- familiar-ai
+  drive --prd PRD-103 ...` is refused by the daemon with `authority denied:
+  a valid minted session is required`. `cli/control.rs` mints an Operator
+  session only on the in-process path it takes when no daemon is resident;
+  against a live daemon it calls the socket with no credential. The Linux
+  tray submits in-process with a scope it builds itself, so the only
+  surface that can dispatch a drive while the daemon runs is a button. A
+  terminal `drive` or `resume` is refused by the worker lock (FAM-BUG-062's
+  delegate fix covers children of the daemon, not a shell), so the
+  documented workaround is to stop the daemon, run the drive, and restart
+  it — which takes the tray down for the run and is what the owner's
+  directive that the tray be live forbids.
+- **Expected fix:** the CLI mints an Operator session against the resident
+  daemon the same way it does in-process — same-user peer identity is the
+  precondition PRD-056 already checks — and presents it on `submit`,
+  `attach` and `show`; a regression drives `submit` against a live daemon
+  fixture and asserts the execution is accepted and runs as the owner's
+  delegate.
 
 ## 2026-08-31 — Provider and model registration
 

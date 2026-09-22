@@ -602,6 +602,47 @@ impl<'a> DriverRepository<'a> {
         rows.collect::<Result<Vec<_>, _>>().map_err(db)
     }
 
+    /// FAM-BUG-073: mark the latest unintegrated attempt for `prd_id` in this
+    /// repository as integrated at `candidate_revision`. The merge queue does
+    /// this inline for drive sessions; the resume-landing path never did,
+    /// which is why `main` carried five `familiar: integrate reviewed
+    /// candidate` commits against two `integrated_at` rows. Returns the
+    /// `(session_id, sequence)` it marked, or `None` when no unintegrated
+    /// attempt exists for the PRD — a landing with nothing to mark is not an
+    /// error, it is the record of work that never went through a driver.
+    pub fn mark_latest_attempt_integrated(
+        &self,
+        repository_key: &str,
+        prd_id: &str,
+        candidate_revision: &str,
+    ) -> familiar_ai_core::Result<Option<(String, i64)>> {
+        let found: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT a.session_id,a.sequence FROM driver_attempts a \
+                 JOIN driver_sessions s ON s.session_id=a.session_id \
+                 WHERE s.repository_key=?1 AND a.prd_id=?2 AND a.integrated_at IS NULL \
+                 ORDER BY a.started_at DESC,a.sequence DESC LIMIT 1",
+                params![repository_key, prd_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        let Some((session_id, sequence)) = found else {
+            return Ok(None);
+        };
+        let now = Utc::now().to_rfc3339();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE driver_attempts SET candidate_revision=?1,integrated_at=?2,last_durable_phase='integrated' \
+                 WHERE session_id=?3 AND sequence=?4 AND integrated_at IS NULL",
+                params![candidate_revision, now, session_id, sequence],
+            )
+            .map_err(db)?;
+        Ok((changed == 1).then_some((session_id, sequence)))
+    }
+
     pub fn latest_attempt_for_prd(
         &self,
         repository_key: &str,
@@ -720,6 +761,68 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         db.run_migrations().unwrap();
         db
+    }
+
+    /// FAM-BUG-073: a landing that did not go through the merge queue must
+    /// still leave `integrated_at` on the attempt it landed, scoped to the
+    /// repository, exactly once, and be a no-op when nothing is waiting.
+    #[test]
+    fn marking_the_latest_attempt_integrated_is_scoped_and_idempotent() {
+        let db = database();
+        let repository = DriverRepository::new(db.conn());
+        repository.open_session("s", "/repo/.git", "{}").unwrap();
+        repository
+            .open_session("elsewhere", "/other/.git", "{}")
+            .unwrap();
+        repository
+            .record_attempt_started("s", "PRD-7", "docs/prds/PRD-007.md", None)
+            .unwrap();
+        repository
+            .record_attempt_started("elsewhere", "PRD-7", "docs/prds/PRD-007.md", None)
+            .unwrap();
+
+        assert_eq!(
+            repository
+                .mark_latest_attempt_integrated("/nowhere/.git", "PRD-7", "abc123")
+                .unwrap(),
+            None,
+            "a repository with no attempt for the PRD has nothing to mark"
+        );
+        assert_eq!(
+            repository
+                .mark_latest_attempt_integrated("/repo/.git", "PRD-7", "abc123")
+                .unwrap(),
+            Some(("s".to_string(), 1)),
+        );
+        let (integrated_at, candidate): (Option<String>, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT integrated_at,candidate_revision FROM driver_attempts WHERE session_id='s' AND sequence=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(integrated_at.is_some());
+        assert_eq!(candidate.as_deref(), Some("abc123"));
+        let other: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT integrated_at FROM driver_attempts WHERE session_id='elsewhere' AND sequence=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            other.is_none(),
+            "another repository's attempt must be untouched"
+        );
+        assert_eq!(
+            repository
+                .mark_latest_attempt_integrated("/repo/.git", "PRD-7", "def456")
+                .unwrap(),
+            None,
+            "a second landing finds nothing unintegrated and changes nothing"
+        );
     }
 
     /// The chart reads one row per repository and one column per session, so

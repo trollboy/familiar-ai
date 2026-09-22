@@ -558,8 +558,19 @@ fn complete_landed(
             &checkpoint.diff_hash,
             commit,
         )
+        .map_err(|error| error.to_string())?;
+    // FAM-BUG-073: the merge queue marks the attempt it integrates; this
+    // landing path did not, so every resumed landing (PRD-60, 76, 85, 96)
+    // reads as unintegrated in the ledger that PRD-085 and PRD-098 compute
+    // from. Marking after `approve_and_complete` rather than inside it keeps
+    // the backlog transaction's contract untouched; if the mark fails the
+    // completion stands and the error names the gap instead of hiding it.
+    familiar_ai_storage::DriverRepository::new(db.conn())
+        .mark_latest_attempt_integrated(&repository.key, prd_id, commit)
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            format!("landed {commit} but could not mark the attempt integrated: {error}")
+        })
 }
 
 fn land_candidate(
