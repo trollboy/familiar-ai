@@ -230,7 +230,42 @@ fn shared_scope_wave_completes_end_to_end_through_drive_alone() {
     .unwrap()
     .trim()
     .to_owned();
-    assert_ne!(integration, base, "integration revision must advance");
+    // FAM-BUG-080: with delivery disabled the merge queue fast-forwards the
+    // checked-out branch onto the integration revision itself, so `HEAD`
+    // read after the drive IS the integration — and the integration commit
+    // moved both PRD files into the archive, which is how completion
+    // reaches every other host through git.
+    assert_eq!(
+        base, integration,
+        "checked-out branch must fast-forward onto the integration revision"
+    );
+    let archived = String::from_utf8(
+        Command::new("git")
+            .args([
+                "ls-tree",
+                "--name-only",
+                &integration,
+                "--",
+                "docs/prds/done/",
+            ])
+            .current_dir(&repository)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    for number in [1, 2] {
+        assert!(
+            archived.contains(&format!("docs/prds/done/PRD-{number:03}.md")),
+            "PRD-{number:03} must be archived in the integration commit: {archived}"
+        );
+        assert!(
+            !repository
+                .join(format!("docs/prds/PRD-{number:03}.md"))
+                .exists(),
+            "the active copy of PRD-{number:03} must be gone after the fast-forward"
+        );
+    }
 
     // The integrated revision contains BOTH PRDs' outputs, and PRD-2 saw
     // PRD-1's work in its own base — integration ordered the wave.

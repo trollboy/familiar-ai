@@ -124,6 +124,20 @@ pub fn merge_candidate(
     integrated: &str,
     candidate: &str,
 ) -> Result<String, String> {
+    merge_candidate_archiving(repository, integrated, candidate, None)
+}
+
+/// FAM-BUG-080: the integration commit also moves the PRD file into the
+/// archive, so completion travels with `git pull` to every other host —
+/// location is the one completion record every host shares (PRD-023), and
+/// Familiar still never edits a PRD's contents. `archive` is
+/// `(active path, archived path)`; `None` integrates exactly as before.
+pub fn merge_candidate_archiving(
+    repository: &Path,
+    integrated: &str,
+    candidate: &str,
+    archive: Option<(&str, &str)>,
+) -> Result<String, String> {
     let tree = Command::new("git")
         .args(["merge-tree", "--write-tree", integrated, candidate])
         .current_dir(repository)
@@ -145,6 +159,10 @@ pub fn merge_candidate(
     if tree.is_empty() {
         return Err("integration produced no tree".into());
     }
+    let tree = match archive {
+        Some((from, to)) => archive_in_tree(repository, &tree, from, to)?,
+        None => tree,
+    };
     let commit = Command::new("git")
         .args([
             "commit-tree",
@@ -167,6 +185,162 @@ pub fn merge_candidate(
         ));
     }
     Ok(String::from_utf8_lossy(&commit.stdout).trim().to_owned())
+}
+
+/// Rewrite `tree` so the blob at `from` lives at `to` instead, through a
+/// temporary index: no checkout is touched. A source that is not in the tree
+/// (already moved) or a destination that already exists leaves the tree as
+/// it is — the move is idempotent across a retried landing.
+fn archive_in_tree(repository: &Path, tree: &str, from: &str, to: &str) -> Result<String, String> {
+    let entry = git_output(repository, &["ls-tree", tree, "--", from])?;
+    if entry.is_empty() || !git_output(repository, &["ls-tree", tree, "--", to])?.is_empty() {
+        return Ok(tree.to_string());
+    }
+    let mut fields = entry.split_whitespace();
+    let mode = fields.next().unwrap_or("100644").to_string();
+    let _kind = fields.next();
+    let blob = fields
+        .next()
+        .ok_or_else(|| format!("cannot parse tree entry for {from}: {entry}"))?
+        .to_string();
+    let index = std::env::temp_dir().join(format!(
+        "familiar-ai-archive-index-{}-{}",
+        std::process::id(),
+        &blob[..blob.len().min(12)]
+    ));
+    let run = |args: &[&str]| -> Result<String, String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repository)
+            .env("GIT_INDEX_FILE", &index)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let result = (|| {
+        run(&["read-tree", tree])?;
+        run(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("{mode},{blob},{to}"),
+        ])?;
+        run(&["update-index", "--force-remove", "--", from])?;
+        run(&["write-tree"])
+    })();
+    let _ = std::fs::remove_file(&index);
+    result
+}
+
+/// The archive move for a PRD being integrated, `(active path, archived
+/// path)` under the repository's configured layout, or `None` when the file
+/// is already archived or the layout cannot be resolved.
+pub fn archive_target(
+    config: &Config,
+    worktree: &Path,
+    prd_path: &str,
+) -> Option<(String, String)> {
+    let layout = config.repository(worktree).ok()?.layout();
+    let archived_dir = layout.archived_dir.to_string();
+    if prd_path.starts_with(&format!("{archived_dir}/")) {
+        return None;
+    }
+    let file = Path::new(prd_path).file_name()?.to_str()?;
+    Some((prd_path.to_string(), format!("{archived_dir}/{file}")))
+}
+
+/// FAM-BUG-080: once a landing is durably recorded, advance the checked-out
+/// branch onto the integration revision when that is a pure fast-forward.
+/// A refusal — dirty checkout, detached HEAD, diverged branch — is reported
+/// and never fails the landing: the ledger already holds the truth. The
+/// resume path has always done this; the merge queue now does too.
+pub fn fast_forward_checkout(repository: &Path, merged: &str) {
+    match git_output(repository, &["merge", "--ff-only", merged]) {
+        Ok(_) => eprintln!("drive: checked-out branch fast-forwarded to {merged}"),
+        Err(error) => eprintln!(
+            "drive: checked-out branch NOT advanced to {merged}: {error}; the integration revision is recorded in the ledger"
+        ),
+    }
+}
+
+/// FAM-BUG-081: what other hosts have said through git, the only channel
+/// they share with this one. A drive branch on origin means another session
+/// holds that PRD; a file under the archive on origin's default branch means
+/// it already landed somewhere. Computed once per selection pass; absent
+/// remote or offline host degrades to empty, never to an error.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignState {
+    /// PRD id → the remote drive branch that holds it.
+    pub claimed: BTreeMap<String, String>,
+    /// File names present under the archive directory on origin.
+    pub archived_files: BTreeSet<String>,
+}
+
+/// Parse `git ls-remote --heads origin 'refs/heads/familiar/drive-*'` into
+/// PRD id → branch, ignoring this session's own branches.
+pub fn parse_remote_claims(ls_remote: &str, own_session: &str) -> BTreeMap<String, String> {
+    let mut claimed = BTreeMap::new();
+    for line in ls_remote.lines() {
+        let Some(reference) = line.split_whitespace().nth(1) else {
+            continue;
+        };
+        let Some(rest) = reference.strip_prefix("refs/heads/familiar/") else {
+            continue;
+        };
+        let Some((session, prd)) = rest.split_once('/') else {
+            continue;
+        };
+        if session == own_session || prd.is_empty() {
+            continue;
+        }
+        claimed
+            .entry(prd.to_string())
+            .or_insert_with(|| rest.to_string());
+    }
+    claimed
+}
+
+pub fn foreign_state(repository: &Path, own_session: &str, archived_dir: &str) -> ForeignState {
+    let claimed = git_output(
+        repository,
+        &[
+            "ls-remote",
+            "--heads",
+            "origin",
+            "refs/heads/familiar/drive-*",
+        ],
+    )
+    .map(|out| parse_remote_claims(&out, own_session))
+    .unwrap_or_default();
+    let prefix = format!("{archived_dir}/");
+    let archived_files = ["origin/HEAD", "origin/main"]
+        .iter()
+        .find_map(|reference| {
+            git_output(
+                repository,
+                &["ls-tree", "--name-only", reference, "--", &prefix],
+            )
+            .ok()
+        })
+        .map(|out| {
+            out.lines()
+                .filter_map(|path| Path::new(path).file_name().and_then(|n| n.to_str()))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    ForeignState {
+        claimed,
+        archived_files,
+    }
 }
 
 /// Continue a final human scope approval through the same durable landing
@@ -207,7 +381,15 @@ pub fn continue_scope_approved_candidate(
         )?;
     }
     let candidate = git_output(checkpoint_worktree, &["rev-parse", "HEAD"])?;
-    let merged = merge_candidate(&repository.worktree, &prior, &candidate)?;
+    let archive = archive_target(config, &repository.worktree, &target.path.to_string());
+    let merged = merge_candidate_archiving(
+        &repository.worktree,
+        &prior,
+        &candidate,
+        archive
+            .as_ref()
+            .map(|(from, to)| (from.as_str(), to.as_str())),
+    )?;
     let rebound_diff = Command::new("git")
         .args(["diff", "--binary", &prior, &merged])
         .current_dir(&repository.worktree)
@@ -267,6 +449,7 @@ pub fn continue_scope_approved_candidate(
             },
         )
         .map_err(|error| error.to_string())?;
+    fast_forward_checkout(&repository.worktree, &merged);
     Ok(())
 }
 
@@ -610,6 +793,8 @@ pub const SELECTION_DECISIONS: &[&str] = &[
     "deferred_scope_unavailable",
     "excluded_allowlist",
     "front_matter_hold",
+    "claimed_elsewhere",
+    "archived_upstream",
 ];
 
 /// One selection or deferral decision for a ready PRD, persisted durably so an
@@ -777,6 +962,9 @@ pub type ActiveHold = (
 );
 
 #[allow(clippy::too_many_arguments)]
+/// Test-facing form with no foreign state; production selection goes through
+/// `select_batch_with_foreign` so another host's claims and archives count.
+#[cfg(test)]
 fn select_batch(
     repository: &RepositoryIdentity,
     discovered: &[DiscoveredPrd],
@@ -784,6 +972,31 @@ fn select_batch(
     attempted: &BTreeSet<PrdId>,
     allowlist: Option<&BTreeSet<PrdId>>,
     active_holds: &[ActiveHold],
+    limit: usize,
+    decisions: &mut Vec<SelectionDecision>,
+) -> Result<Selection, DriveError> {
+    select_batch_with_foreign(
+        repository,
+        discovered,
+        db,
+        attempted,
+        allowlist,
+        active_holds,
+        &ForeignState::default(),
+        limit,
+        decisions,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_batch_with_foreign(
+    repository: &RepositoryIdentity,
+    discovered: &[DiscoveredPrd],
+    db: &mut Database,
+    attempted: &BTreeSet<PrdId>,
+    allowlist: Option<&BTreeSet<PrdId>>,
+    active_holds: &[ActiveHold],
+    foreign: &ForeignState,
     limit: usize,
     decisions: &mut Vec<SelectionDecision>,
 ) -> Result<Selection, DriveError> {
@@ -832,6 +1045,33 @@ fn select_batch(
                 prd_id: entry.prd.id.clone(),
                 decision: "front_matter_hold",
                 detail: format!("front matter status {status}; not selectable from this host"),
+            });
+            continue;
+        }
+        // FAM-BUG-081: git is the only channel between hosts. A drive branch
+        // on origin is another session's claim; the file under the archive
+        // on origin is another host's completion. Neither is in this host's
+        // store, so both are consulted here, and both leave a decision.
+        if let Some(branch) = foreign.claimed.get(&entry.prd.id.to_string()) {
+            decisions.push(SelectionDecision {
+                prd_id: entry.prd.id.clone(),
+                decision: "claimed_elsewhere",
+                detail: format!(
+                    "drive branch {branch} exists on origin; another host holds this PRD"
+                ),
+            });
+            continue;
+        }
+        let file_name = Path::new(&entry.prd.path.to_string())
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .unwrap_or_default();
+        if foreign.archived_files.contains(&file_name) {
+            decisions.push(SelectionDecision {
+                prd_id: entry.prd.id.clone(),
+                decision: "archived_upstream",
+                detail: format!("{file_name} is under the archive on origin; this PRD already landed on another host"),
             });
             continue;
         }
@@ -1224,13 +1464,19 @@ pub fn drive(
                 }
                 .min(parallelism.saturating_sub(active_workers));
                 let mut decisions = Vec::new();
-                let selection = select_batch(
+                let archived_dir = config
+                    .repository(&repository.worktree)
+                    .map(|repository| repository.layout().archived_dir.to_string())
+                    .unwrap_or_else(|_| "docs/prds/done".into());
+                let foreign = foreign_state(&repository.worktree, &session_id, &archived_dir);
+                let selection = select_batch_with_foreign(
                     &repository,
                     &discovered,
                     &mut db,
                     &attempted_ids,
                     warrant.prd_allowlist.as_ref(),
                     &active_holds,
+                    &foreign,
                     remaining,
                     &mut decisions,
                 )?;
@@ -1939,7 +2185,19 @@ pub fn drive(
                             let prior = OrchestrationRepository::new(db.conn())
                                 .integration_revision(&session_id)
                                 .map_err(|e| e.to_string())?;
-                            let merged = merge_candidate(&repository.worktree, &prior, &candidate)?;
+                            let archive = archive_target(
+                                config,
+                                &repository.worktree,
+                                &target.path.to_string(),
+                            );
+                            let merged = merge_candidate_archiving(
+                                &repository.worktree,
+                                &prior,
+                                &candidate,
+                                archive
+                                    .as_ref()
+                                    .map(|(from, to)| (from.as_str(), to.as_str())),
+                            )?;
                             let execution_id = trace.execution_id.as_deref().ok_or_else(|| {
                                 "reviewed candidate has no execution id".to_string()
                             })?;
@@ -2011,6 +2269,7 @@ pub fn drive(
                                 },
                             )
                             .map_err(|e| e.to_string())?;
+                            fast_forward_checkout(&repository.worktree, &merged);
                             Ok(())
                         })();
                         if let Err(error) = integration {
@@ -2376,10 +2635,18 @@ pub fn drive(
                                                             OrchestrationRepository::new(db.conn())
                                                                 .integration_revision(&session_id)
                                                                 .map_err(|e| e.to_string())?;
-                                                        let merged = merge_candidate(
+                                                        let archive = archive_target(
+                                                            config,
+                                                            &repository.worktree,
+                                                            &target.path.to_string(),
+                                                        );
+                                                        let merged = merge_candidate_archiving(
                                                             &repository.worktree,
                                                             &prior,
                                                             &candidate,
+                                                            archive.as_ref().map(|(from, to)| {
+                                                                (from.as_str(), to.as_str())
+                                                            }),
                                                         )?;
                                                         let execution_id = escalation_trace
                                                             .execution_id
@@ -2451,6 +2718,10 @@ pub fn drive(
                                                                 },
                                                             )
                                                             .map_err(|e| e.to_string())?;
+                                                        fast_forward_checkout(
+                                                            &repository.worktree,
+                                                            &merged,
+                                                        );
                                                         Ok(())
                                                     })(
                                                     );
@@ -2920,6 +3191,99 @@ mod tests {
                  (and therefore from the schema's CHECK constraint)"
             );
         }
+    }
+
+    /// FAM-BUG-081: another session's drive branch on origin is a claim;
+    /// this session's own branches are not.
+    #[test]
+    fn remote_drive_branches_of_other_sessions_are_claims() {
+        let listing = "\
+aaaa\trefs/heads/familiar/drive-000A-1-000000/PRD-97
+bbbb\trefs/heads/familiar/drive-000B-2-000000/PRD-103
+cccc\trefs/heads/familiar/drive-000B-2-000000/PRD-97
+dddd\trefs/heads/main
+";
+        let claimed = parse_remote_claims(listing, "drive-000B-2-000000");
+        assert_eq!(
+            claimed.get("PRD-97").map(String::as_str),
+            Some("drive-000A-1-000000/PRD-97")
+        );
+        assert!(
+            !claimed.contains_key("PRD-103"),
+            "own branches are not claims"
+        );
+        assert_eq!(claimed.len(), 1);
+    }
+
+    /// FAM-BUG-080: the integration commit moves the PRD file into the
+    /// archive without touching any checkout, idempotently, and a plain
+    /// fast-forward then advances the checked-out branch onto it.
+    #[test]
+    fn integration_archives_the_prd_and_the_checkout_fast_forwards() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::create_dir_all(repo.join("docs/prds/done")).unwrap();
+        std::fs::write(repo.join("docs/prds/PRD-1.md"), "# PRD-1\n").unwrap();
+        std::fs::write(repo.join("docs/prds/done/.keep"), "").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "-b", "candidate"]);
+        std::fs::write(repo.join("src.txt"), "work\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "candidate"]);
+        let candidate = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "main"]);
+
+        let merged = merge_candidate_archiving(
+            repo,
+            &base,
+            &candidate,
+            Some(("docs/prds/PRD-1.md", "docs/prds/done/PRD-1.md")),
+        )
+        .unwrap();
+        let tree = git(&["ls-tree", "-r", "--name-only", &merged]);
+        assert!(tree.contains("docs/prds/done/PRD-1.md"), "{tree}");
+        assert!(!tree.lines().any(|l| l == "docs/prds/PRD-1.md"), "{tree}");
+        assert!(tree.contains("src.txt"));
+        // Idempotent: archiving a tree whose file already moved is a no-op.
+        let again = merge_candidate_archiving(
+            repo,
+            &merged,
+            &merged,
+            Some(("docs/prds/PRD-1.md", "docs/prds/done/PRD-1.md")),
+        )
+        .unwrap();
+        assert_eq!(
+            git(&["rev-parse", &format!("{again}^{{tree}}")]),
+            git(&["rev-parse", &format!("{merged}^{{tree}}")])
+        );
+
+        fast_forward_checkout(repo, &merged);
+        assert_eq!(
+            git(&["rev-parse", "HEAD"]),
+            merged,
+            "main must fast-forward onto the integration"
+        );
+        assert!(repo.join("docs/prds/done/PRD-1.md").exists());
+        assert!(!repo.join("docs/prds/PRD-1.md").exists());
     }
 
     /// A stopping error is worth storing only if it stays readable in a

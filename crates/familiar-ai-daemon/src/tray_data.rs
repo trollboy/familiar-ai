@@ -240,6 +240,22 @@ impl DaemonDataSource {
             .reconcile_if_stale(std::path::Path::new(repo));
         let discovered = self.discovered(repo)?;
         let identity = Self::identity(repo)?;
+        // A wave is dependency-ready AND scope-disjoint (the owner's
+        // definition, EXECUTION-PLAN). The chart used to lay out dependency
+        // layers only, so it showed PRDs side by side that the scheduler
+        // would serialize; these are the scheduler's own conflict edges.
+        let conflicts: std::collections::HashMap<String, Vec<String>> =
+            crate::drive::achievable_width(std::path::Path::new(repo), &discovered)
+                .map(|width| {
+                    let mut map: std::collections::HashMap<String, Vec<String>> =
+                        std::collections::HashMap::new();
+                    for (a, b, _) in width.conflicts {
+                        map.entry(a.to_string()).or_default().push(b.to_string());
+                        map.entry(b.to_string()).or_default().push(a.to_string());
+                    }
+                    map
+                })
+                .unwrap_or_default();
         let statuses: std::collections::HashMap<String, String> = {
             let db = self
                 .db
@@ -313,6 +329,8 @@ impl DaemonDataSource {
                     "prd_id": prd.id.to_string(),
                     "depends_on": depends_on,
                     "blocked_by": blocked_by,
+                    "conflicts_with": conflicts.get(&prd.id.to_string()).cloned().unwrap_or_default(),
+                    "hold": familiar_ai_core::backlog::front_matter_hold(prd),
                 })
             })
             .collect();

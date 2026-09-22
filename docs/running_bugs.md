@@ -283,7 +283,19 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-080 — The merge queue's integration commit is reachable from no branch when no delivery policy is configured
 
-- **Status:** Open — this occurrence resolved by hand 2026-09-22 (a FAM-BUG-019 recurrence, recorded as the rule requires).
+- **Status:** Fixed 2026-09-22 — `merge_candidate_archiving` builds the
+  integration commit with the PRD file already moved into the configured
+  archive directory (through a temporary index; no checkout is touched,
+  idempotent across a retried landing), and every landing path — the merge
+  queue, the escalated-candidate path, the scope-approval continuation, and
+  `resume` — calls `fast_forward_checkout` once its transaction commits, so
+  the checked-out branch advances onto the integration revision when that
+  is a pure fast-forward and reports, never fails, when it is not. Pinned
+  by `integration_archives_the_prd_and_the_checkout_fast_forwards` and by
+  the FAM-BUG-019 closure test, which now asserts `HEAD` equals the
+  integration revision and both PRD files are under `done/` in it. This
+  occurrence (PRD-108) was resolved by hand first and is recorded as a
+  FAM-BUG-019 recurrence.
 - **Found:** 2026-09-22, at the end of the first hands-off run that completed:
   PRD-108, session `drive-00001790082829700506-0002649502-000000`,
   `attempted=1 completed=1`, $11.70, clean independent review on the second
@@ -307,6 +319,38 @@ appears with no entry, or with a status a reader cannot classify.
   by hand here), or refuses to report the PRD `completed` until some ref
   holds the commit; with a policy configured, `deliver` publishes it. The
   drive log should print the ref that now holds the work, not only the SHA.
+
+### FAM-BUG-081 — Two hosts plan different waves for the same repository
+
+- **Status:** Fixed 2026-09-22 — selection consults git, the one channel
+  both hosts share: a drive branch `familiar/<session>/PRD-<n>` on origin
+  from another session records `claimed_elsewhere`; a PRD file under the
+  archive directory on origin's default branch records `archived_upstream`;
+  neither is selected. `ForeignState` is computed once per selection pass
+  and degrades to empty when there is no remote or no network. Migration
+  072 widens the decision CHECK; `SELECTION_DECISIONS` and its regression
+  cover both. Pinned by `remote_drive_branches_of_other_sessions_are_claims`.
+  With FAM-BUG-080's archive-on-integration, a completion now reaches the
+  other host on `git pull` as well.
+- **Found:** 2026-09-22. The macOS session proposed a wave of 103, 104,
+  106, 108 and 97 while this host was driving 97 and had already landed
+  108. Each host plans from its own SQLite store — claims, attempts and
+  completions never cross the wire — and the only shared records were the
+  PRD files, whose `status` Familiar never writes and whose archive move
+  was a separate human act.
+- **Also fixed here, the other half of the disparity:** the desktop's
+  dependency Gantt laid out dependency *layers* and its Launch-wave button
+  launched a layer, while the scheduler's wave is dependency-ready AND
+  scope-disjoint (the owner's definition, EXECUTION-PLAN, 2026-08-31). The
+  `dependencies` query now emits each PRD's `conflicts_with` from
+  `achievable_width`'s own conflict edges and its front-matter `hold`, and
+  `build_dependency_gantt` assigns rounds that respect both, so two PRDs the
+  scheduler would serialize are never drawn side by side. Pinned by
+  `conflicting_prds_never_share_a_wave`.
+- **Still open, by design:** there is no shared authority for claims and
+  completions across hosts. PRD-056's control plane and PRD-091's leases
+  are per host. Until one exists, git carries claims (branches) and
+  completions (archive moves), and a host should pull before it plans.
 
 ## 2026-08-31 — Provider and model registration
 

@@ -233,7 +233,17 @@ where
                     // PRD-077: a finished candidate lands into the current
                     // branch through the same merge machinery drive uses — no
                     // manual Git operations.
-                    match land_candidate(&repository.worktree, &worktree, &id) {
+                    let archive = discovered
+                        .iter()
+                        .find(|prd| prd.id.to_string() == id)
+                        .and_then(|prd| {
+                            crate::drive::archive_target(
+                                &config,
+                                &repository.worktree,
+                                &prd.path.to_string(),
+                            )
+                        });
+                    match land_candidate(&repository.worktree, &worktree, &id, archive) {
                         Ok(merged) => {
                             output.push(format!("landed\t{id}\t{merged}"));
                             // Completion is the LAST durable write, and it
@@ -577,6 +587,7 @@ fn land_candidate(
     repository_worktree: &Path,
     candidate_worktree: &Path,
     prd_id: &str,
+    archive: Option<(String, String)>,
 ) -> Result<String, String> {
     let dirty = git(candidate_worktree, &["status", "--porcelain"])?;
     if !dirty.is_empty() {
@@ -596,8 +607,17 @@ fn land_candidate(
     {
         return Ok(prior);
     }
-    let merged = crate::drive::merge_candidate(repository_worktree, &prior, &candidate)
-        .map_err(|error| format!("integration failed: {error}"))?;
+    // FAM-BUG-080: the integration commit also archives the PRD file, so
+    // the completion travels to other hosts with the commit itself.
+    let merged = crate::drive::merge_candidate_archiving(
+        repository_worktree,
+        &prior,
+        &candidate,
+        archive
+            .as_ref()
+            .map(|(from, to)| (from.as_str(), to.as_str())),
+    )
+    .map_err(|error| format!("integration failed: {error}"))?;
     git(repository_worktree, &["merge", "--ff-only", &merged])
         .map_err(|error| format!("cannot fast-forward the checked-out branch: {error}"))?;
     Ok(merged)
@@ -1261,14 +1281,14 @@ mod tests {
             ],
         );
         std::fs::write(worktree.join("feature"), "implemented").unwrap();
-        let merged = land_candidate(&main, &worktree, "PRD-9").unwrap();
+        let merged = land_candidate(&main, &worktree, "PRD-9", None).unwrap();
         assert_eq!(git(&main, &["rev-parse", "HEAD"]).unwrap(), merged);
         assert_eq!(
             std::fs::read_to_string(main.join("feature")).unwrap(),
             "implemented"
         );
         // Idempotent: landing again changes nothing.
-        let again = land_candidate(&main, &worktree, "PRD-9").unwrap();
+        let again = land_candidate(&main, &worktree, "PRD-9", None).unwrap();
         assert_eq!(again, merged);
     }
 

@@ -878,6 +878,9 @@ pub struct DependencyGanttNode {
     pub wave: usize,
     pub depends_on: Vec<String>,
     pub unlocks: Vec<String>,
+    /// PRDs whose declared scope overlaps this one's, from the scheduler's
+    /// own overlap rule. Two conflicting PRDs never share a wave.
+    pub conflicts_with: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
@@ -907,9 +910,22 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
     let entries = items(dependencies);
     let mut parents: HashMap<String, Vec<String>> = HashMap::new();
     let mut paths: HashMap<String, String> = HashMap::new();
+    let mut conflicts: HashMap<String, Vec<String>> = HashMap::new();
     for entry in entries {
         let id = str_at(entry, "prd_id").to_string();
         paths.insert(id.clone(), str_at(entry, "prd_path").to_string());
+        conflicts.insert(
+            id.clone(),
+            entry
+                .get("conflicts_with")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+        );
         parents.insert(
             id,
             entry
@@ -951,11 +967,42 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
             break;
         }
     }
-    let max_wave = depths.values().copied().max().unwrap_or(0);
+    // Rounds, not layers: a wave is dependency-ready AND scope-disjoint, the
+    // owner's definition. A PRD goes in the first round after all of its
+    // parents in which nothing already placed conflicts with it, so two PRDs
+    // the scheduler would serialize are never drawn side by side.
+    let mut order: Vec<String> = parents.keys().cloned().collect();
+    order.sort_by_key(|id| (depths.get(id).copied().unwrap_or(0), id.clone()));
+    let mut rounds: HashMap<String, usize> = HashMap::new();
+    let mut occupants: Vec<Vec<String>> = Vec::new();
+    for id in order {
+        let mut round = parents
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|parent| rounds.get(parent))
+            .map(|round| round + 1)
+            .max()
+            .unwrap_or(0);
+        let mine = conflicts.get(&id).cloned().unwrap_or_default();
+        loop {
+            if occupants.len() <= round {
+                occupants.resize(round + 1, Vec::new());
+            }
+            if occupants[round].iter().any(|other| mine.contains(other)) {
+                round += 1;
+                continue;
+            }
+            break;
+        }
+        occupants[round].push(id.clone());
+        rounds.insert(id, round);
+    }
+    let max_wave = rounds.values().copied().max().unwrap_or(0);
     let mut waves = vec![Vec::new(); max_wave + 1];
     for (id, depends_on) in parents {
         let path = paths.remove(&id).unwrap_or_default();
-        let wave = depths.get(&id).copied().unwrap_or(0).min(max_wave);
+        let wave = rounds.get(&id).copied().unwrap_or(0).min(max_wave);
         let mut unlocks = children.remove(&id).unwrap_or_default();
         unlocks.sort();
         // PRD-108: `path` came from the `dependencies` query, i.e. this
@@ -972,6 +1019,7 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
             .filter(|state| !state.is_empty())
             .map(|state| state.to_string())
             .unwrap_or_else(|| status.clone());
+        let conflicts_with = conflicts.remove(&id).unwrap_or_default();
         waves[wave].push(DependencyGanttNode {
             prd_id: id,
             status,
@@ -984,6 +1032,7 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
             wave,
             depends_on,
             unlocks,
+            conflicts_with,
         });
     }
     for wave in &mut waves {
@@ -2003,6 +2052,55 @@ mod tests {
         assert_eq!(chart.waves[1].len(), 2);
         assert_eq!(chart.waves[2][0].prd_id, "PRD-494");
         assert_eq!(chart.waves[3][0].prd_id, "PRD-01");
+    }
+
+    /// A wave is dependency-ready AND scope-disjoint. Two roots that the
+    /// scheduler would serialize on a shared file must not be drawn side by
+    /// side, and a child of the later one lands after it.
+    #[test]
+    fn conflicting_prds_never_share_a_wave() {
+        let row = |path: &str| BacklogRow {
+            prd_path: path.to_string(),
+            status: "pending".to_string(),
+            lifecycle: String::new(),
+            lifecycle_divergence: None,
+            updated_at: String::new(),
+            missing_since: None,
+        };
+        let dependencies = json!({"items": [
+            {"prd_id":"PRD-1","prd_path":"docs/prds/PRD-001.md","depends_on":[],"conflicts_with":["PRD-2"]},
+            {"prd_id":"PRD-2","prd_path":"docs/prds/PRD-002.md","depends_on":[],"conflicts_with":["PRD-1"]},
+            {"prd_id":"PRD-3","prd_path":"docs/prds/PRD-003.md","depends_on":[{"prd_id":"PRD-2","status":"pending"}],"conflicts_with":[]}
+        ]});
+        let backlog = [
+            row("docs/prds/PRD-001.md"),
+            row("docs/prds/PRD-002.md"),
+            row("docs/prds/PRD-003.md"),
+        ];
+        let chart = build_dependency_gantt(&dependencies, &backlog);
+        assert_eq!(chart.max_wave, 2);
+        assert_eq!(
+            chart.waves[0]
+                .iter()
+                .map(|n| n.prd_id.as_str())
+                .collect::<Vec<_>>(),
+            ["PRD-1"]
+        );
+        assert_eq!(
+            chart.waves[1]
+                .iter()
+                .map(|n| n.prd_id.as_str())
+                .collect::<Vec<_>>(),
+            ["PRD-2"]
+        );
+        assert_eq!(
+            chart.waves[2]
+                .iter()
+                .map(|n| n.prd_id.as_str())
+                .collect::<Vec<_>>(),
+            ["PRD-3"]
+        );
+        assert_eq!(chart.waves[0][0].conflicts_with, ["PRD-2"]);
     }
 
     /// The point of the summary: "33 pending" invites a 34th, while
