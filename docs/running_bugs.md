@@ -12,6 +12,102 @@ entries were off-format, and "how many are open" had a different answer
 depending on how it was asked. `bug_log_contract.rs` fails the build if an id
 appears with no entry, or with a status a reader cannot classify.
 
+## 2026-09-22 — queue audit and the PR #19 landing
+
+### FAM-BUG-070 — Raw implementations were recorded twice in the usage ledger
+
+- **Status:** Fixed 2026-09-22 on PR #19's branch (`703f68c`), merged to `main` in `e16fc73`.
+- **Found:** by the independent review of PR #19 (PRD-100).
+- **Detail:** `execute_tracked_inner` called `persist_accounting_observations`
+  for the implementation stage unconditionally, appending an aggregate row
+  from `ExecutionResult`'s totals, while `SqliteRawAgentHost::finish` had
+  already persisted one PRD-051 observation per attempt through
+  `persist_run_outcome`. The two rows carried different adapter labels and
+  different `source_event_hash` values, so `append_observation`'s hash
+  dedup could not see them as one. Every owned-loop implementation counted
+  roughly twice — in the ledger that PRD-100's edit-success number and
+  PRD-086's cost basis are meant to read from.
+- **Fix:** the harness row is skipped when the implementation adapter is
+  `RawAgentLoop` or `Ollama`, whose host writes the per-attempt rows.
+  Pinned by `only_owned_loop_workers_have_host_persisted_usage`. An
+  integration regression through `execute_with_config_tracked` that counts
+  observations per attempt is owed and carried in PRD-105.
+
+### FAM-BUG-071 — The raw agent claimed budget enforcement it did not perform
+
+- **Status:** Fixed 2026-09-22 on PR #19's branch (`703f68c`), merged to `main` in `e16fc73`.
+- **Found:** by the independent review of PR #19 (PRD-100).
+- **Detail:** `RawAgent::budget_capability` returned `cost: true, tokens:
+  true, duration: true`. `execute` read the cost ceiling only to size a
+  PRD-064 reservation and read the request timeout; `budget.max_tokens`
+  and `budget.max_duration_ms` were never consulted, and
+  `StopReason::BudgetStop` has no producer in the loop. The
+  `UnenforceableBudget` gate in `run.rs` trusts that declaration, so a
+  per-execution token, duration or cost warrant on a raw worker was
+  accepted as enforceable and enforced by nothing. That is the silent-spend
+  shape Core Principle #11 exists to prevent.
+- **Fix:** the warrant's token ceiling folds into the loop's
+  `max_output_tokens` and its duration ceiling into the wall-clock ceiling,
+  so the loop stops on both; cost is declared unenforced, so a per-execution
+  cost ceiling on a raw worker is now refused by name rather than silently
+  ignored. Pinned by `a_token_budget_stops_the_loop_at_the_ceiling`. Cost
+  enforcement inside the loop waits on a price basis (PRD-086).
+
+### FAM-BUG-072 — The attempts ledger mixes another repository's fixture rows into this project's numbers
+
+- **Status:** Open
+- **Found:** 2026-09-22, auditing the queue against the ledger.
+- **Detail:** 13 of the 43 rows in `driver_attempts` belong to sessions
+  whose `repository_key` is `~/Projects/spectra` (ids `PRD-177a`,
+  `PRD 0177f` and so on, dated 2026-08-09 and 08-19). Every status
+  document since 2026-09-16 — the README correction, FAM-BUG-019's
+  reopening, PRD-098, EXECUTION-PLAN's round table — quoted the unfiltered
+  table. The two largest rows of the histogram they cite, "no Acceptance
+  Criteria section" ×6 and "no reason recorded" ×6, are all spectra rows,
+  and PRD-085 and PRD-093 were sequenced into round 1 on them. On this
+  repository the figures are 30 attempts, 2 completed, 2 `integrated_at`.
+- **Expected fix:** every ledger query that produces a number a human
+  reads filters by `driver_sessions.repository_key` (the stall taxonomy
+  query, the session rollup, `stewardship`, and whatever PRD-098 ships),
+  and the report names the repository scope beside the host scope.
+  PRD-098's first criterion now requires it.
+
+### FAM-BUG-073 — The resume-landing path integrates without recording the integration
+
+- **Status:** Open
+- **Found:** 2026-09-22, reconciling `main` against `driver_attempts`.
+- **Detail:** `main` carries five `familiar: integrate reviewed candidate`
+  commits; `driver_attempts.integrated_at` has two rows (PRD-53, PRD-81).
+  The other three (PRD-60, PRD-76 on 09-01; PRD-85 and PRD-96 on 09-19,
+  each preceded by a `PRD-NN: resumed candidate` commit) landed through the
+  resume path, which never marks the attempt. PRD-81's recorded candidate
+  SHA no longer exists in the repository. The one column the project uses
+  as its integration record undercounts the project's own successes.
+- **Expected fix:** the resume-landing path writes `integrated_at` and the
+  landed revision on the attempt it resumed, in the same transaction as
+  `approve_and_complete`. Pinned by a regression driving resume to landing
+  and asserting the row. PRD-098's second criterion is satisfied by this
+  fix's regression if it lands first.
+
+### FAM-BUG-074 — A PRD claimed on another host is pending and eligible here
+
+- **Status:** Open
+- **Found:** 2026-09-22, answering whether PRD-104 could be picked up by
+  the Linux driver while the macOS session implements it.
+- **Detail:** backlog discovery inserts a newly seen PRD file as `pending`
+  and never consults the front matter `status`; only `blocked` is an
+  ineligibility reason, and only from the row's own status. Each host has
+  its own store, so a PRD marked `in_progress` by the other machine is
+  `pending` here, and with no dependencies and no scope conflict it is
+  eligible for the next drive. PRD-104 — 14 criteria, 40 expected files,
+  in progress on macOS by hand — is exactly that shape.
+- **Expected fix:** front-matter `status` participates in eligibility:
+  `draft` and `in_progress` are ineligibility reasons alongside `blocked`
+  (PRD-093's seventh criterion covers `draft`; this entry adds
+  `in_progress`), or the multi-host lease from PRD-091 is consulted at
+  selection. Until then, drives on this host should name their PRDs
+  explicitly.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable
@@ -2083,7 +2179,7 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-068 — Desktop installation can leave two tray owners active
 
-- **Status:** Mitigated 2026-09-22; durable installer guard still required.
+- **Status:** Open — mitigated 2026-09-22; durable installer guard still required.
 - **Found:** 2026-09-22, when `Open Dashboard` opened the legacy loopback web
   page after the Tauri desktop had been installed.
 - **Detail:** The independently supervised Tauri desktop owned its tray as

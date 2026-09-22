@@ -283,10 +283,13 @@ containment and tool-output retention work while these were staged.
 - PRD-084 — operator tools become shipped commands. Rebind, set-phase,
   and compute-width promote off `cargo run --example`; `operator_waive`
   and `probe_substance` retire. Depends on PRD-039, PRD-065, PRD-067.
+- PRD-082 — tool-output retention hardening. **Landed** (tests in
+  `runtime_path_containment.rs`); awaiting archive.
 - PRD-085 — stall taxonomy and autonomy measurement. Names every stall,
   attaches one recovery command to each, records human interventions
   inside a PRD's lifetime, and reports unattended-completion rate.
-  Depends on PRD-077, PRD-083, PRD-084.
+  **Landed 2026-09-19** through the merge queue (`c22b485`); awaiting
+  archive.
 - PRD-086 — cost measurement; make `CostUnmeasured` the exception.
   Goal 1's routing thesis with numbers behind it. Changes no route;
   feeds PRD-032. Depends on PRD-031, PRD-044, PRD-047, PRD-051.
@@ -294,55 +297,50 @@ containment and tool-output retention work while these were staged.
   repository identity and for checkpoint/occurrence event ids, explicit
   pre-migration row tolerance, invariants enforced in the gate. Depends
   on PRD-039, PRD-067, PRD-077.
-- PRD-088 — load-faithful verification. Reproduce a failure under the
-  gate's own load (the FAM-BUG-047 lesson), contextual budgets, and
-  risk-tiered gates above a required floor. Depends on PRD-045, PRD-067,
-  PRD-078.
-- PRD-089 — no holes in required gates. Declared, attributed, expiring,
-  self-closing exclusions; migration case is the FAM-BUG-050 SIGTERM
-  skip. The underlying bug stays ledger work and is not deferred here.
-  Depends on PRD-078, PRD-088.
-- PRD-090 — CLI surface design pass. A no-argument front door, daily
-  verbs at the top, everything else namespaced, a declared top-level
-  ceiling, no capability removed. Depends on PRD-035, PRD-083, PRD-084.
+- PRD-088 — load-faithful verification. **Draft, 1.x** as of 2026-09-22:
+  FAM-BUG-047 and 050 are fixed, its closure-rule criterion moved to
+  PRD-098, its tiering criterion restated against PRD-099's single
+  definition.
+- PRD-089 — no holes in required gates. **Draft, 1.x** as of 2026-09-22:
+  the SIGTERM skip it was written around was removed on 2026-09-21 and
+  no required gate holds an exclusion.
+- PRD-090 — CLI surface design pass. **Landed 2026-09-21** by hand
+  (`e6d9308`, FAM-BUG-065); PRD-103 carries its unmet criteria; awaiting
+  archive.
 - PRD-091 — multi-host driver leases. The `$XDG_RUNTIME_DIR` claim
   becomes a durable host-identified expiring lease, lifting the
   one-driver-one-box ceiling. Depends on PRD-034, PRD-056, PRD-065.
-- PRD-092 — one build command everywhere. Default features build on
-  Linux without `--no-default-features`; measured build time; gate and
-  install agree. Depends on PRD-034, PRD-036.
+- PRD-092 — the gate builds what users install. `scripts/gate.sh` still
+  passes `--no-default-features`, so the tray's tests never run in the
+  gate; the 2026-09-05 attempt was retained `scope_broadened`. Now
+  depends on PRD-099 and declares `scripts/gate.sh` rather than
+  `scripts/`.
 - PRD-093 — PRD admission quality and reviewer calibration. Machine
   checks that refuse a malformed PRD before a model call, reviewer
-  finding outcomes tracked to a calibration number, and front-matter
-  `status` honoured by eligibility. Depends on PRD-019, PRD-030,
-  PRD-045, PRD-071.
-- PRD-094 — local workers reachable from dispatch. PRD-063 built a
-  complete local-inference runtime that no dispatch path constructs;
-  until a `provider = "local"` worker can be selected and executed,
-  goal 1 gets nothing from it. No declared dependencies.
-- PRD-095 — declared git and forge identity per repository. Familiar
-  authors commits and publishes PRs as whatever identity the ambient
-  environment supplies; on a multi-account box that is silently wrong
-  until a write fails with an opaque 500. Per-repository declaration,
-  per-invocation selection, no global mutation.
-- PRD-096 — a failing required check is work, not a wall. The
-  coordinator stops before review when a required check fails, so the
-  implementer is never asked to fix the failing test, and the attended
-  pause offers a retry that provably cannot change the outcome
-  (FAM-BUG-054). Status `draft`.
-- PRD-097 — delivery is forge-agnostic.
-- PRD-098 — delivery claims computed from the ledger. The database
-  records 39 attempts, 2 completed, 2 integrated, while the README and a
-  closed FAM-BUG-019 claimed autonomous wave delivery. The north-star
-  metrics become a shipped query, "delivered autonomously" gets one
-  machine-checkable definition, and a documented claim the ledger does
-  not support fails a check. Depends on PRD-046, PRD-051, PRD-077.
-- PRD-099 — the gate runs without being asked. `.github` has never
-  existed here; the gate is four README commands run by hand. Automatic
-  triggers, one definition, unknown-is-failure, required rather than
-  advisory, a queryable verdict. Disjoint from PRD-092, which owns what
-  the gate compiles. No declared dependencies, and the queue that
-  already writes "proven by a gate job" assumes it.
+  finding outcomes tracked to a calibration number, `draft` honoured by
+  eligibility (`blocked` already is), and directory `expected_files`
+  entries named at admission (FAM-BUG-051's other half). Depends on
+  PRD-019, PRD-030, PRD-045, PRD-071.
+- PRD-094 — local workers reachable from dispatch, through PRD-100's
+  owned loop rather than the Codex CLI factory. The bottom rung of
+  PRD-107's ladder. Now depends on PRD-100.
+- PRD-095 — declared git and forge identity per repository. **Landed
+  2026-09-13** (`833aa02`); awaiting archive.
+- PRD-096 — a failing required check is work, not a wall (FAM-BUG-054).
+  **Landed 2026-09-19** through the merge queue (`f182492`); awaiting
+  archive.
+- PRD-097 — delivery is forge-agnostic. **Draft, 1.x, not implemented**:
+  merge `deec7f8` carried only the document. 1.0 delivers to GitHub.
+- PRD-098 — delivery claims computed from the ledger. Corrected
+  2026-09-22: the 43-row table mixes 13 attempts from another repository
+  with 30 from this one, and `main` holds 5 merge-queue commits against
+  2 `integrated_at` rows. Now also requires repository scope on every
+  answer, `integrated_at` on every landing path, and reporting against an
+  owner-declared human baseline. Depends on PRD-046, PRD-051, PRD-077,
+  PRD-085, PRD-086.
+- PRD-099 — the gate runs without being asked. **Landed 2026-09-18**
+  (PR #16, local `pre-push` hook and `gate_verdicts` ledger, not CI);
+  awaiting archive.
 
 - PRD-100 — Familiar's own loop is a selectable worker. The vendor
   dependency is three registry entries and a closed three-variant enum,
@@ -359,18 +357,34 @@ containment and tool-output retention work while these were staged.
   than a session failure, and the README prerequisite deleted. Depends
   on PRD-036, PRD-078, PRD-100.
 
-Suggested order: PRD-098 first and alone — it is the only queued item
-that reports whether any of the others moved a north-star metric, and it
-is cheap. Then PRD-096, which is the largest delivery blocker the ledger
-names that already has a PRD. Then PRD-083 (the failure a stranger hits
-first), then PRD-084 and PRD-092 (a binary-release user has neither the
-tools nor a clean build), then PRD-099 (nothing above is verified until
-the gate runs itself), then PRD-089 and PRD-087 (open gate hole,
-fundamental invariants), then PRD-086 and PRD-085 (measurement before
-steering), then PRD-100 and PRD-101 in that order (the vendor-dependency pair;
-100 is a bridge plus a config-type correction, 101 is the install story
-that only becomes reachable after it), then PRD-088, PRD-090, PRD-093,
-PRD-094, PRD-095, PRD-097, and PRD-091.
+- PRD-102 — the tray says when it needs you. Badge, one notification per
+  new gate, decisions from the window. **Landed 2026-09-20** per commits
+  `9702198`, `5ad602a`, `a0467a2`; the named test file carries the
+  FAM-BUG-062 delegate regressions rather than the badge and
+  notification ones, so verify the six criteria against the tray crate's
+  tests before archiving.
+- PRD-103 — finish PRD-090's unmet criteria. Two files, no dependencies,
+  no hub overlap: the designated first hands-off run.
+- PRD-104 — cross-platform Tauri desktop. `in_progress` on the macOS
+  session; 14 criteria and 40 expected files, outside the 2026-09-19
+  batch approval and conflicting with every round. Not edited in the
+  2026-09-22 audit; its size and scheduling are the owner's decision.
+- PRD-105 — finish PRD-100's unremediated findings. **Blocked**: PRD-100
+  is not integrated, so the findings belong in PR #19's remediation. It
+  stands only if PRD-100 lands with them unfixed.
+- PRD-106 — split the hub files that serialize the queue. Migrations
+  register themselves, defaults per feature, CLI and configuration
+  reference out of the README; width measured after. **Draft, 2026-09-22**,
+  awaiting owner approval. 1.0 on the parallelism bullet.
+- PRD-107 — cheap-first routing is live. Per-job-class ladder ordered by
+  PRD-086 cost, one bounded escalation carrying evidence, PRD-032
+  probation live for the local rung, and a live-run acceptance on this
+  repository. **Draft, 2026-09-22**, awaiting owner approval. 1.0 on the
+  cost bullet. Depends on PRD-086, PRD-094, PRD-100.
+
+Order: see the 2026-09-22 section of `EXECUTION-PLAN.md`. The 2026-09-04
+suggested order that stood here assumed PRD-098 first; PRD-098 now depends
+on PRD-086 and the ledger it reads on has been corrected.
 
 Supporting work may proceed in parallel but does not replace the critical path.
 PRD-035 becomes acceptance-critical only for facts PRD-038 requires clients to

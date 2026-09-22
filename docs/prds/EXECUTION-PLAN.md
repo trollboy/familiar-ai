@@ -23,6 +23,100 @@ a *decomposition*, which for 082+ has not been reviewed as a batch. Until
 then the 082+ PRDs are executed one at a time under ordinary per-PRD
 approval, not under standing authorization.
 
+## 2026-09-22 — release 1.0 definition and queue audit
+
+**Definition (owner, 2026-09-22). Familiar 1.0:**
+
+1. takes a collection of PRDs — the planner is not on the 1.0 path;
+2. parallelizes and implements them at the width the scope graph allows;
+3. optimizes each stream against token spend;
+4. optimizes the architecture against token spend, with multi-model
+   routing that is cheap-first and empirical — *"use the local Ollama
+   model if you can get away with it, then Claude for the heavy lifting,
+   Codex for tests, or whichever you have the best luck with"* — and with
+   Familiar's own loop as a selectable peer of the vendor CLIs, on both
+   product and cost grounds;
+5. implements every PRD with testing as far as possible, stopping only at
+   a genuine user-permission gate, which it passes through to the user.
+
+The bar: **faster and cheaper than five people using Claude.** Fire and
+forget, but not at the cost of the runway. PRD-098 now carries the
+baseline as a declared number the report divides by.
+
+Under that definition a stop is legitimate only if it is a decision that
+is the user's to make. Every other stop in the ledger — infrastructure,
+adapter bug, package cap, checkpoint bug, reviewer incapacity — is a
+defect by definition, not a refusal to preserve.
+
+**What the audit found and changed.** Details in each PRD's dated
+section; the summary:
+
+| PRD | Finding | Action |
+|---|---|---|
+| 082, 085, 090, 095, 096, 099, 102 | landed, still in the queue | not edited (completion is immutable); archive is the owner's act. 102's six criteria should be checked against the tray crate's tests first |
+| 097 | SITREP said landed; merge `deec7f8` carried only the document | corrected; stays `draft`, 1.x |
+| 105 | successor to a PRD that has not integrated (PR #19) | `blocked`; findings belong in PR #19 |
+| 088 | motivating bugs fixed; AC3 duplicated 098; AC5 contradicted 099 | `draft`, 1.x; AC3 struck, AC5 restated |
+| 089 | its exclusion was removed 2026-09-21 | `draft`, 1.x; AC5 struck; `scripts/gate.sh` declared |
+| 092 | gate now exists; `scripts/` was a bare directory claim | depends on 099; declares `scripts/gate.sh`; AC1 restated against `gate.sh` |
+| 093 | `blocked` already honoured, `draft` not; FAM-BUG-051's admission half unowned | AC7 narrowed to `draft`; AC8 added |
+| 094 | overlapped 100 on the local path | depends on 100; local resolves through the owned loop |
+| 086 | review stage never costed (FAM-BUG-061); local basis unorderable | two criteria added; framed as 1.0 |
+| 098 | its ledger table mixed two repositories; five merge commits read as two | corrected in place; repository scope, `integrated_at` on every landing path, and the human baseline added |
+| 103 | assumed 090 unmerged | corrected; named as the first hands-off run |
+| 104 | 14 criteria, 40 files, in progress on macOS, outside the batch grant | not edited; the owner's call |
+| 100, 101 | accurate as written | unchanged |
+| **106** (new, draft) | the hub files bound width and no PRD split them | migrations self-register, defaults per feature, reference out of README, width measured after |
+| **107** (new, draft) | the 1.0 routing sentence had no PRD; every piece exists unwired | per-job-class ladder, one bounded escalation, probation live, **live-run acceptance** |
+
+**The ledger the previous sections quote is wrong.** 13 of the 43
+`driver_attempts` rows belong to `~/Projects/spectra` (ids `PRD-177a`,
+`PRD 0177f`, August dates). The two largest rows of the histogram below,
+"no Acceptance Criteria section" ×6 and "no reason recorded" ×6, are all
+spectra rows, and round 1 was sequenced on them. On this repository: 30
+attempts, 2 `completed`, 2 `integrated_at`, and 5 merge-queue commits on
+`main` — the "resumed candidate" landing path never writes
+`integrated_at`. Corrected table:
+
+| Retained reason, this repository | Count |
+|---|---|
+| `verification_failed` (4 of 6 = FAM-BUG-059 Docker subnets) | 6 |
+| `scope_broadened` | 5 |
+| `scope_ambiguous` | 4 |
+| `unclassified_result` | 3 |
+| `interrupted` | 3 |
+| `human_review_required` | 3 |
+| `malformed_output` (FAM-BUG-034/038) | 2 |
+| `integration_failed` | 1 |
+| `checkpoint_failed` (FAM-BUG-037) | 1 |
+
+**Bug work that precedes the queue, per the standing policy:** the
+resume-landing path must write `integrated_at`; attempt queries must
+filter by `driver_sessions.repository_key`; `scripts/gate.sh` still runs
+`--no-default-features` so the tray is untested in the gate.
+
+**1.0 order, dependency-ordered.** Widths are not restated here: the
+rounds below were computed by `achievable_width()` against declarations
+this audit changed, and `familiar-ai operator width` refuses while the
+daemon holds the control-plane claim. Regenerate after archiving.
+
+1. **PRD-103, hands-off, no-touch rule.** Two files, no dependencies,
+   no hub overlap. Every stop becomes a bug entry naming the variant;
+   nothing is fixed mid-run. This is the firing table, not a PRD.
+2. **PRD-106 alone**, once approved — it conflicts with most of the
+   queue by construction, as PRD-076 did.
+3. ~~**PRD-100**~~ — landed by hand 2026-09-22 (`e16fc73`) after an
+   independent review and four fixes on the branch; PRD-105 is `ready`
+   with the review's remaining findings.
+4. **086 ‖ 092 ‖ 093** — disjoint once 106 removes `migrate.rs` from
+   086 and 093.
+5. **094, 101** after 100; **098** after 086.
+6. **PRD-107** after 086, 094 and 100 — its fifth criterion is the live
+   run.
+
+1.x: 088, 089, 097, 105 (until 100 lands), and 104 at the owner's
+discretion.
+
 ## Completed
 
 | Wave | PRDs | Outcome |
@@ -130,7 +224,7 @@ the live backlog on 2026-09-17 (`familiar-ai operator width` refuses while
 the control-plane owner is live, so the same function was called through a
 one-off harness; the numbers are the scheduler's own).
 
-## Queue state, 2026-09-17
+## Queue state, 2026-09-17 (superseded by the 2026-09-22 audit above)
 
 Sixteen PRDs sit in `docs/prds/`. One of them is not remaining work:
 
@@ -290,30 +384,34 @@ before both of its inputs land, and 085 and 086 conflict on
 no matter how it is scheduled. It is the longest path in the queue and it
 sets the six-round floor for the rounds.
 
-The ledger's own ranking of what stops delivery, this host:
+The ledger's own ranking of what stops delivery, this host — **corrected
+2026-09-22; the table that stood here counted 12 rows from another
+repository's fixtures as this project's stops:**
 
-| Retained reason | Count |
+| Retained reason, this repository only | Count |
 |---|---|
-| Review precondition: PRD lacks an explicit Acceptance Criteria section | 6 |
-| *(no reason recorded)* | 6 |
+| `verification_failed` (4 of 6 infrastructure, FAM-BUG-059) | 6 |
 | `scope_broadened` | 5 |
 | `scope_ambiguous` | 4 |
 | `unclassified_result` | 3 |
 | `interrupted` | 3 |
 | `human_review_required` | 3 |
+| `malformed_output` | 2 |
+| `integration_failed` | 1 |
+| `checkpoint_failed` | 1 |
 
-Two observations that this round table answers directly:
+Two observations, one of which survives the correction:
 
 1. **Scope authorization refuses nine attempts** — the single largest
    cause, and PRD-080 already narrowed it once. The remaining
    `scope_broadened` cases are post-080 (PRD-63, 72, 87, 92 on 09-03 and
    09-05), so 080 did not close the class. The hub-file table above is the
    same finding seen from the other side: PRDs are declared against files
-   that other PRDs also need.
-2. **Six attempts record no reason at all** and six die on a review
-   precondition before a model is ever called. PRD-085 (round 1) makes the
-   first class visible and PRD-093 (round 1) makes the second class
-   impossible to author. Both are in round 1 deliberately.
+   that other PRDs also need. All nine were later landed by hand.
+2. ~~Six attempts record no reason at all and six die on a review
+   precondition before a model is ever called.~~ Both sets are spectra
+   fixture rows. PRD-085 and PRD-093 stand on their own merits, not on
+   this histogram; the round-1 placement argued from it is withdrawn.
 
 Per the bug policy, FAM-BUG-019 and FAM-BUG-022 are reopened and outrank
 the product queue. Their exit criterion is unchanged: one multi-PRD wave
@@ -341,7 +439,12 @@ therefore the FAM-BUG-019 exit criterion — impossible to even attempt.
 
 **PRD-099 is not in the grant.** It lands by hand, alone, ahead of the
 rounds: an unverified system cannot be asked to build its own verifier and
-then be believed about the result.
+then be believed about the result. *(Landed 2026-09-18, PR #16.)*
+
+**Amendments from the 2026-09-22 audit.** 088 and 089 are `draft` and
+leave the grant until the owner returns them to `ready`. 105 is `blocked`
+on 100. 106 and 107 are `draft` and await the owner's approval; nothing in
+this document authorizes them yet. The grant is otherwise unchanged.
 
 What this grant does **not** authorize, unchanged from the standing policy
 below:
