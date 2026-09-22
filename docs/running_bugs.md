@@ -281,6 +281,33 @@ appears with no entry, or with a status a reader cannot classify.
   Pinned by `crates/familiar-ai-daemon/tests/watcher_backlog_reconciliation.rs`
   against a real temporary Git repository and a real `FileWatcher`.
 
+### FAM-BUG-080 — The merge queue's integration commit is reachable from no branch when no delivery policy is configured
+
+- **Status:** Open — this occurrence resolved by hand 2026-09-22 (a FAM-BUG-019 recurrence, recorded as the rule requires).
+- **Found:** 2026-09-22, at the end of the first hands-off run that completed:
+  PRD-108, session `drive-00001790082829700506-0002649502-000000`,
+  `attempted=1 completed=1`, $11.70, clean independent review on the second
+  pass, `integrated_at` written, backlog `completed` — and `main` unchanged.
+- **Detail:** the merge queue wrote `bba2c87` (`familiar: integrate reviewed
+  candidate`, parents `1a0a086` = main and `780ec63` = the candidate) and
+  recorded it as the session's `integration_revision`. No branch or tag
+  points at it. This machine's configuration declares no `[delivery]`
+  policy, so delivery is disabled and nothing advances any ref to the
+  integration revision; the commit is one `gc` away from vanishing. Every
+  one of the ledger's six merge-queue commits has needed a human to move a
+  branch onto it, which is the "landed by hand" step in every after-action
+  report, and the reason the exit criterion of FAM-BUG-019 has never been
+  met even when the loop itself completed.
+- **Resolution this time:** `git merge --ff-only bba2c87` on `main`, a pure
+  fast-forward onto Familiar's own reviewed merge commit, then the ordinary
+  push through the gate.
+- **Expected fix:** a completed integration is never left unreferenced. With
+  delivery disabled the merge queue fast-forwards the session's checked-out
+  branch to the integration revision itself (the same operation performed
+  by hand here), or refuses to report the PRD `completed` until some ref
+  holds the commit; with a policy configured, `deliver` publishes it. The
+  drive log should print the ref that now holds the work, not only the SHA.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable
