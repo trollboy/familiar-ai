@@ -385,6 +385,32 @@ appears with no entry, or with a status a reader cannot classify.
   stops immediately rather than spending the third attempt on the same
   model repeating itself.
 
+### FAM-BUG-083 — Releasing a PRD does not retire the stops that put it on "Waiting on you"
+
+- **Status:** Fixed 2026-09-22 — `pending_human_gates` excludes a stopped
+  attempt or blocked checkpoint that a human recovery event (release,
+  manual completion, recorded completion, approval) has answered since; the
+  event's `changed_at` after the stop is the answer. Pinned by
+  `a_release_after_the_stop_retires_the_gate`. The "nothing to decide"
+  half stays open under FAM-BUG-082.
+- **Found:** 2026-09-22, sweeping the pending-gates surface. PRD-92's
+  2026-09-05 candidate (retained `scope_broadened`, checkpoint `blocked`,
+  worktree long since reaped, base 152 commits behind `main`) was released
+  with actor and reason. The backlog row went `in_progress → pending`; the
+  card stayed. `pending_human_gates` lists every retained attempt and every
+  blocked checkpoint whose PRD is not completed, and a release changes
+  neither, so the operator is asked again about a stop they have already
+  answered — until a new attempt happens to run.
+- **Also seen in the same sweep:** a `scope_broadened` stop with zero
+  pending decisions is not waiting on anyone; the only offered actions were
+  Release and Force-complete. That is FAM-BUG-082's shape one class over:
+  a stop presented as a decision when there is nothing to decide.
+- **Expected fix:** a release (or any later recovery event) for a PRD
+  supersedes the stopped attempts and blocked checkpoints that precede it,
+  and the gates predicate excludes them; a stop with no decidable finding
+  reads as Failed on the lifecycle and offers "run again", not "release or
+  force-complete".
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable

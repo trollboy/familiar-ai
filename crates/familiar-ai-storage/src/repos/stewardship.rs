@@ -235,6 +235,11 @@ pub struct PendingGate {
 /// but success, so half of "waiting on you" was work already finished and the
 /// list read as a second, noisier copy of the backlog. A PRD with no backlog
 /// row at all is still reported: absence is not proof that it was settled.
+/// FAM-BUG-083: a recovery event a human recorded for the PRD *after* a stop
+/// — release, manual completion, recorded completion, approval — is that
+/// stop's answer, so the stop no longer counts as a gate. Without this a
+/// released PRD stayed on "Waiting on you" until a new attempt happened to
+/// run, asking the operator again about a decision already made.
 pub fn pending_human_gates(
     conn: &Connection,
     repository_key: &str,
@@ -261,6 +266,10 @@ pub fn pending_human_gates(
                  WHERE s.repository_key=?1 AND (a.outcome IS NULL OR a.outcome<>'completed') \
                    AND (b.status IS NULL OR b.status<>'completed') \
                    AND b.missing_since IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM backlog_status_events e \
+                     JOIN backlog_recovery_events r ON r.status_event_id=e.event_id \
+                     WHERE e.repository_key=s.repository_key AND e.prd_path=a.prd_path \
+                       AND e.changed_at > a.started_at) \
                  ORDER BY a.started_at DESC, a.sequence DESC LIMIT ?2",
             )
             .map_err(db)?;
@@ -311,6 +320,10 @@ pub fn pending_human_gates(
                  WHERE c.repository_key=?1 AND c.phase IN ('blocked','invalid_checkpoint') \
                    AND (b.status IS NULL OR b.status<>'completed') \
                    AND b.missing_since IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM backlog_status_events e \
+                     JOIN backlog_recovery_events r ON r.status_event_id=e.event_id \
+                     WHERE e.repository_key=c.repository_key AND e.prd_path=c.prd_path \
+                       AND e.changed_at > c.updated_at) \
                  ORDER BY c.prd_id LIMIT ?2",
             )
             .map_err(db)?;
@@ -487,6 +500,61 @@ mod tests {
             .find(|c| c.contains("scope-decisions"))
             .expect("a pending finding must offer the picker");
         assert!(scope_line.contains("1 finding(s)"), "{scope_line}");
+    }
+
+    /// FAM-BUG-083: a release recorded after the stop retires the gate; the
+    /// same stop with no later recovery event is still a gate.
+    #[test]
+    fn a_release_after_the_stop_retires_the_gate() {
+        let db = database();
+        let driver = DriverRepository::new(db.conn());
+        driver
+            .open_session("session-1", "/repo/.git", "{}")
+            .unwrap();
+        for n in [1, 2] {
+            let path = format!("docs/prds/PRD-{n}.md");
+            let attempt = driver
+                .record_attempt_started("session-1", &format!("PRD-{n}"), &path, None)
+                .unwrap();
+            driver
+                .record_attempt_finished(
+                    "session-1",
+                    attempt,
+                    "retained",
+                    Some("scope_broadened"),
+                    None,
+                    Some(5),
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO backlog_prds (repository_key,prd_path,prd_number,content_hash,\
+                     status,discovered_at,last_seen_at,created_at,updated_at) \
+                     VALUES ('/repo/.git',?1,?2,'hash','pending','t','t','t','t')",
+                    rusqlite::params![path, n as i64],
+                )
+                .unwrap();
+        }
+        // PRD-1 was released by a human after its stop; PRD-2 was not.
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_status_events (event_id,repository_key,prd_path,old_status,\
+                 new_status,actor,changed_at) VALUES (7001,'/repo/.git','docs/prds/PRD-1.md',\
+                 'in_progress','pending','human:tester','9999-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO backlog_recovery_events (status_event_id,action,reason) \
+                 VALUES (7001,'release','stale candidate')",
+                [],
+            )
+            .unwrap();
+
+        let gates = pending_human_gates(db.conn(), "/repo/.git", 10).unwrap();
+        let prds: Vec<&str> = gates.iter().map(|g| g.prd_id.as_str()).collect();
+        assert_eq!(prds, ["PRD-2"], "the released PRD must no longer be a gate");
     }
 
     #[test]
