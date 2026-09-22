@@ -2081,6 +2081,33 @@ reinstall the binary, then rerun the 076 drive.
   shared-builder inventory so the two presentations cannot silently drift
   again while GTK remains the migration oracle.
 
+### FAM-BUG-068 — Desktop installation can leave two tray owners active
+
+- **Status:** Mitigated 2026-09-22; durable installer guard still required.
+- **Found:** 2026-09-22, when `Open Dashboard` opened the legacy loopback web
+  page after the Tauri desktop had been installed.
+- **Detail:** The independently supervised Tauri desktop owned its tray as
+  intended, but the daemon had been installed from a default-feature binary
+  that also owned the legacy tray. The two visually similar menus exposed
+  different Dashboard behavior.
+- **Mitigation:** Rebuilt and installed `familiar-ai-daemon` with
+  `--no-default-features`, leaving the Tauri process as the sole tray owner.
+  The desktop migration installer must make this invariant explicit so a later
+  default-feature daemon replacement cannot recreate the duplicate menu.
+
+### FAM-BUG-069 — Status pills inherit unreadable dark-mode foregrounds
+
+- **Status:** Fixed 2026-09-22.
+- **Found:** 2026-09-22 from a live macOS screenshot of the dependency Gantt.
+- **Detail:** Pills used a hard-coded near-white background but inherited the
+  surrounding dark-mode foreground. Multiword values such as `not found` also
+  became two CSS classes, preventing a reliable status-specific override.
+- **Fix:** Status names are normalized to stable CSS identifiers and every
+  status family now has an explicit high-contrast foreground/background pair.
+  A desktop contract regression pins completed, missing, in-progress, and
+  unregistered states. The same update adds an operator-controlled
+  `Hide completed` filter to the dependency Gantt.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or

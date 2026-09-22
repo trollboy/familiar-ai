@@ -85,3 +85,25 @@ fn tauri_reuses_the_gtk_presentation_contract() {
     assert!(!javascript.contains("execution-id"));
     assert!(!javascript.contains("session-id"));
 }
+
+#[test]
+fn status_pills_have_explicit_contrast_and_normalized_names() {
+    let javascript = include_str!("../ui/app.js");
+    let css = include_str!("../ui/styles.css");
+    assert!(javascript.contains("replace(/[^a-z0-9]+/g,'-')"));
+    for status in ["completed", "not-found", "in-progress", "not-registered"] {
+        assert!(
+            css.contains(&format!(".status-{status}")),
+            "missing explicit pill style for {status}"
+        );
+    }
+    assert!(css.contains(".status{border:1px solid transparent;background:#475467;color:#fff"));
+}
+
+#[test]
+fn backlog_can_hide_completed_prds_without_losing_the_dependency_graph() {
+    let javascript = include_str!("../ui/app.js");
+    assert!(javascript.contains("id=\"hide-completed\""));
+    assert!(javascript.contains("n.dataset.status==='completed'"));
+    assert!(javascript.contains("state.hideCompleted"));
+}
