@@ -9,13 +9,14 @@ use std::time::Duration;
 use familiar_ai_core::config::DeliveryIdentityConfig;
 use familiar_ai_core::{
     AppPaths, BacklogDiscovery, Config, DeliveryConfig, DeliveryMode, EndpointProviderKind,
-    FilesystemBacklogDiscovery,
+    FilesystemBacklogDiscovery, Forge,
 };
 use familiar_ai_storage::{Database, DeliveryRepository};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use wait_timeout::ChildExt;
 
+use crate::forge::{self, ChangeRequestId, ForgeCall};
 use crate::worktree::WorktreeOwnership;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +122,11 @@ pub struct DeliveryJournal {
     pub prd_id: String,
     pub worktree: PathBuf,
     pub branch: String,
-    pub pr_number: Option<u64>,
+    /// PRD-097. The opaque, adapter-supplied change request identity — a
+    /// GitHub PR number, a GitLab `!123`, a Gerrit change id — or `None` for
+    /// an adapter that has no identifier (declined, or `forge = "none"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_request: Option<ChangeRequestId>,
     pub phase: String,
     pub detail: Option<String>,
     pub updated_at: String,
@@ -304,7 +309,7 @@ pub fn deliver_with(
             prd_id: ownership.prd_id,
             worktree: ownership.worktree,
             branch: branch.clone(),
-            pr_number: None,
+            change_request: None,
             phase: "admitted".into(),
             detail: None,
             updated_at: chrono::Utc::now().to_rfc3339(),
@@ -366,49 +371,66 @@ pub fn deliver_with(
         persist(&journal_path, &journal)?;
     }
 
+    // PRD-097: `forge = "none"` is a first-class adapter, not a failure.
+    // Delivery has already pushed the branch; without a forge there is
+    // nothing left to publish, check, or merge, so it stops here at a
+    // terminal phase naming the branch and base for a human to open the
+    // request themselves.
+    if policy.forge == Forge::None {
+        if phase_before(&journal.phase, "awaiting_manual_publication") {
+            journal.phase = "awaiting_manual_publication".into();
+            journal.detail = Some(format!(
+                "no forge configured; branch {} pushed against base {}, awaiting a human to open the change request",
+                journal.branch, policy.base
+            ));
+            persist(&journal_path, &journal)?;
+        }
+        return Ok(journal);
+    }
+
     if phase_before(&journal.phase, "published") {
         // PRD-095 preflight. The branch is already on the remote by now, so
         // this is the last point where a wrong identity is still cheap: it
-        // costs a diagnostic instead of a pull request opened by the wrong
+        // costs a diagnostic instead of a change request opened by the wrong
         // account, or an opaque provider error that names neither identity
         // nor permission.
         let selection = provider_env(identity);
         if let Err(error) = verify_forge_account(runner, &journal.worktree, identity, repository) {
             return fail_journal(&journal_path, journal, "identity_mismatch", error);
         }
-        let create = provider_argv(
-            policy,
-            &[
-                "pr",
-                "create",
-                "--fill",
-                "--base",
-                &policy.base,
-                "--head",
-                &branch,
-            ],
-        );
-        if let Err(error) = checked_owned_env(runner, &journal.worktree, &create, &selection) {
-            journal.detail = Some(format!(
-                "PR create returned: {error}; checking for existing PR"
-            ));
+        if let ForgeCall::Run(publish) = forge::publish(policy.forge, &policy.base, &branch) {
+            if let Err(error) = checked_owned_env(
+                runner,
+                &journal.worktree,
+                &forge_argv(policy, publish),
+                &selection,
+            ) {
+                journal.detail = Some(format!(
+                    "publish returned: {error}; checking for an existing change request"
+                ));
+            }
         }
-        let view = checked_owned_env(
-            runner,
-            &journal.worktree,
-            &provider_argv(
-                policy,
-                &["pr", "view", &branch, "--json", "number", "--jq", ".number"],
-            ),
-            &selection,
-        )?;
-        journal.pr_number = String::from_utf8_lossy(&view.stdout).trim().parse().ok();
+        let located = match forge::locate(policy.forge, &branch) {
+            ForgeCall::Run(locate) => Some(checked_owned_env(
+                runner,
+                &journal.worktree,
+                &forge_argv(policy, locate),
+                &selection,
+            )?),
+            ForgeCall::Declined => None,
+        };
+        journal.change_request = located.and_then(|output| {
+            forge::parse_change_request(policy.forge, &String::from_utf8_lossy(&output.stdout))
+        });
         journal.phase = "published".into();
         persist(&journal_path, &journal)?;
     }
-    let pr = journal
-        .pr_number
-        .ok_or_else(|| "provider adapter did not return a pull request number".to_owned())?;
+    let change = journal.change_request.clone().ok_or_else(|| {
+        format!(
+            "forge {} did not return a change request identifier",
+            forge::name(policy.forge)
+        )
+    })?;
 
     if policy.mode == DeliveryMode::ReviewedPrManual {
         journal.phase = "awaiting_merge_authority".into();
@@ -416,34 +438,56 @@ pub fn deliver_with(
         return Ok(journal);
     }
     if phase_before(&journal.phase, "merged") {
-        if let Err(error) = checked_owned(
-            runner,
-            &journal.worktree,
-            &provider_argv(
-                policy,
-                &["pr", "checks", &pr.to_string(), "--watch", "--fail-fast"],
-            ),
-        ) {
-            comment_blocker(runner, policy, &journal.worktree, pr, &error);
-            return fail_journal(&journal_path, journal, "checks_failed", error);
+        match forge::wait_checks(policy.forge, &change.id) {
+            ForgeCall::Declined => {
+                return stop_for_declined_verb(
+                    &journal_path,
+                    journal,
+                    policy.forge,
+                    "watch checks",
+                );
+            }
+            ForgeCall::Run(values) => {
+                if let Err(error) =
+                    checked_owned(runner, &journal.worktree, &forge_argv(policy, values))
+                {
+                    comment_blocker(
+                        runner,
+                        policy,
+                        &journal.worktree,
+                        policy.forge,
+                        &change.id,
+                        &error,
+                    );
+                    return fail_journal(&journal_path, journal, "checks_failed", error);
+                }
+            }
         }
         for check in &policy.required_checks {
-            checked_owned(
-                runner,
-                &journal.worktree,
-                &provider_argv(policy, &["pr", "check", &pr.to_string(), check]),
-            )?;
+            match forge::check_named(policy.forge, &change.id, check) {
+                ForgeCall::Declined => {
+                    return stop_for_declined_verb(
+                        &journal_path,
+                        journal,
+                        policy.forge,
+                        "query a named check",
+                    );
+                }
+                ForgeCall::Run(values) => {
+                    checked_owned(runner, &journal.worktree, &forge_argv(policy, values))?;
+                }
+            }
         }
     }
     if phase_before(&journal.phase, "merged") {
-        checked_owned(
-            runner,
-            &journal.worktree,
-            &provider_argv(
-                policy,
-                &["pr", "merge", &pr.to_string(), "--merge", "--delete-branch"],
-            ),
-        )?;
+        match forge::merge(policy.forge, &change.id) {
+            ForgeCall::Declined => {
+                return stop_for_declined_verb(&journal_path, journal, policy.forge, "merge");
+            }
+            ForgeCall::Run(values) => {
+                checked_owned(runner, &journal.worktree, &forge_argv(policy, values))?;
+            }
+        }
         journal.phase = "merged".into();
         persist(&journal_path, &journal)?;
     }
@@ -454,7 +498,14 @@ pub fn deliver_with(
                 .map(|_| "rollback passed".to_owned())
                 .unwrap_or_else(|error| format!("rollback failed: {error}"));
             let detail = format!("staging deploy failed: {deploy_error}; {rollback}");
-            comment_blocker(runner, policy, &journal.worktree, pr, &detail);
+            comment_blocker(
+                runner,
+                policy,
+                &journal.worktree,
+                policy.forge,
+                &change.id,
+                &detail,
+            );
             return fail_journal(&journal_path, journal, "staging_rolled_back", detail);
         }
     }
@@ -468,7 +519,14 @@ pub fn deliver_with(
                 .map(|_| "rollback passed".to_owned())
                 .unwrap_or_else(|error| format!("rollback failed: {error}"));
             let detail = format!("staging smoke failed: {smoke_error}; {rollback}");
-            comment_blocker(runner, policy, &journal.worktree, pr, &detail);
+            comment_blocker(
+                runner,
+                policy,
+                &journal.worktree,
+                policy.forge,
+                &change.id,
+                &detail,
+            );
             return fail_journal(&journal_path, journal, "staging_rolled_back", detail);
         }
     }
@@ -784,13 +842,30 @@ fn argv(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
 
-fn provider_argv(policy: &DeliveryConfig, values: &[&str]) -> Vec<String> {
-    policy
-        .provider_argv
-        .iter()
-        .cloned()
-        .chain(values.iter().map(|v| (*v).to_owned()))
-        .collect()
+/// Applies the configured executable/prefix override to a forge verb's
+/// argv. `provider_argv` never spells the verb itself — that is
+/// `crate::forge`'s job — only the binary to invoke it through.
+fn forge_argv(policy: &DeliveryConfig, verb: Vec<String>) -> Vec<String> {
+    policy.provider_argv.iter().cloned().chain(verb).collect()
+}
+
+/// A declined verb is a typed, journaled outcome, not an error: delivery
+/// stops in the same family as `ReviewedPrManual`'s manual-authority stop,
+/// naming which verb the forge cannot perform rather than silently claiming
+/// an automatic authority it never exercised.
+fn stop_for_declined_verb(
+    path: &Path,
+    mut journal: DeliveryJournal,
+    forge: Forge,
+    verb: &str,
+) -> Result<DeliveryJournal, String> {
+    journal.phase = "awaiting_merge_authority".into();
+    journal.detail = Some(format!(
+        "forge {} cannot {verb} programmatically; human merge authority required",
+        forge::name(forge)
+    ));
+    persist(path, &journal)?;
+    Ok(journal)
 }
 
 /// PRD-095. The declared identity, or a fail-closed diagnostic naming the
@@ -868,7 +943,7 @@ fn phase_before(current: &str, target: &str) -> bool {
             "admitted" => 0,
             "committed" => 1,
             "pushed" => 2,
-            "published" | "awaiting_merge_authority" => 3,
+            "published" | "awaiting_merge_authority" | "awaiting_manual_publication" => 3,
             "merged" => 4,
             "checks_failed" => 3,
             "staging_rolled_back" => 4,
@@ -919,19 +994,16 @@ fn comment_blocker(
     runner: &dyn CommandRunner,
     policy: &DeliveryConfig,
     directory: &Path,
-    pr: u64,
+    forge: Forge,
+    change_id: &str,
     detail: &str,
 ) {
-    if policy.comment_blockers {
-        let detail = familiar_ai_agent::redact_sensitive(detail.to_owned());
-        let _ = checked_owned(
-            runner,
-            directory,
-            &provider_argv(
-                policy,
-                &["pr", "comment", &pr.to_string(), "--body", &detail],
-            ),
-        );
+    if !policy.comment_blockers {
+        return;
+    }
+    let detail = familiar_ai_agent::redact_sensitive(detail.to_owned());
+    if let ForgeCall::Run(values) = forge::comment(forge, change_id, &detail) {
+        let _ = checked_owned(runner, directory, &forge_argv(policy, values));
     }
 }
 

@@ -25,3 +25,6 @@ them. Unknown kinds and unknown extension fields fail validation closed.
   and migration bookkeeping.
 - [Anthropic adapter](anthropic-adapter.md) — the `anthropic-api` raw
   runtime: PRD-058 wire mapping, stop reasons, caching, and billing mode.
+- [Forge adapters](forge-adapters.md) — the `forge` identity delivery
+  publishes, checks, and merges through, its closed verb vocabulary, and
+  how an adapter declines a verb it cannot perform.

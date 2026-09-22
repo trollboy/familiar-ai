@@ -57,6 +57,25 @@ pub struct DeliveryConfig {
     /// account is silently wrong until a write fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<DeliveryIdentityConfig>,
+    /// PRD-097. Which forge grammar delivery speaks — `github`, `gitlab`,
+    /// `gitea`, or `none`. Validated closed exactly as provider kinds are: an
+    /// unknown identity fails deserialization rather than silently behaving
+    /// like GitHub. `provider_argv` remains the executable/prefix override;
+    /// this field selects the verb grammar itself.
+    pub forge: Forge,
+}
+
+/// PRD-097. The forge a repository's delivery publishes, checks, and merges
+/// through. `none` is a first-class adapter: delivery pushes the branch and
+/// stops at a terminal phase naming the branch and base for a human to open
+/// the request, which is a successful outcome, not a failure.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Forge {
+    Github,
+    Gitlab,
+    Gitea,
+    None,
 }
 
 /// PRD-095. A *descriptor* of who Familiar acts as — never a credential.
@@ -216,6 +235,8 @@ struct DeliveryConfigCompat {
     targets: BTreeMap<String, String>,
     #[serde(default)]
     identity: Option<DeliveryIdentityConfig>,
+    #[serde(default)]
+    forge: Option<Forge>,
 }
 
 impl From<DeliveryConfigCompat> for DeliveryConfig {
@@ -225,6 +246,13 @@ impl From<DeliveryConfigCompat> for DeliveryConfig {
         } else {
             DeliveryMode::Disabled
         });
+        // PRD-097: an omitted `forge` defaults to `github`, the pre-PRD-097
+        // baseline, whether or not `provider_argv` happens to be populated —
+        // inferring `none` from an empty `provider_argv` made a missing or
+        // mistyped adapter executable validate as an intentional "no forge"
+        // section instead of failing closed. `Forge::None` is reserved for a
+        // section that spells `forge = "none"` explicitly.
+        let forge = compat.forge.unwrap_or(Forge::Github);
         Self {
             mode,
             enabled: compat.enabled,
@@ -246,6 +274,7 @@ impl From<DeliveryConfigCompat> for DeliveryConfig {
             review_gate: compat.review_gate,
             targets: compat.targets,
             identity: compat.identity,
+            forge,
         }
     }
 }
@@ -273,6 +302,9 @@ impl Default for DeliveryConfig {
             review_gate: None,
             targets: BTreeMap::new(),
             identity: None,
+            // Matches the compat `From` impl's default for an omitted
+            // `forge`: GitHub is the pre-PRD-097 baseline.
+            forge: Forge::Github,
         }
     }
 }
@@ -329,7 +361,7 @@ impl DeliveryConfig {
         if self.remote.trim().is_empty() || self.base.trim().is_empty() {
             return Err("delivery remote and base must be non-empty".into());
         }
-        if self.provider_argv.is_empty() {
+        if self.forge != Forge::None && self.provider_argv.is_empty() {
             return Err("delivery requires a configured provider_argv adapter".into());
         }
         if self.automatically_authorized() {

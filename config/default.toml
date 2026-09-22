@@ -184,6 +184,12 @@ worktree_root = ""           # empty = driver-owned directory under the state di
 # `reviewed_pr_manual` (the safe default when a section omits it),
 # `poc_self_approval`, or `review_gated_automatic`. A missing repository
 # delivery section grants no publish, merge, or deploy authority.
+# `forge` selects the forge grammar delivery speaks: `github`, `gitlab`,
+# `gitea`, or `none` (see docs/contracts/forge-adapters.md). A section that
+# omits forge keeps speaking `github`, the pre-PRD-097 baseline. Set
+# `forge = "none"` explicitly to push the branch and stop for a human to
+# open the change request instead.
+# forge = "github"
 # provider_argv = ["provider-cli"]
 # max_deliveries_per_session = 1
 # command_timeout_ms = 1800000

@@ -28,12 +28,12 @@ pub use config::{
     AgentAdapterKind, AgentEffort, AgentEntryConfig, AgentPermissionMode, AgentsConfig,
     BudgetProfile, Config, DashboardConfig, DeliveryConfig, DeliveryMode, DeployRecipeConfig,
     DriverConfig, DriverModelRouteConfig, EndpointProviderKind, ExecutionHistoryConfig,
-    ExecutionPrice, FamiliarToml, InferenceConfig, InferenceMode, PackerConfig, PlannerConfig,
-    PocSelfApprovalWarrant, PreflightCommandConfig, PreflightConfig, ProhibitedChangeConfig,
-    ProviderKind, ReferenceKind, ReferenceRootConfig, RepositoryConfig, ResolvedProhibitedRule,
-    ReviewGateConfig, ReviewScopeConfig, RollupConfig, ScopeClassPolicyConfig,
-    ScopeClassificationConfig, ScopeDeclarationModeConfig, ScopeFileClassName, SummaryConfig,
-    TrayConfig, TypedProhibitedChange, WatcherConfig,
+    ExecutionPrice, FamiliarToml, Forge, InferenceConfig, InferenceMode, PackerConfig,
+    PlannerConfig, PocSelfApprovalWarrant, PreflightCommandConfig, PreflightConfig,
+    ProhibitedChangeConfig, ProviderKind, ReferenceKind, ReferenceRootConfig, RepositoryConfig,
+    ResolvedProhibitedRule, ReviewGateConfig, ReviewScopeConfig, RollupConfig,
+    ScopeClassPolicyConfig, ScopeClassificationConfig, ScopeDeclarationModeConfig,
+    ScopeFileClassName, SummaryConfig, TrayConfig, TypedProhibitedChange, WatcherConfig,
 };
 pub use error::{FamiliarError, Result};
 pub use lifecycle::{
