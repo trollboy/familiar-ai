@@ -1488,7 +1488,34 @@ impl RawAgentHost for SqliteRawAgentHost {
         }
     }
 
-    fn finish(&self, outcome: &RunOutcome) -> Result<(), String> {
+    fn abandon_execution(&self, detail: &str) -> Result<(), String> {
+        // Nothing ran: no attempt, no usage, no evidence. The reservation is
+        // released rather than settled, and no run outcome is persisted — a
+        // run that never happened must not appear in the ledger as one that
+        // did. `take()` so a later `finish` on this host cannot settle a
+        // reservation that was already released.
+        let reservation_id = self
+            .reservation_id
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let Some(reservation_id) = reservation_id else {
+            return Ok(());
+        };
+        let mut db = Database::open(&self.database_path).map_err(|error| error.to_string())?;
+        let mut repo = ReservationRepository::new(db.conn_mut());
+        let actor = format!("raw-agent:{}", self.execution_id);
+        tracing::warn!(
+            execution_id = %self.execution_id,
+            reservation_id = %reservation_id,
+            detail,
+            "releasing the budget reservation of an execution that never reached the loop"
+        );
+        repo.release(&reservation_id, &actor)
+            .map_err(|error| error.to_string())
+    }
+
+    fn finish(&self, outcome: &RunOutcome, effective_model: &str) -> Result<(), String> {
         let mut db = Database::open(&self.database_path).map_err(|error| error.to_string())?;
         let reservation_id = self
             .reservation_id
@@ -1525,13 +1552,17 @@ impl RawAgentHost for SqliteRawAgentHost {
                 }
             }
         }
+        // The model the attempts ran against, as computed once by
+        // `RawAgent::execute` — not `self.model_identity`, which is the
+        // worker's configured model captured at construction and is wrong
+        // whenever the request carried an override.
         persist_run_outcome(
             db.conn(),
             &self.execution_id,
             &self.stage,
             &self.worker_id,
             &self.runtime_id,
-            self.model_identity.as_deref(),
+            Some(effective_model),
             None,
             &self.token_discipline,
             outcome,
@@ -1622,9 +1653,12 @@ mod raw_agent_host_tests {
             worktree.path().to_path_buf(),
         );
         host.reserve_execution_budget(Some(1_000)).unwrap();
-        host.finish(&stub_outcome(StopReason::Completed {
-            structured_output: false,
-        }))
+        host.finish(
+            &stub_outcome(StopReason::Completed {
+                structured_output: false,
+            }),
+            "fake-model",
+        )
         .unwrap();
 
         let db = Database::open(&database_path).unwrap();
@@ -1637,6 +1671,40 @@ mod raw_agent_host_tests {
             )
             .unwrap();
         assert_eq!(state, "committed");
+    }
+
+    /// Remediation regression (`reservation-leaked-on-pre-loop-failure`),
+    /// host half: an execution that acquired its reservation and then failed
+    /// before the loop ran hands the host `abandon_execution`, and the
+    /// `resource_reservations` row reaches the terminal `released` state
+    /// rather than staying `held`. A later `finish` on the same host must
+    /// not touch the released row.
+    #[test]
+    fn an_abandoned_execution_releases_its_reservation_row() {
+        let (_dir, database_path) = setup("exec_abandoned");
+        let worktree = tempfile::tempdir().unwrap();
+        let host = host(
+            database_path.clone(),
+            "exec_abandoned",
+            worktree.path().to_path_buf(),
+        );
+        host.reserve_execution_budget(Some(1_000)).unwrap();
+        host.abandon_execution("injected pre-loop failure").unwrap();
+
+        let db = Database::open(&database_path).unwrap();
+        let state: String = db
+            .conn()
+            .query_row(
+                "SELECT state FROM resource_reservations WHERE execution_id='exec_abandoned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "released");
+        assert!(
+            host.reservation_id.lock().unwrap().is_none(),
+            "an abandoned reservation must not be settled again by a later finish"
+        );
     }
 
     /// PRD-100 acceptance criterion: an attempt without a reservation cannot
@@ -1691,9 +1759,12 @@ mod raw_agent_host_tests {
 
         host.reserve_execution_budget(Some(1_000))
             .expect("first attempt must be granted a reservation");
-        host.finish(&stub_outcome(StopReason::Completed {
-            structured_output: false,
-        }))
+        host.finish(
+            &stub_outcome(StopReason::Completed {
+                structured_output: false,
+            }),
+            "fake-model",
+        )
         .expect("first attempt's reservation must settle cleanly");
 
         host.reserve_execution_budget(Some(1_000)).expect(
@@ -1701,9 +1772,12 @@ mod raw_agent_host_tests {
              must still be granted its own reservation rather than refused against an \
              already-exhausted pool",
         );
-        host.finish(&stub_outcome(StopReason::Completed {
-            structured_output: false,
-        }))
+        host.finish(
+            &stub_outcome(StopReason::Completed {
+                structured_output: false,
+            }),
+            "fake-model",
+        )
         .expect("second attempt's reservation must settle cleanly");
     }
 

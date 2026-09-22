@@ -71,7 +71,46 @@ pub trait RawAgentHost: Send + Sync {
 
     /// Resolves the budget reservation and persists the run's evidence and
     /// PRD-051 usage once the loop reaches a terminal stop reason.
-    fn finish(&self, outcome: &RunOutcome) -> Result<(), String>;
+    /// `effective_model` is the model the attempts actually ran against —
+    /// the request's override when one was supplied, else the worker's
+    /// configured model — so accounting names the model that was billed,
+    /// never the one that happened to be configured.
+    fn finish(&self, outcome: &RunOutcome, effective_model: &str) -> Result<(), String>;
+
+    /// Releases this execution's budget reservation when the loop never
+    /// reached a terminal outcome — any exit between
+    /// `reserve_execution_budget` and `finish`, including a panic. Nothing
+    /// ran, so nothing is settled and no run outcome is persisted; the
+    /// reservation is released outright.
+    fn abandon_execution(&self, detail: &str) -> Result<(), String>;
+}
+
+/// Releases the execution's reservation on every exit path that does not
+/// reach `finish`. Armed when the reservation is acquired, disarmed
+/// immediately before `finish` is called; a `?`, an early `return`, or an
+/// unwinding panic between those two points drops it armed. This is what
+/// makes "no reservation outlives the execution that acquired it" hold by
+/// construction rather than by every future fallible step remembering to
+/// release.
+struct ReservationGuard<'a> {
+    host: &'a dyn RawAgentHost,
+    armed: bool,
+}
+
+impl Drop for ReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Err(detail) = self
+                .host
+                .abandon_execution("execution aborted before the loop reached a terminal outcome")
+            {
+                tracing::warn!(
+                    detail = %detail,
+                    "failed to release an abandoned execution's budget reservation"
+                );
+            }
+        }
+    }
 }
 
 /// Everything a [`crate::AdapterFactory`] needs to construct one [`RawAgent`]
@@ -295,14 +334,14 @@ impl RawAgent {
         }
     }
 
-    fn execution_result(&self, outcome: &RunOutcome) -> ExecutionResult {
+    fn execution_result(&self, outcome: &RunOutcome, effective_model: &str) -> ExecutionResult {
         let usage = outcome.attempts.iter().fold(
             Default::default(),
             |acc: familiar_ai_llm::attempt::UsageCategories, attempt| acc.merge(&attempt.usage),
         );
         ExecutionResult {
             agent_version: Some(self.spec.worker_empirical_version.clone()),
-            model: Some(self.spec.model.clone()),
+            model: Some(effective_model.to_owned()),
             input_tokens: usage.uncached_input_tokens,
             output_tokens: usage.output_tokens,
             cached_tokens: usage.cache_read_tokens,
@@ -340,6 +379,21 @@ impl CodingAgent for RawAgent {
                     }),
                 }
             })?;
+        // Armed from here until the line before `finish`. Every early exit
+        // below — the runtime builder failing, a panic in a host hook —
+        // releases the reservation through the guard's `Drop`.
+        let mut reservation_guard = ReservationGuard {
+            host: self.host.as_ref(),
+            armed: true,
+        };
+
+        // Computed exactly once and used for the loop, the result, and the
+        // ledger, so the model named in accounting is the model the attempt
+        // ran on (remediation of `raw-agent-model-override-not-attributed`).
+        let effective_model = request
+            .model
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.spec.model.clone());
 
         let mut journal = self.host.journal();
         let mut executor = self.host.executor(request.working_directory);
@@ -377,10 +431,7 @@ impl CodingAgent for RawAgent {
         let config = LoopConfig {
             worker_spec_identity: self.spec.worker_spec_identity.clone(),
             worker_empirical_version: self.spec.worker_empirical_version.clone(),
-            model: request
-                .model
-                .map(str::to_owned)
-                .unwrap_or_else(|| self.spec.model.clone()),
+            model: effective_model.clone(),
             prompt_template_version: self.spec.prompt_template_version.clone(),
             ceilings,
             offered_capabilities: self.spec.offered_capabilities.clone(),
@@ -430,14 +481,17 @@ impl CodingAgent for RawAgent {
 
         let _ = write!(output, "{}", outcome.final_text.as_deref().unwrap_or(""));
 
-        if let Err(detail) = self.host.finish(&outcome) {
+        // The loop reached a terminal outcome; `finish` now owns the
+        // reservation's settlement.
+        reservation_guard.armed = false;
+        if let Err(detail) = self.host.finish(&outcome, &effective_model) {
             return Err(AgentExecutionError::Output {
                 source: Box::new(std::io::Error::other(detail)),
-                result: Box::new(self.execution_result(&outcome)),
+                result: Box::new(self.execution_result(&outcome, &effective_model)),
             });
         }
 
-        let result = self.execution_result(&outcome);
+        let result = self.execution_result(&outcome, &effective_model);
         match outcome.stop_reason {
             StopReason::Completed { .. } => Ok(result),
             StopReason::Timeout => Err(AgentExecutionError::Timeout {
@@ -496,6 +550,9 @@ mod tests {
         allowed_write_paths: Vec<String>,
         allowed_commands: Vec<String>,
         finish_called: Mutex<Option<StopReason>>,
+        finish_model: Mutex<Option<String>>,
+        abandoned: Mutex<Option<String>>,
+        panic_in_journal: bool,
         last_calls: Mutex<Vec<crate::raw_runtime::CallRecord>>,
         executor_working_directories: Mutex<Vec<PathBuf>>,
     }
@@ -531,6 +588,9 @@ mod tests {
                 allowed_write_paths,
                 allowed_commands,
                 finish_called: Mutex::new(None),
+                finish_model: Mutex::new(None),
+                abandoned: Mutex::new(None),
+                panic_in_journal: false,
                 last_calls: Mutex::new(Vec::new()),
                 executor_working_directories: Mutex::new(Vec::new()),
             }
@@ -539,6 +599,9 @@ mod tests {
 
     impl RawAgentHost for TestHost {
         fn journal(&self) -> Box<dyn ToolJournal> {
+            if self.panic_in_journal {
+                panic!("injected host failure after the reservation was acquired");
+            }
             Box::new(InMemoryToolJournal::default())
         }
         fn executor(&self, working_directory: &std::path::Path) -> Box<dyn ToolExecutor> {
@@ -571,9 +634,14 @@ mod tests {
                 Err("no budget reservation available".into())
             }
         }
-        fn finish(&self, outcome: &RunOutcome) -> Result<(), String> {
+        fn finish(&self, outcome: &RunOutcome, effective_model: &str) -> Result<(), String> {
             *self.finish_called.lock().unwrap() = Some(outcome.stop_reason);
+            *self.finish_model.lock().unwrap() = Some(effective_model.to_owned());
             *self.last_calls.lock().unwrap() = outcome.evidence.calls.clone();
+            Ok(())
+        }
+        fn abandon_execution(&self, detail: &str) -> Result<(), String> {
+            *self.abandoned.lock().unwrap() = Some(detail.to_owned());
             Ok(())
         }
     }
@@ -630,6 +698,83 @@ mod tests {
             Some(StopReason::Completed {
                 structured_output: false
             })
+        );
+        assert_eq!(
+            host.abandoned.lock().unwrap().as_deref(),
+            None,
+            "a run that reached finish must not also be abandoned"
+        );
+    }
+
+    /// Remediation regression (`raw-agent-model-override-not-attributed`):
+    /// an `ExecutionRequest` carrying `model: Some(..)` runs the loop against
+    /// that model, so the `ExecutionResult` and the identity handed to the
+    /// host's `finish` (and from there to PRD-051 accounting) must name it —
+    /// not the worker's configured `spec.model`. Restoring `self.spec.model`
+    /// in either place fails this test.
+    #[test]
+    fn a_request_model_override_is_the_model_attributed_everywhere() {
+        let adapter = Arc::new(FakeInferenceAdapter::new(vec![ScriptedTurn {
+            events: vec![StreamEvent::TextDelta("done".into())],
+            outcome: Ok(SubmitOutcome {
+                stop_reason: AdapterStopReason::EndTurn,
+                usage: UsageCategories {
+                    output_tokens: Some(1),
+                    ..Default::default()
+                },
+                provider_request_id: Some("req_override".into()),
+                provider_idempotency_key: None,
+            }),
+        }]));
+        let host = Arc::new(TestHost::new(true));
+        let agent = RawAgent::new(adapter, host.clone(), spec());
+        let temp = tempfile::tempdir().unwrap();
+        let mut output = Vec::new();
+        let request = ExecutionRequest {
+            model: Some("override-model"),
+            ..base_request(temp.path())
+        };
+        let result = agent.execute(request, &mut output).unwrap();
+        assert_eq!(
+            result.model.as_deref(),
+            Some("override-model"),
+            "the result must name the model the attempt ran on"
+        );
+        assert_eq!(
+            host.finish_model.lock().unwrap().as_deref(),
+            Some("override-model"),
+            "accounting must be handed the model the attempt ran on"
+        );
+        assert_ne!(spec().model, "override-model");
+    }
+
+    /// Remediation regression (`reservation-leaked-on-pre-loop-failure`):
+    /// once the reservation is acquired, every exit that does not reach
+    /// `finish` must release it. The failure injected here is a panic in a
+    /// host hook after `reserve_execution_budget` succeeded — the same shape
+    /// as the tokio runtime builder failing, which cannot be provoked from a
+    /// test. Removing the guard's release fails this test.
+    #[test]
+    fn a_failure_after_the_reservation_and_before_the_loop_releases_it() {
+        let adapter = Arc::new(FakeInferenceAdapter::new(vec![]));
+        let mut fixture = TestHost::new(true);
+        fixture.panic_in_journal = true;
+        let host = Arc::new(fixture);
+        let agent = RawAgent::new(adapter, host.clone(), spec());
+        let temp = tempfile::tempdir().unwrap();
+        let mut output = Vec::new();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = agent.execute(base_request(temp.path()), &mut output);
+        }));
+        assert!(unwound.is_err(), "the injected host failure must unwind");
+        assert!(
+            host.abandoned.lock().unwrap().is_some(),
+            "a reservation acquired by an execution that never reached finish must be released"
+        );
+        assert_eq!(
+            *host.finish_called.lock().unwrap(),
+            None,
+            "finish must not be reported for a loop that never ran"
         );
     }
 
