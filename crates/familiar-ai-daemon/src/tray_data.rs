@@ -107,6 +107,25 @@ impl DaemonDataSource {
         }
     }
 
+    fn repositories(&self) -> Result<Value, String> {
+        let mut value = {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| "database lock poisoned".to_string())?;
+            stewardship::list_repositories(&db).map_err(|e| e.to_string())?
+        };
+        let mut identities = Vec::new();
+        for configured in self.reconciler.configured_repositories() {
+            let identity = FilesystemBacklogDiscovery
+                .resolve(&configured)
+                .map_err(|e| format!("configured repository {}: {e}", configured.display()))?;
+            identities.push(identity);
+        }
+        merge_configured_repositories(&mut value, identities)?;
+        Ok(value)
+    }
+
     /// Every PRD the repository declares, needed to resolve a supplied path to
     /// a real backlog entry before mutating it.
     /// The repository's configured backlog layout: directories, metadata
@@ -667,6 +686,79 @@ impl DaemonDataSource {
     }
 }
 
+fn merge_configured_repositories(
+    value: &mut Value,
+    configured: impl IntoIterator<Item = familiar_ai_core::RepositoryIdentity>,
+) -> Result<(), String> {
+    let rows = value
+        .get_mut("repositories")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "repository listing returned an invalid response".to_string())?;
+    let mut known: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|row| row.get("path").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    for identity in configured {
+        let path = identity.worktree.to_string_lossy().into_owned();
+        if known.insert(path.clone()) {
+            rows.push(json!({"repository_key": identity.key, "path": path}));
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.get("path")
+            .and_then(Value::as_str)
+            .cmp(&right.get("path").and_then(Value::as_str))
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_configured_repositories;
+    use familiar_ai_core::RepositoryIdentity;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn configured_repository_remains_visible_without_durable_rows() {
+        let mut value = json!({"repositories": []});
+        merge_configured_repositories(
+            &mut value,
+            [RepositoryIdentity {
+                worktree: PathBuf::from("/work/familiar"),
+                key: "/work/familiar/.git".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({"repositories": [{
+                "repository_key": "/work/familiar/.git",
+                "path": "/work/familiar"
+            }]})
+        );
+    }
+
+    #[test]
+    fn configured_repository_does_not_duplicate_a_durable_row() {
+        let mut value = json!({"repositories": [{
+            "repository_key": "/work/familiar/.git",
+            "path": "/work/familiar"
+        }]});
+        merge_configured_repositories(
+            &mut value,
+            [RepositoryIdentity {
+                worktree: PathBuf::from("/work/familiar"),
+                key: "/work/familiar/.git".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(value["repositories"].as_array().unwrap().len(), 1);
+    }
+}
+
 impl DataSource for DaemonDataSource {
     fn query(&self, query: Query) -> Result<Value, String> {
         // Inference queries are async. `block_on` is safe here because this is
@@ -769,13 +861,13 @@ impl DataSource for DaemonDataSource {
                     .map_err(|e| e.to_string())?;
                 Ok(json!({"state": state}))
             }
+            Query::Repositories => self.repositories(),
             other => {
                 let db = self
                     .db
                     .lock()
                     .map_err(|_| "database lock poisoned".to_string())?;
                 let value = match other {
-                    Query::Repositories => stewardship::list_repositories(&db),
                     Query::Gates { repo } => {
                         stewardship::list_pending_human_gates(&db, &Self::identity(&repo)?, 100)
                     }
@@ -810,6 +902,7 @@ impl DataSource for DaemonDataSource {
                     | Query::BlockedReasons { .. }
                     | Query::Backlog { .. }
                     | Query::DiscoverModels => unreachable!(),
+                    Query::Repositories => unreachable!(),
                 };
                 value.map_err(|e| e.to_string())
             }

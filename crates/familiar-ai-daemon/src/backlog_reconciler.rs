@@ -91,6 +91,15 @@ impl BacklogReconciler {
         *self.events.lock().unwrap() = Some(sink);
     }
 
+    /// Repository worktrees declared by operator configuration.
+    ///
+    /// These are enrollment records in their own right. They must remain
+    /// available to operator clients even when the filesystem watcher is
+    /// disabled and no backlog row has yet been written for the repository.
+    pub fn configured_repositories(&self) -> Vec<PathBuf> {
+        self.config.repositories.keys().map(PathBuf::from).collect()
+    }
+
     /// Reconcile every configured repository. Called once at daemon startup,
     /// before the control socket is bound or the dashboard is spawned, so no
     /// client can ever observe a pre-reconciliation snapshot.

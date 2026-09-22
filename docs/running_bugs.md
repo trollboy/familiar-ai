@@ -2507,6 +2507,22 @@ reinstall the binary, then rerun the 076 drive.
   unregistered states. The same update adds an operator-controlled
   `Hide completed` filter to the dependency Gantt.
 
+### FAM-BUG-070 — Configured repositories vanish when no durable backlog row exists
+
+- **Status:** Fixed 2026-09-22.
+- **Found:** 2026-09-22 after rebuilding and relaunching the macOS desktop;
+  its repository selector was empty even though Familiar remained enrolled in
+  `config.toml`.
+- **Detail:** The operator `repositories` query returned only repository keys
+  inferred from durable backlog rows. An empty ledger therefore hid valid
+  configured repositories, especially when the filesystem watcher was
+  disabled. Configuration enrollment and watcher discovery were incorrectly
+  treated as the same source of truth.
+- **Fix:** Operator repository discovery now unions durable repository rows
+  with canonically resolved configured repositories, deduplicates them by
+  worktree, and sorts the result. Regression tests cover both an empty durable
+  ledger and duplicate configured/durable enrollment.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or
