@@ -591,6 +591,27 @@ enum Selection {
     NothingEligible,
 }
 
+/// Every `decision` string the driver persists through
+/// `DriverRepository::record_selection_decision`. The storage schema repeats
+/// this vocabulary as a CHECK constraint (last widened by migration 071), and
+/// FAM-BUG-078 is what happens when the two drift: a decision the driver
+/// emits but the table refuses terminates the session `storage_failure`
+/// before any PRD runs. Adding a decision means adding it here, adding a
+/// migration, and watching
+/// `every_selection_decision_the_driver_emits_is_persistable` pass.
+pub const SELECTION_DECISIONS: &[&str] = &[
+    "ready_selected",
+    "deferred_scope_overlap",
+    "deferred_scope_held",
+    "deferred_resource",
+    "deferred_width",
+    "deferred_dependency_undelivered",
+    "dependency_not_integrated",
+    "deferred_scope_unavailable",
+    "excluded_allowlist",
+    "front_matter_hold",
+];
+
 /// One selection or deferral decision for a ready PRD, persisted durably so an
 /// operator can always answer "why did/didn't this run?".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2864,6 +2885,42 @@ fn stopping_detail(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// FAM-BUG-078: every decision the driver can persist must be one the
+    /// schema's CHECK constraint accepts, and every decision literal in this
+    /// file must be in `SELECTION_DECISIONS`. The first hands-off run of
+    /// PRD-108 died `storage_failure` on `front_matter_hold` before any PRD
+    /// ran, because the vocabulary lived in two places with nothing pinning
+    /// them together.
+    #[test]
+    fn every_selection_decision_the_driver_emits_is_persistable() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = DriverRepository::new(db.conn());
+        repository.open_session("s", "/repo/.git", "{}").unwrap();
+        for decision in SELECTION_DECISIONS {
+            repository
+                .record_selection_decision("s", "PRD-1", decision, "fixture")
+                .unwrap_or_else(|error| {
+                    panic!("decision {decision} is refused by the schema: {error}")
+                });
+        }
+        assert_eq!(
+            repository.selection_decisions("s").unwrap().len(),
+            SELECTION_DECISIONS.len()
+        );
+
+        let source = include_str!("drive.rs");
+        for (offset, _) in source.match_indices("decision: \"") {
+            let rest = &source[offset + "decision: \"".len()..];
+            let literal = &rest[..rest.find('"').unwrap()];
+            assert!(
+                SELECTION_DECISIONS.contains(&literal),
+                "decision literal {literal:?} in drive.rs is missing from SELECTION_DECISIONS \
+                 (and therefore from the schema's CHECK constraint)"
+            );
+        }
+    }
 
     /// A stopping error is worth storing only if it stays readable in a
     /// one-line listing and cannot crowd out the rest of the history.

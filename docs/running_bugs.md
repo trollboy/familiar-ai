@@ -216,6 +216,33 @@ appears with no entry, or with a status a reader cannot classify.
   daemon at next login, the shape the macOS session recorded as
   FAM-BUG-068. Not removed here.
 
+### FAM-BUG-078 — A new selection decision killed the session it was meant to explain
+
+- **Status:** Fixed 2026-09-22 — migration 071 widens the CHECK constraint on
+  `driver_selection_decisions.decision` to include `front_matter_hold`, and
+  a regression persists every decision string `drive.rs` can emit so the
+  two vocabularies cannot drift apart again without a failing test.
+- **Found:** 2026-09-22, the second hands-off run (PRD-108, session
+  `drive-00001790081489487623-0002489786-000000`): preflight passed on the
+  rebuilt image, selection reached PRD-104's front-matter hold, and the
+  drive terminated `storage_failure`, `attempted=0`, $0, with `CHECK
+  constraint failed: decision IN (...)`.
+- **Detail:** the FAM-BUG-074 fix that morning added `front_matter_hold`
+  as a durable selection decision in `drive.rs`. The decision vocabulary is
+  also a CHECK constraint in the storage schema, last widened by migration
+  053 for PRD-077's decisions, and nothing pinned the two together. The
+  targeted tests and the full gate were green because no test drives
+  selection over a held PRD against a real database. This is the author's
+  own defect, found by the run that was meant to measure other stops, and
+  it is stop number two of the firing table: a `storage_failure` that was
+  correctly classified and correctly fatal — a session that cannot record
+  its decisions should not continue.
+- **Fix:** `071_selection_decision_front_matter_hold.sql` rebuilds the
+  table one value wider, same shape as 052/053; `SELECTION_DECISIONS` in
+  `drive.rs` enumerates every decision the driver emits, and
+  `every_selection_decision_the_driver_emits_is_persistable` inserts each
+  one against a migrated database.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable
