@@ -156,6 +156,62 @@ appears with no entry, or with a status a reader cannot classify.
   fixture and asserts the execution is accepted and runs as the owner's
   delegate.
 
+### FAM-BUG-076 — The verification image cannot compile the workspace, so every drive dies in preflight at zero cost
+
+- **Status:** Open
+- **Found:** 2026-09-22, the first hands-off run of PRD-103
+  (session `drive-00001790079983258612-0002341699-000000`): `preflight_failed`
+  on `verification.lint`, exit 101, four minutes in, `attempted=0`, $0.
+- **Detail:** `crates/familiar-ai-desktop` became a workspace member with
+  PRD-104, and `cargo clippy --workspace --all-targets` in the tester image
+  now compiles `webkit2gtk-sys`. The image installs `pkg-config
+  libgtk-3-dev libayatana-appindicator3-dev` and nothing for WebKit;
+  `pkg-config --exists` inside it reports `webkit2gtk-4.1`,
+  `javascriptcoregtk-4.1` and `libsoup-3.0` all missing, `gtk+-3.0`
+  present. The host gate passed the same commit because the host has the
+  packages. This is stop number one of the firing table, and it is
+  infrastructure: no PRD, no model, no candidate was involved.
+- **Also:** the retained failure output is the wrong end. The session's
+  `termination_detail` is 53,930 bytes of Docker layer progress and the
+  first minutes of `Compiling` lines, and the actual `error:` never
+  appears — the capture keeps the head of stdout and drops the tail where
+  a compiler puts its verdict. The report then inlines all of it, so
+  `familiar-ai report` is 55KB and says nothing. Diagnosing this took a
+  container run by hand.
+- **Expected fix:** the image installs `libwebkit2gtk-4.1-dev
+  libjavascriptcoregtk-4.1-dev libsoup-3.0-dev` beside GTK — PRD-092's
+  fifth criterion, "the verification image carries the documented minimal
+  system dependencies" — and the retained preflight output keeps its tail
+  (or the first `error` block) rather than its head. Until the image is
+  fixed no drive on this host can pass preflight, so this outranks every
+  queued PRD.
+
+### FAM-BUG-077 — The Tauri desktop core-dumps under its systemd unit on this Linux host
+
+- **Status:** Open — mitigated 2026-09-22 with a drop-in; the unit or the application should carry the fix.
+- **Found:** 2026-09-22, relaunching after a fresh build with
+  `familiar-ai ops desktop install`.
+- **Detail:** `familiar-ai-desktop.service` started, WebKitGTK printed
+  `Could not create GBM EGL display: EGL_NOT_INITIALIZED. Aborting...`,
+  the process dumped core (SIGABRT), and systemd restart-looped it every
+  ten seconds. Host: NVIDIA (`10de:1f08`), X11, `driver (null)` from
+  libEGL. Launched by hand with `WEBKIT_DISABLE_DMABUF_RENDERER=1` the
+  desktop stays up with libEGL warnings only. The daemon unit was fine
+  throughout. With the headless daemon and a crashing desktop this host
+  had no tray at all, which the standing direction forbids.
+- **Mitigation applied:**
+  `~/.config/systemd/user/familiar-ai-desktop.service.d/override.conf`
+  sets `Environment=WEBKIT_DISABLE_DMABUF_RENDERER=1`; unit restarted.
+- **Expected fix:** the generated unit sets the variable on Linux, or the
+  application detects a failed EGL display and falls back to the
+  non-DMA-BUF renderer before WebKit aborts; either way the Linux
+  graphical smoke gate PRD-104 requires before the GTK cutover would have
+  caught this, and it has not run.
+- **Related:** the legacy `~/.config/autostart/familiar-ai-daemon.desktop`
+  entry still exists beside the new systemd units and will start a second
+  daemon at next login, the shape the macOS session recorded as
+  FAM-BUG-068. Not removed here.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable
