@@ -2523,6 +2523,21 @@ reinstall the binary, then rerun the 076 drive.
   worktree, and sorts the result. Regression tests cover both an empty durable
   ledger and duplicate configured/durable enrollment.
 
+### FAM-BUG-071 — Desktop never retries repository discovery after a startup race
+
+- **Status:** Fixed 2026-09-23.
+- **Found:** 2026-09-23 after restarting the daemon and desktop launch agents
+  together; the desktop again displayed no projects even though the daemon's
+  configured-repository response was correct.
+- **Detail:** The desktop queried repositories once during startup. If it won
+  the race against the daemon's control socket, that request failed and the
+  later heartbeat only restored the connection indicator. It never reloaded
+  the repository selector, leaving the process permanently empty until a
+  manual desktop restart.
+- **Fix:** Repository discovery now records successful completion, retries on
+  the first connected heartbeat after a failure, and reloads after a daemon
+  generation change. A desktop contract test pins the retry path.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or

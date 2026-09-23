@@ -130,3 +130,14 @@ fn dependency_waves_have_gated_batch_launch_controls() {
     assert!(javascript.contains("Promise.all(paths.map(path=>mutate({action:'start_prd'"));
     assert!(javascript.contains("disabled title="));
 }
+
+#[test]
+fn repository_discovery_retries_after_daemon_startup_races() {
+    let javascript = include_str!("../ui/app.js");
+    assert!(javascript.contains("repositoriesLoaded:false"));
+    assert!(javascript.contains("state.repositoriesLoaded=true"));
+    assert!(javascript.contains("state.repositoriesLoaded=false"));
+    assert!(javascript.contains(
+        "s.state==='connected'){if(!state.repositoriesLoaded){await repositories();await render()"
+    ));
+}
