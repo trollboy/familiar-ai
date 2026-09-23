@@ -712,53 +712,6 @@ fn merge_configured_repositories(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::merge_configured_repositories;
-    use familiar_ai_core::RepositoryIdentity;
-    use serde_json::json;
-    use std::path::PathBuf;
-
-    #[test]
-    fn configured_repository_remains_visible_without_durable_rows() {
-        let mut value = json!({"repositories": []});
-        merge_configured_repositories(
-            &mut value,
-            [RepositoryIdentity {
-                worktree: PathBuf::from("/work/familiar"),
-                key: "/work/familiar/.git".into(),
-            }],
-        )
-        .unwrap();
-
-        assert_eq!(
-            value,
-            json!({"repositories": [{
-                "repository_key": "/work/familiar/.git",
-                "path": "/work/familiar"
-            }]})
-        );
-    }
-
-    #[test]
-    fn configured_repository_does_not_duplicate_a_durable_row() {
-        let mut value = json!({"repositories": [{
-            "repository_key": "/work/familiar/.git",
-            "path": "/work/familiar"
-        }]});
-        merge_configured_repositories(
-            &mut value,
-            [RepositoryIdentity {
-                worktree: PathBuf::from("/work/familiar"),
-                key: "/work/familiar/.git".into(),
-            }],
-        )
-        .unwrap();
-
-        assert_eq!(value["repositories"].as_array().unwrap().len(), 1);
-    }
-}
-
 impl DataSource for DaemonDataSource {
     fn query(&self, query: Query) -> Result<Value, String> {
         // Inference queries are async. `block_on` is safe here because this is
@@ -1191,4 +1144,51 @@ fn which_on_path(program: &str) -> Option<String> {
         .map(|dir| dir.join(program))
         .find(|candidate| candidate.is_file())
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_configured_repositories;
+    use familiar_ai_core::RepositoryIdentity;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn configured_repository_remains_visible_without_durable_rows() {
+        let mut value = json!({"repositories": []});
+        merge_configured_repositories(
+            &mut value,
+            [RepositoryIdentity {
+                worktree: PathBuf::from("/work/familiar"),
+                key: "/work/familiar/.git".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({"repositories": [{
+                "repository_key": "/work/familiar/.git",
+                "path": "/work/familiar"
+            }]})
+        );
+    }
+
+    #[test]
+    fn configured_repository_does_not_duplicate_a_durable_row() {
+        let mut value = json!({"repositories": [{
+            "repository_key": "/work/familiar/.git",
+            "path": "/work/familiar"
+        }]});
+        merge_configured_repositories(
+            &mut value,
+            [RepositoryIdentity {
+                worktree: PathBuf::from("/work/familiar"),
+                key: "/work/familiar/.git".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(value["repositories"].as_array().unwrap().len(), 1);
+    }
 }
