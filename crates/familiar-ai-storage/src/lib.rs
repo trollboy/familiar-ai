@@ -68,8 +68,8 @@ pub use repos::session_rollup::{
     SessionRollupRepository, StallRecovery, INVARIANT_STALL_TAXONOMY_COMPLETE,
 };
 pub use repos::stewardship::{
-    budget_summary, pending_human_gates, review_findings_for_session, BudgetSummary, PendingGate,
-    ReviewFindingsRow,
+    budget_summary, pending_human_gates, recovered_after, review_findings_for_session,
+    BudgetSummary, PendingGate, ReviewFindingsRow,
 };
 pub use repos::worker_selection::WorkerSelectionRepository;
 pub use repos::worker_spec::WorkerSpecRepository;

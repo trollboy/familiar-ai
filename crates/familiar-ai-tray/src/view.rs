@@ -993,7 +993,10 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
     // parents in which nothing already placed conflicts with it, so two PRDs
     // the scheduler would serialize are never drawn side by side.
     let mut order: Vec<String> = parents.keys().cloned().collect();
-    order.sort_by_key(|id| (depths.get(id).copied().unwrap_or(0), id.clone()));
+    // The scheduler admits in PRD-number order (`PrdId: Ord` is numeric);
+    // sorting the id string put every PRD-1xx ahead of PRD-86..98 and gave
+    // them the free slots first, so the chart disagreed with the batch.
+    order.sort_by_key(|id| (depths.get(id).copied().unwrap_or(0), prd_ordinal(id)));
     let mut rounds: HashMap<String, usize> = HashMap::new();
     let mut occupants: Vec<Vec<String>> = Vec::new();
     for id in order {
@@ -1067,13 +1070,24 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
         });
     }
     for wave in &mut waves {
-        wave.sort_by(|a, b| a.prd_id.cmp(&b.prd_id));
+        wave.sort_by_key(|node| prd_ordinal(&node.prd_id));
     }
     DependencyGantt {
         waves,
         max_wave,
         conflicts_error,
     }
+}
+
+/// The scheduler's order for a PRD id: its number, then the id itself for
+/// suffixes and anything unparseable.
+fn prd_ordinal(id: &str) -> (u64, String) {
+    let digits: String = id
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (digits.parse().unwrap_or(u64::MAX), id.to_string())
 }
 
 /// Why Start is not offered for a row, or `None` when it is.
@@ -2141,6 +2155,34 @@ mod tests {
         );
         assert_eq!(chart.max_wave, 1);
         assert!(chart.conflicts_error.is_none());
+    }
+
+    /// The chart places PRDs in the scheduler's order, which is numeric.
+    /// PRD-92 and PRD-101 conflict; the scheduler admits 92 first, so the
+    /// chart must too, whatever the id strings sort like.
+    #[test]
+    fn wave_placement_follows_prd_number_not_id_text() {
+        let row = |path: &str| BacklogRow {
+            prd_path: path.to_string(),
+            status: "pending".to_string(),
+            lifecycle: "ready".to_string(),
+            lifecycle_divergence: None,
+            updated_at: String::new(),
+            missing_since: None,
+        };
+        let dependencies = json!({"items": [
+            {"prd_id":"PRD-101","prd_path":"docs/prds/PRD-101.md","depends_on":[],"conflicts_with":["PRD-92"]},
+            {"prd_id":"PRD-92","prd_path":"docs/prds/PRD-092.md","depends_on":[],"conflicts_with":["PRD-101"]}
+        ]});
+        let chart = build_dependency_gantt(
+            &dependencies,
+            &[row("docs/prds/PRD-101.md"), row("docs/prds/PRD-092.md")],
+        );
+        assert_eq!(chart.waves[0][0].prd_id, "PRD-92");
+        assert_eq!(chart.waves[1][0].prd_id, "PRD-101");
+        assert_eq!(prd_ordinal("PRD-9"), (9, "PRD-9".into()));
+        assert!(prd_ordinal("PRD-9") < prd_ordinal("PRD-10"));
+        assert!(prd_ordinal("PRD-10") < prd_ordinal("PRD-10a"));
     }
 
     #[test]

@@ -240,6 +240,26 @@ pub struct PendingGate {
 /// stop's answer, so the stop no longer counts as a gate. Without this a
 /// released PRD stayed on "Waiting on you" until a new attempt happened to
 /// run, asking the operator again about a decision already made.
+/// Whether a human recovery (release / force-complete) for `prd_path` was
+/// recorded after `since`. The same rule `pending_human_gates` applies in
+/// SQL, exposed for the lifecycle and the blocked-reason card: a stop the
+/// owner already released is history, not a decision still owed.
+pub fn recovered_after(
+    conn: &Connection,
+    repository_key: &str,
+    prd_path: &str,
+    since: &str,
+) -> familiar_ai_core::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM backlog_status_events e \
+           JOIN backlog_recovery_events r ON r.status_event_id=e.event_id \
+           WHERE e.repository_key=?1 AND e.prd_path=?2 AND e.changed_at > ?3)",
+        params![repository_key, prd_path, since],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(db)
+}
+
 pub fn pending_human_gates(
     conn: &Connection,
     repository_key: &str,

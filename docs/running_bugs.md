@@ -411,6 +411,33 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-090 — Dependency Gantt places PRDs in id-text order, not the scheduler's numeric order
+
+- **Status:** Fixed (2026-09-24: rounds and wave contents order by PRD
+  number, then id, mirroring `PrdId: Ord`.)
+- **Found:** 2026-09-24 on the rebuilt chart: PRD-92 sat in Wave 4 behind
+  PRD-101/103/104/105/106 because `"PRD-101" < "PRD-92"` as strings and
+  the greedy round assignment handed the free slots to the 1xx PRDs first.
+- **Detail:** the chart is meant to be the scheduler's answer; the
+  scheduler admits in numeric id order. A different tie-break gives a
+  different first wave, which is the one the operator launches.
+
+### FAM-BUG-089 — A released stop still reads as Awaiting Feedback on the lifecycle and the card
+
+- **Status:** Fixed (2026-09-24: `stewardship::prd_lifecycle` ignores a
+  latest attempt that a later release/force-complete superseded, and the
+  blocked-reason card skips a checkpoint superseded the same way; both use
+  one storage helper carrying the rule `pending_human_gates` already
+  applied in SQL since FAM-BUG-083.)
+- **Found:** 2026-09-24. PRD-92's scope stop from 2026-09-05 was released
+  by the owner on 2026-09-22, the "Waiting on you" list agreed, and the
+  Gantt card still said `awaiting_feedback` with "scope broadened — 2 files
+  outside the declared scope" and a greyed Start.
+- **Detail:** FAM-BUG-083 fixed the gates query only. The lifecycle
+  derivation took the latest `driver_attempts` row at face value, and the
+  blocked-reasons card read every resumable checkpoint. Three surfaces,
+  one rule, applied once.
+
 ### FAM-BUG-088 — Dependency Gantt waves ignore that parents have landed, and one legacy archived file empties every scope conflict
 
 - **Status:** Fixed (2026-09-24: the chart's rounds skip completed parents

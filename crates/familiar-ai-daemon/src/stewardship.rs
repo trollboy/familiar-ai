@@ -109,12 +109,29 @@ pub fn prd_lifecycle(
 ) -> Result<familiar_ai_core::DerivedLifecycle, StewardshipError> {
     let latest_attempt = DriverRepository::new(db.conn())
         .latest_attempt_for_prd(repository_key, prd_id)
-        .map_err(storage)?
-        .map(|attempt| familiar_ai_core::AttemptFacts {
+        .map_err(storage)?;
+    // FAM-BUG-089: a retained attempt the owner has since released or
+    // force-completed is history. PRD-92 read as AwaitingFeedback for a
+    // scope stop released seventeen days earlier because only the gates
+    // list applied this rule.
+    let latest_attempt = match latest_attempt {
+        Some(attempt)
+            if familiar_ai_storage::recovered_after(
+                db.conn(),
+                repository_key,
+                &attempt.prd_path,
+                &attempt.started_at,
+            )
+            .map_err(storage)? =>
+        {
+            None
+        }
+        other => other.map(|attempt| familiar_ai_core::AttemptFacts {
             outcome: attempt.outcome,
             retained_reason: attempt.retained_reason,
             last_durable_phase: attempt.last_durable_phase,
-        });
+        }),
+    };
     let checkpoint_phase = CheckpointRepository::new(db.conn())
         .get(repository_key, prd_id)
         .map_err(storage)?

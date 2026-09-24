@@ -421,6 +421,27 @@ impl DaemonDataSource {
 
         let mut items = Vec::new();
         for checkpoint in all.iter() {
+            // FAM-BUG-089: a stop the owner released is not a reason the
+            // card should still show. Same rule as the gates list and the
+            // lifecycle.
+            let stopped_at: String = db
+                .conn()
+                .query_row(
+                    "SELECT updated_at FROM execution_checkpoints WHERE checkpoint_id=?1",
+                    rusqlite::params![checkpoint.checkpoint_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if familiar_ai_storage::recovered_after(
+                db.conn(),
+                &identity.key,
+                &checkpoint.prd_path,
+                &stopped_at,
+            )
+            .map_err(|e| e.to_string())?
+            {
+                continue;
+            }
             let events = checkpoints
                 .events(&checkpoint.checkpoint_id)
                 .map_err(|e| e.to_string())?;

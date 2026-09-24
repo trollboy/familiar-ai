@@ -126,6 +126,54 @@ fn the_backlog_surface_carries_the_derived_lifecycle_beside_the_raw_status() {
         ("completed".to_string(), "completed".to_string()),
         "location is truth for completion"
     );
+    // FAM-BUG-089: the owner releases PRD-1's scope stop. The retained
+    // attempt is still the latest row, but it is history now, and every
+    // surface must say Ready again — the gates list already did, the
+    // lifecycle did not.
+    let target = discovered
+        .iter()
+        .find(|prd| prd.path.as_str() == "docs/prds/PRD-001.md")
+        .unwrap()
+        .clone();
+    // The run had claimed it (pending -> in_progress) before retaining;
+    // release audits that claim, so it has to look like a real run's.
+    SqliteBacklogRepository::new(db.conn_mut())
+        .claim_run(
+            &identity,
+            &discovered,
+            &target,
+            "system:familiar-ai-run:00001788597053154009-0003279353-000001",
+        )
+        .unwrap();
+    SqliteBacklogRepository::new(db.conn_mut())
+        .recover(
+            &identity,
+            &target,
+            familiar_ai_core::BacklogRecoveryAction::Release,
+            "human:trollboy",
+            "scope stop superseded by the rewritten PRD",
+        )
+        .unwrap();
+    let backlog = familiar_ai_daemon::stewardship::list_backlog(
+        &db,
+        &identity,
+        Some(&layout),
+        None,
+        None,
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        lifecycle_of(&backlog, "docs/prds/PRD-001.md"),
+        ("pending".to_string(), "ready".to_string()),
+        "a released stop is history, not a decision still owed"
+    );
+    assert_eq!(
+        lifecycle_of(&backlog, "docs/prds/PRD-002.md"),
+        ("pending".to_string(), "failed".to_string()),
+        "the release of PRD-1 changes nothing for PRD-2"
+    );
+
     let raw_present = backlog["items"]
         .as_array()
         .unwrap()
