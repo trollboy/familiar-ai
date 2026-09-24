@@ -1409,7 +1409,7 @@ pub enum FieldOrigin {
 /// Settings that exist only per repository: a PRD location and its grammar.
 /// They have no global counterpart, so a project page that showed only what
 /// the file already set hid them from every repository on profile defaults.
-pub use familiar_ai_core::backlog::REPOSITORY_ONLY_KEYS;
+pub use familiar_ai_core::backlog::{PROJECT_OVERRIDABLE_TABLES, REPOSITORY_ONLY_KEYS};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConfigField {
@@ -1573,9 +1573,16 @@ pub fn build_project_config_form(
     repo: &str,
     defaults: Option<&Value>,
 ) -> Vec<ConfigSection> {
+    // Only the tables a repository entry can shadow are inheritable. Listing
+    // `dashboard` or `logging` here as Inherited implied an override the
+    // loader refuses (`RepositoryConfig` denies unknown fields).
     let global: Vec<ConfigField> = flatten_fields(document, &[])
         .into_iter()
-        .filter(|f| f.path.first().map(String::as_str) != Some("repositories"))
+        .filter(|f| {
+            f.path
+                .first()
+                .is_some_and(|table| PROJECT_OVERRIDABLE_TABLES.contains(&table.as_str()))
+        })
         .collect();
     let overrides = document
         .get("repositories")
@@ -1660,6 +1667,36 @@ mod tests {
 
     /// A repository on profile defaults still gets its PRD-location fields
     /// on the project page, marked Default and carrying the effective value.
+    /// Installation-wide tables never appear on a project page: a repository
+    /// entry cannot hold them, so offering them as Inherited was a lie.
+    #[test]
+    fn project_form_offers_only_what_a_repository_can_override() {
+        let document = json!({
+            "dashboard": {"bind_address": "127.0.0.1:9400"},
+            "logging": {"level": "info"},
+            "inference": {"text": {"mode": "hybrid"}},
+            "review": {"max_review_attempts": 3},
+            "execution_context": {"max_context_tokens": 100000},
+            "repositories": {"/r/one": {}}
+        });
+        let sections = build_project_config_form(&document, "/r/one", None);
+        let names: Vec<&str> = sections
+            .iter()
+            .flat_map(|s| s.fields.iter().map(|f| f.name.as_str()))
+            .collect();
+        assert!(names.contains(&"max_review_attempts"));
+        assert!(names.contains(&"max_context_tokens"));
+        assert!(!names.contains(&"bind_address"), "{names:?}");
+        assert!(!names.contains(&"level"), "{names:?}");
+        assert!(!names.contains(&"mode"), "{names:?}");
+        // The global page still shows all of them.
+        let global = build_config_form(&document);
+        assert!(global
+            .iter()
+            .flat_map(|s| s.fields.iter())
+            .any(|f| f.name == "bind_address"));
+    }
+
     #[test]
     fn project_form_always_offers_the_repository_only_settings() {
         let document = json!({

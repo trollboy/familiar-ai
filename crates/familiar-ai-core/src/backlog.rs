@@ -119,6 +119,12 @@ impl BacklogProfile {
 /// Settings that exist only per repository: a PRD location and its grammar.
 /// They have no global counterpart; the settings surfaces offer them on every
 /// project page and create them on save.
+/// The global tables a repository entry may override, mirroring the
+/// `RepositoryConfig` fields that shadow a global table. Everything else
+/// (daemon, dashboard, logging, database, inference, providers, workers) is
+/// installation-wide and is refused under `[repositories.<path>]`.
+pub const PROJECT_OVERRIDABLE_TABLES: [&str; 2] = ["review", "execution_context"];
+
 pub const REPOSITORY_ONLY_KEYS: [&str; 5] = [
     "profile",
     "active_dir",
