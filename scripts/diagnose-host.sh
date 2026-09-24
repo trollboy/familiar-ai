@@ -70,17 +70,19 @@ for c in "$HOME/.local/share/familiar-ai/familiar.db" "$HOME/Library/Application
 done
 [ -z "$DB" ] && DB="$(find "$HOME/Library" "$HOME/.local" -name familiar.db 2>/dev/null | head -1)"
 echo "db: $DB"
+KEY="$(git rev-parse --git-common-dir 2>/dev/null)"; case "$KEY" in /*) ;; *) KEY="$REPO/$KEY";; esac
+echo "repository_key: $KEY"
 if [ -n "$DB" ] && command -v sqlite3 >/dev/null 2>&1; then
   Q() { printf '> %s\n' "$1"; sqlite3 -header -column "$DB" "$1" 2>&1; }
   Q "select count(*) as migrations, max(version) as latest from schema_migrations;"
   Q "select repository_key from backlog_prds group by repository_key;"
-  Q "select prd_number, status, missing_since, prd_path from backlog_prds where prd_number in (92,97,103,104,106,108,109) order by prd_number, prd_path;"
-  Q "select max(last_seen_at) as last_scan from backlog_prds;"
-  Q "select session_id, substr(started_at,1,19) started, termination_reason from driver_sessions order by started_at desc limit 5;"
-  Q "select a.prd_id, substr(a.started_at,1,19) started, a.outcome, a.retained_reason, a.last_durable_phase from driver_attempts a order by a.started_at desc limit 8;"
-  Q "select prd_id, phase, substr(updated_at,1,10) updated from execution_checkpoints where phase not in ('completed') order by updated_at desc limit 12;"
-  Q "select prd_id, decision, substr(detail,1,90) detail from driver_selection_decisions order by decision_id desc limit 12;"
-  Q "select e.prd_path, e.old_status, e.new_status, e.actor, substr(e.changed_at,1,19) at, r.action from backlog_status_events e left join backlog_recovery_events r on r.status_event_id=e.event_id where e.prd_path like '%PRD-092%' or e.prd_path like '%PRD-10[3468]%' order by e.event_id desc limit 12;"
+  Q "select prd_number, status, missing_since, prd_path from backlog_prds where repository_key='$KEY' and prd_number in (92,97,103,104,106,108,109) order by prd_number, prd_path;"
+  Q "select max(last_seen_at) as last_scan from backlog_prds where repository_key='$KEY';"
+  Q "select session_id, substr(started_at,1,19) started, termination_reason from driver_sessions where repository_key='$KEY' order by started_at desc limit 5;"
+  Q "select a.prd_id, substr(a.started_at,1,19) started, a.outcome, a.retained_reason, a.last_durable_phase from driver_attempts a join driver_sessions s on s.session_id=a.session_id where s.repository_key='$KEY' order by a.started_at desc limit 8;"
+  Q "select prd_id, phase, substr(updated_at,1,10) updated from execution_checkpoints where repository_key='$KEY' and phase not in ('completed') order by updated_at desc limit 12;"
+  Q "select d.prd_id, d.decision, substr(d.detail,1,90) detail from driver_selection_decisions d join driver_sessions s on s.session_id=d.session_id where s.repository_key='$KEY' order by d.decision_id desc limit 12;"
+  Q "select e.prd_path, e.old_status, e.new_status, e.actor, substr(e.changed_at,1,19) at, r.action from backlog_status_events e left join backlog_recovery_events r on r.status_event_id=e.event_id where e.repository_key='$KEY' and (e.prd_path like '%PRD-092%' or e.prd_path like '%PRD-10[3468]%') order by e.event_id desc limit 12;"
 else
   echo "no database or no sqlite3"
 fi

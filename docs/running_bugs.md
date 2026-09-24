@@ -411,6 +411,34 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-084 — On macOS, rebuilding the desktop does not change the desktop that runs
+
+- **Status:** Open
+- **Found:** 2026-09-24, from `scripts/diagnose-host.sh` run on the Mac
+  after three rebuilds had not changed what the Gantt showed. The
+  installed `familiar-ai` and `familiar-ai-daemon` were byte-identical to
+  the tree's release build (Sep 23 20:22). The desktop process was
+  `~/Applications/Familiar.app/Contents/MacOS/familiar-ai-desktop`, built
+  Sep 21 04:58, and `~/.local/bin/familiar-ai-desktop` was also Sep 21 —
+  neither was the tree's Sep 23 build.
+- **Detail:** `ops desktop install --desktop ~/Applications/Familiar.app`
+  writes a LaunchAgent that points at the bundle. The README's install
+  step copies `target/release/familiar-ai-desktop` to `~/.local/bin`,
+  which the LaunchAgent never reads, and nothing rebuilds the bundle. So
+  the daemon advanced through PRD-108, 109 and every fix since Sunday
+  while the UI reading it stayed three days old: dependency layers instead
+  of rounds, no lifecycle field, PRD-92 absent. Both operators concluded
+  the system was inconsistent; only the binary was.
+- **Expected fix:** `ops desktop status` reports the running desktop's
+  build identity beside the tree's and says when they differ; `ops desktop
+  install` warns when the LaunchAgent target is not the binary just
+  installed; the README's macOS steps rebuild the bundle
+  (`cargo tauri build --bundles app`) or re-run `ops desktop install`
+  without `--desktop` so launchd runs `~/.local/bin/familiar-ai-desktop`.
+- **Workaround now:** on the Mac, `familiar-ai ops desktop uninstall &&
+  familiar-ai ops desktop install` (no `--desktop`), then restart; or
+  rebuild the bundle and replace `~/Applications/Familiar.app`.
+
 ## 2026-08-31 — Provider and model registration
 
 ### FAM-BUG-001 — Model inventory does not distinguish installed, registered, enabled, and routable

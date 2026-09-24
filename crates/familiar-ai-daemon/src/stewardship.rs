@@ -195,7 +195,7 @@ pub fn list_backlog(
                     false,
                 )
             });
-        let derived = prd_lifecycle(
+        let mut derived = prd_lifecycle(
             db,
             &repository.key,
             &prd_id,
@@ -203,6 +203,25 @@ pub fn list_backlog(
             archived,
             Some(row.status.as_str()),
         )?;
+        // A row whose file has gone missing is history, not work: PRD-108
+        // keeps it for audit when the file moved to the archive. Its
+        // lifecycle follows the file — Completed when an archived twin of
+        // the same PRD exists, otherwise the state is unknowable and says so.
+        if let Some(since) = row.missing_since.as_deref() {
+            let twin_completed = discovered
+                .values()
+                .any(|(id, _, is_archived)| *id == prd_id && *is_archived);
+            derived = familiar_ai_core::DerivedLifecycle {
+                lifecycle: if twin_completed {
+                    familiar_ai_core::PrdLifecycle::Completed
+                } else {
+                    derived.lifecycle
+                },
+                divergence: Some(format!(
+                    "file missing since {since}; this row is the historical path"
+                )),
+            };
+        }
         let mut value = serde_json::to_value(&row)
             .map_err(|error| StewardshipError::Storage(error.to_string()))?;
         value["prd_id"] = json!(prd_id);
