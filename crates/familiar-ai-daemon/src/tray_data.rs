@@ -259,33 +259,7 @@ impl DaemonDataSource {
             .reconcile_if_stale(std::path::Path::new(repo));
         let discovered = self.discovered(repo)?;
         let identity = Self::identity(repo)?;
-        // A wave is dependency-ready AND scope-disjoint (the owner's
-        // definition, EXECUTION-PLAN). The chart used to lay out dependency
-        // layers only, so it showed PRDs side by side that the scheduler
-        // would serialize; these are the scheduler's own conflict edges.
-        // If the scheduler cannot compute overlaps, say so on the payload
-        // rather than silently drawing dependency layers as if they were
-        // rounds — a chart that degrades without saying it degraded is how
-        // three conflicting PRDs get launched as one wave.
-        let (conflicts, conflicts_error): (
-            std::collections::HashMap<String, Vec<String>>,
-            Option<String>,
-        ) = match crate::drive::achievable_width(std::path::Path::new(repo), &discovered) {
-            Ok(width) => {
-                let mut map: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
-                for (a, b, _) in width.conflicts {
-                    map.entry(a.to_string()).or_default().push(b.to_string());
-                    map.entry(b.to_string()).or_default().push(a.to_string());
-                }
-                (map, None)
-            }
-            Err(error) => {
-                tracing::warn!(repo, %error, "dependency view: scope conflicts unavailable; waves are dependency layers only");
-                (std::collections::HashMap::new(), Some(error))
-            }
-        };
-        let statuses: std::collections::HashMap<String, String> = {
+        let statuses: std::collections::HashMap<String, (String, String)> = {
             let db = self
                 .db
                 .lock()
@@ -303,7 +277,13 @@ impl DaemonDataSource {
                         .filter_map(|item| {
                             Some((
                                 item.get("prd_path")?.as_str()?.to_string(),
-                                item.get("status")?.as_str()?.to_string(),
+                                (
+                                    item.get("status")?.as_str()?.to_string(),
+                                    item.get("lifecycle")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                ),
                             ))
                         })
                         .collect()
@@ -311,9 +291,57 @@ impl DaemonDataSource {
                 .unwrap_or_default()
         };
 
+        // FAM-BUG-088: only work that can still run can conflict. Archived
+        // PRDs (some predate the Expected Files grammar entirely) and
+        // completed ones used to go through the scope loader too, and one
+        // legacy file without a heading emptied the conflict map for the
+        // whole chart, so three PRDs the scheduler serializes were drawn as
+        // one launchable wave.
+        let candidates: Vec<familiar_ai_core::DiscoveredPrd> = discovered
+            .iter()
+            .filter(|prd| prd.location == familiar_ai_core::PrdLocation::Active)
+            .filter(|prd| {
+                statuses
+                    .get(prd.path.as_str())
+                    .map(|(status, lifecycle)| lifecycle != "completed" && status != "completed")
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        // A wave is dependency-ready AND scope-disjoint (the owner's
+        // definition, EXECUTION-PLAN). The chart used to lay out dependency
+        // layers only, so it showed PRDs side by side that the scheduler
+        // would serialize; these are the scheduler's own conflict edges.
+        // If the scheduler cannot compute overlaps, say so on the payload
+        // rather than silently drawing dependency layers as if they were
+        // rounds — a chart that degrades without saying it degraded is how
+        // three conflicting PRDs get launched as one wave.
+        let (conflicts, conflicts_error): (
+            std::collections::HashMap<String, Vec<String>>,
+            Option<String>,
+        ) = match crate::drive::achievable_width(std::path::Path::new(repo), &candidates) {
+            Ok(width) => {
+                let mut map: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for (a, b, _) in width.conflicts {
+                    map.entry(a.to_string()).or_default().push(b.to_string());
+                    map.entry(b.to_string()).or_default().push(a.to_string());
+                }
+                (map, None)
+            }
+            Err(error) => {
+                tracing::warn!(repo, %error, "dependency view: scope conflicts unavailable; waves are dependency layers only");
+                (std::collections::HashMap::new(), Some(error))
+            }
+        };
         let status_of_id: std::collections::HashMap<String, Option<&String>> = discovered
             .iter()
-            .map(|prd| (prd.id.to_string(), statuses.get(&prd.path.to_string())))
+            .map(|prd| {
+                (
+                    prd.id.to_string(),
+                    statuses.get(prd.path.as_str()).map(|(status, _)| status),
+                )
+            })
             .collect();
 
         let items: Vec<Value> = discovered
@@ -623,7 +651,10 @@ impl DaemonDataSource {
         // source of truth, and it may have been edited by hand too.
         let inference = read_inference_config(&path)?;
         let router = self.router.clone();
-        let (configured, loaded, load_error) = self.runtime.block_on(async move {
+        // FAM-BUG-087: this runs on a tokio worker (the local transport
+        // dispatches operator mutations inline), where `Handle::block_on`
+        // panics. The helper uses `block_in_place` there.
+        let (configured, loaded, load_error) = self.block_on(async move {
             router.reconfigure(&inference).await;
             let configured = router.is_configured().await;
             match router.enable().await {

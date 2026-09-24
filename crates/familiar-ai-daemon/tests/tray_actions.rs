@@ -19,6 +19,10 @@ struct Harness {
     status: Arc<Mutex<familiar_ai_core::AppStatus>>,
     db: Arc<Mutex<Database>>,
     _tmp: TempDir,
+    // The source only holds a `Handle`; dropping the runtime here shut it
+    // down before any test ran, and every inference save then died with
+    // "A Tokio 1.x context was found, but it is being shutdown".
+    _runtime: Arc<tokio::runtime::Runtime>,
     repo: String,
     config: std::path::PathBuf,
     source: DaemonDataSource,
@@ -108,6 +112,7 @@ fn harness() -> Harness {
         repo,
         config: config_dir.join("config.toml"),
         _tmp: tmp,
+        _runtime: runtime,
     }
 }
 
@@ -578,6 +583,35 @@ fn saving_inference_creates_the_table_and_marks_it_configured() {
     assert_eq!(status["text_mode"], "localonly");
 
     // ...and the tray now knows it has something to toggle.
+    assert!(h.status.lock().unwrap().local_llm_configured);
+}
+
+/// FAM-BUG-087: the desktop's save arrives on a tokio worker (the local
+/// transport dispatches operator mutations inline), and the save used to
+/// call `Handle::block_on` there, which panics. The other tests call `act`
+/// from a plain thread and never saw it.
+#[test]
+fn saving_inference_from_inside_a_runtime_does_not_panic() {
+    let h = harness();
+    let worker = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (h, result) = worker.block_on(async move {
+        tokio::spawn(async move {
+            let result = h.source.act(Action::SaveInferenceConfig {
+                mode: "hybrid".into(),
+                builtin_url: "http://127.0.0.1:1".into(),
+                builtin_model: "qwen2.5:3b".into(),
+            });
+            (h, result)
+        })
+        .await
+        .expect("the save must not panic on a runtime worker")
+    });
+    let result = result.expect("the save should land");
+    assert_eq!(result["configured"], true);
     assert!(h.status.lock().unwrap().local_llm_configured);
 }
 

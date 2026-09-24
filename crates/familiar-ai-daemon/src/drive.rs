@@ -818,7 +818,9 @@ pub struct WidthReport {
 pub fn achievable_width(repository: &Path, prds: &[DiscoveredPrd]) -> Result<WidthReport, String> {
     let scopes = prds
         .iter()
-        .map(|p| prd_scope(repository, p))
+        .map(|p| {
+            prd_scope(repository, p).map_err(|error| format!("{} ({}): {error}", p.id, p.path))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut conflicts = Vec::new();
     let mut edges = vec![vec![false; prds.len()]; prds.len()];

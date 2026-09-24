@@ -1,8 +1,9 @@
 //! Bounded, versioned dispatch for desktop operator requests.
 
 use std::collections::{HashMap, VecDeque};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use familiar_ai_core::operator_ui::{
     OperatorDataSource, OperatorError, OperatorEvent, OperatorMutation, OperatorPayload,
@@ -33,7 +34,7 @@ impl OperatorDispatcher {
     pub fn query(&self, query: OperatorQuery) -> Result<OperatorReply, OperatorError> {
         query.validate()?;
         let kind = query.kind();
-        let data = self.source.query(query).map_err(sanitize_source_error)?;
+        let data = contained(|| self.source.query(query)).map_err(sanitize_source_error)?;
         Ok(self.reply(
             OperatorPayload::Query { query: kind, data },
             false,
@@ -43,10 +44,7 @@ impl OperatorDispatcher {
 
     pub fn mutate(&self, mutation: OperatorMutation) -> Result<OperatorReply, OperatorError> {
         mutation.validate()?;
-        let mut completed = self
-            .completed
-            .lock()
-            .map_err(|_| OperatorError::unavailable("operator request state is unavailable"))?;
+        let mut completed = recover(self.completed.lock());
         if let Some(prior) = completed.0.get(&mutation.idempotency_key) {
             let mut duplicate = prior.clone();
             duplicate.duplicate = true;
@@ -57,10 +55,7 @@ impl OperatorDispatcher {
         // cannot race the original and perform a destructive action twice.
         let topic = mutation.action.name().to_string();
         let kind = mutation.action.kind();
-        let data = self
-            .source
-            .act(mutation.action)
-            .map_err(sanitize_source_error)?;
+        let data = contained(|| self.source.act(mutation.action)).map_err(sanitize_source_error)?;
         let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
         let reply = self.reply(
             OperatorPayload::Mutation { action: kind, data },
@@ -76,10 +71,7 @@ impl OperatorDispatcher {
                 completed.0.remove(&expired);
             }
         }
-        let mut events = self
-            .events
-            .lock()
-            .map_err(|_| OperatorError::unavailable("operator event state is unavailable"))?;
+        let mut events = recover(self.events.lock());
         events.push_back(OperatorEvent {
             protocol_version: OPERATOR_PROTOCOL_VERSION,
             daemon_generation: self.daemon_generation,
@@ -100,10 +92,7 @@ impl OperatorDispatcher {
     /// cannot distinguish the two — a connected client refreshes either way.
     pub fn record_event(&self, topic: impl Into<String>) -> Result<u64, OperatorError> {
         let revision = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut events = self
-            .events
-            .lock()
-            .map_err(|_| OperatorError::unavailable("operator event state is unavailable"))?;
+        let mut events = recover(self.events.lock());
         events.push_back(OperatorEvent {
             protocol_version: OPERATOR_PROTOCOL_VERSION,
             daemon_generation: self.daemon_generation,
@@ -122,10 +111,7 @@ impl OperatorDispatcher {
                 "event limit must be between 1 and 200",
             ));
         }
-        let events = self
-            .events
-            .lock()
-            .map_err(|_| OperatorError::unavailable("operator event state is unavailable"))?;
+        let events = recover(self.events.lock());
         if let Some(first) = events.front() {
             if after > 0 && after + 1 < first.sequence {
                 return Err(OperatorError {
@@ -154,6 +140,34 @@ impl OperatorDispatcher {
     }
 }
 
+/// FAM-BUG-087: a source that panics (the inference save did, from
+/// `Handle::block_on` on a runtime thread) used to unwind through the
+/// dispatcher while it held `completed`, poisoning it; every later mutation
+/// then failed with "operator request state is unavailable" until the daemon
+/// restarted. The panic becomes one failed reply, and the dedup cache and
+/// event ring are plain data that a poisoned lock does not invalidate.
+fn contained<T>(call: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(format!(
+                "the daemon hit an internal error handling this request: {detail}"
+            ))
+        }
+    }
+}
+
+fn recover<'a, T>(
+    lock: Result<MutexGuard<'a, T>, PoisonError<MutexGuard<'a, T>>>,
+) -> MutexGuard<'a, T> {
+    lock.unwrap_or_else(PoisonError::into_inner)
+}
+
 fn sanitize_source_error(message: String) -> OperatorError {
     // Source errors are already intended for the operator, but never reflect
     // them through Debug formatting where headers or nested request values can
@@ -180,6 +194,50 @@ mod tests {
         fn act(&self, _: OperatorAction) -> Result<serde_json::Value, String> {
             Ok(json!({"count": self.0.fetch_add(1, Ordering::SeqCst) + 1}))
         }
+    }
+
+    struct PanicsOnce(AtomicUsize);
+    impl OperatorDataSource for PanicsOnce {
+        fn query(&self, _: OperatorQuery) -> Result<serde_json::Value, String> {
+            Ok(json!({"ok": true}))
+        }
+        fn act(&self, _: OperatorAction) -> Result<serde_json::Value, String> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("Cannot start a runtime from within a runtime");
+            }
+            Ok(json!({"saved": true}))
+        }
+    }
+
+    #[test]
+    fn a_panicking_action_is_one_failed_reply_not_a_dead_dispatcher() {
+        let dispatch = OperatorDispatcher::new(Arc::new(PanicsOnce(AtomicUsize::new(0))), 3);
+        let mutation = |key: &str| OperatorMutation {
+            request_id: format!("request-{key}"),
+            idempotency_key: key.into(),
+            action: OperatorAction::SaveInferenceConfig {
+                mode: "local_only".into(),
+                builtin_url: "http://127.0.0.1:11434".into(),
+                builtin_model: "qwen".into(),
+            },
+        };
+        let first = dispatch.mutate(mutation("save-1")).unwrap_err();
+        assert_eq!(first.code, "operation_failed");
+        assert!(
+            first.message.contains("internal error"),
+            "{}",
+            first.message
+        );
+        assert!(
+            first.message.contains("within a runtime"),
+            "{}",
+            first.message
+        );
+
+        let second = dispatch.mutate(mutation("save-2")).unwrap();
+        assert!(!second.duplicate);
+        assert_eq!(dispatch.observe(0, 10).unwrap().len(), 1);
+        assert!(dispatch.query(OperatorQuery::InferenceSettings).is_ok());
     }
 
     #[test]

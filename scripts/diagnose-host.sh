@@ -139,6 +139,17 @@ if [ -n "$LOG" ]; then
   run tail -n 30 "$LOG"
 fi
 
+section "daemon stderr (panics land here, not in familiar.log)"
+for e in "$HOME/Library/Logs/Familiar-AI/daemon.stderr.log" "$HOME/Library/Logs/Familiar-AI/desktop.stderr.log"; do
+  [ -f "$e" ] || continue
+  echo "$e:"
+  run bash -c "grep -nE 'panicked|Cannot start a runtime|poison' '$e' | tail -10"
+  run tail -n 15 "$e"
+done
+if command -v journalctl >/dev/null 2>&1; then
+  run bash -c "journalctl --user -u familiar-ai-daemon -u familiar-ai-desktop --since '2 days ago' --no-pager 2>/dev/null | grep -E 'panicked|Cannot start a runtime|poison' | tail -10"
+fi
+
 exec >/dev/tty 2>&1 || exec >/dev/null 2>&1
 cd "$REPO"
 git add -f "$OUT"

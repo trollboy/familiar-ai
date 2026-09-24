@@ -411,6 +411,52 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-088 — Dependency Gantt waves ignore that parents have landed, and one legacy archived file empties every scope conflict
+
+- **Status:** Fixed (2026-09-24: the chart's rounds skip completed parents
+  and completed nodes; the daemon computes scope conflicts only over active,
+  unfinished PRDs; the width error names the PRD that failed; the chart
+  carries `conflicts_error` and the desktop prints it above the waves; each
+  wave header counts unfinished PRDs and says how many are done.)
+- **Found:** 2026-09-24, Mac and Linux desktops alike. Foundations held
+  103/104/106 as one launchable wave and PRD-92 sat in Wave 2, while the
+  scheduler's own answer was 92+103, then 106, then 104.
+- **Detail:** two defects in one chart. (1) `build_dependency_gantt` derived
+  rounds from every declared parent, so PRD-92 behind three completed PRDs
+  (034, 036, 099) was drawn a round later than work with no parents.
+  (2) `dependencies` ran `achievable_width` over all discovered PRDs
+  including `docs/prds/done/001-daemon-skeleton.md` and eleven other
+  pre-contract files with neither front matter nor an Expected Files
+  heading; the loader failed on the first, the whole conflict map came back
+  empty, and the daemon logged "scope conflicts unavailable" without naming
+  the file. The desktop then drew dependency layers and offered "Launch
+  wave" on three PRDs that overlap.
+- **Expected fix:** as landed. The chart is now the scheduler's answer:
+  completed work is history, conflicts come from the PRDs that can still run.
+
+### FAM-BUG-087 — Saving the local LLM configuration from the desktop panics the daemon and bricks every later operator action
+
+- **Status:** Fixed (2026-09-24: the save uses the async-aware `block_on`
+  helper the other inference queries already used; the operator dispatcher
+  contains a panicking action as one failed reply and recovers its locks
+  instead of poisoning them; a regression test performs the save from a
+  tokio worker, which is where the desktop's request actually arrives.)
+- **Found:** 2026-09-24 on the Mac. Configure Local LLM → Save and apply
+  returned an error once, then "operator request state is unavailable" on
+  every retry until the daemon was restarted.
+- **Detail:** `save_inference_config` called `Handle::block_on` directly.
+  The local transport dispatches operator mutations inline on a tokio
+  worker, where that panics with "Cannot start a runtime from within a
+  runtime". The panic unwound through `OperatorDispatcher::mutate` while it
+  held the idempotency mutex, poisoning it; every later mutation failed at
+  the lock. The existing tests call the save from a plain thread and never
+  hit the runtime context, and the test file's harness had also dropped its
+  runtime before running (every inference test in `tray_actions.rs` was
+  already failing with "context is being shutdown"), unseen because the
+  gate runs without the `tray` feature that file requires.
+- **Expected fix:** as landed; the gate still skips `tray`-feature tests,
+  which is a separate hole.
+
 ### FAM-BUG-086 — `ops desktop install` right after `uninstall` races launchd teardown and leaves nothing running
 
 - **Status:** Fixed (2026-09-24: `deactivate` polls `launchctl print` until

@@ -887,6 +887,9 @@ pub struct DependencyGanttNode {
 pub struct DependencyGantt {
     pub waves: Vec<Vec<DependencyGanttNode>>,
     pub max_wave: usize,
+    /// Why scope conflicts are missing, when they are: the waves are then
+    /// dependency layers only and must not be read as launchable rounds.
+    pub conflicts_error: Option<String>,
 }
 
 /// Builds the complete declared dependency graph, including already-completed
@@ -938,6 +941,23 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
                 .collect(),
         );
     }
+    // FAM-BUG-088: completed work is history, not a wave. A parent that is
+    // already complete does not push its child later (PRD-92 sat in Wave 2
+    // behind three landed PRDs), and a completed node neither occupies a
+    // round nor blocks a conflict slot.
+    let completed = |id: &str| -> bool {
+        paths
+            .get(id)
+            .map(|path| {
+                lifecycle_by_path
+                    .get(path.as_str())
+                    .filter(|state| !state.is_empty())
+                    .copied()
+                    .or_else(|| status_by_path.get(path.as_str()).copied())
+                    == Some("completed")
+            })
+            .unwrap_or(false)
+    };
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
     for (child, dependencies) in &parents {
         for parent in dependencies {
@@ -954,6 +974,7 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
         for (id, dependencies) in &parents {
             let depth = dependencies
                 .iter()
+                .filter(|parent| !completed(parent))
                 .filter_map(|parent| previous.get(parent))
                 .map(|depth| depth + 1)
                 .max()
@@ -976,10 +997,15 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
     let mut rounds: HashMap<String, usize> = HashMap::new();
     let mut occupants: Vec<Vec<String>> = Vec::new();
     for id in order {
+        if completed(&id) {
+            rounds.insert(id, 0);
+            continue;
+        }
         let mut round = parents
             .get(&id)
             .into_iter()
             .flatten()
+            .filter(|parent| !completed(parent))
             .filter_map(|parent| rounds.get(parent))
             .map(|round| round + 1)
             .max()
@@ -999,6 +1025,11 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
         rounds.insert(id, round);
     }
     let max_wave = rounds.values().copied().max().unwrap_or(0);
+    let conflicts_error = dependencies
+        .get("conflicts_error")
+        .and_then(Value::as_str)
+        .filter(|error| !error.is_empty())
+        .map(str::to_owned);
     let mut waves = vec![Vec::new(); max_wave + 1];
     for (id, depends_on) in parents {
         let path = paths.remove(&id).unwrap_or_default();
@@ -1038,7 +1069,11 @@ pub fn build_dependency_gantt(dependencies: &Value, backlog: &[BacklogRow]) -> D
     for wave in &mut waves {
         wave.sort_by(|a, b| a.prd_id.cmp(&b.prd_id));
     }
-    DependencyGantt { waves, max_wave }
+    DependencyGantt {
+        waves,
+        max_wave,
+        conflicts_error,
+    }
 }
 
 /// Why Start is not offered for a row, or `None` when it is.
@@ -2052,6 +2087,69 @@ mod tests {
         assert_eq!(chart.waves[1].len(), 2);
         assert_eq!(chart.waves[2][0].prd_id, "PRD-494");
         assert_eq!(chart.waves[3][0].prd_id, "PRD-01");
+    }
+
+    /// FAM-BUG-088: PRD-92's three parents had all landed, and it still sat
+    /// in Wave 2 while 103/104/106 filled Foundations. Landed work is not a
+    /// wave: a child of completed parents is launchable now, and completed
+    /// nodes neither take a round of their own nor block a conflict slot.
+    #[test]
+    fn completed_parents_do_not_push_children_into_later_waves() {
+        let row = |path: &str, status: &str, lifecycle: &str| BacklogRow {
+            prd_path: path.to_string(),
+            status: status.to_string(),
+            lifecycle: lifecycle.to_string(),
+            lifecycle_divergence: None,
+            updated_at: String::new(),
+            missing_since: None,
+        };
+        let dependencies = json!({"items": [
+            {"prd_id":"PRD-99","prd_path":"docs/prds/done/PRD-099.md","depends_on":[],"conflicts_with":["PRD-92"]},
+            {"prd_id":"PRD-92","prd_path":"docs/prds/PRD-092.md","depends_on":[{"prd_id":"PRD-99","status":"completed"}],"conflicts_with":["PRD-99"]},
+            {"prd_id":"PRD-103","prd_path":"docs/prds/PRD-103.md","depends_on":[],"conflicts_with":["PRD-104"]},
+            {"prd_id":"PRD-104","prd_path":"docs/prds/PRD-104.md","depends_on":[],"conflicts_with":["PRD-103"]}
+        ], "conflicts_error": null});
+        let backlog = [
+            row("docs/prds/done/PRD-099.md", "completed", "completed"),
+            row("docs/prds/PRD-092.md", "pending", "ready"),
+            row("docs/prds/PRD-103.md", "pending", "ready"),
+            row("docs/prds/PRD-104.md", "pending", "ready"),
+        ];
+        let chart = build_dependency_gantt(&dependencies, &backlog);
+        let wave_of = |id: &str| {
+            chart
+                .waves
+                .iter()
+                .position(|wave| wave.iter().any(|node| node.prd_id == id))
+                .unwrap()
+        };
+        assert_eq!(
+            wave_of("PRD-92"),
+            0,
+            "completed parents do not delay a child"
+        );
+        assert_eq!(wave_of("PRD-103"), 0);
+        assert_eq!(
+            wave_of("PRD-104"),
+            1,
+            "scope conflict still serializes 104 after 103"
+        );
+        assert_eq!(
+            wave_of("PRD-99"),
+            0,
+            "completed work sits in the first wave, hidden by default"
+        );
+        assert_eq!(chart.max_wave, 1);
+        assert!(chart.conflicts_error.is_none());
+    }
+
+    #[test]
+    fn a_conflicts_error_travels_with_the_chart() {
+        let dependencies = json!({"items": [
+            {"prd_id":"PRD-1","prd_path":"docs/prds/PRD-001.md","depends_on":[]}
+        ], "conflicts_error": "PRD-001 (docs/prds/PRD-001.md): no authoritative `## Expected Files` heading found"});
+        let chart = build_dependency_gantt(&dependencies, &[]);
+        assert!(chart.conflicts_error.unwrap().contains("PRD-001"));
     }
 
     /// A wave is dependency-ready AND scope-disjoint. Two roots that the
