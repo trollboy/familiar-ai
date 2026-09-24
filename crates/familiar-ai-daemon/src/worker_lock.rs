@@ -109,6 +109,28 @@ impl WorkerLock {
         let generation = match fs::read_to_string(&path) {
             Ok(original) => {
                 if let Ok(existing) = serde_json::from_str::<OwnershipClaim>(&original) {
+                    // FAM-BUG-093: a command the owner dispatched never
+                    // recovers the owner's claim. If the pid that delegated
+                    // us is alive, we are its delegate whether or not the
+                    // start-identity probe agrees (on macOS that probe shells
+                    // out to `ps`, which a sandboxed, env-cleared child may
+                    // not reproduce byte for byte). If it is dead, the work
+                    // it delegated is orphaned and stops here; it does not
+                    // become the new owner and then delete the claim on exit,
+                    // which is how a wave launch read as "ownership is stale"
+                    // and then "daemon is not running".
+                    if delegated_by(&existing) {
+                        if process_alive(existing.owner_pid) {
+                            return Self::acquire_delegation(runtime_dir, &existing);
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "control-plane owner pid {} that delegated this command is no longer running",
+                                existing.owner_pid
+                            ),
+                        ));
+                    }
                     if claim_process_matches(&existing) {
                         // A command the owner dispatched runs as the owner's
                         // delegate rather than contending with it. Exclusion
@@ -116,9 +138,6 @@ impl WorkerLock {
                         // owner's child is still refused below, and two
                         // delegates still exclude each other through their own
                         // O_EXCL lock.
-                        if delegated_by(&existing) {
-                            return Self::acquire_delegation(runtime_dir, &existing);
-                        }
                         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!(
                             "Familiar control-plane owner pid {} is live; socket state must be diagnosed and explicit recovery used", existing.owner_pid)));
                     }
@@ -611,6 +630,74 @@ mod tests {
         let recovered = WorkerLock::acquire(t.path()).unwrap();
         assert_eq!(recovered.claim.generation, 2);
     }
+    /// FAM-BUG-093: the owner's own delegate must never recover the claim,
+    /// even when the start-identity probe disagrees with what the claim
+    /// recorded. Serialised with the other env-touching tests by the lock.
+    #[test]
+    fn a_delegate_never_recovers_a_live_owners_claim() {
+        let _guard = env_lock().lock().unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let owner = WorkerLock::acquire(t.path()).unwrap();
+        let claim_path = t.path().join("control-plane.claim");
+        // Corrupt the recorded identity: the probe can no longer match it.
+        let mut recorded: OwnershipClaim =
+            serde_json::from_str(&fs::read_to_string(&claim_path).unwrap()).unwrap();
+        recorded.process_start_identity = "something-else".into();
+        let corrupted = serde_json::to_string(&recorded).unwrap();
+        fs::write(&claim_path, &corrupted).unwrap();
+
+        std::env::set_var(DELEGATION_ENV, std::process::id().to_string());
+        let delegate = WorkerLock::acquire(t.path());
+        std::env::remove_var(DELEGATION_ENV);
+
+        let delegate = delegate.expect("a delegate of a live owner acquires");
+        assert!(t.path().join("control-plane.delegate").exists());
+        assert_eq!(
+            fs::read_to_string(&claim_path).unwrap(),
+            corrupted,
+            "the owner's claim is untouched"
+        );
+        drop(delegate);
+        assert_eq!(
+            fs::read_to_string(&claim_path).unwrap(),
+            corrupted,
+            "dropping the delegate removes only its own file"
+        );
+        assert!(!t.path().join("control-plane.delegate").exists());
+        drop(owner);
+    }
+
+    /// A delegate whose owner has died stops; it does not become the owner.
+    #[test]
+    fn a_delegate_of_a_dead_owner_stops_instead_of_taking_over() {
+        let _guard = env_lock().lock().unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let claim_path = t.path().join("control-plane.claim");
+        let owner = WorkerLock::acquire(t.path()).unwrap();
+        let mut recorded: OwnershipClaim =
+            serde_json::from_str(&fs::read_to_string(&claim_path).unwrap()).unwrap();
+        drop(owner);
+        recorded.owner_pid = 4_294_967_294;
+        let dead = serde_json::to_string(&recorded).unwrap();
+        fs::write(&claim_path, &dead).unwrap();
+
+        std::env::set_var(DELEGATION_ENV, recorded.owner_pid.to_string());
+        let result = WorkerLock::acquire(t.path());
+        std::env::remove_var(DELEGATION_ENV);
+
+        let error = match result {
+            Ok(_) => panic!("an orphaned delegate must not acquire"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("no longer running"), "{error}");
+        assert_eq!(fs::read_to_string(&claim_path).unwrap(), dead);
+    }
+
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn claim_contains_non_pid_identity() {
         let t = tempfile::tempdir().unwrap();

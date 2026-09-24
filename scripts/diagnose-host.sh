@@ -141,8 +141,19 @@ if [ -n "$LOG" ]; then
   run tail -n 30 "$LOG"
 fi
 
+section "control-plane claim (who owns the daemon socket, and whether a delegate took it)"
+for d in "${XDG_RUNTIME_DIR:-/nonexistent}/familiar-ai" "/tmp/familiar-ai-$(id -u)"; do
+  [ -d "$d" ] || continue
+  echo "$d:"; ls -la "$d" | head -12
+  for f in control-plane.claim control-plane.delegate control-plane.generation; do
+    [ -f "$d/$f" ] && { printf '%s: ' "$f"; cat "$d/$f"; echo; }
+  done
+  pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["owner_pid"])' "$d/control-plane.claim" 2>/dev/null)"
+  [ -n "$pid" ] && { echo "claim owner pid $pid: alive=$(kill -0 "$pid" 2>/dev/null && echo yes || echo no) lstart=$(ps -o lstart= -p "$pid" 2>/dev/null)"; }
+done
+
 section "control-worker output logs (what a desktop-launched run printed before it died)"
-for d in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/familiar-ai/capabilities" "$HOME/Library/Application Support/Familiar-AI/capabilities" "$HOME/Library/Application Support/familiar-ai/capabilities" "$TMPDIR/familiar-ai/capabilities"; do
+for d in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/familiar-ai/capabilities" "/tmp/familiar-ai-$(id -u)/capabilities" "$HOME/Library/Application Support/Familiar-AI/capabilities" "$HOME/Library/Application Support/familiar-ai/capabilities" "$TMPDIR/familiar-ai/capabilities"; do
   [ -d "$d" ] || continue
   echo "$d:"; ls -lt "$d" 2>/dev/null | head -8
   for f in $(ls -t "$d"/*.log 2>/dev/null | head -3); do echo "--- $f"; tail -n 25 "$f"; done

@@ -411,6 +411,28 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-093 — A dispatched run can take ownership from the daemon that spawned it, then delete the claim on exit
+
+- **Status:** Fixed (2026-09-24: a process whose delegation variable names
+  the claim's owner pid is that owner's delegate whenever the pid is alive,
+  independent of the start-identity probe; if the pid is dead the delegate
+  stops with "no longer running" instead of recovering the claim. Two lock
+  tests pin both branches and assert the owner's claim file is untouched.)
+- **Found:** 2026-09-24 on the Mac, first Launch wave after FAM-BUG-092.
+  The desktop reported "daemon ownership is stale" and then "daemon is not
+  running" in that order.
+- **Detail:** the delegate branch sat inside `claim_process_matches`, so it
+  applied only when pid liveness *and* the start-identity probe both
+  agreed. On macOS that probe is `ps -o lstart=`, run by a sandboxed,
+  environment-cleared child; when it does not reproduce the owner's
+  recorded string the child fell through to `recover_exact`, wrote its own
+  pid into `control-plane.claim`, and its `Drop` removed the file on exit.
+  The desktop reads that file: a foreign live pid is "stale", no file is
+  "not running", while the daemon itself is still up. Unreachable before
+  FAM-BUG-092 because the child could not read the claim at all.
+- **Expected fix:** as landed. Recovery is for a dead owner and nobody
+  else; a delegate is never a recovery path.
+
 ### FAM-BUG-092 — Start, Re-drive and Launch wave from the desktop have never run a PRD: the worker sandbox denies the child the control-plane claim
 
 - **Status:** Fixed (2026-09-24: the child's denied read path is the
