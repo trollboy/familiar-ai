@@ -176,17 +176,11 @@ supported installation and deletes this paragraph.
 git clone git@github.com:trollboy/familiar-ai.git
 cd familiar-ai
 
-# Build the CLI. --no-default-features skips the tray feature.
-cargo build --release --no-default-features -p familiar-ai-daemon --bin familiar-ai
-install -m755 target/release/familiar-ai ~/.local/bin/
-
-# Build the headless daemon and cross-platform Tauri desktop. No Docker or
-# browser is required for ordinary build, installation, or use.
-cargo build --release -p familiar-ai-daemon --no-default-features --bin familiar-ai-daemon
-cargo build --release -p familiar-ai-desktop
-install -m755 target/release/familiar-ai-daemon ~/.local/bin/
-install -m755 target/release/familiar-ai-desktop ~/.local/bin/
-familiar-ai ops desktop install
+# Build the CLI, headless daemon and Tauri desktop, install all three to
+# ~/.local/bin (verified with cmp), and (re)install the per-user supervisor so
+# launchd/systemd run exactly those binaries. Re-run it after every pull; it
+# is the only supported way to upgrade. No Docker or browser is required.
+bash scripts/reinstall.sh
 
 # Point it at a repository containing docs/prds/*.md
 familiar-ai                             # repository state and the one next command to run

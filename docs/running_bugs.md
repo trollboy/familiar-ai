@@ -442,7 +442,8 @@ appears with no entry, or with a status a reader cannot classify.
   installed; the README's macOS steps rebuild the bundle
   (`cargo tauri build --bundles app`) or re-run `ops desktop install`
   without `--desktop` so launchd runs `~/.local/bin/familiar-ai-desktop`.
-- **Workaround now:** on the Mac, `familiar-ai ops desktop uninstall &&
+- **Workaround now:** `bash scripts/reinstall.sh` (builds, installs, verifies,
+  reinstalls the supervisor). Previously: on the Mac, `familiar-ai ops desktop uninstall &&
   familiar-ai ops desktop install` (no `--desktop`), then restart; or
   rebuild the bundle and replace `~/Applications/Familiar.app`.
 
