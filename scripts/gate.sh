@@ -67,15 +67,22 @@ step() {
         # Name the failures in the verdict, capped so one catastrophic run
         # cannot write an unbounded row into the ledger.
         local culprits
-        culprits="$(grep -oE '^test [^ ]+ \.\.\. FAILED' "${log}" |
+        # Doc-test names carry spaces ("src/lib.rs - module::fn (line 12)"),
+        # so match everything between "test " and " ... FAILED".
+        culprits="$(grep -oE '^test .+ \.\.\. FAILED$' "${log}" |
             sed 's/^test //; s/ \.\.\. FAILED$//' | head -20 | tr '\n' ' ')"
         if [ -n "${culprits}" ]; then
             note "--- gate: ${name} failures: ${culprits}"
         else
-            # Not a test failure — a compile error, a linter, a killed step.
+            # Not a named test failure — a compile error, a linter, or the
+            # step's process itself dying. FAM-BUG-096: two red verdicts
+            # carried neither a test name nor an error line, which left
+            # nothing to act on; the exit status and the last lines the step
+            # printed are the signature of that class.
             local lastline
             lastline="$(grep -m1 -E '^error' "${log}" | head -c 200)"
             [ -n "${lastline}" ] && note "--- gate: ${name} error: ${lastline}"
+            note "--- gate: ${name} exit=${outcome} tail: $(tail -n 3 "${log}" | tr '\n' ' ' | head -c 300)"
         fi
         rm -f "${log}"
         # Record and keep going: one red step should not hide the others, but

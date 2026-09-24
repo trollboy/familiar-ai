@@ -437,9 +437,19 @@ appears with no entry, or with a status a reader cannot classify.
   failing test's name, and `git push 2>&1 | tail -1` discarded the rest.
   Until the test is named this entry stays open; the fix is to the test,
   not to retry policy.
-- **Expected fix:** name it, fix it, and have `ops gate run --hook` keep the
-  failing test names in the verdict detail so the next flake is identified
-  from the ledger alone.
+- **2026-09-24, later:** two full-suite runs at lowest priority on two
+  threads passed clean. Both red verdicts carried neither a `failures:` line
+  nor an `error:` line, and the gate writes one of those for any named test
+  failure, doc-test failure or compile error. So the test step's own process
+  ended non-zero without printing either, which is the signature of a
+  signal death or an OOM kill, not of a flaky test; it may be the same
+  event as FAM-BUG-058. The gate now records the step's exit status and its
+  last three output lines whenever a failure names no test, and matches
+  doc-test names, which contain spaces and were invisible to the old
+  pattern.
+- **Expected fix:** the next occurrence carries an exit status; 141 or 137
+  points at the pipeline or the kernel, anything else at a test. Until then
+  this stays open and no retry policy is added.
 
 ### FAM-BUG-095 — Launch wave was offered on a wave whose PRDs were all completed
 
