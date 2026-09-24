@@ -1,11 +1,11 @@
 familiar-ai host diagnostics
 host: MacBook-Pro-5
-date: 2026-09-24T06:37:52Z
+date: 2026-09-24T13:44:54Z
 os:   Darwin MacBook-Pro-5.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:53:15 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T6000 arm64
 
 === git ===
 $ git rev-parse --short HEAD
-0f3d297
+f7e485a
 $ git status -sb
 ## main...origin/main
  M docs/diagnostics/host-MacBook-Pro-5.log.txt
@@ -18,47 +18,47 @@ $ git status --short
  M docs/diagnostics/suite-hang-20260901T102714Z.txt
 ?? crates/familiar-ai-desktop/gen/schemas/macOS-schema.json
 $ git log --oneline -8
-0f3d297 fix: launchd install after uninstall waited for nothing and hid the bootstrap error (FAM-BUG-086)
-9b7d9e9 scripts: reinstall.sh builds, installs, verifies and restarts Familiar in one step
-d00056e fix: desktop status reports a supervisor program that is not the installed binary (FAM-BUG-084)
-ea51c37 diag: host MacBook-Pro-5 2026-09-24T05:22Z
-a351092 docs: the Mac's stale-bundle entry is FAM-BUG-085 with a classifiable status
-d183016 fix: missing-file backlog rows read as history, and the diagnostics script is repository-scoped
-2df0d70 docs: record stale macOS bundle installs
-9f5af32 diag: host MacBook-Pro-5 2026-09-24T05:02Z
+f7e485a tests: the desktop data-source suite runs in the gate; FAM-BUG-095 and 096 logged (FAM-BUG-097)
+7ec0711 settings: a project page offers only the tables a repository can override; PRD-110 and PRD-111 queued
+e6c9b27 desktop: directory settings get a native Browse button scoped to the repository
+1035d3d settings: every project page offers its PRD location with the profile's defaults
+6db1905 fix: settings saves run the daemon's own validation, and the adapter list is the config's enum (FAM-BUG-094)
+5f736cc desktop: adapters supply their executable and model list; released stops leave the progress strip
+ab05091 desktop: the Runs tab shows live runs and hides finished ones behind a toggle
+0adc92e fix: a dispatched run never takes ownership from the daemon that spawned it (FAM-BUG-093)
 $ git fetch -q origin
-origin/main: 0f3d297
-behind origin/main by: 0
+origin/main: 954278e
+behind origin/main by: 1
 ahead of origin/main by: 0
 
 === installed binaries ===
 familiar-ai resolves to: /Users/trollboy/.local/bin/familiar-ai
--rwxr-xr-x@ 1 trollboy  staff  23681440 Sep 24 02:18 /Users/trollboy/.local/bin/familiar-ai
+-rwxr-xr-x@ 1 trollboy  staff  23679168 Sep 24 09:28 /Users/trollboy/.local/bin/familiar-ai
   == target/release/familiar-ai (identical)
 familiar-ai-daemon resolves to: /Users/trollboy/.local/bin/familiar-ai-daemon
--rwxr-xr-x@ 1 trollboy  staff  22627984 Sep 24 02:18 /Users/trollboy/.local/bin/familiar-ai-daemon
+-rwxr-xr-x@ 1 trollboy  staff  22708864 Sep 24 09:28 /Users/trollboy/.local/bin/familiar-ai-daemon
   == target/release/familiar-ai-daemon (identical)
 familiar-ai-desktop resolves to: /Users/trollboy/.local/bin/familiar-ai-desktop
--rwxr-xr-x@ 1 trollboy  staff  11216528 Sep 24 02:18 /Users/trollboy/.local/bin/familiar-ai-desktop
+-rwxr-xr-x@ 1 trollboy  staff  11738832 Sep 24 09:28 /Users/trollboy/.local/bin/familiar-ai-desktop
   == target/release/familiar-ai-desktop (identical)
 $ ls -l target/release/familiar-ai target/release/familiar-ai-daemon target/release/familiar-ai-desktop
--rwxr-xr-x@ 1 trollboy  staff  23681440 Sep 24 02:18 target/release/familiar-ai
--rwxr-xr-x@ 1 trollboy  staff  22627984 Sep 24 02:18 target/release/familiar-ai-daemon
--rwxr-xr-x@ 1 trollboy  staff  11216528 Sep 24 02:18 target/release/familiar-ai-desktop
+-rwxr-xr-x@ 1 trollboy  staff  23679168 Sep 24 09:27 target/release/familiar-ai
+-rwxr-xr-x@ 1 trollboy  staff  22708864 Sep 24 09:27 target/release/familiar-ai-daemon
+-rwxr-xr-x@ 1 trollboy  staff  11738832 Sep 24 09:28 target/release/familiar-ai-desktop
 
 === processes ===
 $ pgrep -fal familiar-ai
-83761 /Users/trollboy/.local/bin/familiar-ai-daemon
-83782 /Users/trollboy/.local/bin/familiar-ai-desktop
--rwxr-xr-x@ 1 trollboy  staff  22627984 Sep 24 02:18 /Users/trollboy/.local/bin/familiar-ai-daemon
+39382 /Users/trollboy/.local/bin/familiar-ai-daemon
+39403 /Users/trollboy/.local/bin/familiar-ai-desktop
+-rwxr-xr-x@ 1 trollboy  staff  22708864 Sep 24 09:28 /Users/trollboy/.local/bin/familiar-ai-daemon
   running familiar-ai-daemon == target/release/familiar-ai-daemon (identical)
--rwxr-xr-x@ 1 trollboy  staff  11216528 Sep 24 02:18 /Users/trollboy/.local/bin/familiar-ai-desktop
+-rwxr-xr-x@ 1 trollboy  staff  11738832 Sep 24 09:28 /Users/trollboy/.local/bin/familiar-ai-desktop
   running familiar-ai-desktop == target/release/familiar-ai-desktop (identical)
-definition /Users/trollboy/Library/LaunchAgents/com.trollboy.familiar.desktop.plist (Sep 24 02:18:50 2026):
+definition /Users/trollboy/Library/LaunchAgents/com.trollboy.familiar.desktop.plist (Sep 24 09:28:33 2026):
 5:<key>ProgramArguments</key><array><string>/Users/trollboy/.local/bin/familiar-ai-desktop</string></array>
 10:<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/opt/mysql-client/bin:/Users/trollboy/homebrew/opt/mysql-client/bin:/Users/trollboy/homebrew/opt/libpq/bin:/Users/trollboy/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pmk/env/global/bin:/Users/trollboy/.cargo/bin:/Applications/iTerm.app/Contents/Resources/utilities:/Users/trollboy/Library/Application Support/JetBrains/Toolbox/scripts</string></dict>
 11:<key>StandardOutPath</key><string>/Users/trollboy/Library/Logs/Familiar-AI/desktop.stdout.log</string>
-definition /Users/trollboy/Library/LaunchAgents/com.trollboy.familiar.daemon.plist (Sep 24 02:18:50 2026):
+definition /Users/trollboy/Library/LaunchAgents/com.trollboy.familiar.daemon.plist (Sep 24 09:28:33 2026):
 5:<key>ProgramArguments</key><array><string>/Users/trollboy/.local/bin/familiar-ai-daemon</string></array>
 10:<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/opt/mysql-client/bin:/Users/trollboy/homebrew/opt/mysql-client/bin:/Users/trollboy/homebrew/opt/libpq/bin:/Users/trollboy/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/opt/pmk/env/global/bin:/Users/trollboy/.cargo/bin:/Applications/iTerm.app/Contents/Resources/utilities:/Users/trollboy/Library/Application Support/JetBrains/Toolbox/scripts</string></dict>
 11:<key>StandardOutPath</key><string>/Users/trollboy/Library/Logs/Familiar-AI/daemon.stdout.log</string>
@@ -95,9 +95,9 @@ service=com.trollboy.familiar.daemon backend=Launchd installed=true definition=/
 	minimum runtime = 10
 	exit timeout = 5
 	runs = 1
-	pid = 83761
+	pid = 39382
 	immediate reason = non-ipc demand
-	forks = 90
+	forks = 1008
 	execs = 1
 	initialized = 1
 	trampolined = 1
@@ -113,7 +113,7 @@ service=com.trollboy.familiar.daemon backend=Launchd installed=true definition=/
 	}
 
 	resource coalition = {
-		ID = 270140
+		ID = 272134
 		type = resource
 		state = active
 		active count = 1
@@ -121,7 +121,7 @@ service=com.trollboy.familiar.daemon backend=Launchd installed=true definition=/
 	}
 
 	jetsam coalition = {
-		ID = 270141
+		ID = 272135
 		type = jetsam
 		state = active
 		active count = 1
@@ -170,9 +170,9 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 	minimum runtime = 10
 	exit timeout = 5
 	runs = 1
-	pid = 83782
+	pid = 39403
 	immediate reason = non-ipc demand
-	forks = 3510
+	forks = 3328
 	execs = 1
 	initialized = 1
 	trampolined = 1
@@ -189,7 +189,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 
 	pid-local endpoints = {
 		"com.apple.coredrag" = {
-			port = 0x120677
+			port = 0x10d59f
 			active = 1
 			managed = 0
 			reset = 0
@@ -197,7 +197,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 			watching = 0
 		}
 		"com.apple.tsm.portname" = {
-			port = 0x626f3
+			port = 0x12ba63
 			active = 1
 			managed = 0
 			reset = 0
@@ -205,7 +205,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 			watching = 0
 		}
 		"com.apple.axserver" = {
-			port = 0x11f773
+			port = 0x14edb3
 			active = 1
 			managed = 0
 			reset = 0
@@ -215,7 +215,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 	}
 
 	resource coalition = {
-		ID = 270142
+		ID = 272136
 		type = resource
 		state = active
 		active count = 1
@@ -223,7 +223,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 	}
 
 	jetsam coalition = {
-		ID = 270143
+		ID = 272137
 		type = jetsam
 		state = active
 		active count = 1
@@ -242,8 +242,8 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 	properties = runatload | inferred program
 }
 $ bash -c launchctl list | grep -i familiar
-83761	0	com.trollboy.familiar.daemon
-83782	0	com.trollboy.familiar.desktop
+39382	0	com.trollboy.familiar.daemon
+39403	0	com.trollboy.familiar.desktop
 
 === config ===
 config: /Users/trollboy/Library/Application Support/familiar-ai/config.toml
@@ -281,7 +281,7 @@ prd_number  status     missing_since                     prd_path
 > select max(last_seen_at) as last_scan from backlog_prds where repository_key='/Users/trollboy/Projects/familiar/.git';
 last_scan                       
 --------------------------------
-2026-09-24T06:18:51.717392+00:00
+2026-09-24T13:32:09.219312+00:00
 > select session_id, substr(started_at,1,19) started, termination_reason from driver_sessions where repository_key='/Users/trollboy/Projects/familiar/.git' order by started_at desc limit 5;
 session_id                                    started              termination_reason   
 --------------------------------------------  -------------------  ---------------------
@@ -331,6 +331,36 @@ PRD-76  excluded_allowlist  ready but outside the session's approved PRD set
 PRD-62  ready_selected                                                      
 PRD-58  excluded_allowlist  ready but outside the session's approved PRD set
 PRD-53  excluded_allowlist  ready but outside the session's approved PRD set
+> select execution_id, state, stage, attempt, substr(created_at,1,19) created, substr(completed_at,1,19) done, substr(command_json,1,70) cmd from control_plane_executions where project_id like '%familiar%' order by created_at desc limit 8;
+execution_id                 state   stage  attempt  created              done                 cmd                                                                   
+---------------------------  ------  -----  -------  -------------------  -------------------  ----------------------------------------------------------------------
+exec-1790256719734782-39382  failed         1        2026-09-24 13:31:59  2026-09-24 13:32:00  {"argv":["familiar-ai","run","docs/prds/PRD-086.md"],"timeout_ms":null
+exec-1790256719741579-39382  failed         1        2026-09-24 13:31:59  2026-09-24 13:32:02  {"argv":["familiar-ai","run","docs/prds/PRD-092.md"],"timeout_ms":null
+exec-1790256719746467-39382  failed         1        2026-09-24 13:31:59  2026-09-24 13:32:03  {"argv":["familiar-ai","run","docs/prds/PRD-103.md"],"timeout_ms":null
+exec-1790239283216137-35562  failed         1        2026-09-24 08:41:23  2026-09-24 08:41:24  {"argv":["familiar-ai","run","docs/prds/PRD-086.md"],"timeout_ms":null
+exec-1790239283221616-35562  failed         1        2026-09-24 08:41:23  2026-09-24 08:41:24  {"argv":["familiar-ai","run","docs/prds/PRD-092.md"],"timeout_ms":null
+exec-1790239283226429-35562  failed         1        2026-09-24 08:41:23  2026-09-24 08:41:25  {"argv":["familiar-ai","run","docs/prds/PRD-103.md"],"timeout_ms":null
+exec-1790237678968515-20995  failed         1        2026-09-24 08:14:38  2026-09-24 08:14:39  {"argv":["familiar-ai","run","docs/prds/PRD-086.md"],"timeout_ms":null
+exec-1790237678974353-20995  failed         1        2026-09-24 08:14:38  2026-09-24 08:14:40  {"argv":["familiar-ai","run","docs/prds/PRD-092.md"],"timeout_ms":null
+> select substr(created_at,1,19) at, kind, execution_id, substr(payload_json,1,100) payload from control_plane_events where execution_id in (select execution_id from control_plane_executions where project_id like '%familiar%' order by created_at desc limit 4) order by created_at desc limit 16;
+at                   kind             execution_id                 payload                                                                                             
+-------------------  ---------------  ---------------------------  ----------------------------------------------------------------------------------------------------
+2026-09-24 13:32:03  failed           exec-1790256719746467-39382  {"reason":"worker_failed exit=1: error: configuration failed: worker \"ollama/llama3:latest\" declar
+2026-09-24 13:32:03  usage_finalized  exec-1790256719746467-39382  {"known":false}                                                                                     
+2026-09-24 13:32:02  failed           exec-1790256719741579-39382  {"reason":"worker_failed exit=1: error: configuration failed: worker \"ollama/llama3:latest\" declar
+2026-09-24 13:32:02  usage_finalized  exec-1790256719741579-39382  {"known":false}                                                                                     
+2026-09-24 13:32:02  claimed          exec-1790256719746467-39382  {}                                                                                                  
+2026-09-24 13:32:00  failed           exec-1790256719734782-39382  {"reason":"worker_failed exit=1: error: configuration failed: worker \"ollama/llama3:latest\" declar
+2026-09-24 13:32:00  usage_finalized  exec-1790256719734782-39382  {"known":false}                                                                                     
+2026-09-24 13:32:00  claimed          exec-1790256719741579-39382  {}                                                                                                  
+2026-09-24 13:31:59  submitted        exec-1790256719734782-39382  {}                                                                                                  
+2026-09-24 13:31:59  claimed          exec-1790256719734782-39382  {}                                                                                                  
+2026-09-24 13:31:59  submitted        exec-1790256719741579-39382  {}                                                                                                  
+2026-09-24 13:31:59  submitted        exec-1790256719746467-39382  {}                                                                                                  
+2026-09-24 08:41:24  failed           exec-1790239283216137-35562  {"reason":"worker_failed exit=1: error: configuration failed: worker \"ollama/llama3:latest\" declar
+2026-09-24 08:41:24  usage_finalized  exec-1790239283216137-35562  {"known":false}                                                                                     
+2026-09-24 08:41:23  submitted        exec-1790239283216137-35562  {}                                                                                                  
+2026-09-24 08:41:23  claimed          exec-1790239283216137-35562  {}                                                                                                  
 > select e.prd_path, e.old_status, e.new_status, e.actor, substr(e.changed_at,1,19) at, r.action from backlog_status_events e left join backlog_recovery_events r on r.status_event_id=e.event_id where e.repository_key='/Users/trollboy/Projects/familiar/.git' and (e.prd_path like '%PRD-092%' or e.prd_path like '%PRD-10[3468]%') order by e.event_id desc limit 12;
 
 === stewardship backlog (status + lifecycle as the CLI reports it) ===
@@ -465,46 +495,110 @@ docs/prds/PRD-106.md: structured-v1
 docs/prds/PRD-107.md: structured-v1
 docs/prds/done/PRD-108.md: structured-v1
 docs/prds/done/PRD-109.md: structured-v1
-metadata-check mode=advisory structured_v1=69 legacy=40
+docs/prds/PRD-110.md: structured-v1
+docs/prds/PRD-111.md: structured-v1
+metadata-check mode=advisory structured_v1=71 legacy=40
 (only the summary line matters above; legacy warnings are expected)
 
 === scheduler width for 92,103,104,106 (refuses while a daemon holds the claim; the refusal itself is informative) ===
 $ familiar-ai ops operator width --actor human:diagnostics --reason host diagnostics PRD-92 PRD-103 PRD-104 PRD-106
-error: refusing to compute achievable width: Familiar control-plane owner pid 83761 is live. Wait for it to finish, or stop it first.
+error: refusing to compute achievable width: Familiar control-plane owner pid 39382 is live. Wait for it to finish, or stop it first.
 [exit 1]
 
 === recent daemon log ===
 log: /Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24
 $ bash -c grep -nE 'conflicts unavailable|reconcil|WARN|ERROR|error' '/Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24' | tail -40
 338:2026-09-24T05:11:34.130179Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
+428:2026-09-24T06:40:01.530039Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
+448:2026-09-24T06:45:50.739487Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
+455:2026-09-24T06:51:31.508774Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
 $ tail -n 30 /Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24
-2026-09-24T06:18:51.147482Z  INFO familiar_ai_daemon: familiar 0.1.0 (0f3d297) built 2026-09-24 [rustc 1.93.1]
-2026-09-24T06:18:51.147685Z  INFO familiar_ai_daemon: daemon starting config_dir=/Users/trollboy/Library/Application Support/Familiar-AI data_dir=/Users/trollboy/Library/Application Support/Familiar-AI state_dir=/Users/trollboy/Library/Application Support/Familiar-AI
-2026-09-24T06:18:51.147728Z  INFO familiar_ai_daemon: opening database db_path=/Users/trollboy/Library/Application Support/Familiar-AI/familiar.db
-2026-09-24T06:18:51.196860Z  INFO familiar_ai_daemon: database schema up to date
-2026-09-24T06:18:51.739767Z  INFO familiar_ai_daemon: PID file written pid_file=/Users/trollboy/Library/Application Support/Familiar-AI/familiar-ai.pid
-2026-09-24T06:18:51.740003Z  INFO familiar_ai_daemon: loaded existing projects active_projects=0
-2026-09-24T06:18:51.748612Z  INFO familiar_ai_daemon: inference is not configured; no backend to load
-2026-09-24T06:18:51.748690Z  INFO familiar_ai_daemon: file watcher disabled or no paths configured
-2026-09-24T06:18:51.754698Z  INFO familiar_ai_daemon::model_residency: model residency disabled; no local server will be held resident
-2026-09-24T06:18:51.755113Z  INFO familiar_ai_daemon::batch_review: batch review disabled; no tier_policy.batch_worker configured
-2026-09-24T06:18:51.755653Z  INFO familiar_ai_daemon::dashboard: dashboard started addr=127.0.0.1:9400
-2026-09-24T06:19:51.756923Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:19:51.756417 UTC uptime_secs=60 active_projects=0
-2026-09-24T06:20:51.757328Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:20:51.756910 UTC uptime_secs=120 active_projects=0
-2026-09-24T06:21:51.756324Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:21:51.755945 UTC uptime_secs=180 active_projects=0
-2026-09-24T06:22:51.757582Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:22:51.757213 UTC uptime_secs=240 active_projects=0
-2026-09-24T06:23:51.824304Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:23:51.757697 UTC uptime_secs=300 active_projects=0
-2026-09-24T06:24:51.769958Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:24:51.756920 UTC uptime_secs=360 active_projects=0
-2026-09-24T06:25:51.821658Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:25:51.755757 UTC uptime_secs=420 active_projects=0
-2026-09-24T06:26:51.822007Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:26:51.756028 UTC uptime_secs=480 active_projects=0
-2026-09-24T06:27:51.777000Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:27:51.756113 UTC uptime_secs=540 active_projects=0
-2026-09-24T06:28:51.779325Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:28:51.756372 UTC uptime_secs=600 active_projects=0
-2026-09-24T06:29:51.862534Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:29:51.757004 UTC uptime_secs=660 active_projects=0
-2026-09-24T06:30:51.862182Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:30:51.755295 UTC uptime_secs=720 active_projects=0
-2026-09-24T06:31:51.819915Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:31:51.756159 UTC uptime_secs=780 active_projects=0
-2026-09-24T06:32:51.859298Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:32:51.756677 UTC uptime_secs=840 active_projects=0
-2026-09-24T06:33:51.805365Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:33:51.756643 UTC uptime_secs=900 active_projects=0
-2026-09-24T06:34:51.830202Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:34:51.756587 UTC uptime_secs=960 active_projects=0
-2026-09-24T06:35:51.864432Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:35:51.761130 UTC uptime_secs=1020 active_projects=0
-2026-09-24T06:36:51.866387Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:36:51.761010 UTC uptime_secs=1080 active_projects=0
-2026-09-24T06:37:51.763655Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 06:37:51.762213 UTC uptime_secs=1140 active_projects=0
+2026-09-24T13:28:32.818030Z  INFO familiar_ai_daemon::summary_worker: summary worker shutting down
+2026-09-24T13:28:32.818138Z  INFO familiar_ai_daemon::dashboard: dashboard stopped
+2026-09-24T13:28:32.820323Z  INFO familiar_ai_daemon: familiar-ai-daemon stopped
+2026-09-24T13:28:34.339712Z  INFO familiar_ai_daemon: familiar 0.1.0 (f7e485a) built 2026-09-24 [rustc 1.93.1]
+2026-09-24T13:28:34.339757Z  INFO familiar_ai_daemon: daemon starting config_dir=/Users/trollboy/Library/Application Support/Familiar-AI data_dir=/Users/trollboy/Library/Application Support/Familiar-AI state_dir=/Users/trollboy/Library/Application Support/Familiar-AI
+2026-09-24T13:28:34.339798Z  INFO familiar_ai_daemon: opening database db_path=/Users/trollboy/Library/Application Support/Familiar-AI/familiar.db
+2026-09-24T13:28:34.362745Z  INFO familiar_ai_daemon: database schema up to date
+2026-09-24T13:28:34.621878Z  INFO familiar_ai_daemon: PID file written pid_file=/Users/trollboy/Library/Application Support/Familiar-AI/familiar-ai.pid
+2026-09-24T13:28:34.622075Z  INFO familiar_ai_daemon: loaded existing projects active_projects=0
+2026-09-24T13:28:34.753282Z  INFO familiar_ai_daemon: LLM backend loaded
+2026-09-24T13:28:34.753462Z  INFO familiar_ai_daemon: file watcher disabled or no paths configured
+2026-09-24T13:28:34.756257Z  INFO familiar_ai_daemon::batch_review: batch review disabled; no tier_policy.batch_worker configured
+2026-09-24T13:28:34.756463Z  INFO familiar_ai_daemon::model_residency: model residency disabled; no local server will be held resident
+2026-09-24T13:28:34.757185Z  INFO familiar_ai_daemon::dashboard: dashboard started addr=127.0.0.1:9400
+2026-09-24T13:29:34.759142Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:29:34.758782 UTC uptime_secs=60 active_projects=0
+2026-09-24T13:30:34.758535Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:30:34.758206 UTC uptime_secs=120 active_projects=0
+2026-09-24T13:31:34.765304Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:31:34.759769 UTC uptime_secs=180 active_projects=0
+2026-09-24T13:32:34.757969Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:32:34.757597 UTC uptime_secs=240 active_projects=0
+2026-09-24T13:33:34.758323Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:33:34.757967 UTC uptime_secs=300 active_projects=0
+2026-09-24T13:34:34.759095Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:34:34.758753 UTC uptime_secs=360 active_projects=0
+2026-09-24T13:35:34.758445Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:35:34.758101 UTC uptime_secs=420 active_projects=0
+2026-09-24T13:36:34.758037Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:36:34.757719 UTC uptime_secs=480 active_projects=0
+2026-09-24T13:37:34.759539Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:37:34.759154 UTC uptime_secs=540 active_projects=0
+2026-09-24T13:38:34.760307Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:38:34.759948 UTC uptime_secs=600 active_projects=0
+2026-09-24T13:39:34.759384Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:39:34.759013 UTC uptime_secs=660 active_projects=0
+2026-09-24T13:40:34.759203Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:40:34.758826 UTC uptime_secs=720 active_projects=0
+2026-09-24T13:41:34.759890Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:41:34.758812 UTC uptime_secs=780 active_projects=0
+2026-09-24T13:42:34.760098Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:42:34.758923 UTC uptime_secs=840 active_projects=0
+2026-09-24T13:43:34.760361Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:43:34.759261 UTC uptime_secs=900 active_projects=0
+2026-09-24T13:44:34.759530Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:44:34.758233 UTC uptime_secs=960 active_projects=0
+
+=== control-plane claim (who owns the daemon socket, and whether a delegate took it) ===
+/tmp/familiar-ai-501:
+total 32
+drwxr-xr-x@  8 trollboy  wheel   256 Sep 24 09:32 .
+drwxrwxrwt  68 root      wheel  2176 Sep 24 09:28 ..
+drwxr-xr-x@ 14 trollboy  wheel   448 Sep 24 09:32 capabilities
+-rw-r--r--@  1 trollboy  wheel   378 Sep 24 09:28 control-plane.claim
+-rw-r--r--@  1 trollboy  staff     3 Sep 24 09:28 control-plane.generation
+srw-------@  1 trollboy  wheel     0 Sep 24 09:28 control-plane.sock
+-rw-------@  1 trollboy  staff    33 Aug 31 19:08 installation-id
+-rw-------@  1 trollboy  wheel    64 Sep 24 09:28 operator.credential
+control-plane.claim: {"installation_id":"87a5cc1c8fb97a15d1062e093eba055e","owner_nonce":"544d552e9937b82a12f9b5f8260b23ceceddb858487f288848013d84b11b5367","owner_pid":39382,"process_start_identity":"Thu Sep 24 09:28:33 2026","boot_identity":"{ sec = 1784153210, usec = 933471 } Wed Jul 15 18:06:50 2026","socket_path":"/tmp/familiar-ai-501/control-plane.sock","protocol_version":1,"generation":37}
+
+control-plane.generation: 37
+
+claim owner pid 39382: alive=yes lstart=Thu Sep 24 09:28:33 2026    
+
+=== control-worker output logs (what a desktop-launched run printed before it died) ===
+/tmp/familiar-ai-501/capabilities:
+total 96
+-rw-r--r--@ 1 trollboy  wheel  191 Sep 24 09:32 exec-1790256719746467-39382.log
+-rw-r--r--@ 1 trollboy  wheel  191 Sep 24 09:32 exec-1790256719741579-39382.log
+-rw-r--r--@ 1 trollboy  wheel  191 Sep 24 09:32 exec-1790256719734782-39382.log
+-rw-r--r--@ 1 trollboy  wheel  191 Sep 24 04:41 exec-1790239283226429-35562.log
+-rw-r--r--@ 1 trollboy  wheel  191 Sep 24 04:41 exec-1790239283221616-35562.log
+-rw-r--r--@ 1 trollboy  wheel  191 Sep 24 04:41 exec-1790239283216137-35562.log
+-rw-r--r--@ 1 trollboy  wheel  103 Sep 24 04:14 exec-1790237678979771-20995.log
+--- /tmp/familiar-ai-501/capabilities/exec-1790256719746467-39382.log
+error: configuration failed: worker "ollama/llama3:latest" declares runtime "ollama", which executes through Familiar's own raw-model agent loop; agent_runtime.enabled must be true to use it
+--- /tmp/familiar-ai-501/capabilities/exec-1790256719741579-39382.log
+error: configuration failed: worker "ollama/llama3:latest" declares runtime "ollama", which executes through Familiar's own raw-model agent loop; agent_runtime.enabled must be true to use it
+--- /tmp/familiar-ai-501/capabilities/exec-1790256719734782-39382.log
+error: configuration failed: worker "ollama/llama3:latest" declares runtime "ollama", which executes through Familiar's own raw-model agent loop; agent_runtime.enabled must be true to use it
+
+=== daemon stderr (panics land here, not in familiar.log) ===
+/Users/trollboy/Library/Logs/Familiar-AI/daemon.stderr.log:
+$ bash -c grep -nE 'panicked|Cannot start a runtime|poison' '/Users/trollboy/Library/Logs/Familiar-AI/daemon.stderr.log' | tail -10
+13247:thread 'tokio-rt-worker' (44784223) panicked at crates/familiar-ai-daemon/src/tray_data.rs:626:61:
+13248:Cannot start a runtime from within a runtime. This happens because a function (like `block_on`) attempted to block the current thread while the thread is being used to drive asynchronous tasks.
+$ tail -n 15 /Users/trollboy/Library/Logs/Familiar-AI/daemon.stderr.log
+  [2m2026-09-24T13:40:34.758853Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:40:34.758826 UTC, [1;32muptime_secs[0m[32m: 720, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+  [2m2026-09-24T13:41:34.758838Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:41:34.758812 UTC, [1;32muptime_secs[0m[32m: 780, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+  [2m2026-09-24T13:42:34.758947Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:42:34.758923 UTC, [1;32muptime_secs[0m[32m: 840, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+  [2m2026-09-24T13:43:34.759283Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:43:34.759261 UTC, [1;32muptime_secs[0m[32m: 900, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+  [2m2026-09-24T13:44:34.758408Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:44:34.758233 UTC, [1;32muptime_secs[0m[32m: 960, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+/Users/trollboy/Library/Logs/Familiar-AI/desktop.stderr.log:
+$ bash -c grep -nE 'panicked|Cannot start a runtime|poison' '/Users/trollboy/Library/Logs/Familiar-AI/desktop.stderr.log' | tail -10
+$ tail -n 15 /Users/trollboy/Library/Logs/Familiar-AI/desktop.stderr.log
