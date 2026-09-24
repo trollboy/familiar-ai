@@ -1,0 +1,355 @@
+familiar-ai host diagnostics
+host: trollboy
+date: 2026-09-24T04:56:42Z
+os:   Linux trollboy 6.8.0-138-generic #138-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 31 22:41:49 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+
+=== git ===
+$ git rev-parse --short HEAD
+a60ebd7
+$ git status -sb
+## main...origin/main
+?? docs/diagnostics/host-trollboy.log.txt
+?? scripts/diagnose-host.sh
+$ git status --short
+?? docs/diagnostics/host-trollboy.log.txt
+?? scripts/diagnose-host.sh
+$ git log --oneline -8
+a60ebd7 fix: the dependency view says when scope conflicts could not be computed
+ceab959 fix: retry desktop repository discovery
+4dfa392 fix: the tray_data test module sits after the items it follows
+c77af25 docs: archive PRD-108 and PRD-109, which landed today and were left in the active queue
+e33ef21 fix: keep configured repositories visible
+f13f141 fix: a recovery event retires the gates it answers (FAM-BUG-083)
+6f3df10 docs: FAM-BUG-082 — human_review_required conflates reviewer incapacity with a human decision
+bca551e familiar: integrate reviewed candidate
+$ git fetch -q origin
+origin/main: a60ebd7
+behind origin/main by: 0
+ahead of origin/main by: 0
+
+=== installed binaries ===
+-rwxr-xr-x 1 trollboy trollboy 28717200 Sep 22 16:05 /home/trollboy/.local/bin/familiar-ai
+  == target/release/familiar-ai (identical)
+-rwxr-xr-x 1 trollboy trollboy 27464056 Sep 22 16:05 /home/trollboy/.local/bin/familiar-ai-daemon
+  == target/release/familiar-ai-daemon (identical)
+-rwxr-xr-x 1 trollboy trollboy 19382528 Sep 22 13:25 /home/trollboy/.local/bin/familiar-ai-desktop
+  == target/release/familiar-ai-desktop (identical)
+$ ls -l target/release/familiar-ai target/release/familiar-ai-daemon target/release/familiar-ai-desktop
+-rwxrwxr-x 2 trollboy trollboy 28717200 Sep 22 16:05 target/release/familiar-ai
+-rwxrwxr-x 2 trollboy trollboy 27464056 Sep 22 16:05 target/release/familiar-ai-daemon
+-rwxrwxr-x 2 trollboy trollboy 19382528 Sep 22 13:25 target/release/familiar-ai-desktop
+
+=== processes ===
+$ pgrep -fal familiar-ai
+1270273 /home/trollboy/.local/bin/familiar-ai-daemon
+1528021 /bin/bash -c source /home/trollboy/.claude/shell-snapshots/snapshot-bash-1789640245683-pea6uq.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'until ! pgrep -f "cargo test -p familiar-ai-core" >/dev/null 2>&1; do sleep 10; done; echo "=== done ==="; grep -E "^test result: FAILED|^failures:|panicked at" /tmp/claude-1000/-home-trollboy-Projects-familiar-ai/2f0bdef8-7f60-4c04-ba5d-c05f39f55be4/scratchpad/prd100-tgc.log | head -20' < /dev/null && pwd -P >| /tmp/claude-8285-cwd
+4093493 /home/trollboy/.local/bin/familiar-ai-desktop
+$ familiar-ai ops desktop status
+service=familiar-ai-daemon backend=Systemd installed=true definition=/home/trollboy/.config/systemd/user/familiar-ai-daemon.service state=Result=success
+LoadState=loaded
+ActiveState=active
+SubState=running
+service=familiar-ai-desktop backend=Systemd installed=true definition=/home/trollboy/.config/systemd/user/familiar-ai-desktop.service state=Result=success
+LoadState=loaded
+ActiveState=active
+SubState=running
+$ bash -c systemctl --user list-units --type=service --all | grep -i familiar
+  familiar-ai-daemon.service          loaded active   running Familiar daemon
+  familiar-ai-desktop.service         loaded active   running Familiar desktop
+
+=== config ===
+config: /home/trollboy/.config/familiar-ai/config.toml
+$ grep -nE ^\[repositories|^\[driver|^\[delivery|^\[dashboard|profile|risk_vocabulary|prd_metadata_policy|worktree_root|database /home/trollboy/.config/familiar-ai/config.toml
+12:[driver]
+18:[dashboard]
+22:[database]
+180:[repositories."/home/trollboy/Projects/spectra"]
+181:profile = "numbered-slug"
+199:[repositories."/home/trollboy/Projects/spectra".execution_context]
+202:[repositories."/home/trollboy/Projects/spectra".review]
+222:[repositories."/home/trollboy/Projects/spectra".review.scope]
+226:[repositories."/home/trollboy/Projects/spectra".review.scope.file_classes]
+244:argv = ["/usr/bin/docker", "compose", "--profile", "tools", "run", "--rm", "tools", "make", "lint"]
+252:argv = ["/usr/bin/docker", "compose", "--profile", "tools", "run", "--rm", "tools", "make", "test"]
+265:[repositories."/home/trollboy/Projects/spectra".review.implementation_agent]
+271:[repositories."/home/trollboy/Projects/spectra".review.reviewer_agent]
+280:[repositories."/home/trollboy/Projects/familiar-ai"]
+281:profile = "canonical"
+286:risk_vocabulary = ["config-contract", "routing", "scheduling", "persistence", "review-policy", "delivery", "security"]
+291:[repositories."/home/trollboy/Projects/investorBot"]
+292:profile = "numbered-slug"
+295:prd_metadata_policy = "incremental"
+305:risk_vocabulary = [
+312:# --- learning-engine2 repository profile (added 2026-08-29) -----------------
+317:[repositories."/home/trollboy/Projects/BowerHouse/learning-engine2".execution_context]
+320:[repositories."/home/trollboy/Projects/BowerHouse/learning-engine2".review]
+327:[repositories."/home/trollboy/Projects/BowerHouse/learning-engine2".review.scope]
+346:[repositories."/home/trollboy/Projects/BowerHouse/learning-engine2".review.implementation_agent]
+352:[repositories."/home/trollboy/Projects/BowerHouse/learning-engine2".review.reviewer_agent]
+
+=== database ===
+db: /home/trollboy/.local/share/familiar-ai/familiar.db
+> select count(*) as migrations, max(version) as latest from schema_migrations;
+migrations  latest
+----------  ------
+59          72    
+> select repository_key from backlog_prds group by repository_key;
+repository_key                          
+----------------------------------------
+/home/trollboy/Projects/familiar-ai/.git
+/home/trollboy/Projects/investorBot/.git
+/home/trollboy/Projects/spectra/.git    
+> select prd_number, status, missing_since, prd_path from backlog_prds where prd_number in (92,97,103,104,106,108,109) order by prd_number, prd_path;
+prd_number  status       missing_since                        prd_path                                           
+----------  -----------  -----------------------------------  ---------------------------------------------------
+92          completed                                         docs/prd/done/0092-mobile-kyc-capture-sdk.md       
+92          pending                                           docs/prds/PRD-092.md                               
+97          completed                                         docs/prd/done/0097-hsm-integration.md              
+97          in_progress  2026-09-22T17:25:15.083188999+00:00  docs/prds/PRD-097.md                               
+97          completed                                         docs/prds/done/PRD-097.md                          
+103         completed                                         docs/prd/done/0103-update-checkin-mechanism.md     
+103         pending                                           docs/prds/PRD-103.md                               
+104         completed                                         docs/prd/done/0104-admin-ui-tenant-settings.md     
+104         pending                                           docs/prds/PRD-104.md                               
+106         completed                                         docs/prd/done/0106-admin-ui-self-service-profile.md
+106         pending                                           docs/prds/PRD-106.md                               
+108         completed                                         docs/prd/done/0108-tenant-domain-resolution.md     
+108         completed    2026-09-23T17:26:14.510688324+00:00  docs/prds/PRD-108.md                               
+108         completed                                         docs/prds/done/PRD-108.md                          
+109         completed                                         docs/prd/done/0109-security-event-notifications.md 
+109         completed    2026-09-23T17:26:14.510688324+00:00  docs/prds/PRD-109.md                               
+109         completed                                         docs/prds/done/PRD-109.md                          
+> select max(last_seen_at) as last_scan from backlog_prds;
+last_scan                          
+-----------------------------------
+2026-09-24T04:54:32.076769991+00:00
+> select session_id, substr(started_at,1,19) started, termination_reason from driver_sessions order by started_at desc limit 5;
+session_id                                    started              termination_reason   
+--------------------------------------------  -------------------  ---------------------
+drive-00001790092661105835-0003486999-000000  2026-09-22T15:57:41  budget_prds_exhausted
+drive-00001790092320384167-0003443646-000000  2026-09-22T15:52:00  interrupted          
+drive-00001790082829700506-0002649502-000000  2026-09-22T13:13:49  budget_prds_exhausted
+drive-00001790081489487623-0002489786-000000  2026-09-22T12:51:29  storage_failure      
+drive-00001790079983258612-0002341699-000000  2026-09-22T12:26:23  preflight_failed     
+> select a.prd_id, substr(a.started_at,1,19) started, a.outcome, a.retained_reason, a.last_durable_phase from driver_attempts a order by a.started_at desc limit 8;
+prd_id   started              outcome    retained_reason        last_durable_phase
+-------  -------------------  ---------  ---------------------  ------------------
+PRD-97   2026-09-22T16:02:31  retained   human_review_required  retained          
+PRD-108  2026-09-22T13:18:29  completed                         integrated        
+PRD-100  2026-09-19T11:27:41  retained   verification_failed    retained          
+PRD-96   2026-09-19T11:27:41  retained   verification_failed    retained          
+PRD-90   2026-09-19T11:27:41  retained   verification_failed    retained          
+PRD-85   2026-09-19T11:27:41  retained   verification_failed    retained          
+PRD-92   2026-09-05T08:30:52  retained   scope_broadened        retained          
+PRD-91   2026-09-05T08:30:52  retained   verification_failed    retained          
+> select prd_id, phase, substr(updated_at,1,10) updated from execution_checkpoints where phase not in ('completed') order by updated_at desc limit 12;
+prd_id   phase        updated   
+-------  -----------  ----------
+PRD-97   blocked      2026-09-22
+PRD-100  blocked      2026-09-21
+PRD-90   approved     2026-09-21
+PRD-63   blocked      2026-09-07
+PRD-92   blocked      2026-09-05
+PRD-87   implemented  2026-09-05
+PRD-83   reviewed     2026-09-05
+PRD-91   blocked      2026-09-05
+PRD-72   blocked      2026-09-04
+PRD-38   blocked      2026-09-01
+PRD-36   implemented  2026-08-30
+PRD-40   implemented  2026-08-30
+> select prd_id, decision, substr(detail,1,90) detail from driver_selection_decisions order by decision_id desc limit 12;
+prd_id   decision            detail                                                  
+-------  ------------------  --------------------------------------------------------
+PRD-106  excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-105  excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-104  excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-103  excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-101  excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-97   ready_selected                                                              
+PRD-94   excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-93   excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-89   front_matter_hold   front matter status draft; not selectable from this host
+PRD-88   front_matter_hold   front matter status draft; not selectable from this host
+PRD-86   excluded_allowlist  ready but outside the session's approved PRD set        
+PRD-108  ready_selected                                                              
+> select e.prd_path, e.old_status, e.new_status, e.actor, substr(e.changed_at,1,19) at, r.action from backlog_status_events e left join backlog_recovery_events r on r.status_event_id=e.event_id where e.prd_path like '%PRD-092%' or e.prd_path like '%PRD-10[3468]%' order by e.event_id desc limit 12;
+prd_path              old_status   new_status   actor                                                          at                   action 
+--------------------  -----------  -----------  -------------------------------------------------------------  -------------------  -------
+docs/prds/PRD-092.md  in_progress  pending      human:trollboy                                                 2026-09-22T19:57:40  release
+docs/prds/PRD-092.md  pending      in_progress  system:familiar-ai-run:00001788597053154009-0003279353-000001  2026-09-05T08:30:53         
+
+=== stewardship backlog (status + lifecycle as the CLI reports it) ===
+PRD-92 pending awaiting_feedback  docs/prds/PRD-092.md
+PRD-97 in_progress awaiting_feedback  docs/prds/PRD-097.md
+PRD-103 pending ready  docs/prds/PRD-103.md
+PRD-104 pending ready  docs/prds/PRD-104.md
+PRD-106 pending ready  docs/prds/PRD-106.md
+PRD-108 completed completed ledger says completed but the file is still in the active directory docs/prds/PRD-108.md
+PRD-109 completed completed ledger says completed but the file is still in the active directory docs/prds/PRD-109.md
+PRD-97 completed completed  docs/prds/done/PRD-097.md
+PRD-108 completed completed  docs/prds/done/PRD-108.md
+PRD-109 completed completed  docs/prds/done/PRD-109.md
+
+=== PRD files ===
+docs/prds/PRD-092.md  status=ready
+docs/prds/done/PRD-097.md  status=ready
+docs/prds/PRD-103.md  status=ready
+docs/prds/PRD-104.md  status=ready
+docs/prds/PRD-106.md  status=ready
+docs/prds/done/PRD-108.md  status=ready
+docs/prds/done/PRD-109.md  status=ready
+$ familiar-ai backlog metadata-check --advisory
+note: 'familiar-ai backlog' is now 'familiar-ai plan backlog' (this alias will keep working)
+metadata-check mode=advisory
+docs/prds/done/PRD-001.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-002.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-003.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-004.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-005.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-006.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-007.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-008.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-009.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-010.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-011.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-012.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-013.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-014.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-015.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-016.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-017.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-018.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-019.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-020.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-021.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-022.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-023.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-024.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-025.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-026.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-027.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-028.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-029.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-030.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-031.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-032.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-033.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-034.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-035.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-036.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-037.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-038.md: structured-v1
+docs/prds/done/PRD-039.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-040.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-041.md: legacy: add familiar_ai_prd v1 front matter
+docs/prds/done/PRD-042.md: structured-v1
+docs/prds/done/PRD-043.md: structured-v1
+docs/prds/done/PRD-044.md: structured-v1
+docs/prds/done/PRD-045.md: structured-v1
+docs/prds/done/PRD-046.md: structured-v1
+docs/prds/done/PRD-047.md: structured-v1
+docs/prds/done/PRD-048.md: structured-v1
+docs/prds/done/PRD-049.md: structured-v1
+docs/prds/done/PRD-050.md: structured-v1
+docs/prds/done/PRD-051.md: structured-v1
+docs/prds/done/PRD-052.md: structured-v1
+docs/prds/done/PRD-053.md: structured-v1
+docs/prds/done/PRD-054.md: structured-v1
+docs/prds/done/PRD-055.md: structured-v1
+docs/prds/done/PRD-056.md: structured-v1
+docs/prds/done/PRD-057.md: structured-v1
+docs/prds/done/PRD-058.md: structured-v1
+docs/prds/done/PRD-059.md: structured-v1
+docs/prds/done/PRD-060.md: structured-v1
+docs/prds/done/PRD-061.md: structured-v1
+docs/prds/done/PRD-062.md: structured-v1
+docs/prds/done/PRD-063.md: structured-v1
+docs/prds/done/PRD-064.md: structured-v1
+docs/prds/done/PRD-065.md: structured-v1
+docs/prds/done/PRD-066.md: structured-v1
+docs/prds/done/PRD-067.md: structured-v1
+docs/prds/done/PRD-068.md: structured-v1
+docs/prds/done/PRD-069.md: structured-v1
+docs/prds/done/PRD-070.md: structured-v1
+docs/prds/done/PRD-071.md: structured-v1
+docs/prds/done/PRD-072.md: structured-v1
+docs/prds/done/PRD-073.md: structured-v1
+docs/prds/done/PRD-074.md: structured-v1
+docs/prds/done/PRD-075.md: structured-v1
+docs/prds/done/PRD-076.md: structured-v1
+docs/prds/done/PRD-077.md: structured-v1
+docs/prds/done/PRD-078.md: structured-v1
+docs/prds/done/PRD-079.md: structured-v1
+docs/prds/done/PRD-080.md: structured-v1
+docs/prds/done/PRD-081.md: structured-v1
+docs/prds/done/PRD-082.md: structured-v1
+docs/prds/done/PRD-083.md: structured-v1
+docs/prds/done/PRD-084.md: structured-v1
+docs/prds/done/PRD-085.md: structured-v1
+docs/prds/PRD-086.md: structured-v1
+docs/prds/done/PRD-087.md: structured-v1
+docs/prds/PRD-088.md: structured-v1
+docs/prds/PRD-089.md: structured-v1
+docs/prds/done/PRD-090.md: structured-v1
+docs/prds/done/PRD-091.md: structured-v1
+docs/prds/PRD-092.md: structured-v1
+docs/prds/PRD-093.md: structured-v1
+docs/prds/PRD-094.md: structured-v1
+docs/prds/done/PRD-095.md: structured-v1
+docs/prds/done/PRD-096.md: structured-v1
+docs/prds/done/PRD-097.md: structured-v1
+docs/prds/PRD-098.md: structured-v1
+docs/prds/done/PRD-099.md: structured-v1
+docs/prds/PRD-100.md: structured-v1
+docs/prds/PRD-101.md: structured-v1
+docs/prds/done/PRD-102.md: structured-v1
+docs/prds/PRD-103.md: structured-v1
+docs/prds/PRD-104.md: structured-v1
+docs/prds/PRD-105.md: structured-v1
+docs/prds/PRD-106.md: structured-v1
+docs/prds/PRD-107.md: structured-v1
+docs/prds/done/PRD-108.md: structured-v1
+docs/prds/done/PRD-109.md: structured-v1
+metadata-check mode=advisory structured_v1=69 legacy=40
+(only the summary line matters above; legacy warnings are expected)
+
+=== scheduler width for 92,103,104,106 (refuses while a daemon holds the claim; the refusal itself is informative) ===
+$ familiar-ai ops operator width --actor human:diagnostics --reason host diagnostics PRD-92 PRD-103 PRD-104 PRD-106
+error: refusing to compute achievable width: Familiar control-plane owner pid 1270273 is live. Wait for it to finish, or stop it first.
+[exit 1]
+
+=== recent daemon log ===
+log: /home/trollboy/.local/state/familiar-ai/log/familiar.log.2026-09-24
+$ bash -c grep -nE 'conflicts unavailable|reconcil|WARN|ERROR|error' '/home/trollboy/.local/state/familiar-ai/log/familiar.log.2026-09-24' | tail -40
+$ tail -n 30 /home/trollboy/.local/state/familiar-ai/log/familiar.log.2026-09-24
+2026-09-24T04:43:00.081706Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:43:00.081655784 UTC uptime_secs=117420 active_projects=0
+2026-09-24T04:44:00.081817Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:44:00.081769436 UTC uptime_secs=117480 active_projects=0
+2026-09-24T04:45:00.081521Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:45:00.081478612 UTC uptime_secs=117540 active_projects=0
+2026-09-24T04:46:00.081975Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:46:00.081930257 UTC uptime_secs=117600 active_projects=0
+2026-09-24T04:47:00.082095Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:47:00.082053230 UTC uptime_secs=117660 active_projects=0
+2026-09-24T04:48:00.082333Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:48:00.082284895 UTC uptime_secs=117720 active_projects=0
+2026-09-24T04:49:00.082171Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:49:00.082108590 UTC uptime_secs=117780 active_projects=0
+2026-09-24T04:50:00.081576Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:50:00.081531705 UTC uptime_secs=117840 active_projects=0
+2026-09-24T04:51:00.082258Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:51:00.082209491 UTC uptime_secs=117900 active_projects=0
+2026-09-24T04:52:00.081839Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:52:00.081796547 UTC uptime_secs=117960 active_projects=0
+2026-09-24T04:53:00.081555Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:53:00.081504872 UTC uptime_secs=118020 active_projects=0
+2026-09-24T04:54:00.082048Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:54:00.082004001 UTC uptime_secs=118080 active_projects=0
+2026-09-24T04:54:29.652240Z  INFO familiar_ai_daemon::shutdown: received SIGTERM
+2026-09-24T04:54:29.652288Z  INFO familiar_ai_daemon: os shutdown signal received
+2026-09-24T04:54:29.653284Z  INFO familiar_ai_daemon::summary_worker: summary worker shutting down
+2026-09-24T04:54:29.655930Z  INFO familiar_ai_daemon::dashboard: dashboard stopped
+2026-09-24T04:54:29.660019Z  INFO familiar_ai_daemon: familiar-ai-daemon stopped
+2026-09-24T04:54:31.866837Z  INFO familiar_ai_daemon: familiar 0.1.0 (f13f141) built 2026-09-22 [rustc 1.93.1]
+2026-09-24T04:54:31.866860Z  INFO familiar_ai_daemon: daemon starting config_dir=/home/trollboy/.config/familiar-ai data_dir=/home/trollboy/.local/share/familiar-ai state_dir=/home/trollboy/.local/state/familiar-ai
+2026-09-24T04:54:31.866868Z  INFO familiar_ai_daemon: opening database db_path=/home/trollboy/.local/share/familiar-ai/familiar.db
+2026-09-24T04:54:31.895568Z  INFO familiar_ai_daemon: database schema up to date
+2026-09-24T04:54:32.083890Z  INFO familiar_ai_daemon: PID file written pid_file=/home/trollboy/.local/state/familiar-ai/familiar-ai.pid
+2026-09-24T04:54:32.083941Z  INFO familiar_ai_daemon: loaded existing projects active_projects=0
+2026-09-24T04:54:32.166191Z  INFO familiar_ai_daemon: LLM backend loaded
+2026-09-24T04:54:32.167191Z  INFO familiar_ai_daemon: file watcher disabled or no paths configured
+2026-09-24T04:54:32.167431Z  INFO familiar_ai_daemon::batch_review: batch review disabled; no tier_policy.batch_worker configured
+2026-09-24T04:54:32.167498Z  INFO familiar_ai_daemon::model_residency: model residency disabled; no local server will be held resident
+2026-09-24T04:54:32.168034Z  INFO familiar_ai_daemon::dashboard: dashboard started addr=127.0.0.1:9400
+2026-09-24T04:55:32.168543Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:55:32.168415972 UTC uptime_secs=60 active_projects=0
+2026-09-24T04:56:32.168315Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:56:32.168265279 UTC uptime_secs=120 active_projects=0
+scripts/diagnose-host.sh: line 124: /dev/tty: No such device or address
