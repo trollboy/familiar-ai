@@ -689,6 +689,9 @@ fn config_form_widget(
                 view::FieldOrigin::Overridden => {
                     format!("<b>{}</b>  <small>overridden</small>", esc(&field.name))
                 }
+                view::FieldOrigin::Default => {
+                    format!("{}  <small>default</small>", esc(&field.name))
+                }
                 view::FieldOrigin::Inherited => {
                     format!("{}  <small>inherited</small>", esc(&field.name))
                 }
@@ -763,8 +766,13 @@ fn project_settings_tab(
         Ok(v) => v,
         Err(e) => return error_page("Settings", &e),
     };
-    let sections =
-        view::build_project_config_form(document.get("document").unwrap_or(&Value::Null), repo);
+    let sections = view::build_project_config_form(
+        document.get("document").unwrap_or(&Value::Null),
+        repo,
+        document
+            .get("repository_defaults")
+            .and_then(|d| d.get(repo)),
+    );
     let config_path = PathBuf::from(
         document
             .get("path")

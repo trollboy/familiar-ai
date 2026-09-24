@@ -941,9 +941,34 @@ impl DaemonDataSource {
             // override. Anything else is a typo, not an override.
             let global_path = project_override_target(&edit.path)
                 .ok_or_else(|| format!("no such setting: {name}"))?;
-            let hint = item_at(document.as_item_mut(), global_path)
-                .ok_or_else(|| format!("no such setting: {name}"))?;
-            let replacement = typed_value(hint, &edit.value).map_err(|e| format!("{name}: {e}"))?;
+            // A repository-only setting has no global twin to type it from;
+            // its grammar is fixed: a list for the vocabulary, text otherwise.
+            let replacement = if let [key] = global_path {
+                if familiar_ai_core::backlog::REPOSITORY_ONLY_KEYS.contains(&key.as_str()) {
+                    if key == "risk_vocabulary" {
+                        let mut array = toml_edit::Array::new();
+                        for part in edit
+                            .value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|p| !p.is_empty())
+                        {
+                            array.push(part);
+                        }
+                        toml_edit::value(array)
+                    } else {
+                        toml_edit::value(edit.value.trim())
+                    }
+                } else {
+                    let hint = item_at(document.as_item_mut(), global_path)
+                        .ok_or_else(|| format!("no such setting: {name}"))?;
+                    typed_value(hint, &edit.value).map_err(|e| format!("{name}: {e}"))?
+                }
+            } else {
+                let hint = item_at(document.as_item_mut(), global_path)
+                    .ok_or_else(|| format!("no such setting: {name}"))?;
+                typed_value(hint, &edit.value).map_err(|e| format!("{name}: {e}"))?
+            };
             let slot = ensure_item(document.as_item_mut(), &edit.path)
                 .ok_or_else(|| format!("cannot create setting: {name}"))?;
             *slot = replacement;
@@ -1135,9 +1160,34 @@ impl DataSource for DaemonDataSource {
                 let path = self.config_path();
                 let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
                 let parsed: toml::Value = toml::from_str(&text).map_err(|e| e.to_string())?;
+                // The effective PRD location per repository: what the loader
+                // resolved from the profile, so the project page can show and
+                // set it even when the file leaves it to defaults.
+                let repository_defaults: serde_json::Map<String, Value> =
+                    familiar_ai_core::Config::load(Some(&path))
+                        .map(|config| {
+                            config
+                                .repositories
+                                .iter()
+                                .map(|(repo, entry)| {
+                                    (
+                                        repo.clone(),
+                                        json!({
+                                            "profile": entry.profile,
+                                            "active_dir": entry.active_dir,
+                                            "archived_dir": entry.archived_dir,
+                                            "prd_metadata_policy": entry.prd_metadata_policy,
+                                            "risk_vocabulary": entry.risk_vocabulary,
+                                        }),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                 Ok(json!({
                     "path": path.to_string_lossy(),
                     "document": serde_json::to_value(parsed).map_err(|e| e.to_string())?,
+                    "repository_defaults": repository_defaults,
                 }))
             }
             Query::ProjectState { repo } => {

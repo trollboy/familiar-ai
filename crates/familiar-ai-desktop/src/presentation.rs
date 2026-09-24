@@ -50,7 +50,11 @@ pub fn present(kind: String, input: Value) -> Result<Value, String> {
         "config" => {
             let document = required(&input, "document")?;
             let sections = match input.get("repo").and_then(Value::as_str) {
-                Some(repo) if !repo.is_empty() => view::build_project_config_form(document, repo),
+                Some(repo) if !repo.is_empty() => view::build_project_config_form(
+                    document,
+                    repo,
+                    input.get("repository_defaults").and_then(|d| d.get(repo)),
+                ),
                 _ => view::build_config_form(document),
             };
             let catalogue = required(&input, "choices")?;

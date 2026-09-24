@@ -1401,7 +1401,15 @@ pub enum FieldOrigin {
     Overridden,
     /// Not set for this repository; the global value applies.
     Inherited,
+    /// Not set for this repository and nothing global to inherit; the value
+    /// shown is the profile's default, and saving it creates the override.
+    Default,
 }
+
+/// Settings that exist only per repository: a PRD location and its grammar.
+/// They have no global counterpart, so a project page that showed only what
+/// the file already set hid them from every repository on profile defaults.
+pub use familiar_ai_core::backlog::REPOSITORY_ONLY_KEYS;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ConfigField {
@@ -1560,7 +1568,11 @@ pub fn build_config_form(document: &Value) -> Vec<ConfigSection> {
 /// the global tables also set (`review`, `execution_context`), and it can set
 /// things that only exist per repository (`active_dir`, `profile`), which have
 /// no global counterpart to inherit from.
-pub fn build_project_config_form(document: &Value, repo: &str) -> Vec<ConfigSection> {
+pub fn build_project_config_form(
+    document: &Value,
+    repo: &str,
+    defaults: Option<&Value>,
+) -> Vec<ConfigSection> {
     let global: Vec<ConfigField> = flatten_fields(document, &[])
         .into_iter()
         .filter(|f| f.path.first().map(String::as_str) != Some("repositories"))
@@ -1593,6 +1605,29 @@ pub fn build_project_config_form(document: &Value, repo: &str) -> Vec<ConfigSect
         field.path = path;
         fields.push(field);
     }
+    // The repository-only settings, always, with the effective default when
+    // the file does not set them.
+    for key in REPOSITORY_ONLY_KEYS {
+        if overridden.iter().any(|o| o.path == [key.to_string()]) {
+            continue;
+        }
+        let value = defaults
+            .and_then(|d| d.get(key))
+            .cloned()
+            .unwrap_or_else(|| {
+                if key == "risk_vocabulary" {
+                    Value::Array(Vec::new())
+                } else {
+                    Value::String(String::new())
+                }
+            });
+        let mut path = prefix.clone();
+        path.push(key.to_string());
+        if let Some(mut field) = scalar_field(path, key, &value) {
+            field.origin = FieldOrigin::Default;
+            fields.push(field);
+        }
+    }
     let mut sections = into_sections(fields, prefix.len());
     apply_adapter_rules(&mut sections);
     sections
@@ -1622,6 +1657,50 @@ pub fn build_repository_list(repositories: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A repository on profile defaults still gets its PRD-location fields
+    /// on the project page, marked Default and carrying the effective value.
+    #[test]
+    fn project_form_always_offers_the_repository_only_settings() {
+        let document = json!({
+            "review": {"max_review_attempts": 3},
+            "repositories": {
+                "/r/one": {"archived_dir": "docs/prds/finished"},
+            }
+        });
+        let defaults = json!({
+            "profile": "canonical",
+            "active_dir": "docs/prds",
+            "archived_dir": "docs/prds/finished",
+            "prd_metadata_policy": "incremental",
+            "risk_vocabulary": ["persistence", "routing"],
+        });
+        let sections = build_project_config_form(&document, "/r/one", Some(&defaults));
+        let field = |name: &str| {
+            sections
+                .iter()
+                .flat_map(|s| s.fields.iter())
+                .find(|f| f.name == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} missing"))
+        };
+        assert_eq!(field("archived_dir").origin, FieldOrigin::Overridden);
+        assert_eq!(field("active_dir").origin, FieldOrigin::Default);
+        assert_eq!(field("active_dir").value, "docs/prds");
+        assert_eq!(field("profile").value, "canonical");
+        assert_eq!(field("risk_vocabulary").origin, FieldOrigin::Default);
+        assert_eq!(
+            field("risk_vocabulary").path,
+            ["repositories", "/r/one", "risk_vocabulary"]
+        );
+        assert_eq!(field("max_review_attempts").origin, FieldOrigin::Inherited);
+        // Without defaults the fields still exist, empty, so they can be set.
+        let bare = build_project_config_form(&document, "/r/two", None);
+        assert!(bare
+            .iter()
+            .flat_map(|s| s.fields.iter())
+            .any(|f| f.name == "active_dir" && f.origin == FieldOrigin::Default));
+    }
 
     #[test]
     fn money_and_duration_read_in_human_units() {
@@ -2592,7 +2671,7 @@ mod tests {
                 }
             },
         });
-        let sections = build_project_config_form(&doc, "/p/one");
+        let sections = build_project_config_form(&doc, "/p/one", None);
         let agent = sections
             .iter()
             .find(|s| s.title == "review.implementation_agent")
@@ -2619,7 +2698,7 @@ mod tests {
 
     #[test]
     fn a_project_form_marks_what_it_overrides_and_what_it_inherits() {
-        let sections = build_project_config_form(&config_fixture(), "/p/one");
+        let sections = build_project_config_form(&config_fixture(), "/p/one", None);
         let field = |section: &str, name: &str| {
             sections
                 .iter()
@@ -2659,12 +2738,15 @@ mod tests {
 
     #[test]
     fn a_project_with_no_overrides_inherits_everything() {
-        let sections = build_project_config_form(&config_fixture(), "/p/unknown");
+        let sections = build_project_config_form(&config_fixture(), "/p/unknown", None);
         assert!(!sections.is_empty());
-        assert!(sections
-            .iter()
-            .flat_map(|s| &s.fields)
-            .all(|f| f.origin == FieldOrigin::Inherited));
+        // Everything global is inherited; the repository-only PRD-location
+        // settings are offered as defaults so they can be set from here.
+        assert!(sections.iter().flat_map(|s| &s.fields).all(|f| {
+            f.origin == FieldOrigin::Inherited
+                || (f.origin == FieldOrigin::Default
+                    && REPOSITORY_ONLY_KEYS.contains(&f.name.as_str()))
+        }));
         // One project's overrides never leak into another's page.
         assert!(sections
             .iter()

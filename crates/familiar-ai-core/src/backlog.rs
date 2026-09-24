@@ -116,6 +116,17 @@ impl BacklogProfile {
     }
 }
 
+/// Settings that exist only per repository: a PRD location and its grammar.
+/// They have no global counterpart; the settings surfaces offer them on every
+/// project page and create them on save.
+pub const REPOSITORY_ONLY_KEYS: [&str; 5] = [
+    "profile",
+    "active_dir",
+    "archived_dir",
+    "prd_metadata_policy",
+    "risk_vocabulary",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacklogLayout {
     pub profile: BacklogProfile,

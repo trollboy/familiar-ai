@@ -761,6 +761,54 @@ fn every_adapter_choice_carries_its_executable_and_a_model_list() {
     );
 }
 
+/// The PRD location is per repository. A project on profile defaults can set
+/// it from its page: the save creates the key, the loader validates it, and
+/// the document query reports the effective value beforehand.
+#[test]
+fn a_project_can_set_its_prd_location_without_a_global_twin() {
+    let h = harness();
+    let document = h.source.query(Query::ConfigDocument).unwrap();
+    let defaults = &document["repository_defaults"][&h.repo];
+    assert_eq!(defaults["active_dir"], "docs/prds", "{document}");
+    assert_eq!(defaults["profile"], "canonical");
+
+    std::fs::create_dir_all(std::path::Path::new(&h.repo).join("docs/prds/finished")).unwrap();
+    let saved = h
+        .source
+        .act(Action::SaveConfig {
+            edits: vec![
+                ConfigEdit {
+                    path: vec!["repositories".into(), h.repo.clone(), "archived_dir".into()],
+                    value: "docs/prds/finished".into(),
+                },
+                ConfigEdit {
+                    path: vec![
+                        "repositories".into(),
+                        h.repo.clone(),
+                        "risk_vocabulary".into(),
+                    ],
+                    value: "persistence, routing".into(),
+                },
+            ],
+        })
+        .expect("repository-only keys are creatable");
+    assert_eq!(saved["saved"], 2);
+    let written: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&h.config).unwrap()).unwrap();
+    let entry = &written["repositories"][h.repo.as_str()];
+    assert_eq!(entry["archived_dir"].as_str(), Some("docs/prds/finished"));
+    assert_eq!(
+        entry["risk_vocabulary"].as_array().unwrap().len(),
+        2,
+        "{entry}"
+    );
+    let after = h.source.query(Query::ConfigDocument).unwrap();
+    assert_eq!(
+        after["repository_defaults"][&h.repo]["archived_dir"],
+        "docs/prds/finished"
+    );
+}
+
 /// FAM-BUG-094: a save the daemon would refuse at startup is refused here,
 /// with the daemon's own message, and the file is untouched.
 #[test]
