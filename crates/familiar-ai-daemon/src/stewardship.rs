@@ -5,6 +5,7 @@
 //! repository identity the caller resolved, so cross-repository reads
 //! cannot leak state.
 
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 use familiar_ai_core::RepositoryIdentity;
@@ -340,6 +341,33 @@ pub fn list_rounds(
     }))
 }
 
+/// FAM-BUG-089: a checkpoint whose PRD the owner released or force-completed
+/// after it was last written is history. The lifecycle, the gates list, the
+/// blocked-reason card and the progress strip all apply this one rule.
+pub fn checkpoint_superseded_by_recovery(
+    db: &Database,
+    repository_key: &str,
+    checkpoint_id: &str,
+    prd_path: &str,
+) -> Result<bool, StewardshipError> {
+    let stopped_at: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT updated_at FROM execution_checkpoints WHERE checkpoint_id=?1",
+            rusqlite::params![checkpoint_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| StewardshipError::Storage(e.to_string()))?;
+    match stopped_at {
+        Some(stopped_at) => {
+            familiar_ai_storage::recovered_after(db.conn(), repository_key, prd_path, &stopped_at)
+                .map_err(storage)
+        }
+        None => Ok(false),
+    }
+}
+
 pub fn list_checkpoints(
     db: &Database,
     repository: &RepositoryIdentity,
@@ -352,7 +380,19 @@ pub fn list_checkpoints(
     let next_cursor = (items.len() == limit)
         .then(|| items.last().map(|item| item.prd_id.clone()))
         .flatten();
-    let items: Vec<Value> = items
+    let mut live = Vec::with_capacity(items.len());
+    for checkpoint in items {
+        if checkpoint_superseded_by_recovery(
+            db,
+            &repository.key,
+            &checkpoint.checkpoint_id,
+            &checkpoint.prd_path,
+        )? {
+            continue;
+        }
+        live.push(checkpoint);
+    }
+    let items: Vec<Value> = live
         .into_iter()
         .map(|checkpoint| {
             json!({

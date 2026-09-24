@@ -693,6 +693,40 @@ fn a_model_the_endpoint_does_not_serve_is_refused_and_discovery_lists_what_is() 
     assert_eq!(offline["configured"], true);
 }
 
+/// The adapter supplies its executable and its models, so the settings form
+/// can offer both as choices instead of free text.
+#[test]
+fn every_adapter_choice_carries_its_executable_and_a_model_list() {
+    let h = harness();
+    let choices = h.source.query(Query::ConfigChoices).unwrap();
+    let adapters = choices["adapters"].as_array().unwrap();
+    assert!(!adapters.is_empty());
+    for adapter in adapters {
+        assert!(adapter.get("executable").is_some(), "{adapter}");
+        assert!(adapter["models"].is_array(), "{adapter}");
+        assert!(adapter["models_source"].is_string(), "{adapter}");
+    }
+    let claude = adapters
+        .iter()
+        .find(|a| a["value"] == "claude-code")
+        .expect("claude-code is a built-in adapter");
+    assert_eq!(claude["executable"], "claude");
+    let models: Vec<&str> = claude["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    assert_eq!(models, ["haiku", "opus", "sonnet"]);
+    let api = adapters
+        .iter()
+        .find(|a| a["value"] == "anthropic-api")
+        .expect("anthropic-api is a built-in adapter");
+    assert_eq!(api["executable"], "");
+    assert_eq!(api["available"], true, "an API runtime needs no executable");
+    assert!(api["models"].as_array().unwrap().len() >= 4);
+}
+
 /// Saving back to disabled has to clear the flag too, or the menu keeps
 /// offering to enable a backend that no longer exists.
 #[test]

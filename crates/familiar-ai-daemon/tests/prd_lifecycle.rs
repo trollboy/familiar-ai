@@ -126,6 +126,37 @@ fn the_backlog_surface_carries_the_derived_lifecycle_beside_the_raw_status() {
         ("completed".to_string(), "completed".to_string()),
         "location is truth for completion"
     );
+    // The stop left a blocked checkpoint behind, the thing the progress
+    // strip draws as "— blocked".
+    familiar_ai_storage::CheckpointRepository::new(db.conn())
+        .put(&familiar_ai_storage::ExecutionCheckpoint {
+            checkpoint_id: "cp-1".into(),
+            repository_key: identity.key.clone(),
+            prd_id: "PRD-1".into(),
+            prd_path: "docs/prds/PRD-001.md".into(),
+            execution_id: Some("exec-1".into()),
+            phase: "blocked".into(),
+            base_revision: "deadbeef".into(),
+            worktree_path: "/tmp/does-not-matter".into(),
+            branch_name: None,
+            diff_hash: "sha256:candidate".into(),
+            changed_files_json: "[]".into(),
+            agent_identity: "claude-code".into(),
+            usage_json: "{}".into(),
+            test_evidence_json: "{}".into(),
+            invalid_reason: None,
+        })
+        .unwrap();
+    let listed = |db: &Database| -> Vec<String> {
+        familiar_ai_daemon::stewardship::list_checkpoints(db, &identity, None, 50).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["checkpoint_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(listed(&db), ["cp-1"], "before the release the stop is live");
+
     // FAM-BUG-089: the owner releases PRD-1's scope stop. The retained
     // attempt is still the latest row, but it is history now, and every
     // surface must say Ready again — the gates list already did, the
@@ -172,6 +203,10 @@ fn the_backlog_surface_carries_the_derived_lifecycle_beside_the_raw_status() {
         lifecycle_of(&backlog, "docs/prds/PRD-002.md"),
         ("pending".to_string(), "failed".to_string()),
         "the release of PRD-1 changes nothing for PRD-2"
+    );
+    assert!(
+        listed(&db).is_empty(),
+        "a released stop's checkpoint is history and leaves the progress strip"
     );
 
     let raw_present = backlog["items"]

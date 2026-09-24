@@ -495,7 +495,11 @@ appears with no entry, or with a status a reader cannot classify.
   latest attempt that a later release/force-complete superseded, and the
   blocked-reason card skips a checkpoint superseded the same way; both use
   one storage helper carrying the rule `pending_human_gates` already
-  applied in SQL since FAM-BUG-083.)
+  applied in SQL since FAM-BUG-083. Later the same day the progress strip
+  still drew "— blocked" under a ready PRD-92 because `list_checkpoints`
+  was a fourth reader; it now goes through
+  `checkpoint_superseded_by_recovery`, the card reuses it, and the
+  lifecycle test asserts the checkpoint leaves the listing on release.)
 - **Found:** 2026-09-24. PRD-92's scope stop from 2026-09-05 was released
   by the owner on 2026-09-22, the "Waiting on you" list agreed, and the
   Gantt card still said `awaiting_feedback` with "scope broadened — 2 files

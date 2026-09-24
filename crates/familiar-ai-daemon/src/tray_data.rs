@@ -203,13 +203,21 @@ impl DaemonDataSource {
             .map(|id| {
                 let executable = default_executable(id.as_str());
                 let found = which_on_path(executable);
+                let (models, models_source) = self.adapter_models(id.as_str(), config.as_ref());
                 json!({
                     "value": id,
-                    "available": found.is_some(),
-                    "detail": match &found {
-                        Some(path) => format!("{executable} at {path}"),
-                        None => format!("{executable} not on PATH"),
+                    "available": executable.is_empty() || found.is_some(),
+                    "detail": match (&found, executable.is_empty()) {
+                        (_, true) => "API runtime; no executable".to_string(),
+                        (Some(path), _) => format!("{executable} at {path}"),
+                        (None, _) => format!("{executable} not on PATH"),
                     },
+                    // The adapter supplies its executable and the models it
+                    // can drive; the settings form offers exactly these.
+                    "executable": executable,
+                    "executable_path": found,
+                    "models": models,
+                    "models_source": models_source,
                 })
             })
             .collect();
@@ -242,6 +250,130 @@ impl DaemonDataSource {
             "providers": providers,
             "models": models,
         })
+    }
+
+    /// The models an adapter can be pointed at, and where that list came
+    /// from. Vendor CLIs take aliases; Codex keeps a model cache on disk;
+    /// local runtimes are asked over `/v1/models`; API runtimes list what the
+    /// configured providers of that kind declare, with the current family as
+    /// a fallback so the dropdown is never empty.
+    fn adapter_models(
+        &self,
+        adapter: &str,
+        config: Option<&familiar_ai_core::Config>,
+    ) -> (Vec<String>, String) {
+        let provider_models = |kind_fragment: &str| -> Vec<String> {
+            config
+                .map(|config| {
+                    config
+                        .providers
+                        .iter()
+                        .filter(|(_, provider)| {
+                            format!("{:?}", provider.kind)
+                                .to_ascii_lowercase()
+                                .contains(kind_fragment)
+                        })
+                        .flat_map(|(_, provider)| provider.models.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut result = match adapter {
+            "claude-code" => (
+                vec![
+                    "opus".to_string(),
+                    "sonnet".to_string(),
+                    "haiku".to_string(),
+                ],
+                "Claude Code model aliases".to_string(),
+            ),
+            "codex" => {
+                let cache = std::env::var_os("CODEX_HOME")
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(|home| std::path::PathBuf::from(home).join(".codex"))
+                    })
+                    .map(|home| home.join("models_cache.json"));
+                let cached: Vec<String> = cache
+                    .as_ref()
+                    .and_then(|path| std::fs::read(path).ok())
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .and_then(|value| value.get("models").and_then(Value::as_array).cloned())
+                    .map(|models| {
+                        models
+                            .iter()
+                            .filter_map(|model| {
+                                ["slug", "id", "name"]
+                                    .iter()
+                                    .find_map(|key| model.get(*key).and_then(Value::as_str))
+                            })
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if cached.is_empty() {
+                    (
+                        vec!["gpt-5-codex".to_string(), "gpt-5".to_string()],
+                        "built-in defaults; ~/.codex/models_cache.json not found".to_string(),
+                    )
+                } else {
+                    (
+                        cached,
+                        cache
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default(),
+                    )
+                }
+            }
+            "ollama" | "unsloth" => {
+                let url = self.builtin_endpoint().map(|(url, _)| url).or_else(|| {
+                    (adapter == "ollama" && which_on_path("ollama").is_some())
+                        .then(|| "http://127.0.0.1:11434".to_string())
+                });
+                match url {
+                    Some(url) => match self
+                        .probe_models(&url, &familiar_ai_core::config::AuthDescriptor::None)
+                    {
+                        Ok(models) => (models, url),
+                        Err(error) => (Vec::new(), format!("{url}: {error}")),
+                    },
+                    None => (
+                        Vec::new(),
+                        "no local endpoint configured or found".to_string(),
+                    ),
+                }
+            }
+            "anthropic-api" => {
+                let mut models = provider_models("anthropic");
+                for default in [
+                    "claude-fable-5-1",
+                    "claude-opus-5",
+                    "claude-sonnet-5",
+                    "claude-haiku-4-5-20251001",
+                ] {
+                    models.push(default.to_string());
+                }
+                (
+                    models,
+                    "configured providers and the current Claude family".to_string(),
+                )
+            }
+            "openai-api" => {
+                let mut models = provider_models("openai");
+                for default in ["gpt-5", "gpt-5-mini"] {
+                    models.push(default.to_string());
+                }
+                (
+                    models,
+                    "configured providers and current defaults".to_string(),
+                )
+            }
+            _ => (provider_models(""), "configured providers".to_string()),
+        };
+        result.0.sort();
+        result.0.dedup();
+        result
     }
 
     /// Which PRDs are waiting on other PRDs.
@@ -424,19 +556,11 @@ impl DaemonDataSource {
             // FAM-BUG-089: a stop the owner released is not a reason the
             // card should still show. Same rule as the gates list and the
             // lifecycle.
-            let stopped_at: String = db
-                .conn()
-                .query_row(
-                    "SELECT updated_at FROM execution_checkpoints WHERE checkpoint_id=?1",
-                    rusqlite::params![checkpoint.checkpoint_id],
-                    |row| row.get(0),
-                )
-                .map_err(|e| e.to_string())?;
-            if familiar_ai_storage::recovered_after(
-                db.conn(),
+            if stewardship::checkpoint_superseded_by_recovery(
+                &db,
                 &identity.key,
+                &checkpoint.checkpoint_id,
                 &checkpoint.prd_path,
-                &stopped_at,
             )
             .map_err(|e| e.to_string())?
             {
