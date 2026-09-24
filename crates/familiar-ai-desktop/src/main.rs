@@ -24,6 +24,9 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             windows::show_dashboard(app);
         }))
+        // Native folder picker for repository-relative directory settings
+        // (active_dir, archived_dir); the page keeps the path inside the repo.
+        .plugin(tauri_plugin_dialog::init())
         .manage::<ClientState>(client)
         .invoke_handler(tauri::generate_handler![
             commands::connection_status,

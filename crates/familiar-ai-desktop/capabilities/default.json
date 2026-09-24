@@ -5,6 +5,7 @@
   "windows": ["dashboard", "settings", "local-llm"],
   "permissions": [
     "core:default",
-    "core:event:default"
+    "core:event:default",
+    "dialog:allow-open"
   ]
 }

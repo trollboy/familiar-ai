@@ -4,3 +4,8 @@
 .gantt-filters{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}.gantt-filters label{display:flex;align-items:center;gap:.35rem;white-space:nowrap}.gantt-filters input[type=checkbox]{width:1rem;height:1rem;accent-color:var(--accent)}
 .gantt-wave>header span{display:grid}.launch-wave{padding:.28rem .5rem;font-size:.76rem}.launch-wave:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff}.launch-wave:disabled{cursor:not-allowed;opacity:.5}
 .status-draft{background:#475467;color:#fff}.status-ready{background:#315bd6;color:#fff}.status-implementing{background:#6941c6;color:#fff}.status-testing{background:#087e8b;color:#fff}.status-reviewed{background:#126e82;color:#fff}.status-approved{background:#217a45;color:#fff}.status-awaiting-feedback{background:#f1c35b;color:#302400}.status-failed,.status-blocked{background:#b42318;color:#fff}.gantt-card.status-border-draft{border-left-color:#667085}.gantt-card.status-border-ready{border-left-color:#315bd6}.gantt-card.status-border-implementing{border-left-color:#6941c6}.gantt-card.status-border-testing{border-left-color:#087e8b}.gantt-card.status-border-reviewed{border-left-color:#126e82}.gantt-card.status-border-approved,.gantt-card.status-border-completed{border-left-color:#16794b}.gantt-card.status-border-awaiting-feedback{border-left-color:#f1c35b}.gantt-card.status-border-failed,.gantt-card.status-border-blocked{border-left-color:#b42318}.lifecycle-divergence{border-left-color:#b42318}
+
+/* Directory settings carry a native folder picker beside the field. */
+.with-browse{display:flex;gap:.4rem;align-items:center}
+.with-browse input{flex:1;min-width:0}
+.browse-dir{white-space:nowrap}

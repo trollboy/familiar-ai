@@ -22,3 +22,4 @@ tokio.workspace = true
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tracing.workspace = true
+tauri-plugin-dialog = "2"
