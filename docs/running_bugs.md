@@ -411,6 +411,26 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-086 — `ops desktop install` right after `uninstall` races launchd teardown and leaves nothing running
+
+- **Status:** Fixed (2026-09-24: `deactivate` polls `launchctl print` until
+  the job is gone after `bootout`; `activate` retries `bootstrap` for up to
+  10s and returns its last error unless the job is genuinely loaded, instead
+  of excusing it because a dying job still printed; a failed `kickstart`
+  says the job is not loaded and how to recover.)
+- **Found:** 2026-09-24, first run of `scripts/reinstall.sh` on the Mac:
+  `launchctl kickstart gui/501/com.trollboy.familiar.daemon failed (exit
+  status: 113): Could not find service`.
+- **Detail:** `bootout` returns before launchd finishes tearing the job
+  down. The immediate `bootstrap` fails; `activate` swallowed that error
+  because `launchctl print` still showed the dying job; `kickstart` then ran
+  against a domain the job had just left. Result: daemon plist written but
+  not loaded, desktop plist never written, both processes stopped. Recovery
+  was simply re-running `familiar-ai ops desktop install` once launchd had
+  settled.
+- **Expected fix:** as landed; the systemd path was never affected because
+  `disable --now` is synchronous.
+
 ### FAM-BUG-084 — On macOS, rebuilding the desktop does not change the desktop that runs
 
 - **Status:** Fixed (2026-09-24: `ops desktop status` reads the program back

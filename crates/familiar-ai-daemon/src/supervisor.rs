@@ -478,21 +478,49 @@ pub fn status(spec: &Spec, repository: &Path) -> Status {
     }
 }
 
+/// launchd tears a job down asynchronously after `bootout`, so a `bootstrap`
+/// issued right after it fails with EIO or "already in progress" while
+/// `launchctl print` still shows the dying job. Both ends poll: deactivate
+/// waits until the job is gone, activate retries bootstrap and reports its
+/// last error instead of hiding it behind a stale print.
+const LAUNCHD_SETTLE_ATTEMPTS: u32 = 20;
+const LAUNCHD_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
 fn activate(spec: &Spec) -> Result<(), String> {
     match spec.backend {
         Backend::Launchd => {
             let domain = format!("gui/{}", unsafe { libc::getuid() });
-            let result = run(
-                "launchctl",
-                &["bootstrap", &domain, &spec.definition.display().to_string()],
-            );
-            if result.is_err() && query(spec).is_err() {
-                result?;
+            let definition = spec.definition.display().to_string();
+            let mut last_error = None;
+            for attempt in 0..LAUNCHD_SETTLE_ATTEMPTS {
+                match run("launchctl", &["bootstrap", &domain, &definition]) {
+                    Ok(()) => {
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                        if attempt + 1 < LAUNCHD_SETTLE_ATTEMPTS {
+                            std::thread::sleep(LAUNCHD_SETTLE_DELAY);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = last_error {
+                // Only an already-loaded job whose definition is ours excuses
+                // a failed bootstrap; a job mid-teardown does not.
+                if !launchd_job_present(&spec.label) {
+                    return Err(error);
+                }
             }
             run(
                 "launchctl",
                 &["kickstart", &format!("{domain}/{}", spec.label)],
             )
+            .map_err(|error| match &unloaded_note(spec) {
+                Some(note) => format!("{error}; {note}"),
+                None => error,
+            })
         }
         Backend::Systemd => {
             run("systemctl", &["--user", "daemon-reload"])?;
@@ -514,13 +542,23 @@ fn deactivate(spec: &Spec) -> Result<(), String> {
         return Ok(());
     }
     match spec.backend {
-        Backend::Launchd => run(
-            "launchctl",
-            &[
-                "bootout",
-                &format!("gui/{}/{}", unsafe { libc::getuid() }, spec.label),
-            ],
-        ),
+        Backend::Launchd => {
+            let target = format!("gui/{}/{}", unsafe { libc::getuid() }, spec.label);
+            if !launchd_job_present(&spec.label) {
+                return Ok(());
+            }
+            run("launchctl", &["bootout", &target])?;
+            for _ in 0..LAUNCHD_SETTLE_ATTEMPTS {
+                if !launchd_job_present(&spec.label) {
+                    return Ok(());
+                }
+                std::thread::sleep(LAUNCHD_SETTLE_DELAY);
+            }
+            Err(format!(
+                "launchctl bootout {target} returned but the job is still present after {}s",
+                LAUNCHD_SETTLE_ATTEMPTS as u64 * LAUNCHD_SETTLE_DELAY.as_millis() as u64 / 1000
+            ))
+        }
         Backend::Systemd => {
             run(
                 "systemctl",
@@ -534,6 +572,26 @@ fn deactivate(spec: &Spec) -> Result<(), String> {
             run("systemctl", &["--user", "daemon-reload"])
         }
     }
+}
+
+fn launchd_job_present(label: &str) -> bool {
+    run_output(
+        "launchctl",
+        &[
+            "print",
+            &format!("gui/{}/{label}", unsafe { libc::getuid() }),
+        ],
+    )
+    .is_ok()
+}
+
+fn unloaded_note(spec: &Spec) -> Option<String> {
+    (!launchd_job_present(&spec.label)).then(|| {
+        format!(
+            "the job is not loaded; re-run `ops desktop install` (definition at {})",
+            spec.definition.display()
+        )
+    })
 }
 
 fn query(spec: &Spec) -> Result<String, String> {
