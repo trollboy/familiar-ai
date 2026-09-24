@@ -1,34 +1,28 @@
 familiar-ai host diagnostics
 host: MacBook-Pro-5
-date: 2026-09-24T13:44:54Z
+date: 2026-09-24T13:48:04Z
 os:   Darwin MacBook-Pro-5.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:53:15 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T6000 arm64
 
 === git ===
 $ git rev-parse --short HEAD
-f7e485a
+b510952
 $ git status -sb
 ## main...origin/main
  M docs/diagnostics/host-MacBook-Pro-5.log.txt
- M docs/diagnostics/mac-build-speed-20260901T113450Z.txt
- M docs/diagnostics/suite-hang-20260901T102714Z.txt
-?? crates/familiar-ai-desktop/gen/schemas/macOS-schema.json
 $ git status --short
  M docs/diagnostics/host-MacBook-Pro-5.log.txt
- M docs/diagnostics/mac-build-speed-20260901T113450Z.txt
- M docs/diagnostics/suite-hang-20260901T102714Z.txt
-?? crates/familiar-ai-desktop/gen/schemas/macOS-schema.json
 $ git log --oneline -8
+b510952 chore: preserve macOS build diagnostics and schema
+325b062 diag: host MacBook-Pro-5 2026-09-24T13:44Z
+954278e gate: a failure with no named test records the step's exit status and output tail (FAM-BUG-096)
 f7e485a tests: the desktop data-source suite runs in the gate; FAM-BUG-095 and 096 logged (FAM-BUG-097)
 7ec0711 settings: a project page offers only the tables a repository can override; PRD-110 and PRD-111 queued
 e6c9b27 desktop: directory settings get a native Browse button scoped to the repository
 1035d3d settings: every project page offers its PRD location with the profile's defaults
 6db1905 fix: settings saves run the daemon's own validation, and the adapter list is the config's enum (FAM-BUG-094)
-5f736cc desktop: adapters supply their executable and model list; released stops leave the progress strip
-ab05091 desktop: the Runs tab shows live runs and hides finished ones behind a toggle
-0adc92e fix: a dispatched run never takes ownership from the daemon that spawned it (FAM-BUG-093)
 $ git fetch -q origin
-origin/main: 954278e
-behind origin/main by: 1
+origin/main: b510952
+behind origin/main by: 0
 ahead of origin/main by: 0
 
 === installed binaries ===
@@ -172,7 +166,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 	runs = 1
 	pid = 39403
 	immediate reason = non-ipc demand
-	forks = 3328
+	forks = 3815
 	execs = 1
 	initialized = 1
 	trampolined = 1
@@ -513,9 +507,6 @@ $ bash -c grep -nE 'conflicts unavailable|reconcil|WARN|ERROR|error' '/Users/tro
 448:2026-09-24T06:45:50.739487Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
 455:2026-09-24T06:51:31.508774Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
 $ tail -n 30 /Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24
-2026-09-24T13:28:32.818030Z  INFO familiar_ai_daemon::summary_worker: summary worker shutting down
-2026-09-24T13:28:32.818138Z  INFO familiar_ai_daemon::dashboard: dashboard stopped
-2026-09-24T13:28:32.820323Z  INFO familiar_ai_daemon: familiar-ai-daemon stopped
 2026-09-24T13:28:34.339712Z  INFO familiar_ai_daemon: familiar 0.1.0 (f7e485a) built 2026-09-24 [rustc 1.93.1]
 2026-09-24T13:28:34.339757Z  INFO familiar_ai_daemon: daemon starting config_dir=/Users/trollboy/Library/Application Support/Familiar-AI data_dir=/Users/trollboy/Library/Application Support/Familiar-AI state_dir=/Users/trollboy/Library/Application Support/Familiar-AI
 2026-09-24T13:28:34.339798Z  INFO familiar_ai_daemon: opening database db_path=/Users/trollboy/Library/Application Support/Familiar-AI/familiar.db
@@ -543,6 +534,9 @@ $ tail -n 30 /Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24
 2026-09-24T13:42:34.760098Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:42:34.758923 UTC uptime_secs=840 active_projects=0
 2026-09-24T13:43:34.760361Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:43:34.759261 UTC uptime_secs=900 active_projects=0
 2026-09-24T13:44:34.759530Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:44:34.758233 UTC uptime_secs=960 active_projects=0
+2026-09-24T13:45:34.759809Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:45:34.758163 UTC uptime_secs=1020 active_projects=0
+2026-09-24T13:46:34.757306Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:46:34.757017 UTC uptime_secs=1080 active_projects=0
+2026-09-24T13:47:34.758508Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 13:47:34.758129 UTC uptime_secs=1140 active_projects=0
 
 === control-plane claim (who owns the daemon socket, and whether a delegate took it) ===
 /tmp/familiar-ai-501:
@@ -584,19 +578,19 @@ $ bash -c grep -nE 'panicked|Cannot start a runtime|poison' '/Users/trollboy/Lib
 13247:thread 'tokio-rt-worker' (44784223) panicked at crates/familiar-ai-daemon/src/tray_data.rs:626:61:
 13248:Cannot start a runtime from within a runtime. This happens because a function (like `block_on`) attempted to block the current thread while the thread is being used to drive asynchronous tasks.
 $ tail -n 15 /Users/trollboy/Library/Logs/Familiar-AI/daemon.stderr.log
-  [2m2026-09-24T13:40:34.758853Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:40:34.758826 UTC, [1;32muptime_secs[0m[32m: 720, [1;32mactive_projects[0m[32m: 0[0m
-    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
-
-  [2m2026-09-24T13:41:34.758838Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:41:34.758812 UTC, [1;32muptime_secs[0m[32m: 780, [1;32mactive_projects[0m[32m: 0[0m
-    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
-
-  [2m2026-09-24T13:42:34.758947Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:42:34.758923 UTC, [1;32muptime_secs[0m[32m: 840, [1;32mactive_projects[0m[32m: 0[0m
-    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
-
   [2m2026-09-24T13:43:34.759283Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:43:34.759261 UTC, [1;32muptime_secs[0m[32m: 900, [1;32mactive_projects[0m[32m: 0[0m
     [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
 
   [2m2026-09-24T13:44:34.758408Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:44:34.758233 UTC, [1;32muptime_secs[0m[32m: 960, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+  [2m2026-09-24T13:45:34.758174Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:45:34.758163 UTC, [1;32muptime_secs[0m[32m: 1020, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+  [2m2026-09-24T13:46:34.757035Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:46:34.757017 UTC, [1;32muptime_secs[0m[32m: 1080, [1;32mactive_projects[0m[32m: 0[0m
+    [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
+
+  [2m2026-09-24T13:47:34.758158Z[0m [32m INFO[0m [1;32mfamiliar_ai_daemon[0m[32m: [32mheartbeat, [1;32mlast_heartbeat[0m[32m: 2026-09-24 13:47:34.758129 UTC, [1;32muptime_secs[0m[32m: 1140, [1;32mactive_projects[0m[32m: 0[0m
     [2;3mat[0m crates/familiar-ai-daemon/src/main.rs:450
 
 /Users/trollboy/Library/Logs/Familiar-AI/desktop.stderr.log:
