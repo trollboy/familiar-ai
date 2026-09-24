@@ -263,18 +263,28 @@ impl DaemonDataSource {
         // definition, EXECUTION-PLAN). The chart used to lay out dependency
         // layers only, so it showed PRDs side by side that the scheduler
         // would serialize; these are the scheduler's own conflict edges.
-        let conflicts: std::collections::HashMap<String, Vec<String>> =
-            crate::drive::achievable_width(std::path::Path::new(repo), &discovered)
-                .map(|width| {
-                    let mut map: std::collections::HashMap<String, Vec<String>> =
-                        std::collections::HashMap::new();
-                    for (a, b, _) in width.conflicts {
-                        map.entry(a.to_string()).or_default().push(b.to_string());
-                        map.entry(b.to_string()).or_default().push(a.to_string());
-                    }
-                    map
-                })
-                .unwrap_or_default();
+        // If the scheduler cannot compute overlaps, say so on the payload
+        // rather than silently drawing dependency layers as if they were
+        // rounds — a chart that degrades without saying it degraded is how
+        // three conflicting PRDs get launched as one wave.
+        let (conflicts, conflicts_error): (
+            std::collections::HashMap<String, Vec<String>>,
+            Option<String>,
+        ) = match crate::drive::achievable_width(std::path::Path::new(repo), &discovered) {
+            Ok(width) => {
+                let mut map: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for (a, b, _) in width.conflicts {
+                    map.entry(a.to_string()).or_default().push(b.to_string());
+                    map.entry(b.to_string()).or_default().push(a.to_string());
+                }
+                (map, None)
+            }
+            Err(error) => {
+                tracing::warn!(repo, %error, "dependency view: scope conflicts unavailable; waves are dependency layers only");
+                (std::collections::HashMap::new(), Some(error))
+            }
+        };
         let statuses: std::collections::HashMap<String, String> = {
             let db = self
                 .db
@@ -353,7 +363,7 @@ impl DaemonDataSource {
                 })
             })
             .collect();
-        Ok(json!({"items": items}))
+        Ok(json!({"items": items, "conflicts_error": conflicts_error}))
     }
 
     /// What actually stopped each blocked PRD.
