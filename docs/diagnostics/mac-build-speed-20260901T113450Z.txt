@@ -316,3 +316,4 @@ trollboy         63353   0.0  0.4 435786720 269184 s002  S+    9:57PM   0:37.64 
 == SUMMARY: phase 1 (build): completed exit=0 wall=230s compiled_units=11 target_before=existed,  41G (incremental expected)
 == SUMMARY: phase 2 (tests): completed exit=101
 == VERDICT: FAM-BUG-030 hang NOT REPRODUCED at this HEAD (fix candidate 5f517db2b validated by this clean unattended run)
+== PUSH FAILED - report saved locally at docs/diagnostics/mac-build-speed-20260901T113450Z.txt; commit and push it manually
