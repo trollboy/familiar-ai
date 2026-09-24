@@ -539,24 +539,64 @@ impl DaemonDataSource {
     /// Deliberately blocking, with a short timeout, because the caller runs it
     /// on a worker thread.
     fn discover_models(&self) -> Value {
-        let Some(config) = familiar_ai_core::Config::load(Some(&self.config_path())).ok() else {
-            return json!({"models": [], "errors": ["config could not be read"]});
-        };
         let mut models: Vec<String> = Vec::new();
         let mut errors: Vec<Value> = Vec::new();
 
-        for (name, provider) in &config.providers {
-            if provider.host.trim().is_empty() {
-                continue;
+        // The full config validates every repository; a moved worktree must
+        // not hide the model list (same rule as `read_inference_config`).
+        match familiar_ai_core::Config::load(Some(&self.config_path())) {
+            Ok(config) => {
+                for (name, provider) in &config.providers {
+                    if provider.host.trim().is_empty() {
+                        continue;
+                    }
+                    match self.probe_models(&provider.host, &provider.auth) {
+                        Ok(found) => models.extend(found),
+                        Err(error) => errors.push(json!({"provider": name, "error": error})),
+                    }
+                }
             }
-            match self.probe_models(&provider.host, &provider.auth) {
+            Err(error) => errors.push(json!({
+                "provider": "config",
+                "error": format!("providers skipped, config could not be loaded: {error}"),
+            })),
+        }
+        // FAM-BUG-091: the panel's own endpoint was never asked, so a host
+        // with no `[providers]` table showed "0 discovered model(s)" beside
+        // a reachable Ollama.
+        if let Some((url, _)) = self.builtin_endpoint() {
+            match self.probe_models(&url, &familiar_ai_core::config::AuthDescriptor::None) {
                 Ok(found) => models.extend(found),
-                Err(error) => errors.push(json!({"provider": name, "error": error})),
+                Err(error) => errors.push(json!({"provider": "builtin", "error": error})),
             }
         }
         models.sort();
         models.dedup();
         json!({"models": models, "errors": errors})
+    }
+
+    /// The saved builtin endpoint and model, when the saved mode uses them.
+    fn builtin_endpoint(&self) -> Option<(String, String)> {
+        let inference = read_inference_config(&self.config_path()).ok()?;
+        let text = &inference.text;
+        if !matches!(mode_id(&text.mode), "local_only" | "hybrid")
+            || text.builtin_url.trim().is_empty()
+        {
+            return None;
+        }
+        Some((text.builtin_url.clone(), text.builtin_model.clone()))
+    }
+
+    /// FAM-BUG-091: "connected" meant the endpoint answered, not that it
+    /// serves the configured model. A saved `qwen2.5:3b` against an Ollama
+    /// serving only 0.5b/1.5b/7b tested Healthy and would have failed on the
+    /// first real request. `Ok(None)` means the model is served or the
+    /// endpoint could not list models; `Ok(Some(served))` names the gap.
+    fn model_not_served(&self, url: &str, model: &str) -> Option<Vec<String>> {
+        let served = self
+            .probe_models(url, &familiar_ai_core::config::AuthDescriptor::None)
+            .ok()?;
+        (!served.is_empty() && !served.iter().any(|m| m == model)).then_some(served)
     }
 
     fn probe_models(
@@ -571,21 +611,40 @@ impl DaemonDataSource {
         } else {
             format!("http://{host}")
         };
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(4))
-            .build()
-            .map_err(|e| e.to_string())?;
-        let mut request = client.get(format!("{base}/v1/models"));
-        if let Ok(Some(credential)) = crate::config_cli::check_auth(auth) {
-            request = request.bearer_auth(credential.expose_for_request());
-        }
-        let response = request.send().map_err(|e| format!("unreachable ({e})"))?;
-        if !response.status().is_success() {
-            return Err(format!("HTTP {}", response.status().as_u16()));
-        }
-        let body: Value = response
-            .json()
-            .map_err(|e| format!("invalid /v1/models response ({e})"))?;
+        // The panel's endpoint is the OpenAI-compatible base and already
+        // ends in `/v1`; provider hosts do not. Either way the list is at
+        // exactly one `/v1/models`.
+        let base = base.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        // The async client through the context-aware helper: this runs on a
+        // tokio worker when the desktop asks, and reqwest's blocking client
+        // panics there while building its private runtime (FAM-BUG-091).
+        let url = format!("{base}/v1/models");
+        let bearer = crate::config_cli::check_auth(auth)
+            .ok()
+            .flatten()
+            .map(|credential| credential.expose_for_request().to_string());
+        let body: Value = self.block_on(async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(4))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mut request = client.get(url);
+            if let Some(token) = bearer {
+                request = request.bearer_auth(token);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|e| format!("unreachable ({e})"))?;
+            if !response.status().is_success() {
+                return Err(format!("HTTP {}", response.status().as_u16()));
+            }
+            response
+                .json::<Value>()
+                .await
+                .map_err(|e| format!("invalid /v1/models response ({e})"))
+        })?;
         Ok(body
             .get("data")
             .and_then(Value::as_array)
@@ -640,6 +699,18 @@ impl DaemonDataSource {
             }
             if model.is_empty() {
                 return Err("a model is required for this mode".into());
+            }
+        }
+
+        // FAM-BUG-091: when the endpoint answers and lists models, a model
+        // it does not list is a typo, not a preference. An unreachable
+        // endpoint still saves — the server may simply be down right now.
+        if matches!(mode, "local_only" | "hybrid") {
+            if let Some(served) = self.model_not_served(url, model) {
+                return Err(format!(
+                    "{url} does not serve `{model}`. It serves: {}. Pick one of those or pull the model first.",
+                    served.join(", ")
+                ));
             }
         }
 
@@ -782,7 +853,42 @@ impl DataSource for DaemonDataSource {
         match query {
             Query::InferenceStatus => Ok(json!(self.block_on(self.router.health()))),
             Query::TestConnection { target } => {
-                Ok(json!(self.block_on(self.router.test_connection(&target))))
+                let result = self.block_on(self.router.test_connection(&target));
+                let mut value = json!(result);
+                let mut message = if result.connected {
+                    format!(
+                        "Connected to {}{}.",
+                        result.backend_name.as_deref().unwrap_or("the backend"),
+                        result
+                            .latency_ms
+                            .map(|ms| format!(" in {ms} ms"))
+                            .unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "{}{}",
+                        result.status_text,
+                        result
+                            .last_error
+                            .as_deref()
+                            .map(|e| format!(": {e}"))
+                            .unwrap_or_default()
+                    )
+                };
+                if result.connected && target == "text_primary" {
+                    if let Some((url, model)) = self.builtin_endpoint() {
+                        if let Some(served) = self.model_not_served(&url, &model) {
+                            value["connected"] = json!(false);
+                            value["status_text"] = json!("model not served");
+                            message = format!(
+                                "{url} answers, but it does not serve `{model}`. It serves: {}.",
+                                served.join(", ")
+                            );
+                        }
+                    }
+                }
+                value["message"] = json!(message);
+                Ok(value)
             }
             Query::PrdText { repo, prd_path } => {
                 // Contained to the repository: a `repo` and a `prd_path` from

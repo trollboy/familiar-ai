@@ -615,6 +615,84 @@ fn saving_inference_from_inside_a_runtime_does_not_panic() {
     assert!(h.status.lock().unwrap().local_llm_configured);
 }
 
+/// A one-shot OpenAI-compatible `/v1/models` server on a free local port.
+/// Answers every request with the same list until the test ends.
+fn serve_models(models: &[&str]) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let body = serde_json::json!({
+        "data": models.iter().map(|m| serde_json::json!({"id": m})).collect::<Vec<_>>()
+    })
+    .to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    url
+}
+
+/// FAM-BUG-091: the endpoint answered, so "Healthy" — for a model it does
+/// not serve. The save refuses and names what is served; discovery asks the
+/// panel's own endpoint; the connection test says the same thing the save
+/// would.
+#[test]
+fn a_model_the_endpoint_does_not_serve_is_refused_and_discovery_lists_what_is() {
+    let h = harness();
+    let url = serve_models(&["qwen2.5:0.5b", "qwen2.5:7b"]);
+
+    let refused = h
+        .source
+        .act(Action::SaveInferenceConfig {
+            mode: "hybrid".into(),
+            builtin_url: url.clone(),
+            builtin_model: "qwen2.5:3b".into(),
+        })
+        .unwrap_err();
+    assert!(refused.contains("does not serve `qwen2.5:3b`"), "{refused}");
+    assert!(refused.contains("qwen2.5:7b"), "{refused}");
+    assert!(!h.status.lock().unwrap().local_llm_configured);
+
+    let saved = h
+        .source
+        .act(Action::SaveInferenceConfig {
+            mode: "hybrid".into(),
+            builtin_url: url.clone(),
+            builtin_model: "qwen2.5:7b".into(),
+        })
+        .expect("a served model saves");
+    assert_eq!(saved["configured"], true);
+
+    let discovered = h.source.query(Query::DiscoverModels).unwrap();
+    let models: Vec<&str> = discovered["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    assert_eq!(models, ["qwen2.5:0.5b", "qwen2.5:7b"], "{discovered}");
+
+    // An endpoint nobody answers still saves: the server may just be down.
+    let offline = h
+        .source
+        .act(Action::SaveInferenceConfig {
+            mode: "local_only".into(),
+            builtin_url: "http://127.0.0.1:1/v1".into(),
+            builtin_model: "anything".into(),
+        })
+        .expect("an unreachable endpoint is not a typo");
+    assert_eq!(offline["configured"], true);
+}
+
 /// Saving back to disabled has to clear the flag too, or the menu keeps
 /// offering to enable a backend that no longer exists.
 #[test]

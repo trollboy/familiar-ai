@@ -411,6 +411,27 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-091 — Configure Local LLM accepts and reports Healthy for a model the endpoint does not serve, and never discovers from its own endpoint
+
+- **Status:** Fixed (2026-09-24: the save refuses a model the endpoint's
+  `/v1/models` does not list and names what it serves, while an
+  unreachable endpoint still saves; the connection test checks the same
+  thing and returns a `message` the panel actually displays; discovery
+  probes the saved builtin endpoint as well as `[providers]`, tolerates a
+  base URL already ending in `/v1`, and no longer bails when the full
+  config fails validation; the probe uses the async client through the
+  context-aware helper, because the blocking client panics on a tokio
+  worker the same way the save did in FAM-BUG-087.)
+- **Found:** 2026-09-24 on Linux right after FAM-BUG-087 landed. Saved
+  `qwen2.5:3b` against an Ollama serving 0.5b/1.5b/7b: "Connection
+  succeeded", Text primary "Healthy", and "0 discovered model(s)" beside
+  a reachable server with three models.
+- **Detail:** health meant "the endpoint answered". Discovery iterated the
+  `[providers]` table only, and returned early with "config could not be
+  read" whenever `Config::load` failed on an unrelated repository. The
+  panel printed `x.message || x.status`, neither of which the result
+  carried, so every test read "Connection succeeded".
+
 ### FAM-BUG-090 — Dependency Gantt places PRDs in id-text order, not the scheduler's numeric order
 
 - **Status:** Fixed (2026-09-24: rounds and wave contents order by PRD
