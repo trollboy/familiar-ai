@@ -1,50 +1,50 @@
 familiar-ai host diagnostics
 host: MacBook-Pro-5
-date: 2026-09-24T05:02:57Z
+date: 2026-09-24T05:22:11Z
 os:   Darwin MacBook-Pro-5.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:53:15 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T6000 arm64
 
 === git ===
 $ git rev-parse --short HEAD
-3e48c29
+a351092
 $ git status -sb
 ## main...origin/main
+ M docs/diagnostics/host-MacBook-Pro-5.log.txt
  M docs/diagnostics/mac-build-speed-20260901T113450Z.txt
  M docs/diagnostics/suite-hang-20260901T102714Z.txt
-?? docs/diagnostics/host-MacBook-Pro-5.log.txt
 $ git status --short
+ M docs/diagnostics/host-MacBook-Pro-5.log.txt
  M docs/diagnostics/mac-build-speed-20260901T113450Z.txt
  M docs/diagnostics/suite-hang-20260901T102714Z.txt
-?? docs/diagnostics/host-MacBook-Pro-5.log.txt
 $ git log --oneline -8
+a351092 docs: the Mac's stale-bundle entry is FAM-BUG-085 with a classifiable status
+d183016 fix: missing-file backlog rows read as history, and the diagnostics script is repository-scoped
+2df0d70 docs: record stale macOS bundle installs
+9f5af32 diag: host MacBook-Pro-5 2026-09-24T05:02Z
 3e48c29 chore: a host diagnostics script that commits its own log
 f5142c1 diag: host trollboy 2026-09-24T04:56Z
 a60ebd7 fix: the dependency view says when scope conflicts could not be computed
 ceab959 fix: retry desktop repository discovery
-4dfa392 fix: the tray_data test module sits after the items it follows
-c77af25 docs: archive PRD-108 and PRD-109, which landed today and were left in the active queue
-e33ef21 fix: keep configured repositories visible
-f13f141 fix: a recovery event retires the gates it answers (FAM-BUG-083)
 $ git fetch -q origin
-origin/main: 3e48c29
+origin/main: a351092
 behind origin/main by: 0
 ahead of origin/main by: 0
 
 === installed binaries ===
--rwxr-xr-x@ 1 trollboy  staff  23676736 Sep 23 20:22 /Users/trollboy/.local/bin/familiar-ai
+-rwxr-xr-x@ 1 trollboy  staff  23691744 Sep 24 01:07 /Users/trollboy/.local/bin/familiar-ai
   == target/release/familiar-ai (identical)
--rwxr-xr-x@ 1 trollboy  staff  22624256 Sep 23 20:22 /Users/trollboy/.local/bin/familiar-ai-daemon
+-rwxr-xr-x@ 1 trollboy  staff  22628144 Sep 24 01:07 /Users/trollboy/.local/bin/familiar-ai-daemon
   == target/release/familiar-ai-daemon (identical)
 -rwxr-xr-x@ 1 trollboy  staff  10815392 Sep 21 04:58 /Users/trollboy/.local/bin/familiar-ai-desktop
   != target/release/familiar-ai-desktop (DIFFERS; installed binary is not this tree's build)
 $ ls -l target/release/familiar-ai target/release/familiar-ai-daemon target/release/familiar-ai-desktop
--rwxr-xr-x@ 1 trollboy  staff  23676736 Sep 23 20:20 target/release/familiar-ai
--rwxr-xr-x@ 1 trollboy  staff  22624256 Sep 23 20:20 target/release/familiar-ai-daemon
--rwxr-xr-x@ 1 trollboy  staff  11192912 Sep 23 20:21 target/release/familiar-ai-desktop
+-rwxr-xr-x@ 1 trollboy  staff  23691744 Sep 24 01:05 target/release/familiar-ai
+-rwxr-xr-x@ 1 trollboy  staff  22628144 Sep 24 01:06 target/release/familiar-ai-daemon
+-rwxr-xr-x@ 1 trollboy  staff  11193136 Sep 24 01:07 target/release/familiar-ai-desktop
 
 === processes ===
 $ pgrep -fal familiar-ai
-98525 /Users/trollboy/.local/bin/familiar-ai-daemon
-98526 /Users/trollboy/Applications/Familiar.app/Contents/MacOS/familiar-ai-desktop
+68844 /Users/trollboy/.local/bin/familiar-ai-daemon
+68845 /Users/trollboy/Applications/Familiar.app/Contents/MacOS/familiar-ai-desktop
 $ familiar-ai ops desktop status
 service=com.trollboy.familiar.daemon backend=Launchd installed=true definition=/Users/trollboy/Library/LaunchAgents/com.trollboy.familiar.daemon.plist state=gui/501/com.trollboy.familiar.daemon = {
 	active count = 1
@@ -77,10 +77,10 @@ service=com.trollboy.familiar.daemon backend=Launchd installed=true definition=/
 	asid = 100022
 	minimum runtime = 10
 	exit timeout = 5
-	runs = 13
-	pid = 98525
+	runs = 14
+	pid = 68844
 	immediate reason = non-ipc demand
-	forks = 381
+	forks = 383
 	execs = 1
 	initialized = 1
 	trampolined = 1
@@ -153,10 +153,10 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 	asid = 100022
 	minimum runtime = 10
 	exit timeout = 5
-	runs = 8
-	pid = 98526
+	runs = 9
+	pid = 68845
 	immediate reason = non-ipc demand
-	forks = 42445
+	forks = 2958
 	execs = 1
 	initialized = 1
 	trampolined = 1
@@ -173,7 +173,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 
 	pid-local endpoints = {
 		"com.apple.coredrag" = {
-			port = 0x12f627
+			port = 0xed1f3
 			active = 1
 			managed = 0
 			reset = 0
@@ -181,7 +181,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 			watching = 0
 		}
 		"com.apple.tsm.portname" = {
-			port = 0x14a233
+			port = 0x11a07b
 			active = 1
 			managed = 0
 			reset = 0
@@ -189,7 +189,7 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 			watching = 0
 		}
 		"com.apple.axserver" = {
-			port = 0xc4883
+			port = 0x1165db
 			active = 1
 			managed = 0
 			reset = 0
@@ -226,8 +226,8 @@ service=com.trollboy.familiar.desktop backend=Launchd installed=true definition=
 	properties = runatload | inferred program
 }
 $ bash -c launchctl list | grep -i familiar
-98525	0	com.trollboy.familiar.daemon
-98526	-15	com.trollboy.familiar.desktop
+68844	0	com.trollboy.familiar.daemon
+68845	-15	com.trollboy.familiar.desktop
 
 === config ===
 config: /Users/trollboy/Library/Application Support/familiar-ai/config.toml
@@ -239,6 +239,7 @@ $ grep -nE ^\[repositories|^\[driver|^\[delivery|^\[dashboard|profile|risk_vocab
 
 === database ===
 db: /Users/trollboy/Library/Application Support/familiar-ai/familiar.db
+repository_key: /Users/trollboy/Projects/familiar/.git
 > select count(*) as migrations, max(version) as latest from schema_migrations;
 migrations  latest
 ----------  ------
@@ -248,31 +249,24 @@ repository_key
 --------------------------------------
 /Users/trollboy/Projects/familiar/.git
 /Users/trollboy/Projects/spectra/.git 
-> select prd_number, status, missing_since, prd_path from backlog_prds where prd_number in (92,97,103,104,106,108,109) order by prd_number, prd_path;
-prd_number  status     missing_since                     prd_path                                           
-----------  ---------  --------------------------------  ---------------------------------------------------
-92          completed                                    docs/prd/done/0092-mobile-kyc-capture-sdk.md       
-92          pending                                      docs/prds/PRD-092.md                               
-97          completed                                    docs/prd/done/0097-hsm-integration.md              
-97          pending    2026-09-22T21:56:38.102554+00:00  docs/prds/PRD-097.md                               
-97          completed                                    docs/prds/done/PRD-097.md                          
-103         completed                                    docs/prd/done/0103-update-checkin-mechanism.md     
-103         pending                                      docs/prds/PRD-103.md                               
-104         completed                                    docs/prd/done/0104-admin-ui-tenant-settings.md     
-104         pending                                      docs/prds/PRD-104.md                               
-106         completed                                    docs/prd/done/0106-admin-ui-self-service-profile.md
-106         pending                                      docs/prds/PRD-106.md                               
-108         completed                                    docs/prd/done/0108-tenant-domain-resolution.md     
-108         pending    2026-09-23T03:25:45.868310+00:00  docs/prds/PRD-108.md                               
-108         completed                                    docs/prds/done/PRD-108.md                          
-109         completed                                    docs/prd/done/0109-security-event-notifications.md 
-109         pending    2026-09-23T03:25:45.868310+00:00  docs/prds/PRD-109.md                               
-109         completed                                    docs/prds/done/PRD-109.md                          
-> select max(last_seen_at) as last_scan from backlog_prds;
+> select prd_number, status, missing_since, prd_path from backlog_prds where repository_key='/Users/trollboy/Projects/familiar/.git' and prd_number in (92,97,103,104,106,108,109) order by prd_number, prd_path;
+prd_number  status     missing_since                     prd_path                 
+----------  ---------  --------------------------------  -------------------------
+92          pending                                      docs/prds/PRD-092.md     
+97          pending    2026-09-22T21:56:38.102554+00:00  docs/prds/PRD-097.md     
+97          completed                                    docs/prds/done/PRD-097.md
+103         pending                                      docs/prds/PRD-103.md     
+104         pending                                      docs/prds/PRD-104.md     
+106         pending                                      docs/prds/PRD-106.md     
+108         pending    2026-09-23T03:25:45.868310+00:00  docs/prds/PRD-108.md     
+108         completed                                    docs/prds/done/PRD-108.md
+109         pending    2026-09-23T03:25:45.868310+00:00  docs/prds/PRD-109.md     
+109         completed                                    docs/prds/done/PRD-109.md
+> select max(last_seen_at) as last_scan from backlog_prds where repository_key='/Users/trollboy/Projects/familiar/.git';
 last_scan                       
 --------------------------------
-2026-09-24T00:43:21.274041+00:00
-> select session_id, substr(started_at,1,19) started, termination_reason from driver_sessions order by started_at desc limit 5;
+2026-09-24T05:11:32.775053+00:00
+> select session_id, substr(started_at,1,19) started, termination_reason from driver_sessions where repository_key='/Users/trollboy/Projects/familiar/.git' order by started_at desc limit 5;
 session_id                                    started              termination_reason   
 --------------------------------------------  -------------------  ---------------------
 drive-00001788242202884633-0000056390-000000  2026-09-01T05:56:42  preflight_failed     
@@ -280,7 +274,7 @@ drive-00001788240241146577-0000052443-000000  2026-09-01T05:24:01  preflight_fai
 drive-00001788238827292604-0000048485-000000  2026-09-01T05:00:27  preflight_failed     
 drive-00001788237420671882-0000046028-000000  2026-09-01T04:37:00  preflight_failed     
 drive-00001788230774752896-0000087311-000000  2026-09-01T02:46:14  budget_prds_exhausted
-> select a.prd_id, substr(a.started_at,1,19) started, a.outcome, a.retained_reason, a.last_durable_phase from driver_attempts a order by a.started_at desc limit 8;
+> select a.prd_id, substr(a.started_at,1,19) started, a.outcome, a.retained_reason, a.last_durable_phase from driver_attempts a join driver_sessions s on s.session_id=a.session_id where s.repository_key='/Users/trollboy/Projects/familiar/.git' order by a.started_at desc limit 8;
 prd_id  started              outcome   retained_reason        last_durable_phase
 ------  -------------------  --------  ---------------------  ------------------
 PRD-79  2026-09-01T02:46:15  retained  human_review_required  retained          
@@ -291,7 +285,7 @@ PRD-56  2026-08-31T21:30:23  retained  verification_failed    retained
 PRD-56  2026-08-31T21:16:36  retained  interrupted            preflight         
 PRD-55  2026-08-31T20:59:44  retained  scope_broadened        retained          
 PRD-55  2026-08-31T20:14:56  retained  interrupted            preflight         
-> select prd_id, phase, substr(updated_at,1,10) updated from execution_checkpoints where phase not in ('completed') order by updated_at desc limit 12;
+> select prd_id, phase, substr(updated_at,1,10) updated from execution_checkpoints where repository_key='/Users/trollboy/Projects/familiar/.git' and phase not in ('completed') order by updated_at desc limit 12;
 prd_id  phase    updated   
 ------  -------  ----------
 PRD-78  blocked  2026-09-01
@@ -306,7 +300,7 @@ PRD-70  blocked  2026-08-31
 PRD-69  blocked  2026-08-31
 PRD-64  blocked  2026-08-31
 PRD-57  blocked  2026-08-31
-> select prd_id, decision, substr(detail,1,90) detail from driver_selection_decisions order by decision_id desc limit 12;
+> select d.prd_id, d.decision, substr(d.detail,1,90) detail from driver_selection_decisions d join driver_sessions s on s.session_id=d.session_id where s.repository_key='/Users/trollboy/Projects/familiar/.git' order by d.decision_id desc limit 12;
 prd_id  decision            detail                                          
 ------  ------------------  ------------------------------------------------
 PRD-80  excluded_allowlist  ready but outside the session's approved PRD set
@@ -321,7 +315,7 @@ PRD-76  excluded_allowlist  ready but outside the session's approved PRD set
 PRD-62  ready_selected                                                      
 PRD-58  excluded_allowlist  ready but outside the session's approved PRD set
 PRD-53  excluded_allowlist  ready but outside the session's approved PRD set
-> select e.prd_path, e.old_status, e.new_status, e.actor, substr(e.changed_at,1,19) at, r.action from backlog_status_events e left join backlog_recovery_events r on r.status_event_id=e.event_id where e.prd_path like '%PRD-092%' or e.prd_path like '%PRD-10[3468]%' order by e.event_id desc limit 12;
+> select e.prd_path, e.old_status, e.new_status, e.actor, substr(e.changed_at,1,19) at, r.action from backlog_status_events e left join backlog_recovery_events r on r.status_event_id=e.event_id where e.repository_key='/Users/trollboy/Projects/familiar/.git' and (e.prd_path like '%PRD-092%' or e.prd_path like '%PRD-10[3468]%') order by e.event_id desc limit 12;
 
 === stewardship backlog (status + lifecycle as the CLI reports it) ===
 PRD-92 pending ready  docs/prds/PRD-092.md
@@ -460,40 +454,41 @@ metadata-check mode=advisory structured_v1=69 legacy=40
 
 === scheduler width for 92,103,104,106 (refuses while a daemon holds the claim; the refusal itself is informative) ===
 $ familiar-ai ops operator width --actor human:diagnostics --reason host diagnostics PRD-92 PRD-103 PRD-104 PRD-106
-error: refusing to compute achievable width: Familiar control-plane owner pid 98525 is live. Wait for it to finish, or stop it first.
+error: refusing to compute achievable width: Familiar control-plane owner pid 68844 is live. Wait for it to finish, or stop it first.
 [exit 1]
 
 === recent daemon log ===
 log: /Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24
 $ bash -c grep -nE 'conflicts unavailable|reconcil|WARN|ERROR|error' '/Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24' | tail -40
+338:2026-09-24T05:11:34.130179Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
 $ tail -n 30 /Users/trollboy/Library/Logs/familiar-ai/familiar.log.2026-09-24
-2026-09-24T04:33:31.581960Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:33:31.474623 UTC uptime_secs=15060 active_projects=0
-2026-09-24T04:34:31.539218Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:34:31.475342 UTC uptime_secs=15120 active_projects=0
-2026-09-24T04:35:31.582300Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:35:31.475025 UTC uptime_secs=15180 active_projects=0
-2026-09-24T04:36:31.578234Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:36:31.473936 UTC uptime_secs=15240 active_projects=0
-2026-09-24T04:37:31.584541Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:37:31.474305 UTC uptime_secs=15300 active_projects=0
-2026-09-24T04:38:31.568348Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:38:31.475907 UTC uptime_secs=15360 active_projects=0
-2026-09-24T04:39:31.520720Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:39:31.474142 UTC uptime_secs=15420 active_projects=0
-2026-09-24T04:40:31.583004Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:40:31.474317 UTC uptime_secs=15480 active_projects=0
-2026-09-24T04:41:31.613995Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:41:31.474244 UTC uptime_secs=15540 active_projects=0
-2026-09-24T04:42:31.583881Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:42:31.474871 UTC uptime_secs=15600 active_projects=0
-2026-09-24T04:43:31.576065Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:43:31.474487 UTC uptime_secs=15660 active_projects=0
-2026-09-24T04:44:31.509089Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:44:31.474463 UTC uptime_secs=15720 active_projects=0
-2026-09-24T04:45:31.577753Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:45:31.474518 UTC uptime_secs=15780 active_projects=0
-2026-09-24T04:46:31.580808Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:46:31.474571 UTC uptime_secs=15840 active_projects=0
-2026-09-24T04:47:31.582397Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:47:31.474530 UTC uptime_secs=15900 active_projects=0
-2026-09-24T04:48:31.581537Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:48:31.475916 UTC uptime_secs=15960 active_projects=0
-2026-09-24T04:49:31.582769Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:49:31.475165 UTC uptime_secs=16020 active_projects=0
-2026-09-24T04:50:31.558885Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:50:31.475100 UTC uptime_secs=16080 active_projects=0
-2026-09-24T04:51:31.583320Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:51:31.474988 UTC uptime_secs=16140 active_projects=0
-2026-09-24T04:52:31.613009Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:52:31.476042 UTC uptime_secs=16200 active_projects=0
-2026-09-24T04:53:31.573439Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:53:31.475421 UTC uptime_secs=16260 active_projects=0
-2026-09-24T04:54:31.589261Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:54:31.478585 UTC uptime_secs=16320 active_projects=0
-2026-09-24T04:55:31.583602Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:55:31.475268 UTC uptime_secs=16380 active_projects=0
-2026-09-24T04:56:31.613522Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:56:31.474986 UTC uptime_secs=16440 active_projects=0
-2026-09-24T04:57:31.517734Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:57:31.516835 UTC uptime_secs=16500 active_projects=0
-2026-09-24T04:58:31.586524Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:58:31.477025 UTC uptime_secs=16560 active_projects=0
-2026-09-24T04:59:31.581616Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 04:59:31.478350 UTC uptime_secs=16620 active_projects=0
-2026-09-24T05:00:31.589045Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:00:31.479801 UTC uptime_secs=16680 active_projects=0
-2026-09-24T05:01:31.619353Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:01:31.478893 UTC uptime_secs=16740 active_projects=0
-2026-09-24T05:02:31.483585Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:02:31.480414 UTC uptime_secs=16800 active_projects=0
+2026-09-24T05:07:30.977823Z  INFO familiar_ai_daemon: os shutdown signal received
+2026-09-24T05:07:30.979908Z  INFO familiar_ai_daemon::summary_worker: summary worker shutting down
+2026-09-24T05:07:30.980954Z  INFO familiar_ai_daemon::dashboard: dashboard stopped
+2026-09-24T05:07:30.983501Z  INFO familiar_ai_daemon: familiar-ai-daemon stopped
+2026-09-24T05:07:48.366008Z  INFO familiar_ai_daemon: familiar 0.1.0 (9f5af32) built 2026-09-24 [rustc 1.93.1]
+2026-09-24T05:07:48.366050Z  INFO familiar_ai_daemon: daemon starting config_dir=/Users/trollboy/Library/Application Support/Familiar-AI data_dir=/Users/trollboy/Library/Application Support/Familiar-AI state_dir=/Users/trollboy/Library/Application Support/Familiar-AI
+2026-09-24T05:07:48.366068Z  INFO familiar_ai_daemon: opening database db_path=/Users/trollboy/Library/Application Support/Familiar-AI/familiar.db
+2026-09-24T05:07:48.400518Z  INFO familiar_ai_daemon: database schema up to date
+2026-09-24T05:07:48.614511Z  INFO familiar_ai_daemon: PID file written pid_file=/Users/trollboy/Library/Application Support/Familiar-AI/familiar-ai.pid
+2026-09-24T05:07:48.614898Z  INFO familiar_ai_daemon: loaded existing projects active_projects=0
+2026-09-24T05:07:48.621499Z  INFO familiar_ai_daemon: inference is not configured; no backend to load
+2026-09-24T05:07:48.621557Z  INFO familiar_ai_daemon: file watcher disabled or no paths configured
+2026-09-24T05:07:48.622918Z  INFO familiar_ai_daemon::batch_review: batch review disabled; no tier_policy.batch_worker configured
+2026-09-24T05:07:48.623068Z  INFO familiar_ai_daemon::model_residency: model residency disabled; no local server will be held resident
+2026-09-24T05:07:48.638878Z  INFO familiar_ai_daemon::dashboard: dashboard started addr=127.0.0.1:9400
+2026-09-24T05:08:48.624608Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:08:48.624469 UTC uptime_secs=60 active_projects=0
+2026-09-24T05:09:48.624342Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:09:48.623989 UTC uptime_secs=120 active_projects=0
+2026-09-24T05:10:48.625298Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:10:48.624967 UTC uptime_secs=180 active_projects=0
+2026-09-24T05:11:34.130179Z  WARN familiar_ai_daemon::tray_data: dependency view: scope conflicts unavailable; waves are dependency layers only repo="/Users/trollboy/Projects/familiar" error=no authoritative `## Expected Files` heading found
+2026-09-24T05:11:48.625450Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:11:48.625251 UTC uptime_secs=240 active_projects=0
+2026-09-24T05:12:48.625496Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:12:48.625160 UTC uptime_secs=300 active_projects=0
+2026-09-24T05:13:48.625690Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:13:48.625352 UTC uptime_secs=360 active_projects=0
+2026-09-24T05:14:48.626039Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:14:48.625634 UTC uptime_secs=420 active_projects=0
+2026-09-24T05:15:48.626035Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:15:48.625704 UTC uptime_secs=480 active_projects=0
+2026-09-24T05:16:48.627595Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:16:48.627270 UTC uptime_secs=540 active_projects=0
+2026-09-24T05:17:48.687917Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:17:48.624987 UTC uptime_secs=600 active_projects=0
+2026-09-24T05:18:48.648703Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:18:48.625690 UTC uptime_secs=660 active_projects=0
+2026-09-24T05:19:48.731939Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:19:48.625895 UTC uptime_secs=720 active_projects=0
+2026-09-24T05:20:48.739199Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:20:48.626035 UTC uptime_secs=780 active_projects=0
+2026-09-24T05:21:48.731423Z  INFO familiar_ai_daemon: heartbeat last_heartbeat=2026-09-24 05:21:48.626487 UTC uptime_secs=840 active_projects=0
