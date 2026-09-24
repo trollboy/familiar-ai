@@ -2,7 +2,6 @@
 //!
 //! The GTK layout is thin and visual, but what the buttons *do* writes the
 //! backlog and starts processes, so it is verified here rather than by eye.
-#![cfg(feature = "tray")]
 
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +11,11 @@ use familiar_ai_daemon::control_plane::ControlPlaneService;
 use familiar_ai_daemon::tray_data::DaemonDataSource;
 use familiar_ai_llm::InferenceRouter;
 use familiar_ai_storage::{Database, DriverRepository};
-use familiar_ai_tray::data::{Action, ConfigEdit, DataSource, Query};
+// The operator contract lives in core; naming it from there keeps these
+// tests in the gate, which runs without the `tray` feature (FAM-BUG-097).
+use familiar_ai_core::operator_ui::{
+    ConfigEdit, OperatorAction as Action, OperatorDataSource as DataSource, OperatorQuery as Query,
+};
 use tempfile::TempDir;
 
 struct Harness {

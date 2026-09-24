@@ -411,6 +411,52 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-097 — The desktop data-source tests never ran in the gate
+
+- **Status:** Fixed (2026-09-24: `tests/tray_actions.rs` imports the
+  operator contract from `familiar-ai-core` instead of the tray crate's
+  aliases and drops its `tray` feature gate, so its 27 tests, the save
+  validation, the inference save, the model checks and the adapter choices,
+  run under the gate's `--no-default-features`.)
+- **Found:** 2026-09-24 while fixing FAM-BUG-087: every inference test in
+  the file had been failing on a dropped runtime and nobody saw it, because
+  the gate runs without the feature the file required.
+- **Detail:** the file needed `familiar_ai_tray::data`, which is only a
+  re-export of `familiar_ai_core::operator_ui` under compatibility names.
+  The gate never compiled it. Noted inside FAM-BUG-087 on 2026-09-24 and
+  left there, which is the wrong place for an open defect.
+
+### FAM-BUG-096 — A test in the workspace suite is flaky: two pushes refused red, then green unchanged
+
+- **Status:** Open. A low-priority repeated run of the suite is under way
+  to name it; the hook's own output was lost to a one-line tail both times.
+- **Found:** 2026-09-24. `9b7d9e9` and `b196c34` each recorded a red gate
+  verdict with `--- gate: test FAILED` and passed on an immediate retry with
+  no change to the tree. All later pushes were green first time.
+- **Detail:** `gate_verdicts.detail` keeps only the step summary, not the
+  failing test's name, and `git push 2>&1 | tail -1` discarded the rest.
+  Until the test is named this entry stays open; the fix is to the test,
+  not to retry policy.
+- **Expected fix:** name it, fix it, and have `ops gate run --hook` keep the
+  failing test names in the verdict detail so the next flake is identified
+  from the ledger alone.
+
+### FAM-BUG-095 — Launch wave was offered on a wave whose PRDs were all completed
+
+- **Status:** Open, not reproduced. Reported by the owner on 2026-09-24 on
+  the Mac before `a263eb8`; not seen since the chart began collapsing
+  completed work into the first wave.
+- **Detail:** the button enables only when a wave has at least one
+  unfinished PRD and every unfinished PRD is launchable, so the reading of
+  the code does not produce it. Two candidates: the older build placed
+  completed PRDs in their own later waves and the header counted them, so
+  a wave could read "2 PRDs" while hiding both; or a lifecycle filter hid
+  every card of a wave whose PRDs were in fact ready. Neither is confirmed.
+- **Expected fix:** when it recurs, the wave name and one PRD id in it are
+  enough to trace what the chart thought each node was; the header now
+  shows unfinished and done counts separately, which rules the first
+  candidate in or out at a glance.
+
 ### FAM-BUG-094 — Settings saves are not validated, the adapter list offers values the config rejects, and the daemon then fails to start
 
 - **Status:** Fixed (2026-09-24: `save_config` loads the candidate file
