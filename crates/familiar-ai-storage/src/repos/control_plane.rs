@@ -22,6 +22,9 @@ pub struct ExecutionRow {
     pub worker_identity: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// The reason recorded with the latest `failed` event, when there is one:
+    /// the worker's exit status and the last lines it printed.
+    pub failure_reason: Option<String>,
 }
 
 /// Executions for one project, newest first. Terminal states are included —
@@ -34,9 +37,13 @@ pub fn list_executions(
 ) -> Result<Vec<ExecutionRow>> {
     let mut stmt = conn
         .prepare(
-            "SELECT execution_id,project_id,state,mode,command_json,worker_identity,\
-             created_at,updated_at FROM control_plane_executions \
-             WHERE project_id=?1 ORDER BY created_at DESC, execution_id DESC LIMIT ?2",
+            "SELECT x.execution_id,x.project_id,x.state,x.mode,x.command_json,x.worker_identity,\
+             x.created_at,x.updated_at,\
+             (SELECT e.payload_json FROM control_plane_events e \
+                WHERE e.execution_id=x.execution_id AND e.kind='failed' \
+                ORDER BY e.created_at DESC, e.event_id DESC LIMIT 1) \
+             FROM control_plane_executions x \
+             WHERE x.project_id=?1 ORDER BY x.created_at DESC, x.execution_id DESC LIMIT ?2",
         )
         .map_err(db)?;
     let rows = stmt
@@ -50,6 +57,15 @@ pub fn list_executions(
                 worker_identity: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                failure_reason: row
+                    .get::<_, Option<String>>(8)?
+                    .and_then(|payload| serde_json::from_str::<serde_json::Value>(&payload).ok())
+                    .and_then(|value| {
+                        value
+                            .get("reason")
+                            .and_then(|r| r.as_str())
+                            .map(str::to_owned)
+                    }),
             })
         })
         .map_err(db)?;

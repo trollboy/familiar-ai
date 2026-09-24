@@ -77,7 +77,7 @@ section "config"
 CFG="$HOME/.config/familiar-ai/config.toml"
 [ -f "$CFG" ] || CFG="$HOME/Library/Application Support/familiar-ai/config.toml"
 echo "config: $CFG"
-run grep -nE '^\[repositories|^\[driver|^\[delivery|^\[dashboard|profile|risk_vocabulary|prd_metadata_policy|worktree_root|database' "$CFG"
+run grep -nE '^\[repositories|^\[driver|^\[delivery|^\[dashboard|^\[agent_runtime|^\[worker_registry|^\[workers|^\[agents|^\[providers|^enabled|^adapter|^runtime|^capabilities|^model|profile|risk_vocabulary|prd_metadata_policy|worktree_root|database' "$CFG"
 
 section "database"
 DB=""

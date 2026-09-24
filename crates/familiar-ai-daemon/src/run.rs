@@ -436,7 +436,23 @@ pub fn resolved_worker_plan(
         .collect();
     configured.validate(&risk_vocabulary)?;
     let mut registry = WorkerRegistry::default();
+    // FAM-BUG-098: a worker that runs through the owned raw-model loop is
+    // unusable while `agent_runtime.enabled` is false. Registering it
+    // anyway let the planner pick it, and the run then died at context
+    // construction with a message naming the setting but not the stage,
+    // for every PRD in a wave. Such a worker is left out of selection here;
+    // if a stage is then left with nobody, the error names the skipped
+    // workers and the setting, and the other stages proceed as before.
+    let mut skipped_disabled_runtime: Vec<String> = Vec::new();
     for (id, worker) in &configured.workers {
+        if !config.agent_runtime.enabled {
+            if let Ok(runtime) = worker.runtime_id() {
+                if !matches!(runtime, "codex" | "claude-code") {
+                    skipped_disabled_runtime.push(format!("{id} (runtime {runtime})"));
+                    continue;
+                }
+            }
+        }
         let capabilities = worker
             .capabilities
             .iter()
@@ -471,7 +487,18 @@ pub fn resolved_worker_plan(
                 risk_classes: route_context.risk_classes.clone(),
                 expected_file_count: route_context.expected_file_count,
             })
-            .map_err(|e| e.to_string())
+            .map_err(|e| {
+                if skipped_disabled_runtime.is_empty() {
+                    e.to_string()
+                } else {
+                    format!(
+                        "{e}; {} worker(s) were not considered for {stage:?} because \
+                         agent_runtime.enabled is false: {}",
+                        skipped_disabled_runtime.len(),
+                        skipped_disabled_runtime.join(", ")
+                    )
+                }
+            })
     };
     let implementation = select(
         WorkerStage::Implementation,
@@ -5110,6 +5137,9 @@ estimated_cost_microusd = 1
             routing: Default::default(),
         });
         config.review.enabled = true;
+        // FAM-BUG-098: raw-loop workers are candidates only while the owned
+        // loop is enabled; this test is about selection among them.
+        config.agent_runtime.enabled = true;
 
         let (implementation, reviewer, records) =
             resolved_worker_plan(&config, &RouteContext::default()).unwrap();

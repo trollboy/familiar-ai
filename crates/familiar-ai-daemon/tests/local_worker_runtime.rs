@@ -581,6 +581,12 @@ fn worker_selection_selects_a_local_profile_worker_for_the_owned_loop() {
         .insert("llama3-ollama".into(), local_worker);
     let config = Config {
         worker_registry: Some(registry),
+        // FAM-BUG-098: a raw-loop worker is a candidate only while the owned
+        // loop is enabled; this test is about selecting it when it is.
+        agent_runtime: familiar_ai_core::config::AgentRuntimeConfig {
+            enabled: true,
+            ..Default::default()
+        },
         ..Config::default()
     };
 

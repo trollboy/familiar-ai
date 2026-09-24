@@ -66,6 +66,64 @@ estimated_cost_microusd = 10
     );
 }
 
+/// FAM-BUG-098: a raw-loop worker is not a candidate while the owned loop
+/// is disabled. With a CLI worker beside it every stage still resolves; with
+/// nothing else the error names the setting and the worker, not just the
+/// stage.
+#[test]
+fn a_raw_loop_worker_is_skipped_while_agent_runtime_is_disabled() {
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        temp.path(),
+        r#"
+[worker_registry.workers."ollama/llama3:latest"]
+runtime = "ollama"
+provider = "ollama"
+model = "llama3:latest"
+capabilities = ["planning", "implementation", "review", "remediation", "narrow-task"]
+context_tokens = 8000
+estimated_cost_microusd = 1
+
+[worker_registry.workers.claude]
+adapter = "claude-code"
+provider = "anthropic"
+model = "sonnet"
+capabilities = ["planning", "implementation", "review", "remediation", "narrow-task"]
+fresh_process_isolation = true
+context_tokens = 200000
+estimated_cost_microusd = 50
+"#,
+    )
+    .unwrap();
+    let config = Config::load(Some(temp.path())).unwrap();
+    assert!(!config.agent_runtime.enabled, "the default is disabled");
+    let (_, _, records) = resolved_worker_plan(&config, &RouteContext::default()).unwrap();
+    assert!(
+        records.iter().all(|r| r.selected_worker == "claude"),
+        "{records:?}"
+    );
+
+    let only_raw = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        only_raw.path(),
+        r#"
+[worker_registry.workers."ollama/llama3:latest"]
+runtime = "ollama"
+provider = "ollama"
+model = "llama3:latest"
+capabilities = ["planning", "implementation", "review", "remediation", "narrow-task"]
+context_tokens = 8000
+estimated_cost_microusd = 1
+"#,
+    )
+    .unwrap();
+    let config = Config::load(Some(only_raw.path())).unwrap();
+    let error = resolved_worker_plan(&config, &RouteContext::default()).unwrap_err();
+    assert!(error.contains("agent_runtime.enabled is false"), "{error}");
+    assert!(error.contains("ollama/llama3:latest"), "{error}");
+    assert!(error.contains("Implementation"), "{error}");
+}
+
 fn write_executable(path: &Path, script: &str) {
     fs::write(path, script).unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();

@@ -807,6 +807,13 @@ mod tests {
                 capability_profiles: BTreeMap::new(),
                 routing: Default::default(),
             }),
+            // FAM-BUG-098: with the owned loop off this worker is not a
+            // candidate at all; the point here is that, when it is, preflight
+            // needs no RawWorkerContext.
+            agent_runtime: familiar_ai_core::config::AgentRuntimeConfig {
+                enabled: true,
+                ..Default::default()
+            },
             ..Config::default()
         };
         // Review stays disabled: the point of this test is the raw-runtime

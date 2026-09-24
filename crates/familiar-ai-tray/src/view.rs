@@ -667,6 +667,11 @@ pub struct ExecutionRowView {
     pub execution_id: String,
     pub state: String,
     pub mode: String,
+    /// The PRD the command names, when it names one; the headline.
+    pub prd: String,
+    pub updated_at: String,
+    /// What the worker recorded when it failed: exit status and last output.
+    pub reason: Option<String>,
     /// The command as a reader can judge it, not as JSON.
     pub command: String,
     pub created_at: String,
@@ -684,6 +689,29 @@ impl ExecutionRowView {
 /// Renders `command_json` for a human. It holds either a `{argv, timeout_ms}`
 /// object or a bare argv array — both shapes are accepted by the worker, so
 /// both have to be readable here.
+/// The PRD a control-plane command is about: `familiar-ai run <path>` and
+/// `familiar-ai resume <id>` both name it as their last argument. Empty when
+/// the command names none.
+pub fn command_prd(command_json: &str) -> String {
+    let parsed: Value = match serde_json::from_str(command_json) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let argv: Vec<&str> = parsed
+        .get("argv")
+        .and_then(Value::as_array)
+        .or_else(|| parsed.as_array())
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    match argv.as_slice() {
+        [_, verb, .., last] if matches!(*verb, "run" | "resume") => {
+            let name = last.rsplit('/').next().unwrap_or(last);
+            name.trim_end_matches(".md").to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 pub fn command_summary(command_json: &str) -> String {
     let parsed: Value = match serde_json::from_str(command_json) {
         Ok(v) => v,
@@ -710,6 +738,13 @@ pub fn build_executions_view(executions: &Value) -> Vec<ExecutionRowView> {
             execution_id: str_at(e, "execution_id").to_string(),
             state: str_at(e, "state").to_string(),
             mode: str_at(e, "mode").to_string(),
+            prd: command_prd(str_at(e, "command_json")),
+            updated_at: str_at(e, "updated_at").to_string(),
+            reason: e
+                .get("failure_reason")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+                .map(str::to_owned),
             command: command_summary(str_at(e, "command_json")),
             created_at: str_at(e, "created_at").to_string(),
         })
@@ -2039,12 +2074,35 @@ mod tests {
         assert_eq!(project_state_label(&json!({})), "not registered");
     }
 
+    /// The Runs card headlines the PRD and carries the recorded failure
+    /// reason; "Detached" was all an operator saw of three dead runs.
+    #[test]
+    fn executions_view_names_the_prd_and_the_failure_reason() {
+        let rows = build_executions_view(&json!({"items": [
+            {"execution_id": "e1", "state": "failed", "mode": "detached",
+             "command_json": "{\"argv\":[\"familiar-ai\",\"run\",\"docs/prds/PRD-086.md\"]}",
+             "created_at": "t0", "updated_at": "t1",
+             "failure_reason": "worker_failed exit=1: error: configuration failed: worker \"ollama/llama3:latest\""},
+            {"execution_id": "e2", "state": "running", "mode": "detached",
+             "command_json": "{\"argv\":[\"familiar-ai\",\"resume\",\"PRD-92\"]}",
+             "created_at": "t0", "updated_at": "t0"}
+        ]}));
+        assert_eq!(rows[0].prd, "PRD-086");
+        assert!(rows[0].reason.as_deref().unwrap().contains("exit=1"));
+        assert_eq!(rows[1].prd, "PRD-92");
+        assert_eq!(rows[1].reason, None);
+        assert_eq!(command_prd("{\"argv\":[\"sh\",\"-c\",\"true\"]}"), "");
+    }
+
     #[test]
     fn execution_markup_escapes_its_command() {
         let row = ExecutionRowView {
             execution_id: "e1".into(),
             state: "running".into(),
             mode: "detached".into(),
+            prd: String::new(),
+            updated_at: "t".into(),
+            reason: None,
             command: "sh -c 'a & b'".into(),
             created_at: "t".into(),
         };

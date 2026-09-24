@@ -297,3 +297,25 @@ impl std::error::Error for AgentExecutionError {
         }
     }
 }
+
+/// Spawn a command, retrying briefly when the kernel refuses with ETXTBSY
+/// (os error 26, "Text file busy"). Under parallel tests a sibling's fork can
+/// still hold a just-written script's write handle at exec time, and the
+/// exec fails once; FAM-BUG-033 fixed that for the version probe alone and
+/// said to generalise it on the next recurrence, which was the codex
+/// crash-signal test on 2026-09-24. Five attempts ten milliseconds apart;
+/// every other error is returned at once.
+pub(crate) fn spawn_retrying_text_busy(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(26) && attempt < 4 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            outcome => return outcome,
+        }
+    }
+}

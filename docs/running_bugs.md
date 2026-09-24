@@ -411,6 +411,29 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-098 — One raw-loop worker with the owned loop disabled kills every run, and the Runs card shows nothing but "Detached"
+
+- **Status:** Fixed (2026-09-24: `resolved_worker_plan` leaves a raw-loop
+  worker out of selection while `agent_runtime.enabled` is false and, if a
+  stage is then left with no candidate, names the skipped workers and the
+  setting; the Runs card headlines the PRD, shows started and last-change
+  times, and prints the recorded failure reason, which the executions query
+  now carries from the latest `failed` event; the diagnostics script greps
+  the worker and runtime tables.)
+- **Found:** 2026-09-24 on the Mac, first Launch wave after FAM-BUG-093.
+  All three runs died within a second: `configuration failed: worker
+  "ollama/llama3:latest" declares runtime "ollama", which executes through
+  Familiar's own raw-model agent loop; agent_runtime.enabled must be true to
+  use it`. The desktop showed three "Detached" cards and no reason.
+- **Detail:** the planner registered every worker in the registry, picked
+  the Ollama worker for a stage on cost, and the context builder refused it
+  for the disabled runtime after the plan was made, so the refusal named
+  neither the stage nor an alternative. The setting is a legitimate off
+  switch; a worker behind an off switch is unavailable, not fatal. The Runs
+  card read `mode` as its headline and never read the failure event.
+- **Expected fix:** as landed. Enabling the owned loop remains the owner's
+  decision per host; with it off, CLI workers carry every stage.
+
 ### FAM-BUG-097 — The desktop data-source tests never ran in the gate
 
 - **Status:** Fixed (2026-09-24: `tests/tray_actions.rs` imports the
@@ -1910,6 +1933,10 @@ reinstall the binary, then rerun the 076 drive.
   If another fake-spawning test ever shows the same one-spawn-fails
   signature, generalize the retry to a shared spawn helper — narrowly
   fixed here first, per policy.
+- **2026-09-24:** it recurred: `codex::tests::crash_signal_is_preserved_as_terminal_process_evidence`
+  failed a gate run with `Text file busy` on its main spawn. The retry is
+  now `agent::spawn_retrying_text_busy`, used by both CLI adapters' main
+  spawn. Same bound: five attempts, ten milliseconds apart, ETXTBSY only.
 - **Cost note:** each such flake burns an entire drive session at
   preflight. Flakes in required verification checks are session killers
   and get fixed immediately, not waived.

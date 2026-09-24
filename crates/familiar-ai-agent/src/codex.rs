@@ -192,18 +192,19 @@ impl CodingAgent for CodexAgent {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command
+        command
             .args(["--json", "-"])
             .current_dir(request.working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|source| AgentExecutionError::Launch {
+            .stderr(Stdio::inherit());
+        let mut child = crate::agent::spawn_retrying_text_busy(&mut command).map_err(|source| {
+            AgentExecutionError::Launch {
                 executable: self.executable.clone(),
                 source: Box::new(source),
                 result: Box::new(result.clone()),
-            })?;
+            }
+        })?;
         let input = child
             .stdin
             .take()
