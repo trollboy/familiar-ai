@@ -81,7 +81,14 @@ async fn execute(
         let _ = service.finish(&id, ExecutionState::Failed, "worker_sandbox_setup_failed");
         return;
     }
-    let denied = capability_dir.parent().unwrap_or(&capability_dir);
+    // FAM-BUG-092: what the child must not read is the credentials directory
+    // (every worker's `.session`), not its parent. The parent is the runtime
+    // directory, where `control-plane.claim` lives, and the child's first act
+    // is to read that claim to prove it is the owner's delegate. Denying the
+    // parent made every desktop-launched `familiar-ai run` die on that read
+    // before it recorded anything, on Linux (Landlock) and macOS
+    // (sandbox-exec) alike, since the control plane landed.
+    let denied = capability_dir.as_path();
     let Ok(std_command) = familiar_ai_agent::isolated_command("/bin/sh", Some(denied)) else {
         let _ = service.finish(&id, ExecutionState::Failed, "worker_sandbox_unavailable");
         return;
@@ -409,6 +416,87 @@ mod tests {
         assert_eq!(
             svc.execution(&op, "e", "p").unwrap().unwrap().state,
             ExecutionState::Completed
+        );
+    }
+
+    /// FAM-BUG-092: the sandbox must hide other workers' credentials and
+    /// nothing else. The claim in the runtime directory is what the child
+    /// reads first; denying it is how "Launch wave" launched nothing.
+    #[tokio::test]
+    async fn a_worker_reads_the_claim_but_not_other_workers_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let capabilities = runtime.path().join("capabilities");
+        std::fs::create_dir_all(&capabilities).unwrap();
+        std::fs::write(runtime.path().join("control-plane.claim"), "{}").unwrap();
+        std::fs::write(capabilities.join("other_1.session"), "secret").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let svc =
+            ControlPlaneService::new(Arc::new(Mutex::new(db)), SchedulingPolicy::default(), 7);
+        svc.register_project("p", temp.path().to_str().unwrap(), 0, None)
+            .unwrap();
+        let op = CapabilityScope {
+            client_class: ClientClass::Operator,
+            project_id: Some("p".into()),
+            execution_id: None,
+            attempt: None,
+            worker_id: None,
+            authorities: vec![Authority::Control, Authority::Observe],
+        };
+        let submit = |id: &str, script: String| {
+            let argv = vec!["/bin/sh".to_string(), "-c".into(), script];
+            svc.submit(
+                &op,
+                &Submission {
+                    execution_id: id.into(),
+                    project_id: "p".into(),
+                    idempotency_key: id.into(),
+                    mode: ExecutionMode::Detached,
+                    priority: 0,
+                    command_json: serde_json::to_string(&argv).unwrap(),
+                },
+            )
+            .unwrap();
+        };
+        submit(
+            "claim",
+            format!(
+                "cat '{}' >/dev/null",
+                runtime.path().join("control-plane.claim").display()
+            ),
+        );
+        submit(
+            "creds",
+            format!(
+                "cat '{}' >/dev/null",
+                capabilities.join("other_1.session").display()
+            ),
+        );
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(run(svc.clone(), capabilities.clone(), rx));
+        let settled = |id: &str| {
+            svc.execution(&op, id, "p").unwrap().is_some_and(|r| {
+                matches!(r.state, ExecutionState::Completed | ExecutionState::Failed)
+            })
+        };
+        for _ in 0..200 {
+            if settled("claim") && settled("creds") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tx.send(true).unwrap();
+        worker.await.unwrap();
+        assert_eq!(
+            svc.execution(&op, "claim", "p").unwrap().unwrap().state,
+            ExecutionState::Completed,
+            "the child must be able to read the control-plane claim"
+        );
+        assert_eq!(
+            svc.execution(&op, "creds", "p").unwrap().unwrap().state,
+            ExecutionState::Failed,
+            "the child must not be able to read other workers' credentials"
         );
     }
 

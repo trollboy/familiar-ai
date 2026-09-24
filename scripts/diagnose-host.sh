@@ -98,6 +98,8 @@ if [ -n "$DB" ] && command -v sqlite3 >/dev/null 2>&1; then
   Q "select a.prd_id, substr(a.started_at,1,19) started, a.outcome, a.retained_reason, a.last_durable_phase from driver_attempts a join driver_sessions s on s.session_id=a.session_id where s.repository_key='$KEY' order by a.started_at desc limit 8;"
   Q "select prd_id, phase, substr(updated_at,1,10) updated from execution_checkpoints where repository_key='$KEY' and phase not in ('completed') order by updated_at desc limit 12;"
   Q "select d.prd_id, d.decision, substr(d.detail,1,90) detail from driver_selection_decisions d join driver_sessions s on s.session_id=d.session_id where s.repository_key='$KEY' order by d.decision_id desc limit 12;"
+  Q "select execution_id, state, stage, attempt, substr(created_at,1,19) created, substr(completed_at,1,19) done, substr(command_json,1,70) cmd from control_plane_executions where project_id like '%familiar%' order by created_at desc limit 8;"
+  Q "select substr(created_at,1,19) at, kind, execution_id, substr(payload_json,1,100) payload from control_plane_events where execution_id in (select execution_id from control_plane_executions where project_id like '%familiar%' order by created_at desc limit 4) order by created_at desc limit 16;"
   Q "select e.prd_path, e.old_status, e.new_status, e.actor, substr(e.changed_at,1,19) at, r.action from backlog_status_events e left join backlog_recovery_events r on r.status_event_id=e.event_id where e.repository_key='$KEY' and (e.prd_path like '%PRD-092%' or e.prd_path like '%PRD-10[3468]%') order by e.event_id desc limit 12;"
 else
   echo "no database or no sqlite3"
@@ -138,6 +140,14 @@ if [ -n "$LOG" ]; then
   run bash -c "grep -nE 'conflicts unavailable|reconcil|WARN|ERROR|error' '$LOG' | tail -40"
   run tail -n 30 "$LOG"
 fi
+
+section "control-worker output logs (what a desktop-launched run printed before it died)"
+for d in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/familiar-ai/capabilities" "$HOME/Library/Application Support/Familiar-AI/capabilities" "$HOME/Library/Application Support/familiar-ai/capabilities" "$TMPDIR/familiar-ai/capabilities"; do
+  [ -d "$d" ] || continue
+  echo "$d:"; ls -lt "$d" 2>/dev/null | head -8
+  for f in $(ls -t "$d"/*.log 2>/dev/null | head -3); do echo "--- $f"; tail -n 25 "$f"; done
+done
+find "${XDG_RUNTIME_DIR:-/tmp}" "$HOME/Library/Application Support" /tmp -maxdepth 4 -name "exec-*.log" -mmin -720 2>/dev/null | head -5
 
 section "daemon stderr (panics land here, not in familiar.log)"
 for e in "$HOME/Library/Logs/Familiar-AI/daemon.stderr.log" "$HOME/Library/Logs/Familiar-AI/desktop.stderr.log"; do

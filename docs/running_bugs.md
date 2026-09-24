@@ -411,6 +411,30 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-092 — Start, Re-drive and Launch wave from the desktop have never run a PRD: the worker sandbox denies the child the control-plane claim
+
+- **Status:** Fixed (2026-09-24: the child's denied read path is the
+  credentials directory, not its parent; a worker test asserts the child
+  can read `control-plane.claim` and cannot read another worker's
+  `.session`.)
+- **Found:** 2026-09-24. "Launch wave" on the Mac flashed and launched
+  nothing. This box's ledger then showed every desktop-submitted execution
+  since 2026-09-10, ten of them, `failed`; the 2026-09-10 `run` never
+  recorded a driver session. Every PRD that ever completed was launched
+  from the CLI.
+- **Detail:** `control_worker::execute` isolates the child with
+  `denied = capability_dir.parent()`. `capability_dir` is
+  `<runtime>/capabilities`, so the denied subtree is the runtime directory
+  itself, which holds `control-plane.claim`. `familiar-ai run` acquires
+  the worker lock first, and that reads the claim to check it is the
+  owner's delegate (FAM-BUG-062). Under Landlock on Linux or sandbox-exec
+  on macOS the read fails with permission denied, the run exits, and the
+  record says `worker_failed`. Introduced with the control plane in
+  `4fd660e`; FAM-BUG-062's delegation fix could not have been observed
+  working through this path.
+- **Expected fix:** as landed. The sandbox hides other workers'
+  credentials and nothing else.
+
 ### FAM-BUG-091 — Configure Local LLM accepts and reports Healthy for a model the endpoint does not serve, and never discovers from its own endpoint
 
 - **Status:** Fixed (2026-09-24: the save refuses a model the endpoint's
