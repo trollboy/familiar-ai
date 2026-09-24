@@ -2566,9 +2566,9 @@ reinstall the binary, then rerun the 076 drive.
   the first connected heartbeat after a failure, and reloads after a daemon
   generation change. A desktop contract test pins the retry path.
 
-### FAM-BUG-072 — Overlay reinstall leaves the macOS app bundle visibly stale
+### FAM-BUG-085 — Overlay reinstall leaves the macOS app bundle visibly stale (same finding as FAM-BUG-084, recorded from the Mac)
 
-- **Status:** Operationally fixed 2026-09-24; a packaged installer remains
+- **Status:** Fixed 2026-09-24 operationally on the Mac; a packaged installer remains
   desirable so manual installs cannot regress this.
 - **Found:** 2026-09-24 after repeated rebuild/reinstall cycles still showed
   Familiar.app as three days old in Finder.
