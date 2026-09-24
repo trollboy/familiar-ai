@@ -413,7 +413,14 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-084 — On macOS, rebuilding the desktop does not change the desktop that runs
 
-- **Status:** Open
+- **Status:** Fixed (2026-09-24: `ops desktop status` reads the program back
+  from the installed definition and reports a blocker when it is not the
+  binary `install` would write, naming both paths and whether the two
+  binaries differ; `ops desktop install` prints `program=` per definition;
+  `scripts/diagnose-host.sh` compares each running process's binary with
+  the tree and prints each definition's program line. The second Mac log
+  after the fix showed the same stale bundle, which is what the blocker
+  now says out loud.)
 - **Found:** 2026-09-24, from `scripts/diagnose-host.sh` run on the Mac
   after three rebuilds had not changed what the Gantt showed. The
   installed `familiar-ai` and `familiar-ai-daemon` were byte-identical to

@@ -45,11 +45,14 @@ pub fn desktop(command: DesktopCommand) -> Result<(), String> {
     match command {
         DesktopCommand::Install { .. } => {
             let changed = crate::supervisor::install_desktop(&spec, &paths.log_dir)?;
-            for (definition, changed) in spec.definitions.iter().zip(changed) {
+            for ((definition, changed), program) in
+                spec.definitions.iter().zip(changed).zip(spec.executables())
+            {
                 println!(
-                    "installed={} changed={} definition={}",
+                    "installed={} changed={} program={} definition={}",
                     definition.label,
                     changed,
+                    program.display(),
                     definition.definition.display()
                 );
             }

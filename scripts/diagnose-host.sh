@@ -39,6 +39,7 @@ section "installed binaries"
 for b in familiar-ai familiar-ai-daemon familiar-ai-desktop; do
   p="$(command -v "$b" 2>/dev/null || true)"
   if [ -n "$p" ]; then
+    echo "$b resolves to: $p"
     ls -l "$p"
     if [ -f "target/release/$b" ]; then
       if cmp -s "$p" "target/release/$b"; then echo "  == target/release/$b (identical)"; else echo "  != target/release/$b (DIFFERS; installed binary is not this tree's build)"; fi
@@ -53,6 +54,21 @@ run ls -l target/release/familiar-ai target/release/familiar-ai-daemon target/re
 
 section "processes"
 run pgrep -fal "familiar-ai"
+# What the supervisor actually runs, compared with this tree's build. This is
+# the FAM-BUG-084 check: a rebuilt desktop that launchd never picked up.
+for exe in $(pgrep -fl "familiar-ai" | awk '{print $2}' | sort -u); do
+  [ -f "$exe" ] || continue
+  b="$(basename "$exe")"
+  ls -l "$exe"
+  if [ -f "target/release/$b" ]; then
+    if cmp -s "$exe" "target/release/$b"; then echo "  running $b == target/release/$b (identical)"; else echo "  running $b != target/release/$b (DIFFERS; the process is not this tree's build)"; fi
+  fi
+done
+for d in "$HOME/Library/LaunchAgents/com.trollboy.familiar.desktop.plist" "$HOME/Library/LaunchAgents/com.trollboy.familiar.daemon.plist" "$HOME/.config/systemd/user/familiar-ai-desktop.service" "$HOME/.config/systemd/user/familiar-ai-daemon.service"; do
+  [ -f "$d" ] || continue
+  echo "definition $d ($(stat -f %Sm "$d" 2>/dev/null || stat -c %y "$d")):"
+  grep -nE 'ExecStart=|<string>/' "$d" | head -3
+done
 run familiar-ai ops desktop status
 if command -v launchctl >/dev/null 2>&1; then run bash -c "launchctl list | grep -i familiar"; fi
 if command -v systemctl >/dev/null 2>&1; then run bash -c "systemctl --user list-units --type=service --all | grep -i familiar"; fi

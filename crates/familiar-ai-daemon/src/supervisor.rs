@@ -37,6 +37,13 @@ pub struct DesktopInstallSpec {
     executables: [PathBuf; 2],
 }
 
+impl DesktopInstallSpec {
+    /// The executables each definition runs, in definition order.
+    pub fn executables(&self) -> &[PathBuf; 2] {
+        &self.executables
+    }
+}
+
 /// The daemon and desktop are supervised independently: stopping or crashing
 /// the UI cannot stop active work, and restarting the daemon does not require
 /// replacing the WebView process.
@@ -185,7 +192,8 @@ pub fn uninstall_desktop(spec: &DesktopInstallSpec) -> Result<Vec<bool>, String>
 pub fn desktop_status(spec: &DesktopInstallSpec) -> Vec<Status> {
     spec.definitions
         .iter()
-        .map(|definition| {
+        .zip(&spec.executables)
+        .map(|(definition, expected)| {
             let installed = definition.definition.is_file();
             let mut blockers = Vec::new();
             if !installed {
@@ -193,6 +201,11 @@ pub fn desktop_status(spec: &DesktopInstallSpec) -> Vec<Status> {
                     "definition is not installed: {}",
                     definition.definition.display()
                 ));
+            } else {
+                let program = fs::read_to_string(&definition.definition)
+                    .ok()
+                    .and_then(|text| installed_program(definition.backend, &text));
+                blockers.extend(program_blockers(expected, program.as_deref()));
             }
             let supervisor_state = query(definition).unwrap_or_else(|error| {
                 blockers.push(error);
@@ -207,6 +220,66 @@ pub fn desktop_status(spec: &DesktopInstallSpec) -> Vec<Status> {
             }
         })
         .collect()
+}
+
+/// The executable an installed definition runs, read back from the file the
+/// supervisor loaded rather than from what this CLI would render.
+fn installed_program(backend: Backend, definition: &str) -> Option<PathBuf> {
+    match backend {
+        Backend::Launchd => {
+            let rest = definition.split("<key>ProgramArguments</key>").nth(1)?;
+            let start = rest.find("<string>")? + "<string>".len();
+            let end = rest[start..].find("</string>")? + start;
+            Some(PathBuf::from(xml_unescape(&rest[start..end])))
+        }
+        Backend::Systemd => definition.lines().find_map(|line| {
+            let value = line.trim().strip_prefix("ExecStart=")?;
+            Some(PathBuf::from(
+                value
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .replace("\\x20", " ")
+                    .replace("%%", "%"),
+            ))
+        }),
+    }
+}
+
+/// FAM-BUG-084: a definition that runs a different binary than the one
+/// `install` would write is how a rebuilt desktop stays three days old. The
+/// mismatch is a blocker on its own; when both binaries exist and differ, the
+/// message says which build the supervisor actually runs.
+fn program_blockers(expected: &Path, installed: Option<&Path>) -> Vec<String> {
+    let Some(installed) = installed else {
+        return vec!["installed definition has no readable program".into()];
+    };
+    if installed == expected {
+        return Vec::new();
+    }
+    let mut blocker = format!(
+        "installed definition runs {} but `ops desktop install` would use {}",
+        installed.display(),
+        expected.display()
+    );
+    match (fs::read(installed), fs::read(expected)) {
+        (Ok(running), Ok(sibling)) if running != sibling => {
+            blocker.push_str("; the two binaries differ, so rebuilding does not change what runs");
+        }
+        (Err(_), _) => blocker.push_str("; the installed program does not exist"),
+        _ => {}
+    }
+    blocker.push_str(" (re-run `ops desktop install`, or pass --desktop deliberately)");
+    vec![blocker]
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 fn desktop_launchd(
@@ -551,6 +624,61 @@ mod tests {
             fs::read_to_string(temp.path().join("report")).unwrap(),
             "one report\n"
         );
+    }
+
+    #[test]
+    fn installed_program_is_read_back_from_both_definition_formats() {
+        let plist = desktop_launchd(
+            "com.example.desktop",
+            Path::new("/Users/me/Applications/Familiar.app/Contents/MacOS/familiar-ai-desktop"),
+            Path::new("/tmp/desktop.out"),
+            Path::new("/tmp/desktop.err"),
+            "/usr/bin:/bin",
+            true,
+        );
+        assert_eq!(
+            installed_program(Backend::Launchd, &plist).unwrap(),
+            Path::new("/Users/me/Applications/Familiar.app/Contents/MacOS/familiar-ai-desktop")
+        );
+        let unit = desktop_systemd(
+            "Familiar desktop",
+            Path::new("/home/me/my bin/familiar-ai-desktop"),
+            "/usr/bin:/bin",
+            true,
+        );
+        assert_eq!(
+            installed_program(Backend::Systemd, &unit).unwrap(),
+            Path::new("/home/me/my bin/familiar-ai-desktop")
+        );
+        assert!(installed_program(Backend::Launchd, "<plist/>").is_none());
+    }
+
+    #[test]
+    fn stale_desktop_program_is_a_status_blocker() {
+        let temp = tempfile::tempdir().unwrap();
+        let sibling = temp.path().join("familiar-ai-desktop");
+        let bundle = temp
+            .path()
+            .join("Familiar.app/Contents/MacOS/familiar-ai-desktop");
+        fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        fs::write(&sibling, b"new build").unwrap();
+        fs::write(&bundle, b"old build").unwrap();
+
+        assert!(program_blockers(&sibling, Some(&sibling)).is_empty());
+
+        let blockers = program_blockers(&sibling, Some(&bundle));
+        assert_eq!(blockers.len(), 1);
+        assert!(blockers[0].contains("Familiar.app"));
+        assert!(blockers[0].contains("the two binaries differ"));
+
+        fs::write(&bundle, b"new build").unwrap();
+        assert!(!program_blockers(&sibling, Some(&bundle))[0].contains("differ"));
+
+        assert!(
+            program_blockers(&sibling, Some(Path::new("/nonexistent/desktop")))[0]
+                .contains("does not exist")
+        );
+        assert!(program_blockers(&sibling, None)[0].contains("no readable program"));
     }
 
     #[test]
