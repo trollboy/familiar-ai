@@ -2538,6 +2538,23 @@ reinstall the binary, then rerun the 076 drive.
   the first connected heartbeat after a failure, and reloads after a daemon
   generation change. A desktop contract test pins the retry path.
 
+### FAM-BUG-072 — Overlay reinstall leaves the macOS app bundle visibly stale
+
+- **Status:** Operationally fixed 2026-09-24; a packaged installer remains
+  desirable so manual installs cannot regress this.
+- **Found:** 2026-09-24 after repeated rebuild/reinstall cycles still showed
+  Familiar.app as three days old in Finder.
+- **Detail:** The rebuilt executable was current, and launchd was running that
+  executable, but `ditto` had repeatedly copied the new application *over* the
+  installed bundle. That preserved the destination bundle directory's
+  September 21 modification time and initially retained a stale
+  `_CodeSignature`, making the installation both misleading and fragile.
+- **Fix:** Stopped both launch agents, moved the prior bundle to a recoverable
+  backup, copied the build into a nonexistent destination, ad-hoc signed the
+  resulting bundle, verified it with strict `codesign`, and only then
+  relaunched. Future macOS installation must replace the bundle atomically;
+  it must never overlay an existing `.app` directory.
+
 ## 2026-09-05 — PRD-087: identity and event-sequence invariants
 
 Three invariants now enforce facts that previously existed only as prose or
