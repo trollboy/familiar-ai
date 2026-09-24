@@ -38,6 +38,10 @@ fn first_next_applies_manifest_then_is_silent_and_idempotent() {
             .current_dir(repo.path())
             .env("FAMILIAR_AI_DATABASE__PATH", &database)
             .env(
+                "XDG_CONFIG_HOME",
+                std::env::temp_dir().join("familiar-ai-tests-no-config"),
+            )
+            .env(
                 "XDG_RUNTIME_DIR",
                 database.parent().unwrap().join("xdg-runtime"),
             )

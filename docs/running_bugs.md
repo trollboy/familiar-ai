@@ -411,6 +411,32 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-094 — Settings saves are not validated, the adapter list offers values the config rejects, and the daemon then fails to start
+
+- **Status:** Fixed (2026-09-24: `save_config` loads the candidate file
+  through `Config::load`, the daemon's own startup validation, and refuses
+  with that message before writing; `agents.<role>.adapter` offers exactly
+  `AgentAdapterKind`'s four values, and the runtime factory ids move to a
+  `runtimes` list for a worker's `runtime` field; the CLI integration tests
+  set `XDG_CONFIG_HOME` so they stop reading the developer's real config.)
+- **Found:** 2026-09-24 on Linux. The owner set the reviewer adapter to
+  `openai-api` and the implementation model to `opus` from Settings. The
+  form said "Saved and validated." On the next restart the daemon exited
+  with `unknown variant: found openai-api`, and after that line was
+  repaired, with `review.implementation_agent.model 'sonnet' contradicts
+  agents.implementation.model 'opus'` from a repository override. The
+  desktop showed "daemon is not running" until the file was restored from
+  the save's own backup. The gate then went red on this machine because
+  `cli_bootstrap` loads whatever config is in `~/.config`.
+- **Detail:** `save_config` typed each edit against the existing value and
+  wrote the document; no configuration-level validation ran. The adapter
+  dropdown listed every runtime factory id, four of which are not adapter
+  kinds. Three surfaces disagreed about what a valid config is; the daemon's
+  loader is the only one that matters, so the save now asks it.
+- **Expected fix:** as landed. Recovery when it happens anyway: the save
+  writes `config.toml.bak-window-<stamp>` first; `diff` it against the
+  live file and restore the lines the daemon names.
+
 ### FAM-BUG-093 — A dispatched run can take ownership from the daemon that spawned it, then delete the claim on exit
 
 - **Status:** Fixed (2026-09-24: a process whose delegation variable names

@@ -58,6 +58,10 @@ fn release_prints_one_line_and_preserves_claim() {
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
         .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
+        .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )
@@ -102,6 +106,10 @@ fn complete_is_a_human_only_manual_override() {
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
         .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
+        .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )
@@ -123,6 +131,10 @@ fn complete_is_a_human_only_manual_override() {
         ])
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
@@ -160,6 +172,10 @@ fn stale_persisted_identity_fails_without_reconciling_or_writing_an_event() {
         ])
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),

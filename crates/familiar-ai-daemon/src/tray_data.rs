@@ -196,26 +196,43 @@ impl DaemonDataSource {
     fn config_choices(&self) -> Value {
         let config = familiar_ai_core::Config::load(Some(&self.config_path())).ok();
 
-        let factories = familiar_ai_agent::builtin_adapter_factories();
-        let adapters: Vec<Value> = factories
-            .ids()
-            .into_iter()
-            .map(|id| {
-                let executable = default_executable(id.as_str());
+        // FAM-BUG-094: `agents.<role>.adapter` is the closed
+        // `AgentAdapterKind` enum. The form used to offer every runtime
+        // factory id here (`openai-api`, `anthropic-api`, ...), which the
+        // config rejects at startup. Those ids belong to a worker's
+        // `runtime` field and are offered there, as `runtimes`.
+        let adapters: Vec<Value> = ADAPTER_KINDS
+            .iter()
+            .map(|(id, executable, detail)| {
                 let found = which_on_path(executable);
-                let (models, models_source) = self.adapter_models(id.as_str(), config.as_ref());
+                let (models, models_source) = self.adapter_models(id, config.as_ref());
+                let is_cli = which_matters(id);
                 json!({
                     "value": id,
-                    "available": executable.is_empty() || found.is_some(),
-                    "detail": match (&found, executable.is_empty()) {
-                        (_, true) => "API runtime; no executable".to_string(),
-                        (Some(path), _) => format!("{executable} at {path}"),
-                        (None, _) => format!("{executable} not on PATH"),
+                    "available": !is_cli || found.is_some(),
+                    "detail": match (&found, is_cli) {
+                        (_, false) => detail.to_string(),
+                        (Some(path), true) => format!("{executable} at {path}"),
+                        (None, true) => format!("{executable} not on PATH"),
                     },
                     // The adapter supplies its executable and the models it
                     // can drive; the settings form offers exactly these.
                     "executable": executable,
                     "executable_path": found,
+                    "models": models,
+                    "models_source": models_source,
+                })
+            })
+            .collect();
+        let factories = familiar_ai_agent::builtin_adapter_factories();
+        let runtimes: Vec<Value> = factories
+            .ids()
+            .into_iter()
+            .map(|id| {
+                let (models, models_source) = self.adapter_models(id.as_str(), config.as_ref());
+                json!({
+                    "value": id,
+                    "available": true,
                     "models": models,
                     "models_source": models_source,
                 })
@@ -244,6 +261,7 @@ impl DaemonDataSource {
 
         json!({
             "adapters": adapters,
+            "runtimes": runtimes,
             "permission_modes": ["default", "plan", "acceptEdits", "bypassPermissions"],
             "inference_modes": ["disabled", "local_only", "remote_only", "hybrid"],
             "prd_metadata_policies": ["incremental", "strict"],
@@ -369,6 +387,10 @@ impl DaemonDataSource {
                     "configured providers and current defaults".to_string(),
                 )
             }
+            "raw-agent-loop" => (
+                provider_models(""),
+                "configured providers; the runtime is chosen per worker".to_string(),
+            ),
             _ => (provider_models(""), "configured providers".to_string()),
         };
         result.0.sort();
@@ -927,6 +949,12 @@ impl DaemonDataSource {
             *slot = replacement;
         }
 
+        // FAM-BUG-094: the form used to write whatever it held and call it
+        // validated. A reviewer adapter the enum rejects took the daemon
+        // down on its next start. Load the candidate through the same
+        // validation the daemon runs at startup, and refuse before writing.
+        validate_candidate_config(&path, &document.to_string())?;
+
         // Keep the file that was there. The operator can be editing ceilings
         // that govern unattended spending; a bad save must be recoverable.
         let backup = path.with_extension(format!(
@@ -941,6 +969,19 @@ impl DaemonDataSource {
             "note": "Most settings are read at startup; restart the daemon for them to take effect.",
         }))
     }
+}
+
+/// Run the daemon's own startup validation over a candidate file body before
+/// it replaces the real one. The candidate sits beside the real file so any
+/// relative reference resolves the same way.
+fn validate_candidate_config(path: &std::path::Path, candidate: &str) -> Result<(), String> {
+    let probe = path.with_extension(format!("toml.candidate-{}", std::process::id()));
+    std::fs::write(&probe, candidate).map_err(|e| e.to_string())?;
+    let outcome = familiar_ai_core::Config::load(Some(&probe));
+    let _ = std::fs::remove_file(&probe);
+    outcome
+        .map(|_| ())
+        .map_err(|error| format!("not saved, the daemon would refuse this configuration: {error}"))
 }
 
 fn merge_configured_repositories(
@@ -1417,13 +1458,23 @@ fn ensure_item<'a>(
 }
 
 /// The executable an adapter drives when the config does not say otherwise.
-fn default_executable(adapter: &str) -> &'static str {
-    match adapter {
-        "claude-code" => "claude",
-        "codex" => "codex",
-        "ollama" => "ollama",
-        _ => "",
-    }
+/// The closed set `agents.<role>.adapter` accepts, mirroring
+/// `AgentAdapterKind` and its `default_executable`: id, executable, and what
+/// to say about a kind that is not a vendor CLI.
+const ADAPTER_KINDS: [(&str, &str, &str); 4] = [
+    ("claude-code", "claude", ""),
+    ("codex", "codex", ""),
+    ("ollama", "codex", "runs through Familiar's own agent loop"),
+    (
+        "raw-agent-loop",
+        "raw-agent-loop",
+        "Familiar's own agent loop over an API runtime; no executable",
+    ),
+];
+
+/// Whether an adapter kind needs its executable on PATH to be usable.
+fn which_matters(adapter: &str) -> bool {
+    matches!(adapter, "claude-code" | "codex")
 }
 
 /// Whether a program is runnable, resolved the way a shell would.

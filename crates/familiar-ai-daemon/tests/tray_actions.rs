@@ -43,7 +43,11 @@ ratio = 0.5
 allowed_paths = ["docs", "crates"]
 max_review_attempts = 3
 
-[repositories."/p/one"]
+[agents.reviewer]
+adapter = "claude-code"
+model = "opus"
+
+[repositories."__REPO__"]
 # A real profile name: the fixture stands in for a config the daemon loads,
 # and a value that fails validation would only ever test the failure path.
 profile = "canonical"
@@ -78,7 +82,13 @@ fn harness() -> Harness {
     let router = Arc::new(InferenceRouter::new(&Default::default()));
     let config_dir = tmp.path().join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::write(config_dir.join("config.toml"), CONFIG_FIXTURE).unwrap();
+    // The fixture names the real temp repository so the daemon's own
+    // startup validation, which the save now runs, can load it.
+    std::fs::write(
+        config_dir.join("config.toml"),
+        CONFIG_FIXTURE.replace("__REPO__", &repo_dir.to_string_lossy()),
+    )
+    .unwrap();
     let paths = AppPaths {
         config_dir: config_dir.clone(),
         data_dir: tmp.path().join("data"),
@@ -428,7 +438,7 @@ fn a_project_can_override_a_setting_it_currently_inherits() {
             edits: vec![ConfigEdit {
                 path: vec![
                     "repositories".into(),
-                    "/p/one".into(),
+                    h.repo.clone(),
                     "review".into(),
                     "max_review_attempts".into(),
                 ],
@@ -440,7 +450,7 @@ fn a_project_can_override_a_setting_it_currently_inherits() {
     let written = std::fs::read_to_string(&h.config).unwrap();
     let parsed: toml::Value = toml::from_str(&written).unwrap();
     assert_eq!(
-        parsed["repositories"]["/p/one"]["review"]["max_review_attempts"]
+        parsed["repositories"][h.repo.as_str()]["review"]["max_review_attempts"]
             .as_integer()
             .unwrap(),
         7,
@@ -455,7 +465,7 @@ fn a_project_can_override_a_setting_it_currently_inherits() {
     );
     // And the project's existing settings survive.
     assert_eq!(
-        parsed["repositories"]["/p/one"]["profile"]
+        parsed["repositories"][h.repo.as_str()]["profile"]
             .as_str()
             .unwrap(),
         "canonical"
@@ -473,7 +483,7 @@ fn a_project_override_of_the_wrong_type_is_refused() {
             edits: vec![ConfigEdit {
                 path: vec![
                     "repositories".into(),
-                    "/p/one".into(),
+                    h.repo.clone(),
                     "review".into(),
                     "max_review_attempts".into(),
                 ],
@@ -495,7 +505,7 @@ fn a_project_override_of_an_unknown_setting_is_refused() {
             edits: vec![ConfigEdit {
                 path: vec![
                     "repositories".into(),
-                    "/p/one".into(),
+                    h.repo.clone(),
                     "review".into(),
                     "no_such_setting".into(),
                 ],
@@ -706,6 +716,22 @@ fn every_adapter_choice_carries_its_executable_and_a_model_list() {
         assert!(adapter["models"].is_array(), "{adapter}");
         assert!(adapter["models_source"].is_string(), "{adapter}");
     }
+    let values: Vec<&str> = adapters
+        .iter()
+        .filter_map(|a| a["value"].as_str())
+        .collect();
+    assert_eq!(
+        values,
+        ["claude-code", "codex", "ollama", "raw-agent-loop"],
+        "agents.*.adapter offers exactly what AgentAdapterKind accepts"
+    );
+    let runtimes: Vec<&str> = choices["runtimes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["value"].as_str())
+        .collect();
+    assert!(runtimes.contains(&"openai-api") && runtimes.contains(&"anthropic-api"));
     let claude = adapters
         .iter()
         .find(|a| a["value"] == "claude-code")
@@ -718,13 +744,59 @@ fn every_adapter_choice_carries_its_executable_and_a_model_list() {
         .filter_map(|m| m.as_str())
         .collect();
     assert_eq!(models, ["haiku", "opus", "sonnet"]);
-    let api = adapters
+    let api = choices["runtimes"]
+        .as_array()
+        .unwrap()
         .iter()
         .find(|a| a["value"] == "anthropic-api")
-        .expect("anthropic-api is a built-in adapter");
-    assert_eq!(api["executable"], "");
-    assert_eq!(api["available"], true, "an API runtime needs no executable");
+        .expect("anthropic-api is a built-in runtime");
     assert!(api["models"].as_array().unwrap().len() >= 4);
+    let raw = adapters
+        .iter()
+        .find(|a| a["value"] == "raw-agent-loop")
+        .unwrap();
+    assert_eq!(
+        raw["available"], true,
+        "the owned loop needs no executable on PATH"
+    );
+}
+
+/// FAM-BUG-094: a save the daemon would refuse at startup is refused here,
+/// with the daemon's own message, and the file is untouched.
+#[test]
+fn a_save_the_daemon_would_refuse_is_refused_before_writing() {
+    let h = harness();
+    let before = std::fs::read_to_string(&h.config).unwrap();
+    let refused = h
+        .source
+        .act(Action::SaveConfig {
+            edits: vec![ConfigEdit {
+                path: vec!["agents".into(), "reviewer".into(), "adapter".into()],
+                value: "openai-api".into(),
+            }],
+        })
+        .unwrap_err();
+    assert!(refused.contains("not saved"), "{refused}");
+    assert!(refused.contains("openai-api"), "{refused}");
+    assert_eq!(std::fs::read_to_string(&h.config).unwrap(), before);
+    assert!(
+        std::fs::read_dir(h.config.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains("bak-window")),
+        "no backup is made for a save that did not happen"
+    );
+
+    let saved = h
+        .source
+        .act(Action::SaveConfig {
+            edits: vec![ConfigEdit {
+                path: vec!["agents".into(), "reviewer".into(), "adapter".into()],
+                value: "codex".into(),
+            }],
+        })
+        .expect("a value the daemon accepts saves");
+    assert_eq!(saved["saved"], 1);
 }
 
 /// Saving back to disabled has to clear the flag too, or the menu keeps

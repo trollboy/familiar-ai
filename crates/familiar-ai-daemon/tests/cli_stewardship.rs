@@ -41,6 +41,10 @@ fn run_json(repo: &std::path::Path, database: &std::path::Path, args: &[&str]) -
         .current_dir(repo)
         .env("FAMILIAR_AI_DATABASE__PATH", database)
         .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
+        .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )
@@ -172,6 +176,10 @@ fn stewardship_session_from_another_repository_is_refused() {
         .args(["stewardship", "attempts", "session-a"])
         .current_dir(repo_b.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),

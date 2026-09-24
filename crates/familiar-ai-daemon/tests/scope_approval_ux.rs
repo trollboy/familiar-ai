@@ -341,6 +341,10 @@ fn bare_scope_decisions_cli_lists_without_a_hash() {
         .current_dir(repo.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
         .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
+        .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )

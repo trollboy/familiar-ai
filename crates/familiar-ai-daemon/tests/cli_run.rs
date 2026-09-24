@@ -64,6 +64,10 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .env("FAKE_CODEX_PROMPT", &capture)
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
         .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
+        .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )
@@ -112,6 +116,10 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .env("HOME", temp.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
         .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
+        .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
         )
@@ -126,6 +134,10 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .arg("usage")
         .env("HOME", temp.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join("familiar-ai-tests-no-config"),
+        )
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
