@@ -877,6 +877,7 @@ mod tests {
                     remediation_pin: Some("local-ollama".into()),
                     ..Default::default()
                 },
+                ..Default::default()
             }),
             // FAM-BUG-098: with the owned loop off this worker is not a
             // candidate at all; the point here is that, when it is, preflight

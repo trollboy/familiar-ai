@@ -376,6 +376,7 @@ pub(crate) fn materialize_host_worker_default(config: &mut Config) -> Result<(),
             remediation_pin: Some(id),
             ..Default::default()
         },
+        ..Default::default()
     });
     Ok(())
 }
@@ -1776,6 +1777,25 @@ fn execute_tracked_inner(
                         candidates_json: &candidates_json,
                         risk_classes_json: &risk_classes_json,
                         expected_file_count: route_context.expected_file_count,
+                        cost_decision_reason: Some(
+                            if worker_registry.routing.implementation_pin.as_deref()
+                                == Some(record.selected_worker.as_str())
+                                || worker_registry.routing.review_pin.as_deref()
+                                    == Some(record.selected_worker.as_str())
+                                || worker_registry.routing.remediation_pin.as_deref()
+                                    == Some(record.selected_worker.as_str())
+                            {
+                                "explicit-pin"
+                            } else if worker_registry
+                                .workers
+                                .values()
+                                .any(|worker| worker.estimated_cost_microusd.is_none())
+                            {
+                                "cost-could-not-rank"
+                            } else {
+                                "cost-ranked-and-lost"
+                            },
+                        ),
                     },
                 )
                 .map_err(|e| RunError::Storage(e.to_string()))?;
@@ -3170,6 +3190,7 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
     let cycle = coordinator
         .run(&context.repository.worktree, request, &mut io::stdout())
         .map_err(|e| RunError::Storage(format!("review workflow failed: {e}")))?;
+    persist_review_accounting_observations(db, execution_id, &context.repository.worktree, &cycle)?;
     println!(
         "Review disposition: {:?}; waivers: {:?}; independence: {:?}; stop reasons: {:?}",
         cycle.disposition,
@@ -3179,6 +3200,84 @@ fn run_review(input: ReviewRunInput<'_>) -> Result<ReviewCycle, RunError> {
     );
     report_scope_findings(&cycle);
     Ok(cycle)
+}
+
+fn persist_review_accounting_observations(
+    db: &Database,
+    execution_id: &str,
+    worktree: &Path,
+    cycle: &ReviewCycle,
+) -> Result<(), RunError> {
+    let evidence = git_common_directory_evidence(worktree);
+    let worker = cycle
+        .reviewer
+        .as_ref()
+        .map(|value| value.assignment.agent_id.as_str())
+        .unwrap_or("unknown-reviewer");
+    let adapter = cycle
+        .reviewer
+        .as_ref()
+        .map(|value| value.assignment.adapter_id.as_str())
+        .unwrap_or("unknown");
+    let model = cycle.reviewer.as_ref().and_then(|value| {
+        value
+            .reported_model
+            .as_deref()
+            .or(value.assignment.requested_model.as_deref())
+    });
+    let repo = AccountingRepository::new(db.conn());
+    for stage in &cycle.review_attempts {
+        let usage = &stage.usage;
+        let has_usage = usage.input_tokens.is_some()
+            || usage.cached_tokens.is_some()
+            || usage.output_tokens.is_some();
+        let observation = repo
+            .append_observation(&UsageObservation {
+                execution_id,
+                attempt_id: &stage.stage_id,
+                stage: "review",
+                session_id: None,
+                worker_identity: worker,
+                adapter,
+                cli_version: None,
+                model_identity: model,
+                service_tier: None,
+                provider_request_id: None,
+                uncached_input_tokens: usage.input_tokens,
+                cache_read_tokens: usage.cached_tokens,
+                cache_write_tokens: None,
+                output_tokens: usage.output_tokens,
+                reasoning_output_tokens: None,
+                unknown_reason: (!has_usage).then_some("review_usage_not_reported"),
+                period_start: &stage.started_at,
+                period_end: &stage.ended_at,
+                terminal_status: &stage.outcome,
+                source_event_hash: &format!("review:{}:{}", cycle.cycle_id, stage.stage_id),
+                provider_cost_lexical: None,
+                project_resolution_evidence: evidence.as_deref(),
+                output_register_id: "review",
+                output_register_version: REGISTER_VERSION,
+                input_compression_id: "none",
+                input_compression_version: "none",
+                compression_experiment: None,
+                compression_lane: None,
+                edit_form_id: "none",
+                edit_form_version: "none",
+                truncation_config_id: "none",
+                truncation_config_version: "none",
+            })
+            .map_err(|e| RunError::Storage(e.to_string()))?;
+        if let (Some(observation), Some(amount)) = (observation, usage.estimated_cost_microusd) {
+            repo.append_legacy_configured_estimate(
+                &observation,
+                model.unwrap_or("unknown"),
+                amount,
+                "{\"review_stage\":true}",
+            )
+            .map_err(|e| RunError::Storage(e.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 fn configured_tier_policy(config: &familiar_ai_core::config::ReviewConfig) -> ReviewTierPolicy {
@@ -4403,10 +4502,26 @@ mod tests {
         for remediation in [false, true] {
             let (_temp, db, context, config, paths, baseline, agent, finalization, snapshot) =
                 production_review_fixture(remediation);
+            let execution_id = if remediation { "remediation" } else { "clean" };
+            db.conn().execute("INSERT INTO execution_history(execution_id,started_at,ended_at,agent,outcome,repository,worktree,prd_path,unavailable_fields) VALUES(?1,'2026-08-03T00:00:00Z','2026-08-03T00:00:01Z','fake','succeeded','repo','repo','docs/prds/test.md','[]')", [execution_id]).unwrap();
+            let project_evidence =
+                git_common_directory_evidence(&context.repository.worktree).unwrap();
+            AccountingRepository::new(db.conn())
+                .register_project(
+                    &format!(
+                        "prj_review_{}",
+                        if remediation { "remediation" } else { "clean" }
+                    ),
+                    "review-fixture",
+                    "repository",
+                    &project_evidence,
+                    "test",
+                )
+                .unwrap();
             run_review(ReviewRunInput {
                 db: &db,
                 context: &context,
-                execution_id: if remediation { "remediation" } else { "clean" },
+                execution_id,
                 prd_id: "PRD-000",
                 implementation_result: &ExecutionResult {
                     agent_version: Some("fake".into()),
@@ -4443,6 +4558,13 @@ mod tests {
                 *agent.reviews.lock().unwrap(),
                 if remediation { 2 } else { 1 }
             );
+            let review_observations: u64 = db.conn().query_row(
+                "SELECT count(*) FROM usage_observations WHERE execution_id=?1 AND stage='review'",
+                [execution_id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(review_observations, cycle.review_attempts.len() as u64);
+            assert_eq!(review_observations, if remediation { 2 } else { 1 });
             if remediation {
                 assert_eq!(
                     fs::read_to_string(context.repository.worktree.join("src/lib.rs")).unwrap(),
@@ -5390,6 +5512,7 @@ estimated_cost_microusd = 1
             ]),
             capability_profiles: BTreeMap::new(),
             routing: Default::default(),
+            ..Default::default()
         });
         config.review.enabled = true;
         // FAM-BUG-098: raw-loop workers are candidates only while the owned

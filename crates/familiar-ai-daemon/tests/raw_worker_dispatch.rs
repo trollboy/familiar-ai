@@ -303,6 +303,7 @@ fn tracked_run_records_exactly_one_usage_observation_for_one_raw_attempt() {
             remediation_pin: Some("raw".into()),
             ..Default::default()
         },
+        ..Default::default()
     });
     let placeholder = PlaceholderAgent;
     let prd = repository.join("docs/prds/PRD-001.md");

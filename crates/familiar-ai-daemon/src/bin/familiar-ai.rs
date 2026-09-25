@@ -603,6 +603,16 @@ enum ProviderCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModelCommand {
+    /// Attach an auditable operator-declared cost estimate to an enabled worker.
+    CostBasis {
+        worker: String,
+        #[arg(long)]
+        estimate_microusd: u64,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        reason: String,
+    },
     Enable {
         model: String,
         #[arg(long, value_delimiter = ',', num_args = 1..)]
@@ -1153,6 +1163,17 @@ fn config_command(command: ConfigCommand) -> Result<(), String> {
             },
         },
         ConfigCommand::Model { command } => match command {
+            ModelCommand::CostBasis {
+                worker,
+                estimate_microusd,
+                actor,
+                reason,
+            } => ConfigAction::ModelCostBasis {
+                worker,
+                estimate_microusd,
+                actor,
+                reason,
+            },
             ModelCommand::Enable {
                 model,
                 capabilities,

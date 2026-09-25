@@ -201,6 +201,12 @@ pub enum ConfigAction {
         capabilities: Vec<String>,
         actor: Option<String>,
     },
+    ModelCostBasis {
+        worker: String,
+        estimate_microusd: u64,
+        actor: String,
+        reason: String,
+    },
     ModelDisable {
         model: String,
         actor: Option<String>,
@@ -288,6 +294,12 @@ pub fn execute_with_context(action: ConfigAction, context: &ConfigContext) -> Re
             capabilities,
             actor,
         } => model_enable(context, &model, &capabilities, actor.as_deref()),
+        ConfigAction::ModelCostBasis {
+            worker,
+            estimate_microusd,
+            actor,
+            reason,
+        } => model_cost_basis(context, &worker, estimate_microusd, &actor, &reason),
         ConfigAction::ModelDisable { model, actor } => {
             model_disable(context, &model, actor.as_deref())
         }
@@ -1452,6 +1464,59 @@ fn model_enable(
         },
     )?;
     println!("Enabled {address}.");
+    Ok(())
+}
+
+fn model_cost_basis(
+    context: &ConfigContext,
+    worker: &str,
+    estimate: u64,
+    actor_value: &str,
+    reason: &str,
+) -> Result<(), String> {
+    if actor_value.trim().is_empty() || reason.trim().is_empty() {
+        return Err("--actor and --reason must be non-empty".into());
+    }
+    let config = load_config(context)?;
+    let registry = config
+        .worker_registry
+        .as_ref()
+        .ok_or("worker registry is not configured")?;
+    if !registry.workers.contains_key(worker) {
+        return Err(format!("unknown worker '{worker}'"));
+    }
+    mutate(
+        context,
+        "familiar-ai config model cost-basis",
+        actor_value,
+        |document| {
+            let registry = root_table(document, "worker_registry")?;
+            let workers = registry
+                .get_mut("workers")
+                .and_then(Item::as_table_mut)
+                .ok_or("worker_registry.workers is not a table")?;
+            let worker_table = workers
+                .get_mut(worker)
+                .and_then(Item::as_table_mut)
+                .ok_or_else(|| format!("worker '{worker}' is not a table"))?;
+            worker_table["estimated_cost_microusd"] = value(estimate as i64);
+            if !registry.contains_key("cost_bases") {
+                registry.insert("cost_bases", Item::Table(Table::new()));
+            }
+            let bases = registry
+                .get_mut("cost_bases")
+                .and_then(Item::as_table_mut)
+                .ok_or("worker_registry.cost_bases is not a table")?;
+            let mut basis = Table::new();
+            basis["kind"] = value("operator-declared");
+            basis["estimate_microusd"] = value(estimate as i64);
+            basis["actor"] = value(actor_value);
+            basis["reason"] = value(reason);
+            bases.insert(worker, Item::Table(basis));
+            Ok(())
+        },
+    )?;
+    println!("Recorded operator-declared cost basis for {worker}.");
     Ok(())
 }
 

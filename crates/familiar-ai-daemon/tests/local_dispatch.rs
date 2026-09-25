@@ -80,6 +80,7 @@ fn selected_local_worker_executes_with_hardware_reservation_and_telemetry() {
         workers: BTreeMap::from([("local-ollama".into(), worker)]),
         capability_profiles: BTreeMap::new(),
         routing: Default::default(),
+        ..Default::default()
     });
 
     let (_, _, records) = resolved_worker_plan(&config, &RouteContext::default()).unwrap();

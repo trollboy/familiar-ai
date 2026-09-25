@@ -1090,6 +1090,7 @@ pub fn persist_run_outcome(
         candidates_json: "[]",
         risk_classes_json: "[]",
         expected_file_count: 0,
+        cost_decision_reason: Some("cost-could-not-rank"),
     })?;
 
     for AttemptUsage {

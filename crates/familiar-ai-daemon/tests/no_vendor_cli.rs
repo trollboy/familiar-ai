@@ -331,6 +331,7 @@ fn cli_less_raw_worker_completes_claim_verify_review_and_integration() {
             remediation_pin: Some("implementer".into()),
             ..Default::default()
         },
+        ..Default::default()
     });
     let paths = AppPaths {
         config_dir: temp.path().join("config"),

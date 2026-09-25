@@ -16,6 +16,7 @@ pub struct WorkerSelectionRecord<'a> {
     pub candidates_json: &'a str,
     pub risk_classes_json: &'a str,
     pub expected_file_count: u64,
+    pub cost_decision_reason: Option<&'a str>,
 }
 
 impl<'a> WorkerSelectionRepository<'a> {
@@ -23,7 +24,7 @@ impl<'a> WorkerSelectionRepository<'a> {
         Self { conn }
     }
     pub fn record(&self, record: &WorkerSelectionRecord<'_>) -> familiar_ai_core::Result<()> {
-        self.conn.execute("INSERT INTO worker_selections(selection_id,execution_id,stage,rule,selected_identity,candidates_json,risk_classes_json,expected_file_count,recorded_at,selected_spec_identity,selected_empirical_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?5,?10)", params![record.selection_id,record.execution_id,record.stage,record.rule,record.selected_identity,record.candidates_json,record.risk_classes_json,record.expected_file_count,Utc::now().to_rfc3339(),record.selected_empirical_version]).map_err(|e| FamiliarError::Database(format!("worker selection write failed: {e}")))?;
+        self.conn.execute("INSERT INTO worker_selections(selection_id,execution_id,stage,rule,selected_identity,candidates_json,risk_classes_json,expected_file_count,recorded_at,selected_spec_identity,selected_empirical_version,cost_decision_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?5,?10,?11)", params![record.selection_id,record.execution_id,record.stage,record.rule,record.selected_identity,record.candidates_json,record.risk_classes_json,record.expected_file_count,Utc::now().to_rfc3339(),record.selected_empirical_version,record.cost_decision_reason]).map_err(|e| FamiliarError::Database(format!("worker selection write failed: {e}")))?;
         Ok(())
     }
 }
@@ -47,6 +48,7 @@ mod tests {
                 candidates_json: "[]",
                 risk_classes_json: r#"["security","routing"]"#,
                 expected_file_count: 1,
+                cost_decision_reason: Some("cost-ranked-and-lost"),
             })
             .unwrap();
         let stored: (String, u64) = db

@@ -53,6 +53,15 @@ pub fn render(
     session_id: Option<&str>,
     min_unattended_percent: u32,
 ) -> Result<String, ReportError> {
+    render_with_cost_floor(db, session_id, min_unattended_percent, 80)
+}
+
+pub fn render_with_cost_floor(
+    db: &Database,
+    session_id: Option<&str>,
+    min_unattended_percent: u32,
+    cost_coverage_floor_percent: u8,
+) -> Result<String, ReportError> {
     let sessions = DriverRepository::new(db.conn());
     let session = match session_id {
         Some(id) => sessions
@@ -83,6 +92,12 @@ pub fn render(
     render_authority(db, &mut out, &session.session_id)?;
     render_recovery(db, &mut out, &session.repository_key)?;
     render_cost(db, &mut out, &attempts)?;
+    render_cost_coverage(
+        db,
+        &mut out,
+        &session.session_id,
+        cost_coverage_floor_percent,
+    )?;
     render_reconciliation(db, &mut out, &session.repository_key)?;
     render_judgment(&mut out, &session, &stopped, &pending_scope);
     let autonomy =
@@ -108,6 +123,34 @@ pub fn render(
         .collect();
     render_autonomy(&mut out, &autonomy, min_unattended_percent, &lifecycles);
     Ok(familiar_ai_agent::redact_sensitive(out))
+}
+
+fn render_cost_coverage(
+    db: &Database,
+    out: &mut String,
+    session_id: &str,
+    floor: u8,
+) -> Result<(), ReportError> {
+    let coverage = AccountingRepository::new(db.conn())
+        .session_cost_coverage(session_id)
+        .map_err(storage)?;
+    let percent = if coverage.executions == 0 {
+        0
+    } else {
+        coverage.measured_executions.saturating_mul(100) / coverage.executions
+    };
+    let _ = writeln!(
+        out,
+        "\nCOST COVERAGE\n  measured={}/{} ({}%)",
+        coverage.measured_executions, coverage.executions, percent
+    );
+    if percent < u64::from(floor) {
+        let _ = writeln!(out, "  measurement_failure: below {floor}% coverage floor");
+        for worker in coverage.uncovered_workers {
+            let _ = writeln!(out, "  uncovered: {worker}");
+        }
+    }
+    Ok(())
 }
 
 /// PRD-085: how many of this session's completed PRDs finished with nobody's

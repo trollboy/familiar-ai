@@ -806,7 +806,66 @@ pub struct WorkerRouteRuleConfig {
     pub max_expected_files: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// Auditable source for a worker's routing estimate. This is deliberately
+/// separate from `estimated_cost_microusd`: PRD-086 measures the existing
+/// routes before a later PRD is allowed to steer with the measurement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum WorkerCostBasisConfig {
+    PublishedTokenRates {
+        estimate_microusd: u64,
+        source: String,
+        effective_at: String,
+    },
+    OperatorDeclared {
+        estimate_microusd: u64,
+        actor: String,
+        reason: String,
+    },
+    MeasuredAcceptedExecutions {
+        #[serde(default = "default_cost_measurement_minimum")]
+        minimum_accepted_executions: u64,
+    },
+    Local {
+        unit: LocalCostUnitConfig,
+        amount: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        monetary_ordering_policy: Option<String>,
+        actor: String,
+        reason: String,
+    },
+}
+
+impl WorkerCostBasisConfig {
+    pub fn declared_estimate_microusd(&self) -> Option<u64> {
+        match self {
+            Self::PublishedTokenRates {
+                estimate_microusd, ..
+            }
+            | Self::OperatorDeclared {
+                estimate_microusd, ..
+            } => Some(*estimate_microusd),
+            Self::MeasuredAcceptedExecutions { .. } | Self::Local { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LocalCostUnitConfig {
+    WallClockMillisecond,
+    LocalToken,
+}
+
+const fn default_cost_measurement_minimum() -> u64 {
+    3
+}
+
+fn default_cost_coverage_floor_percent() -> u8 {
+    80
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerRegistryConfig {
     #[serde(default)]
@@ -815,6 +874,24 @@ pub struct WorkerRegistryConfig {
     pub capability_profiles: BTreeMap<String, CapabilityProfileConfig>,
     #[serde(default)]
     pub routing: WorkerRoutingConfig,
+    /// Exactly one entry per worker when cost is rankable. Missing entries
+    /// remain valid configuration so diagnostics can provide remediation.
+    #[serde(default)]
+    pub cost_bases: BTreeMap<String, WorkerCostBasisConfig>,
+    #[serde(default = "default_cost_coverage_floor_percent")]
+    pub cost_coverage_floor_percent: u8,
+}
+
+impl Default for WorkerRegistryConfig {
+    fn default() -> Self {
+        Self {
+            workers: BTreeMap::new(),
+            capability_profiles: BTreeMap::new(),
+            routing: WorkerRoutingConfig::default(),
+            cost_bases: BTreeMap::new(),
+            cost_coverage_floor_percent: default_cost_coverage_floor_percent(),
+        }
+    }
 }
 
 /// Facts observed by a composition root when no worker has been declared.
@@ -947,6 +1024,8 @@ impl WorkerRegistryConfig {
                 remediation_pin: Some("legacy-implementation".to_owned()),
                 ..WorkerRoutingConfig::default()
             },
+            cost_bases: BTreeMap::new(),
+            cost_coverage_floor_percent: default_cost_coverage_floor_percent(),
         }
     }
 
@@ -956,6 +1035,26 @@ impl WorkerRegistryConfig {
     ) -> Result<(), String> {
         if self.workers.is_empty() {
             return Err("worker_registry.workers must not be empty".into());
+        }
+        if self.cost_coverage_floor_percent > 100 {
+            return Err(
+                "worker_registry.cost_coverage_floor_percent must be between 0 and 100".into(),
+            );
+        }
+        for (id, basis) in &self.cost_bases {
+            let worker = self.workers.get(id).ok_or_else(|| {
+                format!("worker_registry.cost_bases.{id} does not name a configured worker")
+            })?;
+            if let Some(declared) = basis.declared_estimate_microusd() {
+                if worker.estimated_cost_microusd != Some(declared) {
+                    return Err(format!("worker_registry.workers.{id}.estimated_cost_microusd must equal its declared cost basis estimate ({declared})"));
+                }
+            }
+            if matches!(basis, WorkerCostBasisConfig::Local { .. }) && worker.local.is_none() {
+                return Err(format!(
+                    "worker_registry.cost_bases.{id} uses a local basis for a non-local worker"
+                ));
+            }
         }
         for (id, worker) in &self.workers {
             if id.trim().is_empty()
@@ -1245,6 +1344,7 @@ mod raw_runtime_dispatch_tests {
             workers: BTreeMap::from([("claude-api".to_owned(), worker)]),
             capability_profiles: BTreeMap::new(),
             routing: WorkerRoutingConfig::default(),
+            ..Default::default()
         };
         registry
             .validate(&std::collections::BTreeSet::new())
@@ -1323,6 +1423,7 @@ mod local_worker_tests {
             workers: BTreeMap::from([("w".to_owned(), worker)]),
             capability_profiles: BTreeMap::new(),
             routing: WorkerRoutingConfig::default(),
+            ..Default::default()
         }
     }
 

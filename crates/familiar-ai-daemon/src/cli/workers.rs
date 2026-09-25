@@ -9,7 +9,9 @@
 //! each state typed, and — for anything not routable — the exact command
 //! that would advance it.
 
-use familiar_ai_core::config::{CapabilityProvenanceConfig, Config, RegistryWorkerConfig};
+use familiar_ai_core::config::{
+    CapabilityProvenanceConfig, Config, RegistryWorkerConfig, WorkerCostBasisConfig,
+};
 use serde::Serialize;
 
 /// Why a configured worker cannot currently be routed to. Empty means
@@ -48,7 +50,9 @@ impl Blocker {
                 "set an explicit model for {worker_id} in [worker_registry.workers.{worker_id}] \
                  — the CLI's own name is not a model identity"
             )),
-            Self::CostUnmeasured => None,
+            Self::CostUnmeasured => Some(format!(
+                "familiar-ai config model cost-basis {worker_id} --estimate-microusd AMOUNT --actor ACTOR --reason REASON"
+            )),
         }
     }
 
@@ -67,6 +71,8 @@ pub struct WorkerInventoryRow {
     /// Capability name to the strongest provenance recorded for it.
     pub capabilities: Vec<(String, String)>,
     pub cost_microusd: Option<u64>,
+    pub cost_basis: Option<String>,
+    pub cost_missing_input: Option<String>,
     pub routable: bool,
     pub blockers: Vec<Blocker>,
     pub remediation: Vec<String>,
@@ -152,7 +158,17 @@ pub fn inventory(config: &Config) -> Vec<WorkerInventoryRow> {
             if synthetic_model_identity(worker) {
                 blockers.push(Blocker::SyntheticModelIdentity);
             }
-            if worker.estimated_cost_microusd.is_none() {
+            let basis = registry.cost_bases.get(id);
+            let local_policy_missing = matches!(
+                basis,
+                Some(WorkerCostBasisConfig::Local {
+                    monetary_ordering_policy: None,
+                    ..
+                })
+            );
+            // The legacy number is intentionally insufficient: accepting it
+            // without provenance recreates the ambiguity this PRD removes.
+            if basis.is_none() || local_policy_missing {
                 blockers.push(Blocker::CostUnmeasured);
             }
             let remediation = blockers
@@ -167,6 +183,32 @@ pub fn inventory(config: &Config) -> Vec<WorkerInventoryRow> {
                 enabled: worker.available,
                 capabilities,
                 cost_microusd: worker.estimated_cost_microusd,
+                cost_basis: basis.map(|value| {
+                    match value {
+                        WorkerCostBasisConfig::PublishedTokenRates { .. } => {
+                            "published-token-rates"
+                        }
+                        WorkerCostBasisConfig::OperatorDeclared { .. } => "operator-declared",
+                        WorkerCostBasisConfig::MeasuredAcceptedExecutions { .. } => {
+                            "measured-accepted-executions"
+                        }
+                        WorkerCostBasisConfig::Local { .. } => "local",
+                    }
+                    .to_owned()
+                }),
+                cost_missing_input: if local_policy_missing {
+                    Some("monetary_ordering_policy".into())
+                } else if basis.is_none() {
+                    Some(if worker.local.is_some() {
+                        "local cost basis and monetary ordering policy"
+                    } else if worker.model.trim().is_empty() {
+                        "configured model required for published per-token rates"
+                    } else {
+                        "published rates, accepted-execution measurements, or operator declaration"
+                    }.into())
+                } else {
+                    None
+                },
                 routable: !blockers.iter().any(Blocker::is_fatal),
                 blockers,
                 remediation,

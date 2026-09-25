@@ -232,6 +232,22 @@ pub struct AccountingRepository<'a> {
     conn: &'a Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerCostCoverage {
+    pub worker_identity: String,
+    pub accepted_executions: u64,
+    pub known_cost_executions: u64,
+    pub unknown_cost_executions: u64,
+    pub measured_average_microusd: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCostCoverage {
+    pub executions: u64,
+    pub measured_executions: u64,
+    pub uncovered_workers: Vec<String>,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct LedgerUsageSummary {
     pub observations: u64,
@@ -282,6 +298,107 @@ pub struct ContextEffect {
 impl<'a> AccountingRepository<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self { conn }
+    }
+
+    pub fn record_worker_cost_basis(
+        &self,
+        basis_id: &str,
+        worker_identity: &str,
+        basis_kind: &str,
+        estimate_microusd: Option<u64>,
+        unit: &str,
+        provenance_json: &str,
+    ) -> familiar_ai_core::Result<()> {
+        self.conn.execute("INSERT INTO worker_cost_bases(basis_id,worker_identity,basis_kind,estimate_microusd,unit,provenance_json,recorded_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![basis_id,worker_identity,basis_kind,estimate_microusd,unit,provenance_json,Utc::now().to_rfc3339()]).map_err(db)?;
+        Ok(())
+    }
+
+    pub fn worker_cost_coverage(
+        &self,
+        worker: &str,
+    ) -> familiar_ai_core::Result<WorkerCostCoverage> {
+        let (accepted, known, unknown, total): (u64,u64,u64,Option<u64>) = self.conn.query_row(
+            "SELECT count(DISTINCT u.execution_id), count(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.amount IS NOT NULL) THEN u.execution_id END), count(DISTINCT CASE WHEN NOT EXISTS(SELECT 1 FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.amount IS NOT NULL) THEN u.execution_id END), sum((SELECT sum(c.amount) FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.amount IS NOT NULL)) FROM usage_observations u JOIN execution_history e ON e.execution_id=u.execution_id WHERE u.worker_identity=?1 AND e.outcome='succeeded'",
+            [worker], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(db)?;
+        Ok(WorkerCostCoverage {
+            worker_identity: worker.into(),
+            accepted_executions: accepted,
+            known_cost_executions: known,
+            unknown_cost_executions: unknown,
+            measured_average_microusd: total
+                .zip((known > 0).then_some(known))
+                .map(|(n, d)| n / d / 1000),
+        })
+    }
+
+    pub fn session_cost_coverage(
+        &self,
+        session: &str,
+    ) -> familiar_ai_core::Result<SessionCostCoverage> {
+        let (executions, measured): (u64,u64) = self.conn.query_row("SELECT count(DISTINCT execution_id),count(DISTINCT CASE WHEN EXISTS(SELECT 1 FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.amount IS NOT NULL) THEN execution_id END) FROM usage_observations u WHERE session_id=?1",[session],|r|Ok((r.get(0)?,r.get(1)?))).map_err(db)?;
+        let mut statement=self.conn.prepare("SELECT DISTINCT worker_identity FROM usage_observations u WHERE session_id=?1 AND NOT EXISTS(SELECT 1 FROM cost_estimates c WHERE c.observation_id=u.observation_id AND c.unit='nanoUSD' AND c.amount IS NOT NULL) ORDER BY worker_identity").map_err(db)?;
+        let uncovered_workers = statement
+            .query_map([session], |r| r.get(0))
+            .map_err(db)?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(db)?;
+        Ok(SessionCostCoverage {
+            executions,
+            measured_executions: measured,
+            uncovered_workers,
+        })
+    }
+
+    pub fn record_cost_supersession(
+        &self,
+        id: &str,
+        worker: &str,
+        declared: &str,
+        measured: &str,
+        coverage: &WorkerCostCoverage,
+    ) -> familiar_ai_core::Result<()> {
+        self.conn.execute("INSERT INTO worker_cost_supersessions(supersession_id,worker_identity,declared_basis_id,measured_basis_id,accepted_executions,known_cost_executions,unknown_cost_executions,recorded_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id,worker,declared,measured,coverage.accepted_executions,coverage.known_cost_executions,coverage.unknown_cost_executions,Utc::now().to_rfc3339()]).map_err(db)?;
+        Ok(())
+    }
+
+    /// Promote ledger measurement after the configured accepted-execution
+    /// threshold. Repeated resolution is idempotent and unknown-cost
+    /// executions remain part of the durable supersession evidence.
+    pub fn maybe_supersede_worker_cost(
+        &self,
+        worker: &str,
+        declared_basis_id: &str,
+        minimum_accepted_executions: u64,
+    ) -> familiar_ai_core::Result<Option<String>> {
+        let coverage = self.worker_cost_coverage(worker)?;
+        if coverage.accepted_executions < minimum_accepted_executions
+            || coverage.known_cost_executions == 0
+        {
+            return Ok(None);
+        }
+        let existing: Option<String> = self.conn.query_row(
+            "SELECT measured_basis_id FROM worker_cost_supersessions WHERE worker_identity=?1 AND declared_basis_id=?2 ORDER BY recorded_at,supersession_id LIMIT 1",
+            params![worker, declared_basis_id], |r| r.get(0)).optional().map_err(db)?;
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        let basis_id = format!("measured:{worker}:{}", coverage.accepted_executions);
+        let supersession_id = format!(
+            "supersede:{declared_basis_id}:{}",
+            coverage.accepted_executions
+        );
+        self.record_worker_cost_basis(
+            &basis_id, worker, "measured-accepted-executions",
+            coverage.measured_average_microusd, "microUSD",
+            &serde_json::json!({"accepted_executions":coverage.accepted_executions,"known_cost_executions":coverage.known_cost_executions,"unknown_cost_executions":coverage.unknown_cost_executions}).to_string())?;
+        self.record_cost_supersession(
+            &supersession_id,
+            worker,
+            declared_basis_id,
+            &basis_id,
+            &coverage,
+        )?;
+        Ok(Some(basis_id))
     }
 
     pub fn project_id(&self, evidence: &str) -> familiar_ai_core::Result<String> {
