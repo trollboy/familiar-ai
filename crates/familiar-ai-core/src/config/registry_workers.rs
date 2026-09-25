@@ -772,6 +772,10 @@ impl RegistryWorkerConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerRoutingConfig {
+    /// Optional PRD-107 cheap-first policy. Absent preserves the historical
+    /// rule/pin/cost selector byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ladder: Option<WorkerLadderConfig>,
     #[serde(default)]
     pub implementation_pin: Option<String>,
     #[serde(default)]
@@ -790,6 +794,107 @@ pub struct WorkerRoutingConfig {
     /// rules; applied ahead of the lowest-cost-then-id tiebreak.
     #[serde(default)]
     pub rules: Vec<WorkerRouteRuleConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerLadderConfig {
+    #[serde(default)]
+    pub implementation: Vec<String>,
+    #[serde(default)]
+    pub remediation: Vec<String>,
+    #[serde(default)]
+    pub review: Vec<String>,
+    #[serde(default)]
+    pub narrow_task: Vec<String>,
+    /// Risk class to the lowest worker permitted for that class.
+    #[serde(default)]
+    pub risk_floors: BTreeMap<String, String>,
+    /// Try a cheaper rung only when its declared estimate is less than this
+    /// fraction of the next rung. Zero disables profitability filtering.
+    #[serde(default)]
+    pub maximum_cheap_fraction_basis_points: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probation: Option<LadderProbationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LadderProbationConfig {
+    pub workers: Vec<String>,
+    pub minimum_accepted_prds: u64,
+    pub minimum_review_pass_basis_points: u32,
+    pub maximum_remediation_basis_points: u32,
+    pub maximum_failure_basis_points: u32,
+    pub maximum_expected_files: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LadderJobClass {
+    Implementation,
+    Remediation,
+    Review,
+    NarrowTask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LadderSelection {
+    pub worker: String,
+    pub reason: String,
+}
+
+impl WorkerLadderConfig {
+    fn workers_for(&self, class: LadderJobClass) -> &[String] {
+        match class {
+            LadderJobClass::Implementation => &self.implementation,
+            LadderJobClass::Remediation => &self.remediation,
+            LadderJobClass::Review => &self.review,
+            LadderJobClass::NarrowTask => &self.narrow_task,
+        }
+    }
+
+    /// Pure policy selection. Runtime capability/admission checks remain the
+    /// router's responsibility; this returns the rung the router should pin.
+    pub fn select_rung(
+        &self,
+        class: LadderJobClass,
+        risk_classes: &[String],
+        workers: &BTreeMap<String, RegistryWorkerConfig>,
+        cost_bases: &BTreeMap<String, WorkerCostBasisConfig>,
+    ) -> Option<LadderSelection> {
+        let ladder = self.workers_for(class);
+        if ladder.is_empty() {
+            return None;
+        }
+        let mut index = risk_classes
+            .iter()
+            .filter_map(|risk| self.risk_floors.get(risk))
+            .filter_map(|floor| ladder.iter().position(|id| id == floor))
+            .max()
+            .unwrap_or(0);
+        let mut reason = "cheapest-capable-rung";
+        let estimate = |id: &String| {
+            cost_bases
+                .get(id)
+                .and_then(WorkerCostBasisConfig::declared_estimate_microusd)
+                .or_else(|| workers.get(id).and_then(|w| w.estimated_cost_microusd))
+        };
+        let fraction = self.maximum_cheap_fraction_basis_points as u64;
+        if fraction > 0 && index + 1 < ladder.len() {
+            if let (Some(cheap), Some(next)) =
+                (estimate(&ladder[index]), estimate(&ladder[index + 1]))
+            {
+                if cheap.saturating_mul(10_000) >= next.saturating_mul(fraction) {
+                    index += 1;
+                    reason = "unprofitable-rung-skipped";
+                }
+            }
+        }
+        Some(LadderSelection {
+            worker: ladder[index].clone(),
+            reason: reason.into(),
+        })
+    }
 }
 
 /// Selects a worker by declared risk and expected scope size. Absent
@@ -1150,6 +1255,61 @@ impl WorkerRegistryConfig {
                     .capabilities
                     .contains(&WorkerCapabilityConfig::Review),
             )?;
+        }
+        if let Some(ladder) = &self.routing.ladder {
+            if ladder.maximum_cheap_fraction_basis_points > 10_000 {
+                return Err("worker_registry.routing.ladder.maximum_cheap_fraction_basis_points must be <= 10000".into());
+            }
+            for (class, workers) in [
+                ("implementation", &ladder.implementation),
+                ("remediation", &ladder.remediation),
+                ("review", &ladder.review),
+                ("narrow_task", &ladder.narrow_task),
+            ] {
+                let mut seen = std::collections::BTreeSet::new();
+                for id in workers {
+                    if !self.workers.contains_key(id) {
+                        return Err(format!(
+                            "worker_registry.routing.ladder.{class} names unknown worker '{id}'"
+                        ));
+                    }
+                    if !seen.insert(id) {
+                        return Err(format!(
+                            "worker_registry.routing.ladder.{class} repeats worker '{id}'"
+                        ));
+                    }
+                }
+            }
+            for (risk, floor) in &ladder.risk_floors {
+                if !risk_vocabulary.contains(risk.as_str()) {
+                    return Err(format!("worker_registry.routing.ladder.risk_floors names risk class '{risk}' outside the configured vocabulary"));
+                }
+                if !self.workers.contains_key(floor) {
+                    return Err(format!("worker_registry.routing.ladder.risk_floors.{risk} names unknown worker '{floor}'"));
+                }
+            }
+            if let Some(probation) = &ladder.probation {
+                if probation.workers.is_empty() {
+                    return Err(
+                        "worker_registry.routing.ladder.probation.workers must not be empty".into(),
+                    );
+                }
+                if probation.minimum_accepted_prds == 0
+                    || probation.maximum_expected_files == 0
+                    || probation.minimum_review_pass_basis_points > 10_000
+                    || probation.maximum_remediation_basis_points > 10_000
+                    || probation.maximum_failure_basis_points > 10_000
+                {
+                    return Err("worker_registry.routing.ladder.probation requires positive sample/scope bounds and basis-point thresholds <= 10000".into());
+                }
+                for id in &probation.workers {
+                    if !self.workers.contains_key(id) {
+                        return Err(format!(
+                            "worker_registry.routing.ladder.probation names unknown worker '{id}'"
+                        ));
+                    }
+                }
+            }
         }
         let mut rule_ids = std::collections::BTreeSet::new();
         let mut signatures = std::collections::BTreeMap::new();
@@ -1564,5 +1724,83 @@ mod local_worker_tests {
     fn artifact_digest_support_is_closed_per_runtime() {
         assert!(LocalRuntimeKind::Ollama.supports_artifact_digest());
         assert!(!LocalRuntimeKind::Unsloth.supports_artifact_digest());
+    }
+
+    fn ladder_fixture(
+        fraction: u32,
+    ) -> (WorkerLadderConfig, BTreeMap<String, RegistryWorkerConfig>) {
+        let mut cheap = local_worker("openai", "codex", None, None);
+        cheap.estimated_cost_microusd = Some(10);
+        let mut strong = local_worker("anthropic", "claude-code", None, None);
+        strong.estimated_cost_microusd = Some(100);
+        (
+            WorkerLadderConfig {
+                implementation: vec!["local".into(), "strong".into()],
+                remediation: vec![],
+                review: vec![],
+                narrow_task: vec![],
+                risk_floors: BTreeMap::from([("security".into(), "strong".into())]),
+                maximum_cheap_fraction_basis_points: fraction,
+                probation: Some(LadderProbationConfig {
+                    workers: vec!["local".into()],
+                    minimum_accepted_prds: 3,
+                    minimum_review_pass_basis_points: 9_000,
+                    maximum_remediation_basis_points: 3_334,
+                    maximum_failure_basis_points: 1_000,
+                    maximum_expected_files: 2,
+                }),
+            },
+            BTreeMap::from([("local".into(), cheap), ("strong".into(), strong)]),
+        )
+    }
+
+    #[test]
+    fn absent_ladder_preserves_the_legacy_configuration_shape() {
+        let routing = WorkerRoutingConfig::default();
+        assert!(routing.ladder.is_none());
+        let encoded = toml::to_string(&routing).unwrap();
+        assert!(!encoded.contains("ladder"));
+    }
+
+    #[test]
+    fn profitable_and_unprofitable_rungs_are_deterministic() {
+        let (profitable, workers) = ladder_fixture(5_000);
+        let selected = profitable
+            .select_rung(
+                LadderJobClass::Implementation,
+                &[],
+                &workers,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(selected.worker, "local");
+        assert_eq!(selected.reason, "cheapest-capable-rung");
+
+        let mut workers = workers;
+        workers.get_mut("local").unwrap().estimated_cost_microusd = Some(80);
+        let selected = profitable
+            .select_rung(
+                LadderJobClass::Implementation,
+                &[],
+                &workers,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(selected.worker, "strong");
+        assert_eq!(selected.reason, "unprofitable-rung-skipped");
+    }
+
+    #[test]
+    fn declared_risk_floor_skips_lower_rungs() {
+        let (ladder, workers) = ladder_fixture(0);
+        let selected = ladder
+            .select_rung(
+                LadderJobClass::Implementation,
+                &["security".into()],
+                &workers,
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(selected.worker, "strong");
     }
 }
