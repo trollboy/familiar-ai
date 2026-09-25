@@ -22,9 +22,9 @@ pub use anthropic::{
 };
 pub use claude_code::{ClaudeCodeAgent, ClaudeCodeSettings, READ_ONLY_RESTRICTIONS};
 pub use codex::CodexAgent;
-pub use isolation::isolated_command;
 #[cfg(unix)]
 pub use isolation::{finish_watchdog, spawn_watchdog, Watchdog};
+pub use isolation::{isolated_command, isolated_command_scoped, DenialScope};
 pub use raw_agent::{RawAgent, RawAgentHost, RawAgentSpec, RawCredential, RawWorkerContext};
 pub use registry::{
     builtin_adapter_factories, AdapterFactories, AdapterFactory, CandidateEvaluation,

@@ -12,9 +12,30 @@ use std::time::Duration;
 
 use crate::AgentExecutionError;
 
+/// How much of the denied tree stays invisible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenialScope {
+    /// Neither contents nor names: the independent reviewer must not learn
+    /// what the implementer's tree even contains.
+    NamesAndContents,
+    /// Contents only; names beneath the denied tree are listable. This is
+    /// what lets a sandboxed process build a further sandbox of its own
+    /// (FAM-BUG-101): the Landlock allow-list is assembled by listing the
+    /// denied path's ancestors, which `NamesAndContents` forbids.
+    ContentsOnly,
+}
+
 pub fn isolated_command(
     executable: &str,
     denied_read_path: Option<&std::path::Path>,
+) -> Result<Command, AgentExecutionError> {
+    isolated_command_scoped(executable, denied_read_path, DenialScope::NamesAndContents)
+}
+
+pub fn isolated_command_scoped(
+    executable: &str,
+    denied_read_path: Option<&std::path::Path>,
+    scope: DenialScope,
 ) -> Result<Command, AgentExecutionError> {
     let Some(denied) = denied_read_path else {
         return Ok(Command::new(executable));
@@ -32,8 +53,12 @@ pub fn isolated_command(
             .to_string_lossy()
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
+        let operation = match scope {
+            DenialScope::NamesAndContents => "file-read*",
+            DenialScope::ContentsOnly => "file-read-data",
+        };
         let profile =
-            format!("(version 1) (allow default) (deny file-read* (subpath \"{escaped}\"))");
+            format!("(version 1) (allow default) (deny {operation} (subpath \"{escaped}\"))");
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.args(["-p", &profile, executable]);
         Ok(command)
@@ -49,13 +74,11 @@ pub fn isolated_command(
             })?;
         // Built before fork: unsupported kernels and enumeration failures stop
         // the launch here, before any agent process exists.
-        let ruleset =
-            build_landlock_ruleset(std::path::Path::new("/"), &canonical).map_err(|source| {
-                AgentExecutionError::Launch {
-                    executable: executable.to_owned(),
-                    source: Box::new(source),
-                    result: Box::default(),
-                }
+        let ruleset = build_landlock_ruleset(std::path::Path::new("/"), &canonical, scope)
+            .map_err(|source| AgentExecutionError::Launch {
+                executable: executable.to_owned(),
+                source: Box::new(source),
+                result: Box::default(),
             })?;
         let mut command = Command::new(executable);
         let mut ruleset = Some(ruleset);
@@ -152,6 +175,7 @@ fn landlock_grant_paths(
 fn build_landlock_ruleset(
     root: &std::path::Path,
     canonical_denied: &std::path::Path,
+    scope: DenialScope,
 ) -> io::Result<landlock::RulesetCreated> {
     use landlock::{AccessFs, PathBeneath, PathFd, RulesetAttr, RulesetCreatedAttr, ABI};
     if landlock_forced_unsupported() {
@@ -190,6 +214,27 @@ fn build_landlock_ruleset(
             .add_rule(PathBeneath::new(fd, access))
             .map_err(landlock_error)?;
     }
+    // FAM-BUG-101: with `ContentsOnly`, the ancestors of the denied path get
+    // list-only access. Without it a sandboxed process cannot `read_dir("/")`,
+    // and a nested sandbox, which enumerates exactly that way, fails to build
+    // with EACCES before its child exists: the independent reviewer under the
+    // control worker died with "cannot launch agent executable" on every
+    // attempt. ReadDir beneath an ancestor reveals names inside the denied
+    // tree, never contents or execution; ReadFile and Execute stay denied.
+    if scope == DenialScope::ContentsOnly {
+        let mut ancestor = canonical_denied.parent();
+        while let Some(dir) = ancestor {
+            if let Ok(fd) = PathFd::new(dir) {
+                ruleset = ruleset
+                    .add_rule(PathBeneath::new(fd, AccessFs::ReadDir))
+                    .map_err(landlock_error)?;
+            }
+            if dir == root {
+                break;
+            }
+            ancestor = dir.parent();
+        }
+    }
     Ok(ruleset)
 }
 
@@ -227,7 +272,12 @@ pub(crate) fn linux_sandbox_available() -> bool {
     let Ok(canonical) = temp.path().canonicalize() else {
         return false;
     };
-    build_landlock_ruleset(std::path::Path::new("/"), &canonical).is_ok()
+    build_landlock_ruleset(
+        std::path::Path::new("/"),
+        &canonical,
+        DenialScope::NamesAndContents,
+    )
+    .is_ok()
 }
 
 /// Per-line decision made by an adapter's stream parser.
@@ -335,6 +385,60 @@ mod tests {
         assert!(!granted.contains(&repo));
         assert!(!granted.contains(&mid));
         assert!(!granted.iter().any(|path| path.starts_with(&repo)));
+    }
+
+    /// FAM-BUG-101: a process already inside one sandbox can build another.
+    /// The outer layer is exactly the control worker's shape, /bin/sh under a
+    /// contents-only denial; the inner is the reviewer's strict one, built by
+    /// re-entering this test binary. Contents in the outer denied tree stay
+    /// unreadable throughout.
+    #[test]
+    fn a_nested_sandbox_can_be_built_under_an_outer_one() {
+        if !linux_sandbox_available() {
+            return;
+        }
+        if std::env::var_os("FAMILIAR_AI_TEST_NESTED_INNER").is_some() {
+            // Inner half, running under the outer sandbox: build a second
+            // sandbox around a fresh denied dir and run something trivial.
+            let inner_denied = tempfile::tempdir().unwrap();
+            let mut cmd = isolated_command("/bin/sh", Some(inner_denied.path()))
+                .expect("a nested ruleset must build under an outer sandbox");
+            let status = cmd.args(["-c", "true"]).status().unwrap();
+            assert!(status.success());
+            // And the outer denial still holds for contents.
+            let outer_secret = std::env::var("FAMILIAR_AI_TEST_OUTER_SECRET").unwrap();
+            assert!(
+                fs::read(&outer_secret).is_err(),
+                "outer denial must survive nesting"
+            );
+            return;
+        }
+        let outer_denied = tempfile::tempdir().unwrap();
+        let secret = outer_denied.path().join("secret");
+        fs::write(&secret, "no").unwrap();
+        let me = std::env::current_exe().unwrap();
+        let mut outer = isolated_command_scoped(
+            "/bin/sh",
+            Some(outer_denied.path()),
+            DenialScope::ContentsOnly,
+        )
+        .unwrap();
+        let output = outer
+            .args([
+                "-c",
+                "exec \"$0\" --exact isolation::tests::a_nested_sandbox_can_be_built_under_an_outer_one --nocapture",
+                me.to_str().unwrap(),
+            ])
+            .env("FAMILIAR_AI_TEST_NESTED_INNER", "1")
+            .env("FAMILIAR_AI_TEST_OUTER_SECRET", &secret)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "inner half failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

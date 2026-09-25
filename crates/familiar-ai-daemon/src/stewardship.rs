@@ -673,6 +673,16 @@ pub fn list_pending_human_gates(
     limit: usize,
 ) -> Result<Value, StewardshipError> {
     let gates = pending_human_gates(db.conn(), &repository.key, limit).map_err(storage)?;
+    // FAM-BUG-082: "Waiting on you" is for decisions. A stopped attempt whose
+    // reason is a defect (verification, review machinery, malformed output)
+    // is Failed with Re-drive on the card, the same reading the lifecycle
+    // gives it; only human-gate reasons are owed a decision here.
+    let gates: Vec<_> = gates
+        .into_iter()
+        .filter(|gate| {
+            gate.kind != "stopped_attempt" || familiar_ai_core::is_human_gate_reason(&gate.detail)
+        })
+        .collect();
     let pending_scope = OrchestrationRepository::new(db.conn())
         .pending_scope_decisions(&repository.key)
         .map_err(storage)?;

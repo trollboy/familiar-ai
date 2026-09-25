@@ -2363,6 +2363,24 @@ fn review_retained_reason(cycle: &ReviewCycle) -> &'static str {
         "environment_denied"
     } else if cycle.stop_reasons.contains(&ReviewStopReason::Interrupted) {
         "interrupted"
+    } else if cycle.stop_reasons.contains(&ReviewStopReason::AgentFailure) {
+        // FAM-BUG-082: the reviewer could not run. That is machinery, not a
+        // judgment call; it reads Failed and offers Re-drive, never a
+        // decision for the owner.
+        "review_failed: reviewer agent failed"
+    } else if cycle
+        .stop_reasons
+        .contains(&ReviewStopReason::EvidenceFailure)
+        || cycle
+            .stop_reasons
+            .contains(&ReviewStopReason::MalformedReview)
+    {
+        "review_failed: reviewer produced no valid review"
+    } else if cycle
+        .stop_reasons
+        .contains(&ReviewStopReason::NoIndependentReviewer)
+    {
+        "review_failed: no independent reviewer available"
     } else {
         "human_review_required"
     }

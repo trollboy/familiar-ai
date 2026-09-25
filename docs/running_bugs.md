@@ -354,7 +354,18 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-082 — `human_review_required` cannot tell "a human should decide" from "the review machinery failed"
 
-- **Status:** Open — this occurrence (PRD-97) landed by hand after a human review, recorded as a FAM-BUG-019 recurrence.
+- **Status:** Fixed (2026-09-25: a review cycle stopped by `AgentFailure`
+  retains as `review_failed: reviewer agent failed`; `EvidenceFailure` or
+  `MalformedReview` as `review_failed: reviewer produced no valid review`;
+  `NoIndependentReviewer` as `review_failed: no independent reviewer
+  available`. The lifecycle already reads a `review_failed:` prefix as
+  Failed, so the card offers Re-drive; and "Waiting on you" now lists a
+  stopped attempt only when its reason is a human-gate reason. The
+  2026-09-25 PRD-103 proof run, whose reviewer could not start three times
+  (FAM-BUG-101), was the second occurrence and the one the owner named:
+  "this is not 'do I have permission', this is 'something broke, hit
+  redrive'".)
+- **First occurrence:** PRD-97 landed by hand after a human review, recorded as a FAM-BUG-019 recurrence.
 - **Found:** 2026-09-22, the fourth hands-off run (PRD-97, session
   `drive-00001790092661105835-0003486999-000000`). Implementation and every
   required verification check passed. The independent reviewer then
@@ -436,6 +447,29 @@ appears with no entry, or with a status a reader cannot classify.
   row and the checkpoint; a claimed row with a checkpoint at `implemented`
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
+
+### FAM-BUG-101 — Under the control worker's sandbox the reviewer cannot build its own, so every daemon-launched review fails to launch
+
+- **Status:** Fixed (2026-09-25: the sandbox API carries a `DenialScope`;
+  the control worker denies contents only, so its children may list
+  directories and build a further sandbox; the reviewer keeps
+  `NamesAndContents`. A test re-enters the test binary under a contents-only
+  outer sandbox, builds a strict inner one, and asserts the outer denial
+  still hides contents.)
+- **Found:** 2026-09-25, the first desktop-dispatched drive (PRD-103).
+  Implementation finished; the independent reviewer failed three times with
+  `cannot launch agent executable "claude": Permission denied (os error 13)`
+  and the attempt retained as `human_review_required` at $3.97.
+- **Detail:** the Landlock allow-list is built by listing each ancestor of
+  the denied path and granting its other entries; the ancestors themselves
+  are granted nothing, so a sandboxed process cannot `read_dir("/")`. The
+  reviewer builds exactly such a list inside the control worker's sandbox
+  and fails with EACCES before `claude` is ever executed; the adapter
+  reports that as a launch failure. Every CLI-launched drive before today
+  had no outer layer, which is why review had worked. Reproduced with a
+  two-layer probe; the same probe passes with the fix.
+- **Expected fix:** as landed. Names inside `capabilities/` are execution
+  ids and were never the secret; the `.session` contents remain unreadable.
 
 ### FAM-BUG-100 — `execution_history.agent` says `codex` for a claude-code run
 

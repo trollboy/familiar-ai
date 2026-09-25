@@ -89,7 +89,14 @@ async fn execute(
     // before it recorded anything, on Linux (Landlock) and macOS
     // (sandbox-exec) alike, since the control plane landed.
     let denied = capability_dir.as_path();
-    let Ok(std_command) = familiar_ai_agent::isolated_command("/bin/sh", Some(denied)) else {
+    // Contents-only: the child may list names (execution ids) but never read
+    // another worker's `.session`, and it can still build the reviewer's own
+    // stricter sandbox beneath this one (FAM-BUG-101).
+    let Ok(std_command) = familiar_ai_agent::isolated_command_scoped(
+        "/bin/sh",
+        Some(denied),
+        familiar_ai_agent::DenialScope::ContentsOnly,
+    ) else {
         let _ = service.finish(&id, ExecutionState::Failed, "worker_sandbox_unavailable");
         return;
     };
