@@ -1860,21 +1860,26 @@ fn execute_tracked_inner(
         unavailable.insert("agent_version".into(), "version_probe_failed".into());
     }
     let finalization = terminal(&timer, result, outcome, unavailable, config);
-    finalize(&db, &id, &finalization)
+    // FAM-BUG-102: bookkeeping never kills finished work. A transient
+    // "database is locked" on these writes retries, loudly, before it is
+    // allowed to fail the run.
+    retry_while_locked("execution history", || finalize(&db, &id, &finalization))
         .map_err(|e| retained_traced(trace, &target, "history_failed", e))?;
     if !implementation_usage_is_persisted_by_the_host(&implementation_entry.adapter) {
-        persist_accounting_observations(
-            &db,
-            &id,
-            &started_at,
-            result,
-            outcome,
-            implementation_entry.adapter.as_str(),
-            &context.repository.worktree,
-            &finalization,
-            output_register,
-            config,
-        )
+        retry_while_locked("accounting observations", || {
+            persist_accounting_observations(
+                &db,
+                &id,
+                &started_at,
+                result,
+                outcome,
+                implementation_entry.adapter.as_str(),
+                &context.repository.worktree,
+                &finalization,
+                output_register,
+                config,
+            )
+        })
         .map_err(|e| retained_traced(trace, &target, "accounting_failed", e))?;
     }
     if execution.is_err() {
@@ -3238,6 +3243,29 @@ fn outcome(result: &ExecutionResult) -> &'static str {
         Some(_) => "failed",
         None if result.signal.is_some() => "signaled",
         None => "failed",
+    }
+}
+
+/// Retry a ledger write while SQLite reports the file locked: up to twelve
+/// attempts five seconds apart, on top of each attempt's own busy wait. Any
+/// other error, and exhaustion, return as before. Each retry is printed so
+/// the worker log shows a run waiting on the ledger rather than hanging.
+fn retry_while_locked<T>(
+    what: &str,
+    mut write: impl FnMut() -> Result<T, RunError>,
+) -> Result<T, RunError> {
+    let mut attempt = 0;
+    loop {
+        match write() {
+            Err(error) if attempt < 12 && error.to_string().contains("database is locked") => {
+                attempt += 1;
+                eprintln!(
+                    "ledger: {what} write found the database locked; retry {attempt}/12 in 5s"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            outcome => return outcome,
+        }
     }
 }
 

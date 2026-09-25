@@ -651,7 +651,22 @@ fn land_candidate(
     )
     .is_ok()
     {
-        return Ok(prior);
+        // FAM-BUG-107: already landed. Report the commit that carried the
+        // candidate in, not whatever HEAD is now; the ledger records this as
+        // the attempt's integration revision.
+        let carried = git(
+            repository_worktree,
+            &[
+                "rev-list",
+                "--reverse",
+                "--ancestry-path",
+                &format!("{candidate}..{prior}"),
+            ],
+        )
+        .ok()
+        .and_then(|list| list.lines().next().map(str::to_owned))
+        .filter(|first| !first.is_empty());
+        return Ok(carried.unwrap_or(prior));
     }
     // FAM-BUG-080: the integration commit also archives the PRD file, so
     // the completion travels to other hosts with the commit itself.
@@ -1336,6 +1351,14 @@ mod tests {
         // Idempotent: landing again changes nothing.
         let again = land_candidate(&main, &worktree, "PRD-9", None).unwrap();
         assert_eq!(again, merged);
+        // FAM-BUG-107: and still names the integration commit after main
+        // has moved on, not the new HEAD.
+        std::fs::write(main.join("later"), "unrelated").unwrap();
+        command(&main, &["add", "later"]);
+        command(&main, &["commit", "-qm", "later work"]);
+        let later = land_candidate(&main, &worktree, "PRD-9", None).unwrap();
+        assert_eq!(later, merged);
+        assert_ne!(later, git(&main, &["rev-parse", "HEAD"]).unwrap());
     }
 
     #[test]

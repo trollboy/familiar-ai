@@ -448,6 +448,19 @@ appears with no entry, or with a status a reader cannot classify.
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
 
+### FAM-BUG-107 — Re-landing an already-merged candidate reports the current HEAD as its integration commit
+
+- **Status:** Fixed (2026-09-25: `land_candidate` reports the first commit
+  on the ancestry path from the candidate to HEAD, the integration commit
+  that carried it, and the test pins that after main moves on.)
+- **Found:** 2026-09-25, PRD-103's final finish: the candidate had merged
+  as `00b8bd6` on an earlier attempt; the finish re-landed idempotently and
+  recorded `bb52b24`, an unrelated fix commit, as the attempt's integration
+  revision.
+- **Detail:** the idempotent branch returned `prior` (HEAD) when the
+  candidate was already an ancestor, which was only correct while HEAD was
+  the merge itself.
+
 ### FAM-BUG-106 — Completing a landed claim is refused because the landing itself archived the file
 
 - **Status:** Fixed (2026-09-25: `complete_run` accepts a claimed row marked
@@ -531,8 +544,12 @@ appears with no entry, or with a status a reader cannot classify.
   over a hundred-PRD backlog on a busy disk. The failure landed on the last
   write of a fifteen-minute review and discarded nothing durable, but it
   turned a success into a red card and a manual re-drive.
-- **Expected fix:** name the long writer and bound its transaction; keep the
-  history write retrying past a transient lock rather than failing the run.
+- **2026-09-25, later:** the history and accounting writes retry through a
+  locked database, twelve times five seconds apart, printing each retry to
+  the worker log; every connection's busy wait now reports every two seconds
+  it waits, with its pid; the daemon's reconcile pass warns when it holds
+  the write lock over a second. The next episode names both sides.
+- **Expected fix:** name the long writer and bound its transaction.
 
 ### FAM-BUG-101 — Under the control worker's sandbox the reviewer cannot build its own, so every daemon-launched review fails to launch
 

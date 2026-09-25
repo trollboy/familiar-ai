@@ -140,9 +140,22 @@ impl BacklogReconciler {
                 .db
                 .lock()
                 .map_err(|_| "database lock poisoned".to_string())?;
-            if let Err(error) = SqliteBacklogRepository::new(db.conn_mut())
-                .reconcile_and_snapshot(&repository, &discovered)
-            {
+            let started = std::time::Instant::now();
+            let outcome = SqliteBacklogRepository::new(db.conn_mut())
+                .reconcile_and_snapshot(&repository, &discovered);
+            // FAM-BUG-102: this is the daemon's one recurring writer over the
+            // ledger every worker shares; a slow pass is the prime suspect
+            // for a worker's "database is locked", so it names itself.
+            let elapsed = started.elapsed();
+            if elapsed > std::time::Duration::from_secs(1) {
+                tracing::warn!(
+                    repository = %repository.key,
+                    prds = discovered.len(),
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "backlog reconcile held the ledger write lock for over a second"
+                );
+            }
+            if let Err(error) = outcome {
                 let message = error.to_string();
                 self.record_diagnostic(&repository.key, &message);
                 return Err(message);
