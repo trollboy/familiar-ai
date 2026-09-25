@@ -40,6 +40,33 @@ fn directives(body: &str) -> String {
         .join("\n")
 }
 
+fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        files.push(path.to_path_buf());
+        return;
+    }
+    for entry in fs::read_dir(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())) {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            collect_files(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+fn cargo_command_lines(body: &str) -> Vec<&str> {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.contains("cargo ")
+                && !line.starts_with('#')
+                && !line.starts_with("//")
+                && !line.starts_with("<!--")
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // AC1 — verification runs without a human invoking it, and locally.
 // ---------------------------------------------------------------------------
@@ -183,6 +210,79 @@ fn no_verification_step_is_declared_outside_the_single_definition() {
     assert!(
         read("README.md").contains("scripts/gate.sh"),
         "the README must point a contributor at the single definition"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PRD-092 — the gate builds exactly what users install.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn documented_commands_do_not_hide_the_default_feature_set() {
+    let mut files = vec![
+        repo_root().join("README.md"),
+        repo_root().join("SPECTRA_AUTONOMOUS_HANDOVER.md"),
+    ];
+    collect_files(&repo_root().join("scripts"), &mut files);
+
+    let offenders = files
+        .into_iter()
+        .flat_map(|path| {
+            let body = fs::read_to_string(&path).unwrap_or_default();
+            cargo_command_lines(&body)
+                .into_iter()
+                .filter(|line| line.contains("--no-default-features"))
+                .map(|line| format!("{}: {line}", path.display()))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "documented cargo commands must build the default feature set:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn gate_container_and_host_install_resolve_the_same_default_features() {
+    let sources = [
+        ("gate", read("scripts/gate.sh")),
+        ("container", read("Dockerfile")),
+        ("host install", read("scripts/reinstall.sh")),
+    ];
+
+    for (name, body) in sources {
+        let builds_daemon = cargo_command_lines(&body)
+            .into_iter()
+            .any(|line| line.contains("cargo build") && line.contains("familiar-ai-daemon"));
+        assert!(builds_daemon, "{name} must build familiar-ai-daemon");
+        assert!(
+            !body.contains("--no-default-features") && !body.contains("--features"),
+            "{name} must use Cargo's default feature set"
+        );
+    }
+}
+
+#[test]
+fn verification_image_can_compile_every_default_workspace_member() {
+    let dockerfile = read("Dockerfile");
+    for dependency in ["pkg-config", "libgtk-3-dev"] {
+        assert!(
+            dockerfile.contains(dependency),
+            "the verification image must install {dependency}"
+        );
+    }
+
+    let gate = directives(&read("scripts/gate.sh"));
+    assert!(
+        gate.contains("cargo clippy --workspace --all-targets")
+            && gate.contains("cargo test --workspace"),
+        "the gate must compile and test the whole default-feature workspace"
+    );
+    assert!(
+        read("Cargo.toml").contains("\"crates/familiar-ai-tray\""),
+        "the tray must remain a workspace member reached by --workspace"
     );
 }
 

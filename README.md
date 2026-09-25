@@ -165,6 +165,11 @@ containing changes. Landing work is a human act.
 least one coding agent CLI on `PATH`
 (`claude` or `codex`).
 
+On Debian/Ubuntu Linux, the default build additionally needs `pkg-config` and
+`libgtk-3-dev`; the runtime needs `libgtk-3-0`. These are the complete native
+dependencies of the default daemon/tray build. macOS uses AppKit and does not
+need GTK.
+
 The CLI is a real prerequisite today, not a recommendation: `AgentAdapterKind`
 is a closed enum of three vendor-CLI variants and `as_agent_entry` maps any
 unrecognised runtime to Codex, so a raw-API or local worker cannot currently be

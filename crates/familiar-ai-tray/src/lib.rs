@@ -3,6 +3,8 @@ pub mod data;
 pub mod icon;
 pub mod menu;
 pub mod notify;
+#[cfg(test)]
+mod sysdeps;
 pub mod tray;
 pub mod view;
 #[cfg(target_os = "linux")]

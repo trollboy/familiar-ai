@@ -18,7 +18,7 @@ RESTART=1
 step() { printf '\n==> %s\n' "$*"; }
 
 step "building CLI and daemon"
-cargo build --release -p familiar-ai-daemon --no-default-features --bin familiar-ai --bin familiar-ai-daemon
+cargo build --release -p familiar-ai-daemon --bin familiar-ai --bin familiar-ai-daemon
 
 step "building desktop"
 cargo build --release -p familiar-ai-desktop

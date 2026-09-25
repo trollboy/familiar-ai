@@ -6,7 +6,7 @@
 //! only when something calls `gtk::main_quit()` — and for a long while nothing
 //! did. SIGTERM stopped the workers and left the process alive with its icon
 //! still in the tray and its PID file still on disk, and no test noticed
-//! because the suite builds this crate with `--no-default-features`.
+//! because the old gate suppressed default features.
 //!
 //! This test therefore insists on the combination that was never covered:
 //! the `tray` feature compiled in, `[tray] enabled = true`, and a real X
@@ -95,7 +95,7 @@ fn start_xvfb() -> Xvfb {
             Err(e) => panic!(
                 "Xvfb is required to exercise the tray shutdown path but could \
                  not be started: {e}. Install it (apt install xvfb) or run this \
-                 crate with --no-default-features to skip the tray build."
+                 crate without the tray feature to skip the tray build."
             ),
         };
         let mut xvfb = Xvfb {

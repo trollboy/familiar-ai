@@ -95,8 +95,9 @@ step() {
 }
 
 step fmt    cargo fmt --all -- --check
+step build  cargo build -p familiar-ai-daemon --bins
 step clippy cargo clippy --workspace --all-targets -- -D warnings
-step test   cargo test --workspace --no-default-features
+step test   cargo test --workspace
 
 if [ -n "${failed}" ]; then
     note "gate: FAILED —${failed}"
