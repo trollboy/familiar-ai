@@ -512,9 +512,16 @@ impl CodingAgent for RawAgent {
             }
         }
 
-        let result = self.execution_result(&outcome, &effective_model);
+        let mut result = self.execution_result(&outcome, &effective_model);
         match outcome.stop_reason {
-            StopReason::Completed { .. } => Ok(result),
+            StopReason::Completed { .. } => {
+                // The owned loop has no child process whose status can be
+                // copied into the common result. A protocol-level completed
+                // stop is its successful exit and must be represented as
+                // such for the shared tracked workflow.
+                result.exit_code = Some(0);
+                Ok(result)
+            }
             StopReason::Timeout => Err(AgentExecutionError::Timeout {
                 result: Box::new(result),
             }),

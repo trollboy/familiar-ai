@@ -784,6 +784,83 @@ fn default_local_endpoint(
     })
 }
 
+fn resolved_local_endpoint(
+    worker: &familiar_ai_core::config::RegistryWorkerConfig,
+    runtime_id: &str,
+) -> Option<familiar_ai_core::config::LocalEndpointConfig> {
+    worker
+        .local
+        .as_ref()
+        .map(|local| local.endpoint.clone())
+        .or_else(|| {
+            worker
+                .runtime_config
+                .as_ref()
+                .and_then(|runtime| runtime.host.as_deref())
+                .map(|host| {
+                    let base_url = if host.contains("://") {
+                        host.to_owned()
+                    } else {
+                        format!("http://{host}")
+                    };
+                    familiar_ai_core::config::LocalEndpointConfig {
+                        tls: base_url
+                            .split("://")
+                            .next()
+                            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https")),
+                        base_url,
+                    }
+                })
+        })
+        .or_else(|| default_local_endpoint(runtime_id))
+}
+
+/// Validates every input needed to construct an owned-loop worker while
+/// preflight still has the registry/configuration context. It intentionally
+/// does not need an execution id, journal, worktree, or PRD body.
+pub(crate) fn preflight_raw_worker(
+    config: &Config,
+    worker_id: &str,
+    worker: &familiar_ai_core::config::RegistryWorkerConfig,
+) -> Result<Option<familiar_ai_core::config::LocalEndpointConfig>, String> {
+    let runtime_id = worker
+        .runtime_id()
+        .map_err(|error| format!("worker {worker_id:?}: {error}"))?;
+    if matches!(runtime_id, "codex" | "claude-code") {
+        return Ok(None);
+    }
+    let registered = builtin_adapter_factories().ids();
+    if !registered.iter().any(|candidate| candidate == runtime_id) {
+        return Err(format!(
+            "worker {worker_id:?}: no adapter factory registered for runtime {runtime_id:?}; registered runtimes: {registered:?}"
+        ));
+    }
+    if !config.agent_runtime.enabled {
+        return Err(format!(
+            "worker {worker_id:?} declares runtime {runtime_id:?}; agent_runtime.enabled must be true"
+        ));
+    }
+    let credential = resolve_raw_credential(config, worker)
+        .map_err(|error| format!("worker {worker_id:?}: {error}"))?;
+    let endpoint = resolved_local_endpoint(worker, runtime_id);
+    if matches!(runtime_id, "ollama" | "unsloth") && endpoint.is_none() {
+        return Err(format!(
+            "worker {worker_id:?} runtime {runtime_id:?} requires a worker_registry local endpoint"
+        ));
+    }
+    if matches!(runtime_id, "openai-api" | "anthropic-api") && credential.is_none() {
+        return Err(format!(
+            "worker {worker_id:?} runtime {runtime_id:?} requires a resolvable auth_profile"
+        ));
+    }
+    if worker.provider == familiar_ai_core::config::LOCAL_PROVIDER && worker.local.is_none() {
+        return Err(format!(
+            "local worker {worker_id:?} requires a [worker_registry.workers.{worker_id}.local] resource profile"
+        ));
+    }
+    Ok(endpoint)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_raw_worker_context(
     config: &Config,
@@ -804,11 +881,7 @@ fn build_raw_worker_context(
         ));
     }
     let credential = resolve_raw_credential(config, worker)?;
-    let local_endpoint = worker
-        .local
-        .as_ref()
-        .map(|local| local.endpoint.clone())
-        .or_else(|| default_local_endpoint(runtime_id));
+    let local_endpoint = resolved_local_endpoint(worker, runtime_id);
 
     // Phase-1 discipline (docs/contracts/agent-loop.md): review is offered
     // only the read-only-plus-reporting capability set, independent of the
@@ -5047,6 +5120,21 @@ mod tests {
         .unwrap();
         assert!(ctx.local_endpoint.is_some());
         assert!(ctx.credential.is_none());
+    }
+
+    #[test]
+    fn legacy_ollama_runtime_config_host_is_the_resolved_endpoint() {
+        let mut config = Config::default();
+        config.agent_runtime.enabled = true;
+        let mut worker = raw_worker("ollama", "legacy-ollama", None);
+        worker.runtime_config = Some(familiar_ai_core::config::OllamaRuntimeConfig {
+            host: Some("http://10.0.0.12:11434/v1".into()),
+        });
+        let endpoint = preflight_raw_worker(&config, "legacy-ollama", &worker)
+            .unwrap()
+            .expect("ollama resolves a local endpoint");
+        assert_eq!(endpoint.base_url, "http://10.0.0.12:11434/v1");
+        assert_ne!(endpoint.base_url, "http://127.0.0.1:11434");
     }
 
     /// F3 regression: a pre-PRD-100 `adapter = "ollama"` entry declared no

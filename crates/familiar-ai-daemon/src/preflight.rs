@@ -84,16 +84,28 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
                     );
                     let check_id = format!("worker.{:?}", record.stage).to_ascii_lowercase();
                     if probed_agents.insert(key.clone()) {
-                        // A raw-runtime worker (`Ollama`/`RawAgentLoop`) has
-                        // no `RawWorkerContext` here — that requires an
-                        // execution id, database path, worktree, and PRD
-                        // text this session-level probe never has. Its real
-                        // `CodingAgent` is constructed later, per execution,
-                        // by `build_selected_agents`; a registered worker is
-                        // never refused here for lacking what only that
-                        // later construction needs.
-                        match crate::run::build_agent_or_deferred(&worker.as_agent_entry(), true) {
-                            Ok(agent) => checks.push(agent_check(&check_id, agent.as_ref())),
+                        let runtime_id = worker.runtime_id().unwrap_or("invalid-runtime");
+                        let validation = if matches!(runtime_id, "codex" | "claude-code") {
+                            crate::run::build_agent_or_deferred(&worker.as_agent_entry(), true)
+                                .map(|agent| Some(agent))
+                        } else {
+                            crate::run::preflight_raw_worker(
+                                config,
+                                &record.selected_worker,
+                                worker,
+                            )
+                            .map(|_| None)
+                        };
+                        match validation {
+                            Ok(None) => checks.push(PreflightCheck {
+                                check_id: check_id.clone(),
+                                status: PreflightStatus::Passed,
+                                detail: format!(
+                                    "worker {:?} runtime {:?} is constructible",
+                                    record.selected_worker, runtime_id
+                                ),
+                            }),
+                            Ok(Some(agent)) => checks.push(agent_check(&check_id, agent.as_ref())),
                             Err(detail) => checks.push(PreflightCheck {
                                 check_id: check_id.clone(),
                                 status: PreflightStatus::Failed,
@@ -105,11 +117,32 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
                     }
                 }
             }
-            Err(detail) => checks.push(PreflightCheck {
-                check_id: "worker.routing".into(),
-                status: PreflightStatus::Failed,
-                detail,
-            }),
+            Err(detail) => {
+                // Routing can exclude a raw worker precisely because its
+                // owned loop is disabled. Preserve the construction
+                // diagnostic instead of collapsing it into "no candidate".
+                for (worker_id, worker) in &registry.workers {
+                    let Ok(runtime_id) = worker.runtime_id() else {
+                        continue;
+                    };
+                    if worker.available && !matches!(runtime_id, "codex" | "claude-code") {
+                        if let Err(error) =
+                            crate::run::preflight_raw_worker(config, worker_id, worker)
+                        {
+                            checks.push(PreflightCheck {
+                                check_id: format!("worker.{worker_id}"),
+                                status: PreflightStatus::Failed,
+                                detail: error,
+                            });
+                        }
+                    }
+                }
+                checks.push(PreflightCheck {
+                    check_id: "worker.routing".into(),
+                    status: PreflightStatus::Failed,
+                    detail,
+                });
+            }
         }
     } else {
         let implementation_key = agent_identity(agents.implementation);
@@ -769,7 +802,7 @@ mod tests {
             WorkerCapabilityConfig, WorkerRegistryConfig,
         };
 
-        let config = Config {
+        let mut config = Config {
             worker_registry: Some(WorkerRegistryConfig {
                 workers: BTreeMap::from([(
                     "local-ollama".to_owned(),
@@ -846,5 +879,77 @@ mod tests {
                  RawWorkerContext it was never meant to have here: {check:?}"
             );
         }
+
+        let worker = config
+            .worker_registry
+            .as_mut()
+            .unwrap()
+            .workers
+            .get_mut("local-ollama")
+            .unwrap();
+        worker.auth_profile = Some("missing-profile".into());
+        let report = run(
+            &AgentSet {
+                implementation: &agent,
+                reviewer: &agent,
+                remediation: &agent,
+            },
+            &config,
+            temp.path(),
+        );
+        assert!(report.checks.iter().any(|check| {
+            check.status == PreflightStatus::Failed
+                && check.detail.contains("local-ollama")
+                && check.detail.contains("missing-profile")
+        }));
+
+        let worker = config
+            .worker_registry
+            .as_mut()
+            .unwrap()
+            .workers
+            .get_mut("local-ollama")
+            .unwrap();
+        worker.auth_profile = None;
+        worker.runtime = Some("unregistered-runtime".into());
+        let report = run(
+            &AgentSet {
+                implementation: &agent,
+                reviewer: &agent,
+                remediation: &agent,
+            },
+            &config,
+            temp.path(),
+        );
+        assert!(report.checks.iter().any(|check| {
+            check.status == PreflightStatus::Failed
+                && check.detail.contains("local-ollama")
+                && check.detail.contains("unregistered-runtime")
+                && check.detail.contains("no adapter factory registered")
+        }));
+
+        config
+            .worker_registry
+            .as_mut()
+            .unwrap()
+            .workers
+            .get_mut("local-ollama")
+            .unwrap()
+            .runtime = Some("ollama".into());
+        config.agent_runtime.enabled = false;
+        let report = run(
+            &AgentSet {
+                implementation: &agent,
+                reviewer: &agent,
+                remediation: &agent,
+            },
+            &config,
+            temp.path(),
+        );
+        assert!(report.checks.iter().any(|check| {
+            check.status == PreflightStatus::Failed
+                && check.detail.contains("local-ollama")
+                && check.detail.contains("agent_runtime.enabled")
+        }));
     }
 }

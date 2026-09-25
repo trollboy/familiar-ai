@@ -776,6 +776,62 @@ impl ToolExecutor for SandboxedToolExecutor {
     }
 }
 
+/// Execution-side counterpart to `ScopeAuthorizer` for writes. The
+/// authorizer checks the declared spelling; this wrapper checks the path
+/// after symlinks have been resolved, immediately before the effect.
+struct ResolvedWriteScopeExecutor {
+    inner: SandboxedToolExecutor,
+    allowed_write_paths: Vec<String>,
+}
+
+impl ResolvedWriteScopeExecutor {
+    fn resolved_write_allowed(&self, declared: &str) -> Result<bool, ExecutionError> {
+        let resolved = self.inner.resolve_within_worktree(declared)?;
+        let root = self.inner.worktree_root.canonicalize().map_err(|error| {
+            ExecutionError::Failed(format!(
+                "worktree root {:?} could not be resolved: {error}",
+                self.inner.worktree_root
+            ))
+        })?;
+        let relative = resolved
+            .strip_prefix(&root)
+            .map_err(|_| ExecutionError::Failed(format!("path {declared:?} escapes worktree")))?
+            .to_str()
+            .ok_or_else(|| {
+                ExecutionError::Failed(format!("resolved path for {declared:?} is not UTF-8"))
+            })?
+            .replace('\\', "/");
+        Ok(self.allowed_write_paths.iter().any(|entry| {
+            entry == &relative
+                || entry
+                    .strip_suffix('/')
+                    .is_some_and(|directory| relative == directory || relative.starts_with(entry))
+        }))
+    }
+}
+
+impl ToolExecutor for ResolvedWriteScopeExecutor {
+    fn execute(
+        &mut self,
+        call: &ValidatedCall,
+        ctx: &AuthorityContext,
+    ) -> Result<ExecutionOutcome, ExecutionError> {
+        if call.capability == CapabilityId::ApplyEdit {
+            let declared = call
+                .arguments
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if !self.resolved_write_allowed(declared)? {
+                return Err(ExecutionError::Failed(format!(
+                    "apply-edit {declared:?} refused: resolved path is outside allowed_write_paths"
+                )));
+            }
+        }
+        self.inner.execute(call, ctx)
+    }
+}
+
 /// Refuses a regular file whose containment cannot be *proven*, which for a
 /// hard link means any file carrying more than one name.
 ///
@@ -1468,12 +1524,15 @@ impl RawAgentHost for SqliteRawAgentHost {
     /// the request's `working_directory` (`RequestScopedAuthorizer`) while
     /// executing against a different tree entirely.
     fn executor(&self, working_directory: &Path) -> Box<dyn ToolExecutor> {
-        Box::new(SandboxedToolExecutor {
-            worktree_root: working_directory.to_path_buf(),
-            sandbox: self.sandbox.clone(),
-            command_timeout_ms: self.command_timeout_ms,
-            max_output_bytes: self.max_output_bytes,
-            token_discipline: self.token_discipline.clone(),
+        Box::new(ResolvedWriteScopeExecutor {
+            inner: SandboxedToolExecutor {
+                worktree_root: working_directory.to_path_buf(),
+                sandbox: self.sandbox.clone(),
+                command_timeout_ms: self.command_timeout_ms,
+                max_output_bytes: self.max_output_bytes,
+                token_discipline: self.token_discipline.clone(),
+            },
+            allowed_write_paths: self.allowed_write_paths.clone(),
         })
     }
 
@@ -2011,6 +2070,60 @@ mod raw_agent_host_tests {
             authorizer.authorize(&call, &authority),
             familiar_ai_agent::raw_runtime::AuthorizationDecision::Refused { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_redirect_under_allowed_directory_is_refused_by_executor() {
+        let (_dir, database_path) = setup("exec_symlink_scope");
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(worktree.path().join("allowed")).unwrap();
+        std::fs::write(worktree.path().join("outside.txt"), "original").unwrap();
+        std::os::unix::fs::symlink(
+            worktree.path().join("outside.txt"),
+            worktree.path().join("allowed/redirect.txt"),
+        )
+        .unwrap();
+        let host = SqliteRawAgentHost::new(
+            database_path,
+            "exec_symlink_scope".into(),
+            "proj_1".into(),
+            "worker".into(),
+            "implementation".into(),
+            "ollama".into(),
+            Some("model".into()),
+            worktree.path().to_path_buf(),
+            Default::default(),
+            Default::default(),
+            vec!["allowed/".into()],
+            vec![CapabilityId::ApplyEdit],
+            2_000,
+            4096,
+        );
+        let call = ValidatedCall {
+            call_id: "redirect".into(),
+            capability: CapabilityId::ApplyEdit,
+            arguments: serde_json::json!({
+                "path": "allowed/redirect.txt",
+                "content": "overwritten"
+            }),
+            argument_hash: "hash".into(),
+        };
+        assert!(matches!(
+            host.authorizer().authorize(&call, &host.authority()),
+            familiar_ai_agent::raw_runtime::AuthorizationDecision::Authorized
+        ));
+        let result = host
+            .executor(worktree.path())
+            .execute(&call, &host.authority());
+        assert!(
+            matches!(result, Err(ExecutionError::Failed(ref detail)) if detail.contains("resolved path is outside allowed_write_paths")),
+            "resolved target must be checked against scope: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.path().join("outside.txt")).unwrap(),
+            "original"
+        );
     }
 
     /// F2 regression: an unreadable journal database must fail closed, not

@@ -23,7 +23,9 @@ use familiar_ai_agent::{
     RawWorkerContext, WorkerDescriptor,
 };
 use familiar_ai_core::config::LocalEndpointConfig;
+use familiar_ai_core::{AppPaths, Config};
 use familiar_ai_daemon::agent_runtime::SqliteRawAgentHost;
+use familiar_ai_daemon::run::{execute_with_config_tracked_from, AgentSet};
 use familiar_ai_storage::Database;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -68,6 +70,29 @@ fn minimal_descriptor(runtime_id: &str, executable: &str) -> WorkerDescriptor {
         effort: None,
         permission_mode: None,
         extra_args: vec![],
+    }
+}
+
+struct PlaceholderAgent;
+impl familiar_ai_agent::CodingAgent for PlaceholderAgent {
+    fn execute(
+        &self,
+        _request: ExecutionRequest<'_>,
+        _output: &mut dyn std::io::Write,
+    ) -> Result<familiar_ai_agent::ExecutionResult, familiar_ai_agent::AgentExecutionError> {
+        panic!("worker registry must replace the placeholder")
+    }
+}
+
+fn app_paths(root: &std::path::Path) -> AppPaths {
+    AppPaths {
+        config_dir: root.join("config"),
+        data_dir: root.join("data"),
+        state_dir: root.join("state"),
+        runtime_dir: root.join("runtime"),
+        log_dir: root.join("log"),
+        socket_path: root.join("runtime/socket"),
+        pid_path: root.join("state/pid"),
     }
 }
 
@@ -187,6 +212,126 @@ fn full_prd_cycle_executes_through_the_owned_loop_with_no_vendor_cli_present() {
         )
         .unwrap();
     assert_eq!(usage_count, 1);
+}
+
+#[test]
+fn tracked_run_records_exactly_one_usage_observation_for_one_raw_attempt() {
+    use familiar_ai_core::config::{
+        OllamaRuntimeConfig, RegistryWorkerConfig, WorkerCapabilityConfig, WorkerRegistryConfig,
+    };
+    use std::collections::BTreeMap;
+    use std::process::Command;
+
+    let mock_runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = mock_runtime.block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                sse(&[serde_json::json!({
+                    "choices": [{"delta": {"content": "implemented"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 4}
+                })]),
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+        server
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    std::fs::create_dir_all(repository.join("docs/prds")).unwrap();
+    std::fs::write(
+        repository.join("docs/prds/PRD-001.md"),
+        "# PRD-001: raw cycle\n\n**Status:** Ready for implementation\n\n## Acceptance Criteria\n\n1. The raw cycle completes.\n\n## Expected Files\n\n- `src/lib.rs`\n",
+    )
+    .unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&repository)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let mut config = Config::default();
+    config.database.path = Some(temp.path().join("tracked.sqlite"));
+    config.agent_runtime.enabled = true;
+    config.worker_registry = Some(WorkerRegistryConfig {
+        workers: BTreeMap::from([(
+            "raw".into(),
+            RegistryWorkerConfig {
+                adapter: None,
+                provider: "legacy-ollama".into(),
+                model: "llama3".into(),
+                runtime: Some("ollama".into()),
+                model_artifact: None,
+                auth_profile: None,
+                capability_profile: None,
+                runtime_config: Some(OllamaRuntimeConfig {
+                    host: Some(server.uri()),
+                }),
+                local: None,
+                executable: None,
+                capabilities: vec![
+                    WorkerCapabilityConfig::Implementation,
+                    WorkerCapabilityConfig::Remediation,
+                ],
+                fresh_process_isolation: true,
+                context_tokens: 0,
+                estimated_cost_microusd: Some(1),
+                available: true,
+                effort: None,
+                permission_mode: None,
+                extra_args: vec![],
+            },
+        )]),
+        capability_profiles: BTreeMap::new(),
+        routing: familiar_ai_core::config::WorkerRoutingConfig {
+            implementation_pin: Some("raw".into()),
+            remediation_pin: Some("raw".into()),
+            ..Default::default()
+        },
+    });
+    let placeholder = PlaceholderAgent;
+    let prd = repository.join("docs/prds/PRD-001.md");
+    let (_result, trace) = execute_with_config_tracked_from(
+        &repository,
+        &prd,
+        &AgentSet {
+            implementation: &placeholder,
+            reviewer: &placeholder,
+            remediation: &placeholder,
+        },
+        &config,
+        &app_paths(temp.path()),
+    );
+    assert!(trace.execution_id.is_some());
+    let db = Database::open(config.database.path.as_ref().unwrap()).unwrap();
+    let attempts: i64 = db.conn().query_row(
+        "SELECT count(*) FROM agent_runtime_attempts WHERE execution_id IN (SELECT execution_id FROM execution_history)",
+        [], |row| row.get(0)
+    ).unwrap();
+    let observations: i64 = db.conn().query_row(
+        "SELECT count(*) FROM usage_observations WHERE execution_id IN (SELECT execution_id FROM execution_history)",
+        [], |row| row.get(0)
+    ).unwrap();
+    assert_eq!(attempts, 1);
+    assert_eq!(
+        observations, attempts,
+        "one PRD-051 observation per raw attempt"
+    );
 }
 
 /// PRD-100 acceptance: every owned-loop attempt records its edit outcome —
