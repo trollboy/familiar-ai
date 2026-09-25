@@ -440,7 +440,16 @@ impl<'a> SqliteBacklogRepository<'a> {
             params![repository.key,target.path.as_str()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(storage)?;
         let (status, hash, missing) =
             row.ok_or_else(|| BacklogStoreError::NotFound(target.path.clone()))?;
-        if status != "in_progress" || hash != target.content_hash || missing.is_some() {
+        // FAM-BUG-106: landing archives the PRD file before the claimed row
+        // completes (FAM-BUG-080), so at completion time the claimed path is
+        // "missing" with a completed twin under `done/`. That is Familiar's
+        // own move, not a deleted PRD, and the claim may complete.
+        let missing_is_landing_archive =
+            missing.is_some() && archived_twin_completed(&tx, &repository.key, target.number)?;
+        if status != "in_progress"
+            || hash != target.content_hash
+            || (missing.is_some() && !missing_is_landing_archive)
+        {
             // Name the failing predicate: "expected in_progress, found
             // in_progress" (status fine, hash stale) is undiagnosable.
             let actual = if status != "in_progress" {
@@ -691,6 +700,22 @@ fn validate_persisted_findings(
         ));
     }
     Ok(())
+}
+
+/// Whether a PRD number has a live (non-missing) completed row: the archived
+/// twin that archive-on-integration creates when a landing moves the file.
+fn archived_twin_completed(
+    tx: &Transaction<'_>,
+    repository_key: &str,
+    prd_number: u64,
+) -> Result<bool, BacklogStoreError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM backlog_prds WHERE repository_key=?1 AND prd_number=?2 \
+           AND status='completed' AND missing_since IS NULL)",
+        params![repository_key, prd_number as i64],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(storage)
 }
 
 fn validate_run_actor(actor: &str) -> Result<(), BacklogStoreError> {
@@ -1373,6 +1398,35 @@ mod tests {
             storage.reconcile_and_snapshot(&repo(), &[prd()]).unwrap()[0].status,
             BacklogStatus::Blocked
         );
+    }
+
+    /// FAM-BUG-106: the archived twin a landing creates lets the claimed row
+    /// complete although its own path is now missing; a genuinely deleted PRD
+    /// with no twin does not get that pass.
+    #[test]
+    fn a_missing_claim_may_complete_only_beside_a_landing_archive_twin() {
+        let mut db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let insert = |db: &crate::Database,
+                      path: &str,
+                      number: i64,
+                      status: &str,
+                      missing: Option<&str>| {
+            db.conn()
+                .execute(
+                    "INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,missing_since,created_at,updated_at) \
+                     VALUES('repo',?1,?2,'h',?3,'t','t',?4,'t','t')",
+                    params![path, number, status, missing],
+                )
+                .unwrap();
+        };
+        insert(&db, "docs/prds/PRD-103.md", 103, "in_progress", Some("t"));
+        insert(&db, "docs/prds/done/PRD-103.md", 103, "completed", None);
+        insert(&db, "docs/prds/PRD-200.md", 200, "in_progress", Some("t"));
+        let tx = db.conn_mut().transaction().unwrap();
+        assert!(archived_twin_completed(&tx, "repo", 103).unwrap());
+        assert!(!archived_twin_completed(&tx, "repo", 200).unwrap());
+        assert!(!archived_twin_completed(&tx, "other", 103).unwrap());
     }
 
     #[test]

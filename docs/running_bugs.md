@@ -448,6 +448,22 @@ appears with no entry, or with a status a reader cannot classify.
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
 
+### FAM-BUG-106 — Completing a landed claim is refused because the landing itself archived the file
+
+- **Status:** Fixed (2026-09-25: `complete_run` accepts a claimed row marked
+  missing when a live completed twin for the same PRD number exists, the
+  archived twin the landing created; a missing claim with no twin is still a
+  conflict.)
+- **Found:** 2026-09-25, PRD-103's fourth finish: `status transition
+  conflict for docs/prds/PRD-103.md: expected in_progress, found in_progress
+  but marked missing`, after FAM-BUG-105 let resume reach completion.
+- **Detail:** archive-on-integration (FAM-BUG-080) moves the PRD file before
+  the ledger completes the claim, and the reconciler marks the claimed path
+  missing as soon as the file moves. `complete_run` treated any missing
+  claim as a deleted PRD. Between them, no resumed landing could ever
+  complete its row after an archive.
+- **Expected fix:** as landed, proven by PRD-103's ledger reading completed.
+
 ### FAM-BUG-105 — A half-landed PRD reads as terminal, so resume refuses to finish it
 
 - **Status:** Fixed (2026-09-25: `terminal_prds` excludes any PRD that still
