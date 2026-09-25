@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use figment::providers::{Env, Format, Serialized, Toml};
@@ -194,6 +195,29 @@ fn reject_stale_env() -> crate::Result<()> {
 }
 
 impl Config {
+    /// Load the repository's machine-default fragments in lexical order.
+    ///
+    /// `config/default.d` is the authoring surface: features own one file and
+    /// therefore no longer serialize on a monolithic defaults document.
+    pub fn load_defaults_dir(directory: &Path) -> crate::Result<Self> {
+        let mut paths: Vec<PathBuf> = fs::read_dir(directory)
+            .map_err(|error| FamiliarError::Config(error.to_string()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("toml"))
+            .collect();
+        paths.sort();
+        let mut figment = Figment::from(Serialized::defaults(Config::default()));
+        for path in paths {
+            figment = figment.merge(Toml::file(path));
+        }
+        let config: Config = figment
+            .extract()
+            .map_err(|error| FamiliarError::Config(error.to_string()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Validate the complete effective configuration. Mutation callers use
     /// this same boundary as startup before exposing new bytes.
     pub fn validate(&self) -> crate::Result<()> {

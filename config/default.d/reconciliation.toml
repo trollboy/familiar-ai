@@ -1,0 +1,3 @@
+# [reconciliation]
+# tolerance_nanousd = 10000000    # one cent; variance within this is "reconciled-with-variance"
+# settlement_horizon_days = 3     # a local estimate with no provider match past this many days becomes an explicit mismatch

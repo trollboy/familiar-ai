@@ -1,0 +1,7 @@
+# [auth_profiles]
+# env-anthropic-key = "env: ANTHROPIC_API_KEY"
+
+# Local artifact aliases point to immutable canonical manifests. Registration
+# is performed with `familiar-ai config artifact register`; do not hand-author
+# digests. Runtime-only aliases are recorded as degraded-unverified and may be
+# rejected by routing policy. License metadata is advisory, not enforced.

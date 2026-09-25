@@ -1,0 +1,8 @@
+# [planner]
+# adapter = "codex"
+# model = "gpt-5"
+# max_prds_per_batch = 8
+# max_bytes_per_prd = 65536
+
+# Repositories absent from this table use the canonical profile at docs/prds
+# and docs/prds/done with the existing ADR, contract, and supporting roots.

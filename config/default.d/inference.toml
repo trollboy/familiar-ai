@@ -1,0 +1,29 @@
+[inference.text]
+# mode = "disabled"             # Options: disabled, local_only, remote_only, hybrid
+# provider = "disabled"         # Options: disabled, builtin, remote
+# builtin_model = "qwen2.5:3b"
+# builtin_url = "http://127.0.0.1:11434/v1"
+# remote_url = ""
+# remote_api_key = ""
+# fallback_enabled = true
+# prefer_privacy = false
+# prefer_cost_savings = true
+# max_input_chars = 16000
+# max_concurrent_requests = 4
+# request_timeout_secs = 60
+
+[inference.embedding]
+# provider = "disabled"         # Options: disabled, builtin, remote
+# builtin_model = "nomic-embed-text"
+# builtin_url = "http://127.0.0.1:11434/v1"
+# remote_url = ""
+# remote_api_key = ""
+# fallback_enabled = true
+# max_concurrent_requests = 4
+# request_timeout_secs = 60
+
+# PRD-058: the Familiar-owned raw-model agent loop. Disabled by default; no
+# existing harness-driven execution path changes when this stays absent.
+# PRD-100: `enabled = true` here is required for any worker_registry entry
+# whose runtime is not "codex" or "claude-code" (anthropic-api, openai-api,
+# ollama, unsloth, ...) — that worker is refused at construction otherwise.

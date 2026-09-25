@@ -24,31 +24,22 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every `include_str!("../migrations/NNN_name.sql")` paired with the
-/// `version:` that precedes it, read from the migration table itself.
+/// The build-derived registry's authoritative inputs, read exactly as
+/// `familiar-ai-storage/build.rs` reads them.
 fn declared_migrations() -> Vec<(i64, String)> {
-    let source = fs::read_to_string(repo_root().join("crates/familiar-ai-storage/src/migrate.rs"))
-        .expect("the migration table must be readable");
-    let mut out = Vec::new();
-    let mut pending: Option<i64> = None;
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("version: ") {
-            if let Ok(value) = rest.trim_end_matches(',').parse::<i64>() {
-                pending = Some(value);
-            }
-        }
-        if let Some(start) = trimmed.find("../migrations/") {
-            if let Some(version) = pending.take() {
-                let file = trimmed[start + "../migrations/".len()..]
-                    .split('"')
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                out.push((version, file));
-            }
-        }
-    }
+    let directory = repo_root().join("crates/familiar-ai-storage/migrations");
+    let mut out: Vec<(i64, String)> = fs::read_dir(directory)
+        .expect("the migrations directory must be readable")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file = entry.file_name().into_string().ok()?;
+            (entry.path().extension().and_then(|value| value.to_str()) == Some("sql")).then(|| {
+                let version = file.split('_').next().unwrap_or_default().parse().unwrap();
+                (version, file)
+            })
+        })
+        .collect();
+    out.sort_by_key(|(version, _)| *version);
     assert!(
         !out.is_empty(),
         "no migrations parsed — the table's shape changed"

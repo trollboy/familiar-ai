@@ -1,0 +1,4 @@
+[logging]
+# level = "info"        # Options: trace, debug, info, warn, error
+# format = "pretty"     # Options: pretty, json
+# file = ""             # Optional: path to log file (logs also go to stdout)

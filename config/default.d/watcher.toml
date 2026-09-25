@@ -1,0 +1,6 @@
+[watcher]
+# enabled = true
+# paths = []                                    # Directories to watch (e.g. ["~/Projects"])
+# debounce_ms = 1000
+# ignore_patterns = ["target/**", "node_modules/**"]
+# respect_gitignore = true

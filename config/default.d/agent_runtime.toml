@@ -1,0 +1,35 @@
+[agent_runtime]
+# enabled = false
+# offered_capabilities = ["read-file", "search-list", "report-progress", "submit-evidence", "request-escalation"]
+# prompt_cache_enabled = true
+
+[agent_runtime.ceilings]
+# max_iterations = 20
+# max_output_tokens = 200000
+# max_context_tokens = 200000
+# max_wall_clock_ms = 600000
+
+[agent_runtime.sandbox]
+# Deny-by-default: run-command is refused unless offered_capabilities names
+# it AND this allowlist is non-empty.
+# allowed_commands = ["cargo", "git"]
+# network_allowed = false
+# allowed_environment = []
+
+[agent_runtime.token_discipline]
+# PRD-072. Disabled reproduces pre-PRD-072 behavior byte-for-byte: whole-
+# file apply-edit writes, no stated edit-form preference, and command/file
+# results bounded only by the raw byte caps above.
+# enabled = false
+# targeted_edit_threshold_bytes = 4096
+# tool_result_max_lines = 200
+# tool_result_head_lines = 100
+# tool_result_tail_lines = 100
+# file_read_max_lines = 2000
+
+# PRD-073: warm local model residency. The daemon holds configured local
+# serving processes loaded between executions so consecutive local calls
+# share one model load and a warm prefix cache. Off by default in two
+# independent places — this section's `enabled` and each resident's own —
+# because holding gigabytes of weights resident is an operator resource
+# commitment, never something Familiar infers.

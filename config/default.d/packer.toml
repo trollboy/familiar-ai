@@ -1,0 +1,3 @@
+[packer]
+# default_profile = "balanced"        # Options: minimal, balanced, aggressive, max_accuracy
+# hard_ceiling_tokens = 15000

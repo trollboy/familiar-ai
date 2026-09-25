@@ -1,5 +1,35 @@
 # Backlog Execution Plan — updated 2026-09-18
 
+## 2026-09-25 — PRD-106 hub split measurement
+
+PRD-106 replaced the handwritten migration registry, monolithic machine
+defaults, and README command/configuration reference with directory-derived
+migrations, per-feature `config/default.d/` files, and two focused guides.
+Every queued PRD was re-declared against its owned leaf file. Consequently,
+the queued conflict count on the three split surfaces (`migrate.rs`,
+`config/default.toml`, and `README.md`) is **0**, down from the 2026-09-17
+hub count recorded below.
+
+Measured from this repository with the scheduler's own `achievable_width()`:
+
+```bash
+FAMILIAR_AI_DATABASE__PATH=/tmp/familiar-prd-106-width-final.db \
+XDG_CONFIG_HOME=/tmp/familiar-prd-106-config \
+target/debug/familiar-ai ops operator width \
+  --actor human:codex --reason "PRD-106 post-archive width measurement"
+```
+
+```text
+considering: PRD-86, PRD-88, PRD-89, PRD-98, PRD-101, PRD-104, PRD-107, PRD-110, PRD-111
+graph_width=9 achievable_width=3
+```
+
+PRD-106 was archived before this measurement, so none of its broad conversion
+claims contribute a conflict. Remaining width is bound by the deliberately
+out-of-scope code hubs (`run.rs` and
+`registry_workers.rs`) and dependency edges, not by any of the three surfaces
+split here.
+
 **Authority:** `docs/north-star.md`; backlog index in `ROADMAP.md`.
 **Definition (owner's): a wave is a batch of PRDs runnable simultaneously —
 dependency-ready AND mutually scope-disjoint.**

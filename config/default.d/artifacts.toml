@@ -1,0 +1,5 @@
+# [artifacts.qwen-local]
+# id = "sha256:..."
+# state = "verified"
+# manifest = { schema_version = 1, digest_algorithm = "sha256-v1", files = [] }
+# provenance = { license = "unknown", usage_restrictions = [] }

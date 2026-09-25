@@ -1,0 +1,88 @@
+[review]
+enabled = false
+max_review_attempts = 3
+max_remediation_attempts = 2
+max_total_tokens = 0
+max_total_cost_microusd = 0
+max_total_duration_ms = 0
+allow_isolated_same_model_fallback = false
+reviewer_calibration_window = 100
+reviewer_calibration_minimum_sample = 10
+reviewer_invalid_rate_bps = 2500
+max_package_bytes = 1000000
+max_package_tokens = 250000
+max_evidence_bytes = 16000000
+max_verification_log_bytes = 256000
+# allowed_paths = ["src/", "tests/"]
+# Prohibited changes are typed rules with stable ids. Each rule names exactly
+# one of `path` (closed grammar: exact file, `dir/`, or `dir/**`) or `class`
+# (dependency_manifest | dependency_lockfile | migration | configuration |
+# test | generated_artifact). Optional `change_kinds` restricts the rule to
+# specific Git change kinds; empty means all. The only accepted legacy string
+# forms are a repository-relative path containing '/' or '.', or the exact
+# phrase "dependency changes".
+# [[review.prohibited_changes]]
+# id = "no_secret_changes"
+# path = "secrets/"
+# description = "secret material is never agent-editable"
+# [[review.prohibited_changes]]
+# id = "no_dependency_manifest_changes"
+# class = "dependency_manifest"
+
+# Deterministic coding-agent selection. When this section is absent both the
+# implementation and reviewer agents resolve to the Codex adapter with
+# executable "codex" — exactly the historical behavior — and no review
+# consistency checking applies. When present, validation is fail-closed and,
+# with review enabled, review.*_agent.adapter_id must equal agents.*.adapter.
+[review.scope]
+allow_prd_expected_file_expansion = false
+declaration_mode = "expected_or_configured"
+# [[review.scope.classification]]
+# id = "storage_migrations"
+# class = "migration"
+# path = "crates/familiar-ai-storage/migrations/"
+
+[review.scope.file_classes]
+dependency_manifest = "human_review"
+dependency_lockfile = "human_review"
+migration = "human_review"
+configuration = "human_review"
+test = "allow_when_expected"
+generated_artifact = "human_review"
+# [[review.verification]]
+# check_id = "tests"
+# argv = ["cargo", "test"]
+# working_directory = "."
+# timeout_ms = 300000
+# required = true
+# path_prefixes = ["crates/"]
+# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }
+# [review.implementation_agent]
+# adapter_id = "codex-cli"
+# agent_id = "implementation"
+# provider = "openai"
+# model = "configured-model"
+
+# Optional deterministic cost tiers. When omitted or unmatched, full review is
+# used. Rules are evaluated in authored order against measured diff evidence.
+# Unknown, ambiguous, and high-risk footprints always use full review.
+# [review.tier_policy]
+# independent_review_required = false
+# [review.tier_policy.standard_reviewer_agent]
+# adapter_id = "codex-cli"
+# agent_id = "economy-reviewer"
+# provider = "openai"
+# model = "configured-cheaper-model"
+# [[review.tier_policy.rules]]
+# id = "small-tests"
+# tier = "checks-only" # "checks-only" | "standard" | "full"
+# path_prefixes = ["tests/"]
+# max_changed_files = 2
+# max_changed_bytes = 4096
+# change_kinds = ["added", "modified"]
+# scope_classes = ["test"]
+# [review.reviewer_agent]
+# adapter_id = "codex-cli"
+# agent_id = "reviewer"
+# provider = "openai"
+# model = "configured-model"

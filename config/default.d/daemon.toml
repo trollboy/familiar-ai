@@ -1,0 +1,15 @@
+[daemon]
+# heartbeat_interval_secs = 60
+# pid_file = ""         # Default: platform-specific (see AppPaths)
+# socket_path = ""      # Default: platform-specific (see AppPaths)
+# global_concurrency_ceiling = 1
+# default_project_concurrency_ceiling = 1
+# health_timeout_ms = 5000
+
+# PRD-091: the durable, per-repository, cross-host driver lease. Unused by a
+# single host — the filesystem control-plane claim keeps doing local mutual
+# exclusion unchanged, and no configuration is required for that to keep
+# working exactly as before. These two values only matter once a second host
+# shares this installation's database and drives a repository against it.
+# lease_renewal_interval_secs = 20  # must stay well below lease_ttl_secs
+# lease_ttl_secs = 90               # time since last renewal before a lease is takeable

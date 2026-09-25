@@ -1,0 +1,80 @@
+# [repositories."/absolute/path/to/worktree"]
+# profile = "numbered-slug" # "canonical" | "numbered-slug"
+# active_dir = "docs/prd/todo"
+# archived_dir = "docs/prd/done"
+# reference_roots = [
+#   { prefix = "docs/prd/", kind = "prd" },
+#   { prefix = "docs/runbooks/", kind = "supporting" },
+# ]
+#
+# Execution policy is resolved wholesale per section. This worked example
+# gives a second repository its own context ceiling, scope, and verification
+# pipeline; omitted sections fall back whole to their global counterpart.
+# [repositories."/home/operator/Projects/spectra".execution_context]
+# hard_ceiling_tokens = 60000
+# [repositories."/home/operator/Projects/spectra".review]
+# enabled = true
+# max_review_attempts = 3
+# max_remediation_attempts = 2
+# max_total_duration_ms = 1200000
+# allowed_paths = ["internal/", "api/", "tests/", "docs/prd/"]
+# [repositories."/home/operator/Projects/spectra".review.scope]
+# declaration_mode = "expected_or_configured"
+# [repositories."/home/operator/Projects/spectra".review.scope.file_classes]
+# dependency_manifest = "human_review"
+# dependency_lockfile = "human_review"
+# migration = "human_review"
+# configuration = "human_review"
+# test = "allow_when_expected"
+# generated_artifact = "human_review"
+# [[repositories."/home/operator/Projects/spectra".review.verification]]
+# check_id = "lint"
+# argv = ["/usr/bin/docker", "compose", "run", "--rm", "tools", "make", "lint"]
+# working_directory = "."
+# timeout_ms = 1200000
+# required = true
+# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }
+# [repositories."/home/operator/Projects/spectra".review.implementation_agent]
+# adapter_id = "codex"
+# agent_id = "implementation"
+# [repositories."/home/operator/Projects/spectra".review.reviewer_agent]
+# adapter_id = "codex"
+# agent_id = "reviewer"
+
+# Unattended driver warrant. `familiar-ai drive` refuses to start unless at
+# least one ceiling below is finite — an unbounded unattended loop is not a
+# warrant. Command-line flags may only tighten these values, never loosen them.
+# Note: cost ceilings require *known* per-run cost, which comes from
+# [repositories."/absolute/canonical/worktree".delivery] section for each
+# repository that Familiar may publish. `mode` is one of `disabled`,
+# `reviewed_pr_manual` (the safe default when a section omits it),
+# `poc_self_approval`, or `review_gated_automatic`. A missing repository
+# delivery section grants no publish, merge, or deploy authority.
+# `forge` selects the forge grammar delivery speaks: `github`, `gitlab`,
+# `gitea`, or `none` (see docs/contracts/forge-adapters.md). A section that
+# omits forge keeps speaking `github`, the pre-PRD-097 baseline. Set
+# `forge = "none"` explicitly to push the branch and stop for a human to
+# open the change request instead.
+# forge = "github"
+# provider_argv = ["provider-cli"]
+# max_deliveries_per_session = 1
+# command_timeout_ms = 1800000
+# remote = "configured-remote"
+# base = "configured-base"
+# staging_environment = "configured-non-production-environment"
+# deploy_argv = ["deployment-adapter", "deploy"]
+# smoke_argv = ["deployment-adapter", "health"]
+# rollback_argv = ["deployment-adapter", "rollback"]
+# migration_gate_argv = ["deployment-adapter", "migration-gate"]
+# required_checks = ["configured-check"]
+# credential_references = ["DELIVERY_CREDENTIAL_REFERENCE"]
+# PoC mode additionally requires [repositories."...".delivery.poc_warrant]
+# with actor, finite max_prds, RFC3339 expires_at, and the fixed visible
+# assurance_label = "LOW_ASSURANCE_POC_SELF_APPROVAL". Governed automatic mode
+# requires [repositories."...".delivery.review_gate] with three distinct
+# implementer, reviewer, and approver identities. These fields model evidence;
+# they do not claim certification.
+
+# Persistent worker supervision (launchd on macOS, systemd user service on Linux).
+# The generated definition preserves PATH, writes durable logs, restarts only
+# after failure, and runs one finite warrant at a time.

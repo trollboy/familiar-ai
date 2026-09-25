@@ -1,0 +1,20 @@
+[model_residency]
+# enabled = false
+# max_residents = 1
+# memory_ceiling_mb = 16384          # unset means only max_residents bounds residency
+# health_interval_secs = 30
+# max_restarts = 2
+
+# One resident per model artifact, keyed however the operator names it.
+# `worker` must be a worker_registry.workers entry declaring both a PRD-063
+# [..local] profile and a PRD-062 model_artifact. `launch` is the serving
+# command, argv-style, executed directly with no shell: Familiar never
+# guesses how a local runtime is started. Prefer
+# `familiar-ai model-residency enable`, which validates and records a
+# decision row, over hand-editing this section.
+# [model_residency.residents.llama3]
+# enabled = false
+# worker = "llama3-ollama"
+# launch = ["ollama", "serve"]
+# memory_mb = 8192                   # required whenever memory_ceiling_mb is set
+# ready_timeout_secs = 60

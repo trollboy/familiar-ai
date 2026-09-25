@@ -1,0 +1,81 @@
+# [worker_registry.routing]
+# implementation_pin = "codex-primary"
+# review_pin = "claude-review"
+# max_stage_cost_microusd = 0
+# required_context_tokens = 0
+# [worker_registry.workers.codex-primary]
+# runtime = "codex" # execution mechanism; legacy `adapter` migrates deterministically
+# provider = "openai"
+# model = "runtime-selected" # known id, "unknown", or "runtime-selected"
+# auth_profile = "codex-chatgpt" # external descriptor key; never a credential
+# capability_profile = "agentic-implementer"
+# capabilities = ["planning", "implementation", "remediation", "narrow-task"]
+# fresh_process_isolation = true
+# context_tokens = 200000
+# estimated_cost_microusd = 0
+# available = true
+# [worker_registry.workers.claude-review]
+# adapter = "claude-code"
+# provider = "anthropic"
+# model = "sonnet"
+# capabilities = ["review"]
+# fresh_process_isolation = true
+# context_tokens = 200000
+# estimated_cost_microusd = 0
+# available = true
+# Ollama uses adapter = "ollama" and model = "qwen3:8b"; with no [local]
+# block declared, the endpoint defaults to the conventional loopback
+# address (http://127.0.0.1:11434). A [local] block is only needed to
+# point at a non-default endpoint or to declare a hardware/resource
+# profile. Ollama, this raw hosted Anthropic worker below, and any other
+# worker naming a runtime that is not "codex" or "claude-code" all execute
+# through Familiar's own PRD-058 raw-model agent loop (PRD-100) — never a
+# vendor CLI subprocess — and require [agent_runtime] enabled = true below.
+# A worker explicitly declaring `provider = "local"` must include its
+# endpoint/resource profile. Production dispatch acquires the declared
+# inference-slot reservation before contacting the endpoint and persists
+# per-attempt local telemetry after resolution (PRD-094):
+# [worker_registry.workers.local-ollama]
+# runtime = "ollama"
+# provider = "local"
+# model = "qwen3:8b"
+# capabilities = ["implementation", "remediation"]
+# fresh_process_isolation = true
+# context_tokens = 32768
+# [worker_registry.workers.local-ollama.local]
+# runtime_kind = "ollama"
+# [worker_registry.workers.local-ollama.local.endpoint]
+# base_url = "http://127.0.0.1:11434"
+# tls = false
+# [worker_registry.workers.local-ollama.local.resources]
+# concurrent_inference_slots = 1
+#
+# A raw hosted Anthropic worker (PRD-059) — distinct for routing, accounting,
+# and empirical history from any Claude Code worker of the same model, since
+# it differs only in runtime. No runtime_config extension is needed for
+# "anthropic-api" (unlike ollama); thinking/effort defaults come from the
+# adapter's own construction, itself informed by capability_profile.
+# [worker_registry.workers.claude-api]
+# runtime = "anthropic-api"
+# provider = "anthropic"
+# model = "claude-sonnet-5"
+# auth_profile = "env-anthropic-key"
+# capability_profile = "anthropic-api-default"
+# capabilities = ["implementation", "remediation"]
+# fresh_process_isolation = true
+# context_tokens = 1000000
+# estimated_cost_microusd = 0
+# available = true
+# [worker_registry.capability_profiles.anthropic-api-default]
+# [worker_registry.capability_profiles.anthropic-api-default.capabilities]
+# native-tool-calling = "declared"
+# mcp-client = "declared"
+# structured-output = "declared"
+# streaming = "declared"
+# prompt-caching = "declared"
+# reasoning-controls = "declared"
+# parallel-tool-calls = "declared"
+# usage-reporting-categories = "declared"
+# cost-reporting-mode = "declared"
+# remote-or-local = "declared"
+# max-context = "declared"

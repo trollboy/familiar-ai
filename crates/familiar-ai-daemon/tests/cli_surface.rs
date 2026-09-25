@@ -19,6 +19,8 @@ use familiar_ai_storage::{
 };
 use tempfile::tempdir;
 
+const CLI_GUIDE: &str = include_str!("../../../docs/guides/cli.md");
+
 fn git_repo() -> tempfile::TempDir {
     let temp = tempdir().unwrap();
     let status = Command::new("git")
@@ -114,6 +116,18 @@ fn assert_lists_leaves(repo: &Path, database: &Path, path: &[&str], leaves: &[&s
 #[test]
 fn declared_top_level_commands_stay_under_their_ceiling() {
     assert!(TOP_LEVEL_COMMANDS.len() <= TOP_LEVEL_COMMAND_CEILING);
+    for command in TOP_LEVEL_COMMANDS {
+        assert!(
+            CLI_GUIDE.contains(&format!("`{command}")),
+            "docs/guides/cli.md must document top-level command {command}"
+        );
+    }
+    for (old, new) in RELOCATED_COMMAND_ALIASES {
+        assert!(
+            CLI_GUIDE.contains(&format!("`{old}`")) && CLI_GUIDE.contains(&format!("`{new}")),
+            "docs/guides/cli.md must document relocated alias {old} -> {new}"
+        );
+    }
 }
 
 #[test]

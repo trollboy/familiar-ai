@@ -1,0 +1,5 @@
+[rollup]
+# enabled = true
+# default_limit = 20
+# max_rollup_tokens = 4000
+# max_rollup_chars = 50000

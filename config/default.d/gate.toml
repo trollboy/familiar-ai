@@ -1,0 +1,12 @@
+[gate]
+# PRD-099. Whether the pre-push hook runs the gate before a push leaves the
+# machine. This toggles a trigger, never a step: what verification means lives
+# in scripts/gate.sh and is changeable only by a reviewed change to this
+# repository.
+#
+# Turn it off for an unattended wave. Familiar's own driver pushes candidate
+# branches, and a hook-refused push aborts delivery as an unclassified command
+# error rather than a recorded verdict, which produces a retry loop and no
+# usable taxonomy. A commit pushed with this off carries no verdict, so
+# `familiar-ai gate status` answers `absent` for it — honest, and never a pass.
+# pre_push_hook = true

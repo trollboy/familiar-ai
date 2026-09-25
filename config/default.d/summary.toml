@@ -1,0 +1,7 @@
+[summary]
+# enabled = true
+# staleness_threshold_secs = 86400      # forced refresh window (24h)
+# flush_interval_secs = 3
+# max_file_size_bytes = 1048576         # 1 MB
+# max_pending_files = 10000
+# per_file_quiet_ms = 1500              # debounce per path before regen

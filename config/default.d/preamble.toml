@@ -1,0 +1,9 @@
+# Familiar Daemon Configuration
+#
+# This is the default configuration file. Copy to:
+#   Linux:  ~/.config/familiar-ai/config.toml
+#   macOS:  ~/Library/Application Support/Familiar-AI/config.toml
+#
+# All values shown are defaults. Uncomment and modify as needed.
+# Environment variables override file values (prefix: FAMILIAR_AI_, separator: __)
+# Example: FAMILIAR_AI_DAEMON__HEARTBEAT_INTERVAL_SECS=30

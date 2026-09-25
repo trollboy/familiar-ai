@@ -1,0 +1,6 @@
+[worker]
+label = "ai.familiar.worker"
+restart_throttle_secs = 10
+max_prds_per_run = 1
+
+# Commands run as exact argv before any PRD claim; no shell is involved.

@@ -1,0 +1,24 @@
+# [providers.unsloth-local]
+# kind = "inference"
+# runtime = "unsloth"
+# host = "127.0.0.1:8888"
+# auth = "env: UNSLOTH_API_KEY"
+
+# Anthropic Messages API, called directly by Familiar's own raw-model agent
+# loop (PRD-058/059) rather than through a Claude Code harness subscription.
+# The API key stays an external `env:` reference; nothing here or in any
+# accounting row ever carries the credential value. Capability/limit probing
+# uses only non-billable surfaces (GET /v1/models/{id}, POST
+# /v1/messages/count_tokens) — a failed probe leaves capabilities unknown,
+# never assumed. This is a distinct worker identity from any Claude Code
+# worker of the same nominal model: see [worker_registry.workers.claude-api]
+# below, which is what actually names the "anthropic-api" runtime.
+# [providers.anthropic]
+# kind = "inference"
+# host = "api.anthropic.com:443"
+# auth = "env: ANTHROPIC_API_KEY"
+# models = ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"]
+
+# Cost-reconciliation policy (PRD-053). Both values are operator policy, not
+# provider guarantees; the exact value in effect is recorded on every
+# reconciliation run for audit even after this default changes.

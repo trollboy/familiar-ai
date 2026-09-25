@@ -1,0 +1,23 @@
+# [agents] entry; the two positive ceilings bound every generated batch.
+# [agents.implementation]
+# adapter = "claude-code"          # "codex" | "claude-code"; default "codex"
+# executable = "claude"            # default: "codex" for codex, "claude" for claude-code
+# model = "sonnet"                 # optional; omitted -> CLI default
+# effort = "high"                  # optional; claude-code only: "low" | "medium" | "high"
+# permission_mode = "acceptEdits"  # optional; claude-code only:
+#                                  # "default" | "plan" | "acceptEdits" | "bypassPermissions"
+# max_execution_cost_microusd = 0  # optional; Claude Code enforces this natively
+# max_execution_tokens = 0         # optional; refused unless the adapter supports it
+# max_execution_duration_ms = 0    # optional; refused unless the adapter supports it
+# extra_args = []                  # optional; validated passthrough
+# [agents.reviewer]
+# adapter = "claude-code"
+# executable = "claude"
+# model = "sonnet"
+# effort = "high"
+# permission_mode = "default"      # bypassPermissions is always rejected here
+
+# Adapter-neutral worker registry. This is mutually exclusive with [agents].
+# Automatic routing uses lowest estimated cost, then worker id. A stage pin is
+# exact and is refused if unavailable, incapable, over budget, under-context,
+# insufficiently isolated, or (for review) not independent.
