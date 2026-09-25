@@ -6,6 +6,41 @@ use familiar_ai_review::{
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionQualityRow {
+    pub check_name: String,
+    pub field_name: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingOutcome {
+    Confirmed,
+    Waived,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewerCalibration {
+    pub reviewer_identity: String,
+    pub window: usize,
+    pub raised: u64,
+    pub confirmed: u64,
+    pub waived: u64,
+    pub invalid: u64,
+    pub unresolved: u64,
+    pub invalid_rate: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewerRoutingInput {
+    pub calibration: ReviewerCalibration,
+    pub minimum_sample: u64,
+    pub invalid_rate_threshold: f64,
+    pub probation_recommended: bool,
+}
+
 /// PRD-087: a recovery path either accepts the schema its own rows were
 /// written under, or migrates them forward with a recorded migration —
 /// refusing your own history is neither. `recover_incomplete` below is the
@@ -21,6 +56,189 @@ pub struct ReviewRepository<'a> {
 impl<'a> ReviewRepository<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self { conn }
+    }
+    pub fn record_admission_quality(
+        &self,
+        repository_key: &str,
+        content_hash: &str,
+        report: &familiar_ai_core::backlog::AdmissionQualityReport,
+    ) -> familiar_ai_core::Result<()> {
+        let tx = self.conn.unchecked_transaction().map_err(db)?;
+        for check in &report.checks {
+            tx.execute(
+                "INSERT OR REPLACE INTO admission_quality_results(repository_key,prd_id,prd_path,content_hash,check_name,field_name,passed,detail,measured_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![repository_key, report.prd_id.to_string(), report.prd_path.as_str(), content_hash, check.check, check.field, check.passed, check.detail, Utc::now().to_rfc3339()],
+            ).map_err(db)?;
+        }
+        tx.commit().map_err(db)?;
+        Ok(())
+    }
+
+    pub fn admission_quality(
+        &self,
+        repository_key: &str,
+        prd_id: &str,
+    ) -> familiar_ai_core::Result<Vec<AdmissionQualityRow>> {
+        let hash: Option<String> = self.conn.query_row(
+            "SELECT content_hash FROM admission_quality_results WHERE repository_key=?1 AND prd_id=?2 ORDER BY measured_at DESC LIMIT 1",
+            params![repository_key, prd_id], |row| row.get(0)
+        ).optional().map_err(db)?;
+        let Some(hash) = hash else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT check_name,field_name,passed,detail FROM admission_quality_results WHERE repository_key=?1 AND prd_id=?2 AND content_hash=?3 ORDER BY check_name,field_name"
+        ).map_err(db)?;
+        let rows = stmt
+            .query_map(params![repository_key, prd_id, hash], |row| {
+                Ok(AdmissionQualityRow {
+                    check_name: row.get(0)?,
+                    field_name: row.get(1)?,
+                    passed: row.get(2)?,
+                    detail: row.get(3)?,
+                })
+            })
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        Ok(rows)
+    }
+
+    pub fn resolve_finding(
+        &self,
+        cycle_id: &str,
+        finding_id: &str,
+        outcome: FindingOutcome,
+        actor: &str,
+        reason: &str,
+        landed_revision: Option<&str>,
+    ) -> familiar_ai_core::Result<()> {
+        if actor.trim().is_empty() {
+            return Err(FamiliarError::Database(
+                "finding outcome requires actor".into(),
+            ));
+        }
+        let (outcome, revision) = match outcome {
+            FindingOutcome::Confirmed => {
+                let revision = landed_revision
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| {
+                        FamiliarError::Database("confirmed finding requires landed revision".into())
+                    })?;
+                ("confirmed", Some(revision))
+            }
+            FindingOutcome::Waived => {
+                if !actor.starts_with("human:") || reason.trim().is_empty() {
+                    return Err(FamiliarError::Database(
+                        "waived finding requires human authority and reason".into(),
+                    ));
+                }
+                ("waived", None)
+            }
+            FindingOutcome::Invalid => {
+                if reason.trim().is_empty() {
+                    return Err(FamiliarError::Database(
+                        "invalid finding requires reason".into(),
+                    ));
+                }
+                ("invalid", None)
+            }
+        };
+        let changed = self.conn.execute(
+            "UPDATE reviewer_finding_outcomes SET outcome=?3,actor=?4,reason=?5,landed_revision=?6,resolved_at=?7 WHERE cycle_id=?1 AND finding_id=?2 AND outcome='unresolved'",
+            params![cycle_id, finding_id, outcome, actor, reason, revision, Utc::now().to_rfc3339()]
+        ).map_err(db)?;
+        if changed != 1 {
+            return Err(FamiliarError::Database(format!(
+                "finding {finding_id} is absent or already resolved"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn reviewer_calibration(
+        &self,
+        reviewer_identity: &str,
+        window: usize,
+    ) -> familiar_ai_core::Result<ReviewerCalibration> {
+        if window == 0 {
+            return Err(FamiliarError::Database(
+                "calibration window must be positive".into(),
+            ));
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT outcome FROM reviewer_finding_outcomes WHERE reviewer_identity=?1 ORDER BY raised_at DESC,cycle_id DESC,finding_id DESC LIMIT ?2"
+        ).map_err(db)?;
+        let outcomes = stmt
+            .query_map(
+                params![reviewer_identity, i64::try_from(window).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        let count = |name: &str| {
+            u64::try_from(
+                outcomes
+                    .iter()
+                    .filter(|value| value.as_str() == name)
+                    .count(),
+            )
+            .unwrap_or(u64::MAX)
+        };
+        let raised = u64::try_from(outcomes.len()).unwrap_or(u64::MAX);
+        let invalid = count("invalid");
+        Ok(ReviewerCalibration {
+            reviewer_identity: reviewer_identity.into(),
+            window,
+            raised,
+            confirmed: count("confirmed"),
+            waived: count("waived"),
+            invalid,
+            unresolved: count("unresolved"),
+            invalid_rate: if raised == 0 {
+                0.0
+            } else {
+                invalid as f64 / raised as f64
+            },
+        })
+    }
+
+    /// Measurement-only input for PRD-032. It deliberately performs no route
+    /// or probation mutation.
+    pub fn reviewer_routing_input(
+        &self,
+        reviewer_identity: &str,
+        window: usize,
+        minimum_sample: u64,
+        invalid_rate_threshold: f64,
+    ) -> familiar_ai_core::Result<ReviewerRoutingInput> {
+        if !(0.0..=1.0).contains(&invalid_rate_threshold) || minimum_sample == 0 {
+            return Err(FamiliarError::Database(
+                "invalid reviewer calibration policy".into(),
+            ));
+        }
+        let calibration = self.reviewer_calibration(reviewer_identity, window)?;
+        let probation_recommended = calibration.raised >= minimum_sample
+            && calibration.invalid_rate > invalid_rate_threshold;
+        Ok(ReviewerRoutingInput {
+            calibration,
+            minimum_sample,
+            invalid_rate_threshold,
+            probation_recommended,
+        })
+    }
+    pub fn configured_reviewer_routing_input(
+        &self,
+        reviewer_identity: &str,
+        config: &familiar_ai_core::config::ReviewConfig,
+    ) -> familiar_ai_core::Result<ReviewerRoutingInput> {
+        self.reviewer_routing_input(
+            reviewer_identity,
+            config.reviewer_calibration_window,
+            config.reviewer_calibration_minimum_sample,
+            f64::from(config.reviewer_invalid_rate_bps) / 10_000.0,
+        )
     }
     pub fn insert_task(
         &self,
@@ -94,6 +312,11 @@ impl<'a> ReviewRepository<'a> {
         cycle.waivers.push(waiver.clone());
         let tx = self.conn.unchecked_transaction().map_err(db)?;
         tx.execute("INSERT INTO review_finding_waivers(waiver_id,cycle_id,finding_id,finding_substance,actor,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(cycle_id,finding_id) DO UPDATE SET waiver_id=excluded.waiver_id,finding_substance=excluded.finding_substance,actor=excluded.actor,reason=excluded.reason,created_at=excluded.created_at", params![waiver.waiver_id, cycle_id, finding_id, substance, actor, reason, waiver.created_at]).map_err(db)?;
+        tx.execute(
+            "UPDATE reviewer_finding_outcomes SET outcome='waived',actor=?3,reason=?4,resolved_at=?5 WHERE cycle_id=?1 AND finding_id=?2 AND outcome='unresolved'",
+            params![cycle_id, finding_id, actor, reason, waiver.created_at],
+        )
+        .map_err(db)?;
         tx.execute(
             "UPDATE review_cycles SET cycle_json=?2 WHERE cycle_id=?1",
             params![cycle_id, json(&cycle)?],
@@ -293,6 +516,9 @@ impl ReviewStore for ReviewRepository<'_> {
             for f in &result.findings {
                 tx.execute("INSERT OR REPLACE INTO review_findings(finding_id,cycle_id,category,severity,blocking,status,finding_json,acceptance_criterion_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![f.finding_id,cycle.cycle_id,enum_json(&f.category)?,enum_json(&f.severity)?,f.blocking,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?,f.acceptance_criterion_id]).map_err(|e|e.to_string())?;
                 tx.execute("INSERT OR IGNORE INTO review_finding_events(cycle_id,finding_id,review_attempt,status,finding_json) VALUES(?1,?2,?3,?4,?5)",params![cycle.cycle_id,f.finding_id,cycle.attempt,enum_json(&f.status)?,serde_json::to_string(f).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+                let reviewer_identity = serde_json::to_string(&result.reviewer.assignment)
+                    .map_err(|e| e.to_string())?;
+                tx.execute("INSERT OR IGNORE INTO reviewer_finding_outcomes(cycle_id,finding_id,reviewer_identity,outcome,raised_at) VALUES(?1,?2,?3,'unresolved',?4)",params![cycle.cycle_id,f.finding_id,reviewer_identity,result.ended_at]).map_err(|e|e.to_string())?;
             }
         }
         for stage in cycle

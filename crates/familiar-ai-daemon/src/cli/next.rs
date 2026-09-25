@@ -2,10 +2,11 @@
 //! executing it.
 
 use familiar_ai_core::{
-    load_manifest, validate_graph, AppPaths, BacklogDiscovery, BacklogManager, BacklogStatusStore,
-    BootstrapApplyResult, FilesystemBacklogDiscovery, ProfiledFilesystemBacklogDiscovery,
+    admission_quality, load_manifest, validate_graph, AppPaths, BacklogDiscovery, BacklogManager,
+    BacklogStatusStore, BootstrapApplyResult, FilesystemBacklogDiscovery,
+    ProfiledFilesystemBacklogDiscovery,
 };
-use familiar_ai_storage::{SqliteBacklogRepository, SqliteBootstrapRepository};
+use familiar_ai_storage::{ReviewRepository, SqliteBacklogRepository, SqliteBootstrapRepository};
 
 use super::shared::{database, effective_repository_config};
 
@@ -65,6 +66,21 @@ pub fn next() -> Result<(), String> {
             return Err(error.to_string());
         }
     };
+    drop(manager);
+    let selected_prd = discovered
+        .iter()
+        .find(|prd| prd.path == selected.path)
+        .expect("selection came from discovered backlog");
+    let quality = admission_quality(&repository, &discovered, selected_prd);
+    ReviewRepository::new(db.conn())
+        .record_admission_quality(&repository.key, &selected_prd.content_hash, &quality)
+        .map_err(|error| error.to_string())?;
+    if let Some(refusal) = quality.refusal() {
+        return Err(format!(
+            "admission quality refused {}: {refusal}",
+            selected.id
+        ));
+    }
     // PRD-109: the derived lifecycle beside the raw ledger status. A PRD
     // `next` just selected has no live attempt, so the file and the row are
     // the only inputs that can apply here.

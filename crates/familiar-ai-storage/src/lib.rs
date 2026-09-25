@@ -60,7 +60,10 @@ pub use repos::reservation::{
     AcquireOutcome, ReservationGrant, ReservationGrantItem, ReservationRepository,
     SettlementObservation, SettlementResult,
 };
-pub use repos::review::{ReviewRepository, INVARIANT_REVIEW_RECOVERY_TOLERANCE};
+pub use repos::review::{
+    AdmissionQualityRow, FindingOutcome, ReviewRepository, ReviewerCalibration,
+    ReviewerRoutingInput, INVARIANT_REVIEW_RECOVERY_TOLERANCE,
+};
 pub use repos::session_rollup::{
     assert_stall_taxonomy_complete, autonomy_for_window, classify_attempt_stall,
     human_interventions_for_prd, session_autonomy, stall_recovery, stall_taxonomy_classes,

@@ -352,6 +352,216 @@ pub struct PrdMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionQualityCheck {
+    pub check: &'static str,
+    pub field: String,
+    pub passed: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionQualityReport {
+    pub prd_id: PrdId,
+    pub prd_path: RepositoryPath,
+    pub checks: Vec<AdmissionQualityCheck>,
+}
+
+impl AdmissionQualityReport {
+    pub fn passed(&self) -> bool {
+        self.checks.iter().all(|check| check.passed)
+    }
+
+    pub fn refusal(&self) -> Option<String> {
+        let failures = self
+            .checks
+            .iter()
+            .filter(|check| !check.passed)
+            .map(|check| format!("{} {}: {}", check.check, check.field, check.detail))
+            .collect::<Vec<_>>();
+        (!failures.is_empty()).then(|| failures.join("; "))
+    }
+}
+
+/// Cheap, deterministic PRD quality checks. This function can only refuse a
+/// candidate; a passing report is deliberately not an approval grant.
+pub fn admission_quality(
+    repository: &RepositoryIdentity,
+    discovered: &[DiscoveredPrd],
+    prd: &DiscoveredPrd,
+) -> AdmissionQualityReport {
+    let mut checks = Vec::new();
+    let graph = validate_graph(discovered);
+    checks.push(AdmissionQualityCheck {
+        check: "dependencies.graph",
+        field: "dependencies".into(),
+        passed: graph.is_ok(),
+        detail: graph
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "every dependency exists and the graph is acyclic".into()),
+    });
+    // Discovery is the authority for the closed repository vocabulary and
+    // refuses an unknown class before a DiscoveredPrd can exist.
+    checks.push(AdmissionQualityCheck {
+        check: "risk_classes.vocabulary",
+        field: "risk_classes".into(),
+        passed: true,
+        detail: "risk classes passed the configured closed vocabulary during discovery".into(),
+    });
+    checks.push(AdmissionQualityCheck {
+        check: "status.vocabulary",
+        field: "status".into(),
+        passed: true,
+        detail: "status passed the structured PRD vocabulary during discovery".into(),
+    });
+    for (index, criterion) in prd.metadata.acceptance_criteria.iter().enumerate() {
+        let lower = criterion.to_ascii_lowercase();
+        let activity = [
+            "add ",
+            "build ",
+            "create ",
+            "implement ",
+            "investigate ",
+            "refactor ",
+            "update ",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix));
+        let observable = [
+            " before ",
+            " after ",
+            " disabled",
+            " error",
+            " fail",
+            " never ",
+            " only ",
+            " pass",
+            " print",
+            " query",
+            " record",
+            " report",
+            " return",
+            " select",
+            " status",
+            " visible",
+            " rejects",
+            " refuses",
+            " pinned by",
+            " exactly ",
+        ]
+        .iter()
+        .any(|word| lower.contains(word));
+        // Refuse only the structurally certain case: an imperative activity.
+        // A criterion without one of these lexical cues is advisory rather
+        // than a false refusal, as required by the PRD's recorded assumption.
+        let passed = !activity;
+        checks.push(AdmissionQualityCheck {
+            check: "acceptance.observable",
+            field: format!("acceptance_criteria[{index}]"),
+            passed,
+            detail: if observable {
+                "criterion names an observable outcome".into()
+            } else if passed {
+                "criterion is not an imperative activity; observable cue is advisory".into()
+            } else {
+                format!("criterion is an activity or has no observable outcome: {criterion}")
+            },
+        });
+
+        for token in criterion.split('`').skip(1).step_by(2) {
+            let token = token.trim();
+            let path_like = !token.contains(char::is_whitespace)
+                && !token.starts_with('-')
+                && !token.ends_with('/')
+                && [".rs", ".toml", ".sql", ".md", ".json", ".yaml", ".yml"]
+                    .iter()
+                    .any(|suffix| token.ends_with(suffix));
+            if !path_like {
+                continue;
+            }
+            let covered = prd.metadata.expected_files.iter().any(|expected| {
+                expected == token
+                    || token.starts_with(&format!("{}/", expected.trim_end_matches('/')))
+                    || expected.starts_with(&format!("{}/", token.trim_end_matches('/')))
+            });
+            checks.push(AdmissionQualityCheck {
+                check: "criterion.scope",
+                field: format!("acceptance_criteria[{index}] <-> expected_files"),
+                passed: covered,
+                detail: if covered {
+                    format!("named surface '{token}' is declared")
+                } else {
+                    format!("criterion names undeclared surface '{token}'")
+                },
+            });
+        }
+    }
+
+    for (index, expected) in prd.metadata.expected_files.iter().enumerate() {
+        let relative = Path::new(expected);
+        let normalized = !expected.is_empty()
+            && !relative.is_absolute()
+            && !relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::CurDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+        let target = repository.worktree.join(relative);
+        let plausible = normalized
+            && (target.exists() || target.parent().is_some_and(|parent| parent.is_dir()));
+        checks.push(AdmissionQualityCheck {
+            check: "expected_files.plausible",
+            field: format!("expected_files[{index}]"),
+            passed: plausible,
+            detail: if plausible {
+                format!("'{expected}' is plausible under the repository layout")
+            } else {
+                format!("'{expected}' is not a plausible repository path")
+            },
+        });
+
+        let directory_claim = expected.ends_with('/') || target.is_dir();
+        let conflicts = if directory_claim {
+            discovered
+                .iter()
+                .filter(|other| other.id != prd.id)
+                .filter(|other| {
+                    other.metadata.expected_files.iter().any(|path| {
+                        path == expected
+                            || path.starts_with(&format!("{}/", expected.trim_end_matches('/')))
+                    })
+                })
+                .map(|other| other.id.to_string())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        checks.push(AdmissionQualityCheck {
+            check: "expected_files.directory",
+            field: format!("expected_files[{index}]"),
+            passed: !directory_claim,
+            detail: if directory_claim {
+                format!(
+                    "directory claim '{expected}' is refused; conflicts with queued PRDs [{}]",
+                    conflicts.join(",")
+                )
+            } else {
+                "entry is a file claim".into()
+            },
+        });
+    }
+    AdmissionQualityReport {
+        prd_id: prd.id.clone(),
+        prd_path: prd.path.clone(),
+        checks,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BacklogEntry {
     pub prd: DiscoveredPrd,
     pub status: BacklogStatus,

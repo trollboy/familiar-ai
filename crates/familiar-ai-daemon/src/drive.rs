@@ -19,14 +19,14 @@ use std::time::Duration;
 use std::time::Instant;
 
 use familiar_ai_core::{
-    validate_graph, AppPaths, BacklogDiscovery, BacklogStatus, BacklogStatusStore,
-    BacklogStoreError, Config, DiscoveredPrd, FilesystemBacklogDiscovery, GrantMode, PrdId,
-    RepositoryIdentity, ReservationOwnerIdentity, ResourceRequest, ResourceType,
+    admission_quality, validate_graph, AppPaths, BacklogDiscovery, BacklogStatus,
+    BacklogStatusStore, BacklogStoreError, Config, DiscoveredPrd, FilesystemBacklogDiscovery,
+    GrantMode, PrdId, RepositoryIdentity, ReservationOwnerIdentity, ResourceRequest, ResourceType,
     UnknownConsumptionPolicy,
 };
 use familiar_ai_storage::{
     AcquireOutcome, Database, DeliveryRepository, DriverRepository, ExecutionHistoryRepository,
-    OrchestrationRepository, ReservationRepository, SettlementObservation,
+    OrchestrationRepository, ReservationRepository, ReviewRepository, SettlementObservation,
 };
 
 /// Shared application-service entry point used by CLI fallback and daemon
@@ -1536,6 +1536,24 @@ pub fn drive(
                 let mut jobs = Vec::new();
                 let mut preparation_failed = false;
                 for target in targets {
+                    let quality = admission_quality(&repository, &discovered, &target);
+                    if let Err(error) = ReviewRepository::new(db.conn()).record_admission_quality(
+                        &repository.key,
+                        &target.content_hash,
+                        &quality,
+                    ) {
+                        eprintln!("drive: cannot persist admission quality: {error}");
+                        preparation_failed = true;
+                        break;
+                    }
+                    if let Some(refusal) = quality.refusal() {
+                        attempted_ids.insert(target.id.clone());
+                        eprintln!(
+                            "drive: admission quality refused {} before attempt: {refusal}",
+                            target.id
+                        );
+                        continue;
+                    }
                     let component_id = components[&target.id].clone();
                     attempted_ids.insert(target.id.clone());
                     attempted += 1;

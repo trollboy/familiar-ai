@@ -21,9 +21,9 @@ use familiar_ai_context::{
 };
 use familiar_ai_core::config::WorkerCapabilityConfig;
 use familiar_ai_core::{
-    admit_run_prd, resolve_run_prd, structured_prd_metadata, validate_graph, AgentAdapterKind,
-    AgentEntryConfig, AppPaths, BacklogDiscovery, BacklogStatusStore, Config, ExecutionPrice,
-    FilesystemBacklogDiscovery, ScopeClassPolicyConfig, ScopeDeclarationModeConfig,
+    admission_quality, admit_run_prd, resolve_run_prd, structured_prd_metadata, validate_graph,
+    AgentAdapterKind, AgentEntryConfig, AppPaths, BacklogDiscovery, BacklogStatusStore, Config,
+    ExecutionPrice, FilesystemBacklogDiscovery, ScopeClassPolicyConfig, ScopeDeclarationModeConfig,
     ScopeFileClassName,
 };
 use familiar_ai_review::{
@@ -1731,6 +1731,16 @@ fn execute_tracked_inner(
     validate_graph(&discovered).map_err(|e| RunError::Config(e.to_string()))?;
     let target = resolve_run_prd(&repository, &discovered, prd_path)
         .map_err(|e| RunError::Config(e.to_string()))?;
+    let quality = admission_quality(&repository, &discovered, &target);
+    ReviewRepository::new(db.conn())
+        .record_admission_quality(&repository.key, &target.content_hash, &quality)
+        .map_err(|error| RunError::Storage(error.to_string()))?;
+    if let Some(refusal) = quality.refusal() {
+        return Err(RunError::Config(format!(
+            "admission quality refused {}: {refusal}",
+            target.id
+        )));
+    }
     let snapshot = SqliteBacklogRepository::new(db.conn_mut())
         .reconcile_and_snapshot(&repository, &discovered)
         .map_err(|e| RunError::Storage(e.to_string()))?;

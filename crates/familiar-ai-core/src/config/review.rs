@@ -32,6 +32,15 @@ pub struct ReviewConfig {
     pub implementation_agent: ReviewAgentConfig,
     #[serde(default)]
     pub reviewer_agent: ReviewAgentConfig,
+    /// Bounded durable-finding window used only as a routing input. PRD-093
+    /// measures reviewer calibration; it does not itself mutate a route.
+    #[serde(default = "default_reviewer_calibration_window")]
+    pub reviewer_calibration_window: usize,
+    #[serde(default = "default_reviewer_calibration_minimum_sample")]
+    pub reviewer_calibration_minimum_sample: u64,
+    /// Invalid-finding threshold in basis points (0..=10_000).
+    #[serde(default = "default_reviewer_invalid_rate_bps")]
+    pub reviewer_invalid_rate_bps: u16,
     /// Optional cost-tier policy. Absence preserves full independent review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_policy: Option<ReviewTierPolicyConfig>,
@@ -529,6 +538,9 @@ impl Default for ReviewConfig {
             verification: Vec::new(),
             implementation_agent: ReviewAgentConfig::default(),
             reviewer_agent: ReviewAgentConfig::default(),
+            reviewer_calibration_window: default_reviewer_calibration_window(),
+            reviewer_calibration_minimum_sample: default_reviewer_calibration_minimum_sample(),
+            reviewer_invalid_rate_bps: default_reviewer_invalid_rate_bps(),
             tier_policy: None,
             max_package_bytes: default_review_package_bytes(),
             max_package_tokens: default_review_package_tokens(),
@@ -540,6 +552,14 @@ impl Default for ReviewConfig {
 
 impl ReviewConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if self.reviewer_calibration_window == 0
+            || self.reviewer_calibration_minimum_sample == 0
+            || self.reviewer_calibration_minimum_sample
+                > u64::try_from(self.reviewer_calibration_window).unwrap_or(u64::MAX)
+            || self.reviewer_invalid_rate_bps > 10_000
+        {
+            return Err("reviewer calibration requires a positive bounded window, a positive minimum sample no larger than the window, and invalid-rate basis points <= 10000".into());
+        }
         if !self.enabled {
             return Ok(());
         }
@@ -719,4 +739,14 @@ impl ReviewConfig {
         }
         Ok(())
     }
+}
+
+fn default_reviewer_calibration_window() -> usize {
+    100
+}
+fn default_reviewer_calibration_minimum_sample() -> u64 {
+    10
+}
+fn default_reviewer_invalid_rate_bps() -> u16 {
+    2500
 }
