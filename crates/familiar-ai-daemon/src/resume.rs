@@ -252,9 +252,14 @@ where
                             // failure before this point leaves the PRD
                             // resumable rather than claiming done with its
                             // work uncommitted (FAM-BUG-064).
-                            if let Err(error) =
-                                complete_landed(&mut db, &repository, &discovered, &id, &merged)
-                            {
+                            if let Err(error) = complete_landed(
+                                &mut db,
+                                &config,
+                                &repository,
+                                &discovered,
+                                &id,
+                                &merged,
+                            ) {
                                 failed_prds.insert(id.clone());
                                 failures.push(format!("{id}: completion_failed: {error}"));
                             }
@@ -545,30 +550,71 @@ pub fn discover_with_legacy(
 /// approved-but-not-completed either.
 fn complete_landed(
     db: &mut Database,
+    config: &familiar_ai_core::Config,
     repository: &familiar_ai_core::RepositoryIdentity,
     discovered: &[familiar_ai_core::DiscoveredPrd],
     prd_id: &str,
     commit: &str,
 ) -> Result<(), String> {
-    let target = discovered
+    let mut target = discovered
         .iter()
         .find(|candidate| candidate.id.to_string() == prd_id)
         .ok_or_else(|| format!("{prd_id} is no longer in the backlog"))?
         .clone();
+    // Landing archives the PRD file, and a later resume discovers it under
+    // `done/`; the row that was claimed still names the active path. The
+    // ledger completes the row it claimed, wherever the file now lives.
+    if target.location == familiar_ai_core::PrdLocation::Archived {
+        let claimed: Option<String> = db
+            .conn()
+            .query_row(
+                "SELECT prd_path FROM backlog_prds WHERE repository_key=?1 AND prd_number=?2 \
+                 AND status='in_progress' ORDER BY updated_at DESC LIMIT 1",
+                rusqlite::params![repository.key, target.number as i64],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(path) = claimed {
+            target.path =
+                familiar_ai_core::RepositoryPath::new(path).map_err(|error| error.to_string())?;
+        }
+    }
     let checkpoint = familiar_ai_storage::CheckpointRepository::new(db.conn())
         .get(&repository.key, prd_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("no durable checkpoint for {prd_id}"))?;
+    // FAM-BUG-104: `approve_and_complete` is the manual force-complete path
+    // and rightly demands a human actor; a landed candidate is a completed
+    // run and completes the ledger the way the run itself would, under the
+    // run actor that claimed the row (the checkpoint's own execution id).
+    let execution_id = checkpoint
+        .checkpoint_id
+        .strip_prefix("checkpoint-")
+        .unwrap_or(&checkpoint.checkpoint_id)
+        .to_string();
+    let actor = format!("system:familiar-ai-run:{execution_id}");
     familiar_ai_storage::SqliteBacklogRepository::new(db.conn_mut())
-        .approve_and_complete(
+        .complete_run(
             repository,
             &target,
-            "system:familiar-ai-resume",
-            &format!("candidate landed as {commit}"),
-            &checkpoint.diff_hash,
-            commit,
+            &execution_id,
+            &actor,
+            &crate::run::required_check_ids(config),
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("landed {commit}, but the ledger refused completion: {error}"))?;
+    // The checkpoint follows the row: integrated, then completed, the same
+    // two transitions the run path records after its own completion.
+    let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+    for (phase, detail) in [
+        ("integrated", "backlog_completion_committed"),
+        ("completed", "execution_completed"),
+    ] {
+        checkpoints
+            .transition(&checkpoint.checkpoint_id, phase, detail)
+            .map_err(|error| {
+                format!("completed {prd_id} but checkpoint {phase} failed: {error}")
+            })?;
+    }
     // FAM-BUG-073: the merge queue marks the attempt it integrates; this
     // landing path did not, so every resumed landing (PRD-60, 76, 85, 96)
     // reads as unintegrated in the ledger that PRD-085 and PRD-098 compute

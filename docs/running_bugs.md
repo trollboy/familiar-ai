@@ -448,6 +448,23 @@ appears with no entry, or with a status a reader cannot classify.
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
 
+### FAM-BUG-104 — A landed candidate could not complete its ledger row: resume used the manual force-complete path
+
+- **Status:** Fixed (2026-09-25: resume's landing completes the row with
+  `complete_run` under the run actor derived from the checkpoint's
+  execution id and the configured required checks, the same call the run
+  itself makes; `required_check_ids` is shared by both.)
+- **Found:** 2026-09-25, PRD-103's finish. The candidate merged into `main`
+  (`06023f2`, integration `00b8bd6`) and the PRD file was archived, then
+  `completion_failed: manual completion override requires --actor
+  human:<identity>`; the ledger kept the row `in_progress`, the checkpoint at
+  `approved`, the attempt unintegrated, and the execution read `failed`.
+- **Detail:** `complete_landed` called `approve_and_complete`, which is the
+  operator's force-complete and validates recovery attribution, with a
+  system actor. Every resumed landing since FAM-BUG-073's fix has taken this
+  path; the earlier by-hand landings never exercised it.
+- **Expected fix:** as landed, proven by PRD-103's ledger reading completed.
+
 ### FAM-BUG-103 — `resume` cannot finish a checkpoint that is already `reviewed`
 
 - **Status:** Fixed (2026-09-25: resuming a checkpoint at `reviewed` or

@@ -2215,13 +2215,7 @@ fn finish_implementation(
             prd_id: target.id.to_string(),
         });
     }
-    let required_checks = config
-        .review
-        .verification
-        .iter()
-        .filter(|c| c.required)
-        .map(|c| c.check_id.clone())
-        .collect::<Vec<_>>();
+    let required_checks = required_check_ids(config);
     if defer_completion {
         if let Some(checkpoint) = familiar_ai_storage::CheckpointRepository::new(db.conn())
             .get(&repository.key, &target.id.to_string())
@@ -2374,6 +2368,19 @@ fn context_profile(config: &familiar_ai_core::RepositoryConfig) -> ContextProfil
             })
             .collect(),
     }
+}
+
+/// The ids of the verification checks a completed run must have passed, in
+/// configuration order. Shared by the run's own completion and by resume's
+/// landing so both complete the ledger the same way (FAM-BUG-104).
+pub(crate) fn required_check_ids(config: &Config) -> Vec<String> {
+    config
+        .review
+        .verification
+        .iter()
+        .filter(|c| c.required)
+        .map(|c| c.check_id.clone())
+        .collect::<Vec<_>>()
 }
 
 fn review_retained_reason(cycle: &ReviewCycle) -> &'static str {
