@@ -6,6 +6,7 @@
 //! previous name, and a help text that names the next step in the workflow
 //! at every level. These regressions pin all five.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -57,6 +58,13 @@ fn text(output: &Output) -> String {
     combined
 }
 
+/// Stdout alone, excluding stderr -- needed wherever stderr would legitimately
+/// differ between two invocations being compared (the relocation notice, for
+/// instance, which only ever fires for the old name).
+fn stdout_only(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 /// Every line under a `--help` listing's `Commands:` header, up to the next
 /// blank line -- clap always renders one subcommand per line, name first.
 fn listed_commands(help_text: &str) -> Vec<String> {
@@ -66,6 +74,20 @@ fn listed_commands(help_text: &str) -> Vec<String> {
         .skip(1)
         .take_while(|line| !line.trim().is_empty())
         .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The body of a named `--help` section (`Commands:`, `Arguments:`,
+/// `Options:`), the same shape as [`listed_commands`] but for any header --
+/// used to compare the argument surface of a leaf command rather than its
+/// subcommand listing.
+fn section_lines(help_text: &str, header: &str) -> Vec<String> {
+    help_text
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
         .map(str::to_owned)
         .collect()
 }
@@ -155,6 +177,56 @@ fn relocation_notice_fires_even_for_a_bare_invocation_not_just_help() {
     let output = run(repo.path(), &database, &["preflight"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("'familiar-ai preflight' is now 'familiar-ai stewardship preflight'"));
+}
+
+// ---------------------------------------------------------------------
+// PRD-103 f3-alias-regression-does-not-assert-target: the notice above
+// proves only that the old name is declared in `RELOCATED_COMMAND_ALIASES`,
+// printed from raw argv before clap ever parses anything. It does not prove
+// the old name still reaches the same handler as its replacement -- an
+// alias wired to the wrong handler, or whose copy of the arguments has
+// drifted from the namespaced original, would still pass it. This compares
+// the actual subcommand/argument surface `--help` renders for each side.
+// ---------------------------------------------------------------------
+
+#[test]
+fn every_relocated_alias_resolves_to_the_identical_subcommand_surface_as_its_target() {
+    let repo = git_repo();
+    let database = repo.path().join("state/alias-targets.db");
+    for (old, new) in RELOCATED_COMMAND_ALIASES {
+        let old_output = run(repo.path(), &database, &[old, "--help"]);
+        assert!(
+            old_output.status.success(),
+            "familiar-ai {old} --help must succeed: {}",
+            text(&old_output)
+        );
+        let old_help = stdout_only(&old_output);
+
+        let mut new_args: Vec<&str> = new.split(' ').collect();
+        new_args.push("--help");
+        let new_output = run(repo.path(), &database, &new_args);
+        assert!(
+            new_output.status.success(),
+            "familiar-ai {new} --help must succeed: {}",
+            text(&new_output)
+        );
+        let new_help = stdout_only(&new_output);
+
+        assert_eq!(
+            listed_commands(&old_help),
+            listed_commands(&new_help),
+            "familiar-ai {old} must list the identical subcommands as familiar-ai {new}"
+        );
+        for header in ["Arguments:", "Options:"] {
+            assert_eq!(
+                section_lines(&old_help, header),
+                section_lines(&new_help, header),
+                "familiar-ai {old} --help's {header} section must match familiar-ai {new} --help's -- \
+                 an alias wired to the wrong handler, or a copy of its arguments that has drifted from \
+                 the namespaced original, would show up here"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -275,6 +347,186 @@ fn every_relocated_leaf_is_reachable_at_its_new_namespaced_home() {
 }
 
 // ---------------------------------------------------------------------
+// PRD-103 f2-ac5-leaf-set-not-compared: the spot check above never
+// enumerates the full reachable leaf set -- it recurses only as deep as the
+// levels it names, and `any(|name| name == leaf)` makes an extra or missing
+// unlisted leaf invisible. `ops desktop` is exactly such a leaf: it is a
+// real group under `OpsCommand` with three leaves of its own, and the case
+// list above never mentions it, so it was never checked. This regression
+// walks the whole command tree recursively from `--help` and compares the
+// complete set of reachable leaf paths against a checked-in inventory, so a
+// dropped capability or an unlisted group fails with a diff instead of
+// passing unseen.
+// ---------------------------------------------------------------------
+
+/// Every leaf command reachable from `familiar-ai --help`, as a full
+/// space-separated path (e.g. `"ops desktop status"`). Recomputed by hand
+/// against the `Command`/`*NamespaceCommand`/`*Command` enum definitions in
+/// `src/bin/familiar-ai.rs` and `src/cli/*.rs` -- this is the "declared
+/// inventory" the walk below is checked against, so growing the tree is a
+/// deliberate edit here, not a silent pass.
+const DECLARED_LEAVES: &[&str] = &[
+    // -- Daily verbs ------------------------------------------------------
+    "next",
+    "run",
+    "drive",
+    "resume",
+    "report",
+    "approve",
+    "deliver",
+    // -- config -------------------------------------------------------
+    "config history",
+    "config show",
+    "config provider add",
+    "config provider remove",
+    "config provider verify",
+    "config provider list",
+    "config provider bind",
+    "config model enable",
+    "config model disable",
+    "config model list",
+    "config artifact register",
+    "config artifact register-alias",
+    "config artifact list",
+    "config artifact show",
+    "config migrate agents",
+    "config project approve",
+    "config project revoke",
+    "config compress output-enable",
+    "config compress input-enable",
+    "config compress experiment",
+    "config model-residency enable",
+    "config model-residency disable",
+    "config model-residency status",
+    // -- accounting ---------------------------------------------------
+    "accounting month-to-date",
+    "accounting prd-cost",
+    "accounting usage",
+    "accounting billing status",
+    "accounting billing collect",
+    "accounting billing reconcile",
+    // -- stewardship ----------------------------------------------------
+    "stewardship substance",
+    "stewardship backlog",
+    "stewardship sessions",
+    "stewardship attempts",
+    "stewardship checkpoints",
+    "stewardship recovery",
+    "stewardship delivery",
+    "stewardship budget",
+    "stewardship review",
+    "stewardship gates",
+    "stewardship reconciliation",
+    "stewardship workers",
+    "stewardship status",
+    "stewardship preflight",
+    "stewardship history",
+    // -- plan -----------------------------------------------------------
+    "plan approve",
+    "plan reject",
+    "plan onboard propose",
+    "plan onboard approve",
+    "plan onboard validate",
+    "plan onboard fixture",
+    "plan backlog metadata-check",
+    "plan backlog bootstrap status",
+    "plan backlog bootstrap rollback",
+    "plan backlog release",
+    "plan backlog complete",
+    "plan backlog record-complete",
+    "plan backlog approve-and-complete",
+    "plan batch-review enable",
+    "plan batch-review disable",
+    "plan batch-review pending",
+    // -- ops --------------------------------------------------------------
+    "ops waive",
+    "ops control register",
+    "ops control submit",
+    "ops control attach",
+    "ops control show",
+    "ops control project-state",
+    "ops control cancel",
+    "ops worker install",
+    "ops worker uninstall",
+    "ops worker status",
+    "ops worker validate",
+    "ops worker test",
+    "ops worker plist",
+    "ops worker run",
+    "ops desktop install",
+    "ops desktop uninstall",
+    "ops desktop status",
+    "ops operator rebind",
+    "ops operator set-phase",
+    "ops operator width",
+    "ops gate run",
+    "ops gate status",
+    "ops gate require",
+    "ops gate override",
+];
+
+/// Recursively walks `familiar-ai <path> --help`, following every listed
+/// subcommand (other than clap's own `help`), and returns every leaf path
+/// reached -- a level with no `Commands:` section of its own is a leaf.
+fn collect_leaves(repo: &Path, database: &Path, path: &[&str]) -> Vec<String> {
+    let mut args: Vec<&str> = path.to_vec();
+    args.push("--help");
+    let output = run(repo, database, &args);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let children: Vec<String> = listed_commands(&stdout)
+        .into_iter()
+        .filter(|name| name != "help")
+        .collect();
+    if children.is_empty() {
+        return vec![path.join(" ")];
+    }
+    let mut leaves = Vec::new();
+    for child in children {
+        let mut child_path: Vec<&str> = path.to_vec();
+        child_path.push(&child);
+        leaves.extend(collect_leaves(repo, database, &child_path));
+    }
+    leaves
+}
+
+/// `Ok(())` when both sets are identical; otherwise an error naming exactly
+/// what is missing from the reachable tree and what is unexpectedly present
+/// in it, so a real regression fails with a diff rather than a bare
+/// "assertion failed".
+fn leaf_paths_match(actual: &BTreeSet<String>, declared: &BTreeSet<String>) -> Result<(), String> {
+    if actual == declared {
+        return Ok(());
+    }
+    let missing: Vec<_> = declared.difference(actual).cloned().collect();
+    let unexpected: Vec<_> = actual.difference(declared).cloned().collect();
+    Err(format!(
+        "leaf set mismatch -- declared but unreachable: {missing:?}; reachable but undeclared: {unexpected:?}"
+    ))
+}
+
+#[test]
+fn full_reachable_leaf_set_matches_the_declared_inventory() {
+    let repo = git_repo();
+    let database = repo.path().join("state/leaf-inventory.db");
+    let actual: BTreeSet<String> = collect_leaves(repo.path(), &database, &[])
+        .into_iter()
+        .collect();
+    let declared: BTreeSet<String> = DECLARED_LEAVES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(leaf_paths_match(&actual, &declared), Ok(()));
+}
+
+/// Pins that the comparison above actually catches a dropped capability,
+/// rather than being vacuously true: with one declared leaf removed from
+/// the "reachable" side, the same comparison must report a mismatch.
+#[test]
+fn leaf_set_comparison_fails_when_a_leaf_is_missing_from_the_tree() {
+    let declared: BTreeSet<String> = DECLARED_LEAVES.iter().map(|s| s.to_string()).collect();
+    let mut actual = declared.clone();
+    assert!(actual.remove("ops desktop status"));
+    assert!(leaf_paths_match(&actual, &declared).is_err());
+}
+
+// ---------------------------------------------------------------------
 // AC4: help at every level names the next command in the workflow, so the
 // path from `next` to `run` to a pause to approval to completion is
 // traversable from help text alone.
@@ -343,6 +595,41 @@ fn front_door_reports_nothing_to_do_on_an_empty_backlog() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("state: nothing to do"), "{stdout}");
     assert!(stdout.contains("next: familiar-ai next"), "{stdout}");
+}
+
+// ---------------------------------------------------------------------
+// PRD-103 f1-front-door-misreports-broken-backlog: `front_door_report`
+// used to compute no eligible work whenever `validate_graph` failed, and
+// swallow every selection error with `.ok()` -- both collapsed into
+// `NothingToDo`, so a repository with a structurally broken backlog (here,
+// a PRD depending on one that does not exist) was told "nothing to do", a
+// false statement of state for exactly the case where an operator most
+// needs to be told something is wrong.
+// ---------------------------------------------------------------------
+
+#[test]
+fn front_door_reports_backlog_unschedulable_instead_of_nothing_to_do_when_the_graph_is_invalid() {
+    let repo = git_repo();
+    let database = repo.path().join("state/invalid-graph.db");
+    fs::write(
+        repo.path().join("docs/prds/PRD-001.md"),
+        "# PRD-1: One\n\n**Depends on:** PRD-999\n",
+    )
+    .unwrap();
+
+    let output = front_door(repo.path(), &database);
+    assert!(output.status.success(), "{}", text(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("state: nothing to do"),
+        "a backlog with an unresolvable dependency is not \"nothing to do\": {stdout}"
+    );
+    assert!(stdout.contains("state: backlog unschedulable"), "{stdout}");
+    assert!(stdout.contains("next: familiar-ai next"), "{stdout}");
+    assert!(
+        stdout.contains("PRD-999"),
+        "the report should name the failure, not just gesture at it: {stdout}"
+    );
 }
 
 #[test]
