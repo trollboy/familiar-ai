@@ -27,7 +27,9 @@ use familiar_ai_agent::raw_runtime::{
 use familiar_ai_agent::token_discipline::{self, EditForm};
 #[cfg(unix)]
 use familiar_ai_agent::{finish_watchdog, spawn_watchdog};
-use familiar_ai_core::config::{AgentRuntimeSandboxConfig, TokenDisciplineConfig};
+use familiar_ai_core::config::{
+    AgentRuntimeSandboxConfig, LocalResourceProfileConfig, TokenDisciplineConfig,
+};
 use familiar_ai_core::{
     GrantMode, ReservationOwnerIdentity, ResourceRequest, ResourceType, UnknownConsumptionPolicy,
 };
@@ -37,6 +39,9 @@ use familiar_ai_llm::token_discipline::{
 use familiar_ai_review::parse_expected_files;
 use familiar_ai_storage::repos::accounting::{AccountingRepository, UsageObservation};
 use familiar_ai_storage::repos::agent_runtime::{AgentRuntimeRepository, ToolResultOutcome};
+use familiar_ai_storage::repos::local_telemetry::{
+    LocalArtifactVerificationState, LocalTelemetryRepository,
+};
 use familiar_ai_storage::repos::reservation::{
     AcquireOutcome, ReservationRepository, SettlementObservation,
 };
@@ -1252,6 +1257,8 @@ pub struct SqliteRawAgentHost {
     pub command_timeout_ms: u64,
     pub max_output_bytes: usize,
     reservation_id: Mutex<Option<String>>,
+    local_execution: Option<LocalExecutionConfig>,
+    local_reservation: Mutex<Option<LocalReservation>>,
     /// PRD-100 remediation (N1): `build_selected_agents` constructs one
     /// `SqliteRawAgentHost` per stage and hands it back as a `Box<dyn
     /// CodingAgent>` that is reused for every `execute()` call against that
@@ -1266,6 +1273,22 @@ pub struct SqliteRawAgentHost {
     /// `reserve_execution_budget` call so every attempt within the stage
     /// draws its own freshly-defined pool under its own reservation owner.
     attempt_sequence: Mutex<u64>,
+}
+
+/// Local-only execution facts attached by production worker construction.
+/// Their presence makes the same host that gates raw inference also acquire
+/// PRD-064 hardware capacity and persist PRD-051 local telemetry; hosted raw
+/// providers leave this absent and retain their existing behavior.
+#[derive(Debug, Clone)]
+pub struct LocalExecutionConfig {
+    pub resource_profile: LocalResourceProfileConfig,
+    pub model_artifact_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalReservation {
+    reservation_id: String,
+    requests: Vec<ResourceRequest>,
 }
 
 impl SqliteRawAgentHost {
@@ -1302,8 +1325,96 @@ impl SqliteRawAgentHost {
             command_timeout_ms,
             max_output_bytes,
             reservation_id: Mutex::new(None),
+            local_execution: None,
+            local_reservation: Mutex::new(None),
             attempt_sequence: Mutex::new(0),
         }
+    }
+
+    pub fn with_local_execution(mut self, local: LocalExecutionConfig) -> Self {
+        self.local_execution = Some(local);
+        self
+    }
+
+    fn acquire_local_reservation(&self, attempt: u64) -> Result<(), String> {
+        let Some(local) = &self.local_execution else {
+            return Ok(());
+        };
+        let mut db = Database::open(&self.database_path).map_err(|error| error.to_string())?;
+        let mut repo = ReservationRepository::new(db.conn_mut());
+        let pool_prefix = format!(
+            "local:{}:{}",
+            self.runtime_id,
+            self.model_identity.as_deref().unwrap_or("unknown-model")
+        );
+        crate::local_worker_runtime::define_pools_from_resource_profile(
+            &mut repo,
+            &pool_prefix,
+            &local.resource_profile,
+        )
+        .map_err(|error| error.to_string())?;
+        let requests = crate::local_worker_runtime::execution_resource_requests_for_profile(
+            &pool_prefix,
+            &local.resource_profile,
+        );
+        let owner_instance_id =
+            format!("local-agent:{}:{}:{attempt}", self.execution_id, self.stage);
+        let owner = ReservationOwnerIdentity {
+            owner_instance_id: owner_instance_id.clone(),
+            installation_id: None,
+            nonce_or_generation: owner_instance_id,
+            owner_kind: "local-agent".into(),
+            project_id: self.project_id.clone(),
+            execution_id: self.execution_id.clone(),
+            component_id: self.stage.clone(),
+        };
+        match crate::local_worker_runtime::acquire_with_unknown_capacity_policy(
+            &mut repo,
+            &owner,
+            &requests,
+            crate::local_worker_runtime::UnknownCapacityPolicy::Refuse,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            AcquireOutcome::Granted(grant) => {
+                *self
+                    .local_reservation
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(LocalReservation {
+                    reservation_id: grant.reservation_id,
+                    requests,
+                });
+                Ok(())
+            }
+            AcquireOutcome::Refused { unavailable } => Err(format!(
+                "no local hardware reservation available for execution {:?}: {:?}",
+                self.execution_id, unavailable
+            )),
+        }
+    }
+
+    fn release_local_reservation(&self, detail: &str) -> Result<(), String> {
+        let reservation = self
+            .local_reservation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let Some(reservation) = reservation else {
+            return Ok(());
+        };
+        tracing::warn!(
+            execution_id = %self.execution_id,
+            reservation_id = %reservation.reservation_id,
+            detail,
+            "releasing local hardware reservation before inference completed"
+        );
+        let mut db = Database::open(&self.database_path).map_err(|error| error.to_string())?;
+        ReservationRepository::new(db.conn_mut())
+            .release(
+                &reservation.reservation_id,
+                &format!("local-agent:{}", self.execution_id),
+            )
+            .map_err(|error| error.to_string())
     }
 
     /// Scoped by stage as well as execution: `build_selected_agents`
@@ -1475,10 +1586,28 @@ impl RawAgentHost for SqliteRawAgentHost {
             .map_err(|error| error.to_string())?
         {
             AcquireOutcome::Granted(grant) => {
+                let budget_reservation_id = grant.reservation_id;
                 *self
                     .reservation_id
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner()) = Some(grant.reservation_id);
+                    .unwrap_or_else(|error| error.into_inner()) =
+                    Some(budget_reservation_id.clone());
+                if let Err(error) = self.acquire_local_reservation(attempt) {
+                    let mut rollback = ReservationRepository::new(db.conn_mut());
+                    rollback
+                        .release(
+                            &budget_reservation_id,
+                            &format!("raw-agent:{}", self.execution_id),
+                        )
+                        .map_err(|release| {
+                            format!("{error}; also failed to release budget reservation: {release}")
+                        })?;
+                    *self
+                        .reservation_id
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) = None;
+                    return Err(error);
+                }
                 Ok(())
             }
             AcquireOutcome::Refused { .. } => Err(format!(
@@ -1499,6 +1628,7 @@ impl RawAgentHost for SqliteRawAgentHost {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
+        self.release_local_reservation(detail)?;
         let Some(reservation_id) = reservation_id else {
             return Ok(());
         };
@@ -1560,6 +1690,22 @@ impl RawAgentHost for SqliteRawAgentHost {
             .reservation_id
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = None;
+
+        if let Some(local_reservation) = self
+            .local_reservation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            crate::local_worker_runtime::resolve_reservation(
+                &mut ReservationRepository::new(db.conn_mut()),
+                &local_reservation.reservation_id,
+                outcome.stop_reason,
+                local_reservation.requests,
+                &format!("local-agent:{}", self.execution_id),
+            )
+            .map_err(|error| error.to_string())?;
+        }
         // The model the attempts ran against, as computed once by
         // `RawAgent::execute` — not `self.model_identity`, which is the
         // worker's configured model captured at construction and is wrong
@@ -1575,7 +1721,28 @@ impl RawAgentHost for SqliteRawAgentHost {
             &self.token_discipline,
             outcome,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+        if let Some(local) = &self.local_execution {
+            crate::local_worker_runtime::persist_local_telemetry(
+                &LocalTelemetryRepository::new(db.conn()),
+                &self.execution_id,
+                &self.stage,
+                &self.worker_id,
+                &self.runtime_id,
+                local.model_artifact_id.as_deref(),
+                // Artifact verification is a separate endpoint probe. The
+                // dispatch path has not observed one, so it records exactly
+                // that instead of promoting configured identity to proof.
+                LocalArtifactVerificationState::DegradedUnverified,
+                &crate::local_worker_runtime::LocalRunMeasurements::default(),
+                outcome,
+                0,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 

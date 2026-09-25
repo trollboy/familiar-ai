@@ -265,9 +265,11 @@ mechanics, only the local-specific request shapes and policy glue:
   called `define_pool` for reports zero available capacity by construction
   (PRD-064's own `ReservationRepository::acquire`), so an unconfigured
   resource is refused by default. `UnknownCapacityPolicy::
-  SerializeConservatively` is the one explicit alternative: it bootstraps
-  exactly one single-occupant pool per unknown resource before retrying —
-  never a larger invented number, and never automatic.
+  SerializeConservatively` is the one explicit alternative for slot-shaped
+  resources (`InferenceSlots`, `ModelLoadingSlots`, `ExclusiveRuntime`): it
+  bootstraps exactly one single-occupant pool before retrying. It never
+  invents byte-, token-, or currency-quantified capacity; those remain
+  refused until observed or configured.
 - **Managed vs. externally shared capacity.** `LocalCapacityClass::Managed`
   capacity is exclusively Familiar's; `ExternallyShared` capacity can be
   consumed by another process, user, or client outside Familiar's control.

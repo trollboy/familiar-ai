@@ -132,8 +132,9 @@ pub fn execution_resource_requests(
 /// never observed (no `define_pool` call ever ran for it, so it reports
 /// zero available and the acquisition is refused by construction).
 /// `SerializeConservatively` bootstraps exactly one conservative
-/// single-occupant pool per unknown resource before retrying — never a
-/// larger invented number, and never a pool the operator already defined.
+/// single-occupant pool per unknown *slot-shaped* resource before retrying
+/// — never a larger invented number, never a byte/token/currency quantity,
+/// and never a pool the operator already defined.
 ///
 /// `acquire`'s `Refused { unavailable }` cannot itself distinguish "no pool
 /// row exists" from "a pool exists but this request doesn't fit" — both
@@ -157,7 +158,13 @@ pub fn acquire_with_unknown_capacity_policy(
     }
     let mut bootstrapped_any = false;
     for request in unavailable {
-        if !repo.pool_is_defined(&request.pool_id, &request.resource_type)? {
+        let slot_shaped = matches!(
+            request.resource_type,
+            ResourceType::InferenceSlots
+                | ResourceType::ModelLoadingSlots
+                | ResourceType::ExclusiveRuntime
+        );
+        if slot_shaped && !repo.pool_is_defined(&request.pool_id, &request.resource_type)? {
             repo.define_pool(&request.pool_id, &request.resource_type, 1, false)?;
             bootstrapped_any = true;
         }
@@ -454,51 +461,62 @@ pub fn persist_local_telemetry(
     outcome: &RunOutcome,
     retries: u32,
     residency: Option<&LocalResidencyAttribution<'_>>,
-) -> familiar_ai_core::Result<String> {
-    let usage = outcome.attempts.iter().fold(
-        Default::default(),
-        |acc: familiar_ai_llm::attempt::UsageCategories, attempt| acc.merge(&attempt.usage),
-    );
-    let tokens_per_second = match (usage.output_tokens, measurements.wall_time_ms) {
-        (Some(tokens), Some(ms)) if ms > 0 => Some(tokens as f64 / (ms as f64 / 1000.0)),
-        _ => None,
-    };
-    let attempt_id = outcome
+) -> familiar_ai_core::Result<Vec<String>> {
+    let one_attempt = outcome.attempts.len() == 1;
+    outcome
         .attempts
-        .first()
-        .map(|attempt| attempt.attempt_id.0.as_str())
-        .unwrap_or("no-attempt");
-    let row = LocalTelemetryRow {
-        execution_id,
-        attempt_id,
-        stage,
-        spec_identity: &outcome.evidence.worker_spec_identity,
-        empirical_version: &outcome.evidence.worker_empirical_version,
-        worker_identity,
-        runtime_id,
-        model_artifact_id,
-        artifact_verification_state: artifact_verification_state.into(),
-        uncached_input_tokens: usage.uncached_input_tokens,
-        cache_read_tokens: usage.cache_read_tokens,
-        cache_write_tokens: usage.cache_write_tokens,
-        output_tokens: usage.output_tokens,
-        reasoning_output_tokens: usage.reasoning_output_tokens,
-        wall_time_ms: measurements.wall_time_ms,
-        time_to_first_token_ms: measurements.time_to_first_token_ms,
-        tokens_per_second,
-        load_time_ms: measurements.load_time_ms,
-        peak_memory_mb: measurements.peak_memory_mb,
-        accelerator_utilization_pct: measurements.accelerator_utilization_pct,
-        cpu_utilization_pct: measurements.cpu_utilization_pct,
-        retries,
-        failure_kind: failure_kind_for(outcome.stop_reason),
-        energy_wh: measurements.energy_wh,
-        energy_measurement_provenance: measurements.energy_measurement_provenance.as_deref(),
-        residency_state: residency.map(|value| value.residency_state.as_str()),
-        resident_server_identity: residency.and_then(|value| value.resident_server_identity),
-        cache_evidence: residency.map(|value| value.cache_evidence.as_str()),
-    };
-    repo.record_telemetry(&row)
+        .iter()
+        .map(|attempt| {
+            // Wall/load/utilization measurements describe the whole run.
+            // They are attributable to an attempt only when the run made
+            // exactly one submission; duplicating them across turns would
+            // fabricate per-attempt measurements.
+            let run_ms = one_attempt.then_some(measurements.wall_time_ms).flatten();
+            let tokens_per_second = match (attempt.usage.output_tokens, run_ms) {
+                (Some(tokens), Some(ms)) if ms > 0 => Some(tokens as f64 / (ms as f64 / 1000.0)),
+                _ => None,
+            };
+            repo.record_telemetry(&LocalTelemetryRow {
+                execution_id,
+                attempt_id: &attempt.attempt_id.0,
+                stage,
+                spec_identity: &outcome.evidence.worker_spec_identity,
+                empirical_version: &outcome.evidence.worker_empirical_version,
+                worker_identity,
+                runtime_id,
+                model_artifact_id,
+                artifact_verification_state: artifact_verification_state.into(),
+                uncached_input_tokens: attempt.usage.uncached_input_tokens,
+                cache_read_tokens: attempt.usage.cache_read_tokens,
+                cache_write_tokens: attempt.usage.cache_write_tokens,
+                output_tokens: attempt.usage.output_tokens,
+                reasoning_output_tokens: attempt.usage.reasoning_output_tokens,
+                wall_time_ms: run_ms,
+                time_to_first_token_ms: one_attempt
+                    .then_some(measurements.time_to_first_token_ms)
+                    .flatten(),
+                tokens_per_second,
+                load_time_ms: one_attempt.then_some(measurements.load_time_ms).flatten(),
+                peak_memory_mb: one_attempt.then_some(measurements.peak_memory_mb).flatten(),
+                accelerator_utilization_pct: one_attempt
+                    .then_some(measurements.accelerator_utilization_pct)
+                    .flatten(),
+                cpu_utilization_pct: one_attempt
+                    .then_some(measurements.cpu_utilization_pct)
+                    .flatten(),
+                retries,
+                failure_kind: failure_kind_for(outcome.stop_reason),
+                energy_wh: one_attempt.then_some(measurements.energy_wh).flatten(),
+                energy_measurement_provenance: one_attempt
+                    .then_some(measurements.energy_measurement_provenance.as_deref())
+                    .flatten(),
+                residency_state: residency.map(|value| value.residency_state.as_str()),
+                resident_server_identity: residency
+                    .and_then(|value| value.resident_server_identity),
+                cache_evidence: residency.map(|value| value.cache_evidence.as_str()),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -665,6 +683,28 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(second, AcquireOutcome::Refused { .. }));
+    }
+
+    #[test]
+    fn conservative_bootstrap_never_invents_byte_quantified_capacity() {
+        let mut db = database();
+        let mut repo = ReservationRepository::new(db.conn_mut());
+        let request = ResourceRequest {
+            pool_id: "local:ollama:llama3:accelerator-memory".into(),
+            resource_type: ResourceType::AcceleratorMemory,
+            amount: 8_192,
+        };
+        let outcome = acquire_with_unknown_capacity_policy(
+            &mut repo,
+            &owner("bytes"),
+            std::slice::from_ref(&request),
+            UnknownCapacityPolicy::SerializeConservatively,
+        )
+        .unwrap();
+        assert!(matches!(outcome, AcquireOutcome::Refused { .. }));
+        assert!(!repo
+            .pool_is_defined(&request.pool_id, &request.resource_type)
+            .unwrap());
     }
 
     #[test]
@@ -903,7 +943,7 @@ mod tests {
             wall_time_ms: Some(2000),
             ..Default::default()
         };
-        let telemetry_id = persist_local_telemetry(
+        let telemetry_ids = persist_local_telemetry(
             &repo,
             "exec_1",
             "implementation",
@@ -919,7 +959,7 @@ mod tests {
         .unwrap();
         let rows = repo.telemetry_for_execution("exec_1").unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, telemetry_id);
+        assert_eq!(rows[0].0, telemetry_ids[0]);
     }
 
     /// A successful multi-turn run (several ordinary tool-call round trips,
@@ -939,13 +979,14 @@ mod tests {
         );
         // Three ordinary submissions (e.g. two tool-call round trips plus a
         // final completing turn), none of them a retry.
-        outcome.attempts = vec![
-            outcome.attempts[0].clone(),
-            outcome.attempts[0].clone(),
-            outcome.attempts[0].clone(),
-        ];
+        outcome.attempts = (1..=3)
+            .map(|number| AttemptUsage {
+                attempt_id: AttemptId(format!("att_{number}")),
+                ..outcome.attempts[0].clone()
+            })
+            .collect();
         let measurements = LocalRunMeasurements::default();
-        let telemetry_id = persist_local_telemetry(
+        let telemetry_ids = persist_local_telemetry(
             &repo,
             "exec_1",
             "implementation",
@@ -959,18 +1000,21 @@ mod tests {
             None,
         )
         .unwrap();
+        assert_eq!(telemetry_ids.len(), 3);
+        let rows = repo.telemetry_for_execution("exec_1").unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.1.as_str()).collect::<Vec<_>>(),
+            ["att_1", "att_2", "att_3"]
+        );
         let retries: u32 = db
             .conn()
             .query_row(
-                "SELECT retries FROM local_worker_telemetry WHERE telemetry_id=?1",
-                [&telemetry_id],
+                "SELECT sum(retries) FROM local_worker_telemetry WHERE execution_id='exec_1'",
+                [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(
-            retries, 0,
-            "three successful submissions must not be reported as two retries"
-        );
+        assert_eq!(retries, 0);
     }
 
     #[test]

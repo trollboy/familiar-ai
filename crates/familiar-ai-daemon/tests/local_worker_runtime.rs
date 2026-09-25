@@ -267,7 +267,7 @@ async fn full_pipeline_reserves_runs_commits_and_records_telemetry() {
     assert!(!settlement.unknown_consumption);
 
     let telemetry_repo = LocalTelemetryRepository::new(db.conn());
-    let telemetry_id = persist_local_telemetry(
+    let telemetry_ids = persist_local_telemetry(
         &telemetry_repo,
         "exec_1",
         "implementation",
@@ -286,7 +286,7 @@ async fn full_pipeline_reserves_runs_commits_and_records_telemetry() {
     .unwrap();
     let rows = telemetry_repo.telemetry_for_execution("exec_1").unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, telemetry_id);
+    assert_eq!(rows[0].0, telemetry_ids[0]);
 }
 
 /// Mid-run memory pressure / unexpected external contention: settlement

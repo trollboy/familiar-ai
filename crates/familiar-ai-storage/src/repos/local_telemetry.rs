@@ -232,8 +232,32 @@ impl<'a> LocalTelemetryRepository<'a> {
         &self,
         policy: &AllocationPolicy<'_>,
     ) -> familiar_ai_core::Result<()> {
+        let existing: Option<(String, String, String, bool)> = self
+            .conn
+            .query_row(
+                "SELECT kind,currency,declared_assumptions_json,enabled FROM local_allocation_policies WHERE policy_id=?1 AND policy_version=?2",
+                params![policy.policy_id, policy.policy_version],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        if let Some(existing) = existing {
+            let requested = (
+                policy.kind.to_owned(),
+                policy.currency.to_owned(),
+                policy.declared_assumptions_json.to_owned(),
+                policy.enabled,
+            );
+            if existing != requested {
+                return Err(FamiliarError::Config(format!(
+                    "allocation policy {:?} version {:?} is already registered with a different body; register a new version, or call set_allocation_policy_enabled to change only activation",
+                    policy.policy_id, policy.policy_version
+                )));
+            }
+            return Ok(());
+        }
         self.conn.execute(
-            "INSERT OR IGNORE INTO local_allocation_policies(policy_id,policy_version,kind,currency,declared_assumptions_json,enabled,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO local_allocation_policies(policy_id,policy_version,kind,currency,declared_assumptions_json,enabled,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
                 policy.policy_id,
                 policy.policy_version,
@@ -244,6 +268,31 @@ impl<'a> LocalTelemetryRepository<'a> {
                 Utc::now().to_rfc3339(),
             ],
         ).map_err(db)?;
+        Ok(())
+    }
+
+    /// The only supported in-place policy mutation. Policy meaning remains
+    /// immutable under `(policy_id, policy_version)`; activation is an
+    /// explicit operator switch and may be turned off without inventing a
+    /// replacement version solely to stop producing estimates.
+    pub fn set_allocation_policy_enabled(
+        &self,
+        policy_id: &str,
+        policy_version: &str,
+        enabled: bool,
+    ) -> familiar_ai_core::Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE local_allocation_policies SET enabled=?1 WHERE policy_id=?2 AND policy_version=?3",
+                params![enabled, policy_id, policy_version],
+            )
+            .map_err(db)?;
+        if changed == 0 {
+            return Err(FamiliarError::Config(format!(
+                "allocation policy {policy_id:?} version {policy_version:?} is not registered"
+            )));
+        }
         Ok(())
     }
 
@@ -451,10 +500,8 @@ mod tests {
 
         // Explicitly enabled: succeeds and the row carries the closed
         // operator-allocation cost category and estimated-authority label.
-        db.conn().execute(
-            "UPDATE local_allocation_policies SET enabled=1 WHERE policy_id='electricity-home-office' AND policy_version='v1'",
-            [],
-        ).unwrap();
+        repo.set_allocation_policy_enabled("electricity-home-office", "v1", true)
+            .unwrap();
         let estimate_id = repo
             .record_allocation_estimate(&telemetry_id, &estimate)
             .unwrap();
@@ -462,6 +509,41 @@ mod tests {
             .allocation_estimates_for_telemetry(&telemetry_id)
             .unwrap();
         assert_eq!(rows, vec![(estimate_id, 1_500_000, "USD".to_string())]);
+    }
+
+    #[test]
+    fn policy_reregistration_is_idempotent_only_for_an_identical_body() {
+        let db = database();
+        let repo = LocalTelemetryRepository::new(db.conn());
+        let policy = AllocationPolicy {
+            policy_id: "power",
+            policy_version: "v1",
+            kind: "electricity",
+            currency: "USD",
+            declared_assumptions_json: r#"{"rate":1}"#,
+            enabled: true,
+        };
+        repo.register_allocation_policy(&policy).unwrap();
+        repo.register_allocation_policy(&policy).unwrap();
+
+        let divergent = AllocationPolicy {
+            currency: "EUR",
+            ..policy
+        };
+        let error = repo.register_allocation_policy(&divergent).unwrap_err();
+        assert!(error.to_string().contains("different body"), "{error}");
+
+        repo.set_allocation_policy_enabled("power", "v1", false)
+            .unwrap();
+        let enabled: bool = db
+            .conn()
+            .query_row(
+                "SELECT enabled FROM local_allocation_policies WHERE policy_id='power' AND policy_version='v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!enabled);
     }
 
     #[test]

@@ -1045,7 +1045,7 @@ async fn local_execution_records_residency_state_and_resident_identity() {
     );
     assert_eq!(attribution.cache_evidence, CacheEvidence::WarmHit);
 
-    let telemetry_id = persist_local_telemetry(
+    let telemetry_ids = persist_local_telemetry(
         &LocalTelemetryRepository::new(db.conn()),
         "exec_1",
         "implementation",
@@ -1062,12 +1062,13 @@ async fn local_execution_records_residency_state_and_resident_identity() {
         Some(&attribution),
     )
     .unwrap();
+    let telemetry_id = &telemetry_ids[0];
 
     let recorded: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
             "SELECT residency_state,resident_server_identity,cache_evidence FROM local_worker_telemetry WHERE telemetry_id=?1",
-            [&telemetry_id],
+            [telemetry_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();

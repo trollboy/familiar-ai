@@ -727,7 +727,7 @@ fn worker_descriptor(
     }
 }
 
-type OwnedAgentSet = (
+pub type OwnedAgentSet = (
     Box<dyn CodingAgent>,
     Box<dyn CodingAgent>,
     Box<dyn CodingAgent>,
@@ -851,7 +851,7 @@ fn build_raw_worker_context(
         max_wall_clock_ms: config.agent_runtime.ceilings.max_wall_clock_ms,
     };
     let stage_label = format!("{stage:?}").to_ascii_lowercase();
-    let host = crate::agent_runtime::SqliteRawAgentHost::new(
+    let mut host = crate::agent_runtime::SqliteRawAgentHost::new(
         database_path.to_path_buf(),
         execution_id.to_owned(),
         project_id.to_owned(),
@@ -871,6 +871,17 @@ fn build_raw_worker_context(
             .unwrap_or(120_000),
         1 << 20,
     );
+    if worker.provider == familiar_ai_core::config::LOCAL_PROVIDER {
+        let local = worker.local.as_ref().ok_or_else(|| {
+            format!(
+                "local worker {worker_id:?} requires a [worker_registry.workers.{worker_id}.local] resource profile"
+            )
+        })?;
+        host = host.with_local_execution(crate::agent_runtime::LocalExecutionConfig {
+            resource_profile: local.resources.clone(),
+            model_artifact_id: worker.model_artifact.clone(),
+        });
+    }
     Ok(familiar_ai_agent::RawWorkerContext {
         host: std::sync::Arc::new(host),
         ceilings,
@@ -882,7 +893,7 @@ fn build_raw_worker_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_selected_agents(
+pub fn build_selected_agents(
     config: &Config,
     route_context: &RouteContext,
     execution_id: &str,
