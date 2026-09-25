@@ -144,6 +144,13 @@ pub enum OperatorAction {
         repo: String,
         prd_path: String,
     },
+    /// One drive session over exactly these PRDs: isolated worktrees, a
+    /// recorded session and attempts, usage, and the scope-disjoint merge
+    /// queue. Start on one card is a one-PRD wave.
+    StartWave {
+        repo: String,
+        prd_paths: Vec<String>,
+    },
     ResumePrd {
         repo: String,
         prd_id: String,
@@ -183,6 +190,7 @@ pub enum OperatorAction {
 #[serde(rename_all = "snake_case")]
 pub enum OperatorActionKind {
     StartPrd,
+    StartWave,
     ResumePrd,
     CancelExecution,
     SetProjectPaused,
@@ -194,8 +202,9 @@ pub enum OperatorActionKind {
 }
 
 impl OperatorAction {
-    pub const NAMES: [&'static str; 9] = [
+    pub const NAMES: [&'static str; 10] = [
         "start_prd",
+        "start_wave",
         "resume_prd",
         "cancel_execution",
         "set_project_paused",
@@ -209,6 +218,9 @@ impl OperatorAction {
     pub fn summary(&self) -> String {
         match self {
             Self::StartPrd { prd_path, .. } => format!("Start a run of {prd_path}"),
+            Self::StartWave { prd_paths, .. } => {
+                format!("Start one drive session over {} PRD(s)", prd_paths.len())
+            }
             Self::ResumePrd { prd_id, .. } => format!("Re-drive retained work for {prd_id}"),
             Self::CancelExecution { execution_id, .. } => format!("Stop execution {execution_id}"),
             Self::SetProjectPaused { paused: true, .. } => {
@@ -228,6 +240,7 @@ impl OperatorAction {
     pub fn name(&self) -> &'static str {
         match self {
             Self::StartPrd { .. } => "start_prd",
+            Self::StartWave { .. } => "start_wave",
             Self::ResumePrd { .. } => "resume_prd",
             Self::CancelExecution { .. } => "cancel_execution",
             Self::SetProjectPaused { .. } => "set_project_paused",
@@ -242,6 +255,7 @@ impl OperatorAction {
     pub fn kind(&self) -> OperatorActionKind {
         match self {
             Self::StartPrd { .. } => OperatorActionKind::StartPrd,
+            Self::StartWave { .. } => OperatorActionKind::StartWave,
             Self::ResumePrd { .. } => OperatorActionKind::ResumePrd,
             Self::CancelExecution { .. } => OperatorActionKind::CancelExecution,
             Self::SetProjectPaused { .. } => OperatorActionKind::SetProjectPaused,
@@ -277,6 +291,9 @@ impl OperatorAction {
             Self::SaveConfig { edits } if edits.is_empty() || edits.len() > 500 => Err(
                 OperatorError::invalid("configuration save requires 1 to 500 edits"),
             ),
+            Self::StartWave { prd_paths, .. } if prd_paths.is_empty() || prd_paths.len() > 50 => {
+                Err(OperatorError::invalid("a wave names 1 to 50 PRDs"))
+            }
             _ => Ok(()),
         }
     }
@@ -371,7 +388,7 @@ mod tests {
     #[test]
     fn inventory_is_stable_and_serialized_names_match() {
         assert_eq!(OperatorQuery::NAMES.len(), 20);
-        assert_eq!(OperatorAction::NAMES.len(), 9);
+        assert_eq!(OperatorAction::NAMES.len(), 10);
         let value = serde_json::to_value(OperatorQuery::Backlog {
             repo: "/r".into(),
             limit: 5,

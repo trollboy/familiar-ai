@@ -72,6 +72,63 @@ pub fn list_executions(
     rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db)
 }
 
+/// The latest control-plane execution whose command names this PRD, by id
+/// (`--prd PRD-12`) or by path (`run docs/prds/PRD-012.md`): its id, state,
+/// and the reason recorded with its latest `failed` event. `run`-launched
+/// work records no driver attempt, so this is the only durable trace that a
+/// desktop-launched run ended, and how.
+pub fn latest_execution_for_prd(
+    conn: &Connection,
+    project_id: &str,
+    needles: &[&str],
+) -> Result<Option<(String, String, Option<String>)>> {
+    if needles.is_empty() {
+        return Ok(None);
+    }
+    // Each needle is matched as a whole JSON string in the command's argv, so
+    // `PRD-1` cannot match `PRD-10`.
+    let clauses = (0..needles.len())
+        .map(|i| format!("x.command_json LIKE ?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sql = format!(
+        "SELECT x.execution_id, x.state, \
+         (SELECT e.payload_json FROM control_plane_events e \
+            WHERE e.execution_id=x.execution_id AND e.kind='failed' \
+            ORDER BY e.created_at DESC, e.event_id DESC LIMIT 1) \
+         FROM control_plane_executions x \
+         WHERE x.project_id=?1 AND ({clauses}) \
+         ORDER BY x.created_at DESC, x.execution_id DESC LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(db)?;
+    let mut bound: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(project_id.to_owned())];
+    for needle in needles {
+        bound.push(Box::new(format!("%\"{needle}\"%")));
+    }
+    let params: Vec<&dyn rusqlite::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+    let mut rows = stmt.query(params.as_slice()).map_err(db)?;
+    match rows.next().map_err(db)? {
+        Some(row) => {
+            let reason = row
+                .get::<_, Option<String>>(2)
+                .map_err(db)?
+                .and_then(|payload| serde_json::from_str::<serde_json::Value>(&payload).ok())
+                .and_then(|value| {
+                    value
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .map(str::to_owned)
+                });
+            Ok(Some((
+                row.get(0).map_err(db)?,
+                row.get(1).map_err(db)?,
+                reason,
+            )))
+        }
+        None => Ok(None),
+    }
+}
+
 /// The registered state of a project (`active`, `paused`, `archived`), or
 /// `None` when it has never been registered with the control plane.
 pub fn project_state(conn: &Connection, project_id: &str) -> Result<Option<String>> {

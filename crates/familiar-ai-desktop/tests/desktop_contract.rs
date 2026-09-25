@@ -127,7 +127,10 @@ fn dependency_waves_have_gated_batch_launch_controls() {
     assert!(javascript.contains(">Launch wave</button>"));
     assert!(javascript.contains("lifecycle(n)==='ready'"));
     assert!(javascript.contains("launchable.length===unfinished.length"));
-    assert!(javascript.contains("Promise.all(paths.map(path=>mutate({action:'start_prd'"));
+    // FAM-BUG-099: a wave is one drive session over exactly its PRDs, never
+    // one `run` per card in the repository's own checkout.
+    assert!(javascript.contains("mutate({action:'start_wave',repo:state.repo,prd_paths:paths})"));
+    assert!(!javascript.contains("Promise.all(paths.map(path=>mutate({action:'start_prd'"));
     assert!(javascript.contains("disabled title="));
 }
 

@@ -411,6 +411,43 @@ appears with no entry, or with a status a reader cannot classify.
   reads as Failed on the lifecycle and offers "run again", not "release or
   force-complete".
 
+### FAM-BUG-099 — The desktop launched `run` in the live checkout, recorded no attempt, and a finished run read as running forever
+
+- **Status:** Fixed (2026-09-24: every desktop start is one `drive` session
+  over exactly the named PRDs, via a new `start_wave` operator action, with
+  Start on one card a one-PRD wave; `drive` always isolates a worktree,
+  records session and attempts, persists usage and runs the merge queue.
+  The lifecycle reads the latest control-plane execution for a claimed PRD
+  with no attempt, so a failed run reads Failed with the recorded reason.
+  Desktop-supplied PRD paths resolve against the repository, which also
+  fixes Release and Force-complete from the desktop.)
+- **Found:** 2026-09-24, first desktop-launched run to get past config on
+  either machine (PRD-110 on Linux). It ran 78 minutes, edited 21 files in
+  `~/Projects/familiar-ai` itself on `main`, stopped `implementation_incomplete`
+  by its own declaration, and the app still said running two hours later.
+  Its usage is recorded under the run's own execution id, not the
+  control-plane one: claude-sonnet-5, 73 minutes, 184,379 output tokens,
+  71.9M cached input tokens, $20.54. The partial is preserved on
+  `prd-110/attempt-1`.
+- **Detail:** the desktop submitted `familiar-ai run <path>`. `run` works
+  in the current directory, records no driver attempt, and persists usage
+  only on a complete result. A three-PRD wave would have been three
+  implementers in one working tree. The lifecycle's inputs were the ledger
+  row and the checkpoint; a claimed row with a checkpoint at `implemented`
+  and no attempt derives Implementing regardless of the execution's state.
+- **Expected fix:** as landed.
+
+### FAM-BUG-100 — `execution_history.agent` says `codex` for a claude-code run
+
+- **Status:** Open
+- **Found:** 2026-09-24 in the PRD-110 run's history row: `agent = codex`,
+  `model = claude-sonnet-5`, while the usage observation for the same
+  execution says `adapter = claude-code`. The cost and tokens are right; the
+  label is not.
+- **Expected fix:** the history row takes its agent from the resolved
+  adapter, the same source the usage observation uses; a regression pins a
+  claude-code run's history row.
+
 ### FAM-BUG-098 — One raw-loop worker with the owned loop disabled kills every run, and the Runs card shows nothing but "Detached"
 
 - **Status:** Fixed (2026-09-24: `resolved_worker_plan` leaves a raw-loop

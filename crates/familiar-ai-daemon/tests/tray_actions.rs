@@ -62,7 +62,7 @@ fn harness() -> Harness {
     std::fs::create_dir_all(repo_dir.join("docs/prds")).unwrap();
     std::fs::write(
         repo_dir.join("docs/prds/PRD-1.md"),
-        "# PRD-1\n\nThe body of the PRD.\n",
+        "# PRD-1: Fixture\n\nThe body of the PRD.\n",
     )
     .unwrap();
 
@@ -171,10 +171,91 @@ fn starting_a_prd_registers_the_project_and_queues_a_run() {
     let items = runs["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["state"], "queued");
-    // The command is the one the operator would have typed.
-    let command = items[0]["command_json"].as_str().unwrap();
-    assert!(command.contains("familiar-ai"));
-    assert!(command.contains("docs/prds/PRD-1.md"));
+    // FAM-BUG-099: a start is one drive session over exactly this PRD, the
+    // path that isolates a worktree and records session, attempt and usage;
+    // never `run`, which works in the repository's own checkout.
+    let command: serde_json::Value =
+        serde_json::from_str(items[0]["command_json"].as_str().unwrap()).unwrap();
+    let argv: Vec<&str> = command["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        argv,
+        ["familiar-ai", "drive", "--prd", "PRD-1", "--max-prds", "1"],
+        "{command}"
+    );
+    assert_eq!(ack["prd_ids"][0], "PRD-1");
+}
+
+/// A wave is one drive session naming every PRD in it, not one run per card.
+#[test]
+fn launching_a_wave_submits_one_drive_session_over_exactly_those_prds() {
+    let h = harness();
+    std::fs::write(
+        std::path::Path::new(&h.repo).join("docs/prds/PRD-2.md"),
+        "# PRD-2: Second fixture\n\nThe second PRD.\n",
+    )
+    .unwrap();
+    let ack = h
+        .source
+        .act(Action::StartWave {
+            repo: h.repo.clone(),
+            prd_paths: vec!["docs/prds/PRD-1.md".into(), "docs/prds/PRD-2.md".into()],
+        })
+        .expect("a wave should queue one execution");
+    let runs = h
+        .source
+        .query(Query::Executions {
+            repo: h.repo.clone(),
+            limit: 10,
+        })
+        .unwrap();
+    let items = runs["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "one session, not one run per PRD");
+    let command: serde_json::Value =
+        serde_json::from_str(items[0]["command_json"].as_str().unwrap()).unwrap();
+    let argv: Vec<&str> = command["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        argv,
+        [
+            "familiar-ai",
+            "drive",
+            "--prd",
+            "PRD-1",
+            "--prd",
+            "PRD-2",
+            "--max-prds",
+            "2"
+        ],
+        "{command}"
+    );
+    assert_eq!(ack["prd_ids"].as_array().unwrap().len(), 2);
+
+    // A path that names no discovered PRD is refused before anything is queued.
+    let refused = h
+        .source
+        .act(Action::StartWave {
+            repo: h.repo.clone(),
+            prd_paths: vec!["docs/prds/PRD-404.md".into()],
+        })
+        .unwrap_err();
+    assert!(!refused.is_empty());
+    let runs = h
+        .source
+        .query(Query::Executions {
+            repo: h.repo.clone(),
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(runs["items"].as_array().unwrap().len(), 1);
 }
 
 #[test]

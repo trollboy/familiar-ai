@@ -100,10 +100,13 @@ pub fn list_repositories(db: &Database) -> Result<Value, StewardshipError> {
 /// that already exist — the latest driver attempt, the durable checkpoint,
 /// and pending scope decisions — plus what the caller knows about the file
 /// and the ledger row. Nothing is stored; see `docs/contracts/prd-lifecycle.md`.
+#[allow(clippy::too_many_arguments)]
 pub fn prd_lifecycle(
     db: &Database,
     repository_key: &str,
+    project_id: &str,
     prd_id: &str,
+    prd_path: &str,
     file_status: Option<&str>,
     archived: bool,
     ledger_status: Option<&str>,
@@ -133,6 +136,54 @@ pub fn prd_lifecycle(
             last_durable_phase: attempt.last_durable_phase,
         }),
     };
+    // FAM-BUG-099: a desktop-launched `run` recorded no attempt, so a PRD it
+    // claimed read as Implementing forever after the execution had failed.
+    // The control-plane execution is the durable record of that work; when
+    // there is no attempt to speak for a claimed row, it speaks.
+    let mut execution_divergence = None;
+    let latest_attempt = match latest_attempt {
+        Some(attempt) => Some(attempt),
+        None if ledger_status == Some("in_progress") => {
+            // The ledger renders `PRD-1`; a dispatched `drive --prd` may say
+            // `PRD-001`; a legacy `run` names the path. Match all three.
+            let padded = prd_id
+                .strip_prefix("PRD-")
+                .and_then(|digits| digits.parse::<u64>().ok())
+                .map(|n| format!("PRD-{n:03}"));
+            let mut needles = vec![prd_id, prd_path];
+            if let Some(padded) = padded.as_deref() {
+                if padded != prd_id {
+                    needles.push(padded);
+                }
+            }
+            match familiar_ai_storage::latest_execution_for_prd(db.conn(), project_id, &needles)
+                .map_err(storage)?
+            {
+                Some((execution_id, state, reason))
+                    if state == "failed" || state == "cancelled" =>
+                {
+                    execution_divergence = Some(format!(
+                        "claimed, but its last run {execution_id} {state}: {}",
+                        reason.as_deref().unwrap_or("no reason recorded")
+                    ));
+                    Some(familiar_ai_core::AttemptFacts {
+                        outcome: Some("retained".into()),
+                        retained_reason: Some(
+                            reason
+                                .as_deref()
+                                .filter(|r| r.contains("scope"))
+                                .map(|_| "scope_broadened")
+                                .unwrap_or("worker_failed")
+                                .into(),
+                        ),
+                        last_durable_phase: None,
+                    })
+                }
+                _ => None,
+            }
+        }
+        None => None,
+    };
     let checkpoint_phase = CheckpointRepository::new(db.conn())
         .get(repository_key, prd_id)
         .map_err(storage)?
@@ -142,16 +193,18 @@ pub fn prd_lifecycle(
         .map_err(storage)?
         .iter()
         .any(|decision| decision.prd_id == prd_id);
-    Ok(familiar_ai_core::derive_lifecycle(
-        &familiar_ai_core::LifecycleInputs {
-            file_status: file_status.map(str::to_owned),
-            archived,
-            ledger_status: ledger_status.map(str::to_owned),
-            latest_attempt,
-            checkpoint_phase,
-            pending_human_gate,
-        },
-    ))
+    let mut derived = familiar_ai_core::derive_lifecycle(&familiar_ai_core::LifecycleInputs {
+        file_status: file_status.map(str::to_owned),
+        archived,
+        ledger_status: ledger_status.map(str::to_owned),
+        latest_attempt,
+        checkpoint_phase,
+        pending_human_gate,
+    });
+    if derived.divergence.is_none() {
+        derived.divergence = execution_divergence;
+    }
+    Ok(derived)
 }
 
 /// `layout` is the repository's configured backlog layout — directories,
@@ -216,7 +269,9 @@ pub fn list_backlog(
         let mut derived = prd_lifecycle(
             db,
             &repository.key,
+            &repository.worktree.to_string_lossy(),
             &prd_id,
+            &row.prd_path,
             file_status.as_deref(),
             archived,
             Some(row.status.as_str()),

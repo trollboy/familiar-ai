@@ -143,6 +143,81 @@ impl DaemonDataSource {
             .layout())
     }
 
+    /// FAM-BUG-099: the desktop used to submit `familiar-ai run <path>`, which
+    /// works in the repository's own checkout, records no session or
+    /// attempt, and persists no usage. Three such runs in a wave would have
+    /// shared one working tree. Every start is now one `drive` session over
+    /// exactly the named PRDs: isolated worktrees, recorded attempts, usage,
+    /// and the scope-disjoint merge queue, the path that has actually landed
+    /// PRDs. Start on one card is a one-PRD wave.
+    fn start_wave(
+        &self,
+        scope: &CapabilityScope,
+        repo: &str,
+        prd_paths: &[String],
+    ) -> Result<Value, String> {
+        let project = Self::project_id(repo).to_string();
+        let repository = Self::identity(repo)?;
+        let discovered = self.discovered(repo)?;
+        let mut ids = Vec::with_capacity(prd_paths.len());
+        for prd_path in prd_paths {
+            let target = familiar_ai_core::resolve_run_prd(
+                &repository,
+                &discovered,
+                &Self::within_repository(&repository, prd_path),
+            )
+            .map_err(|e| e.to_string())?;
+            ids.push(target.id.to_string());
+        }
+        // Registration is idempotent and leaves an existing project's state
+        // alone, so this cannot silently unpause a paused project on the way
+        // to submitting.
+        self.control
+            .register_project(&project, repo, 0, None)
+            .map_err(|e| e.to_string())?;
+        let mut argv: Vec<String> = vec!["familiar-ai".into(), "drive".into()];
+        for id in &ids {
+            argv.push("--prd".into());
+            argv.push(id.clone());
+        }
+        argv.push("--max-prds".into());
+        argv.push(ids.len().to_string());
+        let stamp = chrono::Utc::now().timestamp_micros();
+        let submission = Submission {
+            execution_id: format!("exec-{stamp}-{}", std::process::id()),
+            project_id: project.clone(),
+            // Unique per click: the operator asking twice means they want it
+            // twice, and the control plane dedupes identical keys.
+            idempotency_key: format!("tray:{project}:{}:{stamp}", ids.join("+")),
+            mode: ExecutionMode::Detached,
+            priority: 0,
+            command_json: json!({ "argv": argv, "timeout_ms": null }).to_string(),
+        };
+        let ack = self
+            .control
+            .submit(scope, &submission)
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "execution_id": ack.execution_id,
+            "duplicate": ack.duplicate,
+            "prd_ids": ids,
+        }))
+    }
+
+    /// The desktop names PRDs by repository-relative path; the daemon's own
+    /// working directory is not the repository, so resolve against it.
+    fn within_repository(
+        repository: &familiar_ai_core::RepositoryIdentity,
+        prd_path: &str,
+    ) -> std::path::PathBuf {
+        let path = std::path::Path::new(prd_path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repository.worktree.join(path)
+        }
+    }
+
     fn discovered(&self, repo: &str) -> Result<Vec<familiar_ai_core::DiscoveredPrd>, String> {
         let repository = Self::identity(repo)?;
         let layout = self.layout(repo)?;
@@ -168,7 +243,7 @@ impl DaemonDataSource {
         let target = familiar_ai_core::resolve_run_prd(
             &repository,
             &discovered,
-            std::path::Path::new(prd_path),
+            &Self::within_repository(&repository, prd_path),
         )
         .map_err(|e| e.to_string())?;
         let mut db = self
@@ -1248,39 +1323,8 @@ impl DataSource for DaemonDataSource {
     fn act(&self, action: Action) -> Result<Value, String> {
         let scope = Self::operator_scope();
         match action {
-            Action::StartPrd { repo, prd_path } => {
-                let project = Self::project_id(&repo).to_string();
-                // Registration is idempotent and leaves an existing project's
-                // state alone, so this cannot silently unpause a paused
-                // project on the way to submitting.
-                self.control
-                    .register_project(&project, &repo, 0, None)
-                    .map_err(|e| e.to_string())?;
-                let stamp = chrono::Utc::now().timestamp_micros();
-                let submission = Submission {
-                    execution_id: format!("exec-{stamp}-{}", std::process::id()),
-                    project_id: project.clone(),
-                    // Unique per click: the operator asking twice means they
-                    // want it twice, and the control plane dedupes identical
-                    // keys.
-                    idempotency_key: format!("tray:{project}:{prd_path}:{stamp}"),
-                    mode: ExecutionMode::Detached,
-                    priority: 0,
-                    command_json: json!({
-                        "argv": ["familiar-ai", "run", prd_path],
-                        "timeout_ms": null,
-                    })
-                    .to_string(),
-                };
-                let ack = self
-                    .control
-                    .submit(&scope, &submission)
-                    .map_err(|e| e.to_string())?;
-                Ok(json!({
-                    "execution_id": ack.execution_id,
-                    "duplicate": ack.duplicate,
-                }))
-            }
+            Action::StartPrd { repo, prd_path } => self.start_wave(&scope, &repo, &[prd_path]),
+            Action::StartWave { repo, prd_paths } => self.start_wave(&scope, &repo, &prd_paths),
             Action::ResumePrd { repo, prd_id } => {
                 let project = Self::project_id(&repo).to_string();
                 self.control

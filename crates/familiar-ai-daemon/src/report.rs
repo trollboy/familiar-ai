@@ -95,7 +95,9 @@ pub fn render(
             crate::stewardship::prd_lifecycle(
                 db,
                 &session.repository_key,
+                &session.repository_key,
                 &prd.prd_id,
+                &prd.prd_path,
                 None,
                 false,
                 None,
