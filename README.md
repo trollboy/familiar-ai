@@ -161,21 +161,19 @@ containing changes. Landing work is a human act.
 
 ## Quick start
 
-**Requirements:** Rust (stable), Linux with kernel ≥ 5.13 or macOS, and at
-least one coding agent CLI on `PATH`
-(`claude` or `codex`).
+**Requirements:** Rust (stable), Linux with kernel ≥ 5.13 or macOS, and one
+reachable worker: a provider API key, a local Ollama endpoint, or an optional
+`claude`/`codex` CLI on `PATH`.
 
 On Debian/Ubuntu Linux, the default build additionally needs `pkg-config` and
 `libgtk-3-dev`; the runtime needs `libgtk-3-0`. These are the complete native
 dependencies of the default daemon/tray build. macOS uses AppKit and does not
 need GTK.
 
-The CLI is a real prerequisite today, not a recommendation: `AgentAdapterKind`
-is a closed enum of three vendor-CLI variants and `as_agent_entry` maps any
-unrecognised runtime to Codex, so a raw-API or local worker cannot currently be
-selected to implement a PRD even though the loop to run one is built. PRD-100
-adds the bridge; PRD-101 makes a host with one API key and no vendor CLI a
-supported installation and deletes this paragraph.
+With no worker declaration Familiar discovers what this host can actually run.
+If none is available, its diagnostic lists every setup path instead of silently
+choosing a missing vendor executable. Explicit CLI configuration is still
+honored unchanged.
 
 ```bash
 git clone git@github.com:trollboy/familiar-ai.git

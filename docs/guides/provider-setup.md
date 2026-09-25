@@ -1,12 +1,17 @@
 # Operator Guide: Registering Providers and Models
 
 Practical walkthrough for putting real workers behind Familiar on one
-machine — subscription CLIs (Codex, Claude Code), local Ollama, and
+machine — hosted APIs, optional subscription CLIs (Codex, Claude Code), local Ollama, and
 authenticated OpenAI-compatible servers (Unsloth). Written 2026-08-31
 against the current CLI; each step notes its known caveats from
 `docs/running_bugs.md` so you hit them knowingly instead of by surprise.
 
 ## The mental model: five separate states
+
+No vendor CLI is mandatory. A usable installation needs one reachable worker:
+a provider key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`), a local endpoint, or
+a CLI. With no explicit worker declaration Familiar selects an available path
+and reports every remedy when it finds none.
 
 A model is useful only when all five hold. `provider list` / `model list`
 show fragments of this today (FAM-BUG-001; a unified inventory command is

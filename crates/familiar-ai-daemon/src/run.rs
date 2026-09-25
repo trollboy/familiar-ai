@@ -284,7 +284,7 @@ impl PreparedRun {
                     "cannot acquire mutating orchestrator ownership: {error}"
                 ))
             })?;
-        let config = crate::config_cli::effective_config_for_repository(
+        let mut config = crate::config_cli::effective_config_for_repository(
             &crate::config_cli::ConfigContext {
                 config_path: paths.config_dir.join("config.toml"),
                 data_dir: paths.data_dir.clone(),
@@ -292,6 +292,7 @@ impl PreparedRun {
             &identity.worktree,
         )
         .map_err(RunError::Config)?;
+        materialize_host_worker_default(&mut config)?;
         let (implementation_entry, reviewer_entry) =
             resolved_agent_entries(&config).map_err(RunError::Config)?;
         let remediation_entry = resolved_remediation_entry(&config).map_err(RunError::Config)?;
@@ -324,6 +325,59 @@ impl PreparedRun {
     pub fn execute(&self, prd_path: &Path) -> Result<RunWorkflowResult, RunError> {
         execute_with_config(prd_path, &self.agents(), &self.config, &self.paths)
     }
+}
+
+fn executable_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| {
+            let candidate = directory.join(name);
+            candidate.is_file()
+        })
+    })
+}
+
+/// Replaces the historical implicit Codex choice only when the operator has
+/// declared neither configuration shape. Explicit workers remain untouched.
+pub(crate) fn materialize_host_worker_default(config: &mut Config) -> Result<(), RunError> {
+    if config.worker_registry.is_some() || config.agents.is_some() {
+        return Ok(());
+    }
+    let facts = familiar_ai_core::config::HostWorkerFacts {
+        openai_api_key: std::env::var_os("OPENAI_API_KEY").is_some_and(|v| !v.is_empty()),
+        anthropic_api_key: std::env::var_os("ANTHROPIC_API_KEY").is_some_and(|v| !v.is_empty()),
+        ollama_endpoint: std::env::var("OLLAMA_HOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty()),
+        codex_cli: executable_on_path("codex"),
+        claude_cli: executable_on_path("claude"),
+    };
+    let (id, worker) = facts.selected_worker().map_err(RunError::Config)?;
+    if worker.auth_profile.as_deref() == Some("host-openai-api-key") {
+        config.auth_profiles.insert(
+            "host-openai-api-key".into(),
+            familiar_ai_core::config::AuthDescriptor::Env("OPENAI_API_KEY".into()),
+        );
+    }
+    if worker.auth_profile.as_deref() == Some("host-anthropic-api-key") {
+        config.auth_profiles.insert(
+            "host-anthropic-api-key".into(),
+            familiar_ai_core::config::AuthDescriptor::Env("ANTHROPIC_API_KEY".into()),
+        );
+    }
+    if !matches!(worker.runtime_id(), Ok("codex" | "claude-code")) {
+        config.agent_runtime.enabled = true;
+    }
+    config.worker_registry = Some(familiar_ai_core::config::WorkerRegistryConfig {
+        workers: std::collections::BTreeMap::from([(id.clone(), worker)]),
+        capability_profiles: std::collections::BTreeMap::new(),
+        routing: familiar_ai_core::config::WorkerRoutingConfig {
+            implementation_pin: Some(id.clone()),
+            review_pin: Some(id.clone()),
+            remediation_pin: Some(id),
+            ..Default::default()
+        },
+    });
+    Ok(())
 }
 
 struct RegisterAgent<'a> {
@@ -388,6 +442,9 @@ pub fn resolved_agent_entries(
             agents.validate(&config.review)?;
             Ok((agents.implementation.clone(), agents.reviewer.clone()))
         }
+        // Composition roots materialize a host-derived registry first. Keep
+        // this library fallback for callers that deliberately supply their
+        // own agents (notably deterministic workflow tests).
         None => Ok((AgentEntryConfig::default(), AgentEntryConfig::default())),
     }
 }

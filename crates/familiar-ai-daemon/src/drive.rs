@@ -50,6 +50,7 @@ pub fn execute_configured(
         },
         repository,
     )?;
+    crate::run::materialize_host_worker_default(&mut config).map_err(|e| e.to_string())?;
     if let Some(value) = max_parallel_components {
         if value == 0 {
             return Err("--max-parallel-components must be positive".into());

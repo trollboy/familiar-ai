@@ -30,6 +30,11 @@ pub enum OnboardCommand {
     Validate { policy: PathBuf },
     /// Run the harmless onboarding boundary fixture.
     Fixture { policy: PathBuf },
+    /// Write a host-valid worker configuration without requiring a vendor CLI.
+    WorkerConfig {
+        #[arg(long, default_value = "worker-config.toml")]
+        output: PathBuf,
+    },
 }
 
 pub fn onboard(command: OnboardCommand) -> Result<(), String> {
@@ -108,6 +113,14 @@ pub fn onboard(command: OnboardCommand) -> Result<(), String> {
             );
         }
         OnboardCommand::Fixture { policy } => println!("{}", onboarding::safe_fixture(&policy)?),
+        OnboardCommand::WorkerConfig { output } => {
+            let mut config = Config::default();
+            crate::run::materialize_host_worker_default(&mut config).map_err(|e| e.to_string())?;
+            let encoded = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
+            std::fs::write(&output, encoded)
+                .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+            println!("worker_config={} host_valid=true", output.display());
+        }
     }
     Ok(())
 }

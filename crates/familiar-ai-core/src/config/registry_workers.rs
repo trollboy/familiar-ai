@@ -817,6 +817,78 @@ pub struct WorkerRegistryConfig {
     pub routing: WorkerRoutingConfig,
 }
 
+/// Facts observed by a composition root when no worker has been declared.
+/// Keeping selection pure prevents configuration defaults from silently
+/// depending on the test runner's PATH or credentials.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostWorkerFacts {
+    pub openai_api_key: bool,
+    pub anthropic_api_key: bool,
+    pub ollama_endpoint: Option<String>,
+    pub codex_cli: bool,
+    pub claude_cli: bool,
+}
+
+impl HostWorkerFacts {
+    pub fn selected_worker(&self) -> Result<(String, RegistryWorkerConfig), String> {
+        let capabilities = vec![
+            WorkerCapabilityConfig::Implementation,
+            WorkerCapabilityConfig::Review,
+            WorkerCapabilityConfig::Remediation,
+        ];
+        let base = |provider: &str, model: &str, runtime: &str| RegistryWorkerConfig {
+            adapter: None,
+            provider: provider.into(),
+            model: model.into(),
+            runtime: Some(runtime.into()),
+            model_artifact: None,
+            auth_profile: None,
+            capability_profile: None,
+            runtime_config: None,
+            local: None,
+            executable: None,
+            capabilities: capabilities.clone(),
+            fresh_process_isolation: true,
+            context_tokens: 0,
+            estimated_cost_microusd: None,
+            available: true,
+            effort: None,
+            permission_mode: None,
+            extra_args: Vec::new(),
+        };
+        if self.openai_api_key {
+            let mut worker = base("openai", "gpt-5-codex", "openai-api");
+            worker.auth_profile = Some("host-openai-api-key".into());
+            return Ok(("host-openai-api".into(), worker));
+        }
+        if self.anthropic_api_key {
+            let mut worker = base("anthropic", "claude-sonnet-4-5", "anthropic-api");
+            worker.auth_profile = Some("host-anthropic-api-key".into());
+            return Ok(("host-anthropic-api".into(), worker));
+        }
+        if let Some(endpoint) = &self.ollama_endpoint {
+            let mut worker = base("local", "llama3", "ollama");
+            worker.runtime_config = Some(OllamaRuntimeConfig {
+                host: Some(endpoint.clone()),
+            });
+            return Ok(("host-ollama".into(), worker));
+        }
+        if self.codex_cli {
+            return Ok((
+                "host-codex-cli".into(),
+                base("openai", "__legacy_cli_default__", "codex"),
+            ));
+        }
+        if self.claude_cli {
+            return Ok((
+                "host-claude-cli".into(),
+                base("anthropic", "__legacy_cli_default__", "claude-code"),
+            ));
+        }
+        Err("no reachable worker found; configure one of: an OPENAI_API_KEY or ANTHROPIC_API_KEY, a reachable local Ollama endpoint, or a claude/codex CLI on PATH".into())
+    }
+}
+
 impl WorkerRegistryConfig {
     /// Losslessly represent the legacy role configuration in the registry.
     /// Explicit pins preserve legacy selection semantics for all three stages.

@@ -407,6 +407,11 @@ impl CodingAgent for RawAgent {
         });
         let authority = self.host.authority();
         let execution_id = authority.execution_id.clone();
+        // Multiple independently selected raw workers (implementation and
+        // review) share an execution id and each starts its host-local
+        // attempt sequence at one. Include worker identity so their durable
+        // attempt rows cannot collide.
+        let worker_id = authority.worker_id.clone();
         // Distinguishes repeated `execute()` calls that share one
         // `execution_id` (a remediation round, a review re-run): without
         // this, `attempt_counter` below restarts at 1 on every call and a
@@ -470,7 +475,9 @@ impl CodingAgent for RawAgent {
         let mut attempt_counter = 0u32;
         let mint_attempt_id = move || {
             attempt_counter += 1;
-            AttemptId(format!("{execution_id}:{attempt_scope}:{attempt_counter}"))
+            AttemptId(format!(
+                "{execution_id}:{worker_id}:{attempt_scope}:{attempt_counter}"
+            ))
         };
 
         let runtime = tokio::runtime::Builder::new_current_thread()

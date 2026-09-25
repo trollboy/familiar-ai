@@ -116,6 +116,40 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
                         checks.push(deduplicated_check(&check_id, &key));
                     }
                 }
+                // Inventory-only CLI candidates are facts, not gates. A
+                // missing executable blocks only when routing selected that
+                // worker; otherwise report it without invalidating a healthy
+                // raw-worker session (FAM-BUG-020 class).
+                for (worker_id, worker) in &registry.workers {
+                    let Ok(runtime_id) = worker.runtime_id() else {
+                        continue;
+                    };
+                    if !matches!(runtime_id, "codex" | "claude-code") {
+                        continue;
+                    }
+                    let key = format!(
+                        "executable:{}:{}:{:?}",
+                        runtime_id,
+                        worker.executable.as_deref().unwrap_or("default"),
+                        worker.extra_args
+                    );
+                    if !probed_agents.insert(key) {
+                        continue;
+                    }
+                    let detail =
+                        match crate::run::build_agent_or_deferred(&worker.as_agent_entry(), true) {
+                            Ok(agent) => match agent.preflight() {
+                                Ok(()) => "candidate is available".into(),
+                                Err(error) => format!("candidate is unavailable: {error}"),
+                            },
+                            Err(error) => format!("candidate is unavailable: {error}"),
+                        };
+                    checks.push(PreflightCheck {
+                        check_id: format!("worker.candidate.{worker_id}"),
+                        status: PreflightStatus::Passed,
+                        detail,
+                    });
+                }
             }
             Err(detail) => {
                 // Routing can exclude a raw worker precisely because its
@@ -838,7 +872,11 @@ mod tests {
                     },
                 )]),
                 capability_profiles: BTreeMap::new(),
-                routing: Default::default(),
+                routing: familiar_ai_core::config::WorkerRoutingConfig {
+                    implementation_pin: Some("local-ollama".into()),
+                    remediation_pin: Some("local-ollama".into()),
+                    ..Default::default()
+                },
             }),
             // FAM-BUG-098: with the owned loop off this worker is not a
             // candidate at all; the point here is that, when it is, preflight
@@ -852,6 +890,19 @@ mod tests {
         // Review stays disabled: the point of this test is the raw-runtime
         // dispatch path, not review-independence routing.
         assert!(!config.review.enabled);
+
+        let mut absent_cli =
+            config.worker_registry.as_ref().unwrap().workers["local-ollama"].clone();
+        absent_cli.provider = "openai".into();
+        absent_cli.runtime = Some("codex".into());
+        absent_cli.local = None;
+        absent_cli.executable = Some("familiar-test-definitely-missing-codex".into());
+        config
+            .worker_registry
+            .as_mut()
+            .unwrap()
+            .workers
+            .insert("absent-codex".into(), absent_cli);
 
         let agent = AvailableAgent;
         let temp = tempfile::tempdir().unwrap();
@@ -879,6 +930,11 @@ mod tests {
                  RawWorkerContext it was never meant to have here: {check:?}"
             );
         }
+        assert!(report.checks.iter().any(|check| {
+            check.check_id == "worker.candidate.absent-codex"
+                && check.status == PreflightStatus::Passed
+                && check.detail.contains("unavailable")
+        }));
 
         let worker = config
             .worker_registry
