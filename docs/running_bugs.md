@@ -448,6 +448,23 @@ appears with no entry, or with a status a reader cannot classify.
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
 
+### FAM-BUG-103 — `resume` cannot finish a checkpoint that is already `reviewed`
+
+- **Status:** Fixed (2026-09-25: resuming a checkpoint at `reviewed` or
+  `approved` reuses the recorded review; a `reviewed` transition recorded
+  `independent_review_clean` moves to `approved` and hands to landing,
+  anything else stops and names the findings as the reason.)
+- **Found:** 2026-09-25, the finish attempt for PRD-103 after FAM-BUG-102:
+  `configuration failed: checkpoint phase reviewed cannot start review`,
+  within a second of submission.
+- **Detail:** the resume path only knew how to start a review from
+  `implemented`, `implemented_pending_review` or `blocked`. Drive approves
+  a clean review and lands inside one process, so a checkpoint parked at
+  `reviewed` had never existed until a run died between that transition and
+  its next write. Every clean review that dies late would have been stuck
+  behind this.
+- **Expected fix:** as landed, proven by the PRD-103 finish.
+
 ### FAM-BUG-102 — A clean review was thrown away by "database is locked" on the history write
 
 - **Status:** Open. Mitigated 2026-09-25 by raising `busy_timeout` from 5 s

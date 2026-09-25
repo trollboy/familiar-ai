@@ -1141,6 +1141,42 @@ pub fn resume_implemented_checkpoint(
                 .unwrap_or_else(|| "invalid checkpoint".into()),
         ));
     }
+    // FAM-BUG-103: a checkpoint already `reviewed` or `approved` has paid for
+    // its review. Drive approves a clean review and lands in one process, so
+    // nothing ever resumed from here until a run died between the `reviewed`
+    // transition and its next write. Reuse the recorded review: clean means
+    // approve and hand to landing; anything else is a real stop, named.
+    if matches!(checkpoint.phase.as_str(), "reviewed" | "approved") {
+        let checkpoints = familiar_ai_storage::CheckpointRepository::new(db.conn());
+        let events = checkpoints
+            .events(&checkpoint.checkpoint_id)
+            .map_err(|e| RunError::Storage(e.to_string()))?;
+        let recorded_clean = checkpoint.phase == "approved"
+            || events
+                .iter()
+                .rev()
+                .find(|(phase, _)| phase == "reviewed")
+                .is_some_and(|(_, detail)| detail == "independent_review_clean");
+        if !recorded_clean {
+            return Err(RunError::Config(format!(
+                "checkpoint for {prd_id} is reviewed but its recorded review was not clean; \
+                 decide its findings (familiar-ai scope-decisions / waive) before landing"
+            )));
+        }
+        if checkpoint.phase == "reviewed" {
+            checkpoints
+                .transition(
+                    &checkpoint.checkpoint_id,
+                    "approved",
+                    "review_disposition_ready",
+                )
+                .map_err(|e| RunError::Storage(e.to_string()))?;
+        }
+        eprintln!("resume: {prd_id} review already recorded clean; approved, handing to landing");
+        return Ok(RunWorkflowResult {
+            implementation: Default::default(),
+        });
+    }
     if !matches!(
         checkpoint.phase.as_str(),
         "implemented" | "implemented_pending_review" | "blocked"
