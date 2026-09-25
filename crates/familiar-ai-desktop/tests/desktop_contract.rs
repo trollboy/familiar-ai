@@ -144,3 +144,12 @@ fn repository_discovery_retries_after_daemon_startup_races() {
         "s.state==='connected'){if(!state.repositoriesLoaded){await repositories();await render()"
     ));
 }
+
+#[test]
+fn daemon_loss_has_distinct_disconnected_and_reconnecting_states() {
+    let javascript = include_str!("../ui/app.js");
+    let css = include_str!("../ui/styles.css");
+    assert!(javascript.contains("connected('reconnecting','Reconnecting…')"));
+    assert!(javascript.contains("connected('disconnected',String(e))"));
+    assert!(css.contains("#connection[data-state=reconnecting]"));
+}

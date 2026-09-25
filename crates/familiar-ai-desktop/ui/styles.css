@@ -9,3 +9,4 @@
 .with-browse{display:flex;gap:.4rem;align-items:center}
 .with-browse input{flex:1;min-width:0}
 .browse-dir{white-space:nowrap}
+#connection[data-state=reconnecting]::before{content:'↻ ';color:var(--warn)}

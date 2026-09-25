@@ -192,7 +192,10 @@ appears with no entry, or with a status a reader cannot classify.
 
 ### FAM-BUG-077 — The Tauri desktop core-dumps under its systemd unit on this Linux host
 
-- **Status:** Open — mitigated 2026-09-22 with a drop-in; the unit or the application should carry the fix.
+- **Status:** Fixed 2026-09-25 — generated graphical systemd units set
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`; daemon units deliberately do not. The
+  renderer fallback and its lifecycle-domain boundary are pinned by the
+  supervisor regression.
 - **Found:** 2026-09-22, relaunching after a fresh build with
   `familiar-ai ops desktop install`.
 - **Detail:** `familiar-ai-desktop.service` started, WebKitGTK printed

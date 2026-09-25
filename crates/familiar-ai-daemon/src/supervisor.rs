@@ -307,8 +307,19 @@ fn desktop_systemd(description: &str, executable: &Path, path: &str, graphical: 
     } else {
         "default.target"
     };
+    let graphical_environment = if graphical {
+        // WebKitGTK's DMA-BUF renderer aborts before Tauri can recover on
+        // supported X11/NVIDIA combinations where EGL cannot create a GBM
+        // display. The user service has no opportunity to retry with the
+        // fallback after that SIGABRT, so make the portable renderer the
+        // audited desktop-service default. This does not affect the headless
+        // daemon definition.
+        "Environment=\"WEBKIT_DISABLE_DMABUF_RENDERER=1\"\n"
+    } else {
+        ""
+    };
     format!(
-        "[Unit]\nDescription={description}\nStartLimitIntervalSec=300\nStartLimitBurst=5\n\n[Service]\nType=simple\nExecStart={}\nEnvironment=\"PATH={}\"\nRestart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy={target}\n",
+        "[Unit]\nDescription={description}\nStartLimitIntervalSec=300\nStartLimitBurst=5\n\n[Service]\nType=simple\nExecStart={}\nEnvironment=\"PATH={}\"\n{graphical_environment}Restart=on-failure\nRestartSec=10\n\n[Install]\nWantedBy={target}\n",
         executable.display().to_string().replace(' ', "\\x20").replace('%', "%%"),
         path.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"),
     )
@@ -777,5 +788,7 @@ mod tests {
         assert!(linux_daemon.contains("WantedBy=default.target"));
         assert!(linux_desktop.contains("WantedBy=graphical-session.target"));
         assert!(linux_desktop.contains("Restart=on-failure"));
+        assert!(linux_desktop.contains("Environment=\"WEBKIT_DISABLE_DMABUF_RENDERER=1\""));
+        assert!(!linux_daemon.contains("WEBKIT_DISABLE_DMABUF_RENDERER"));
     }
 }
