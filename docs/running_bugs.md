@@ -2968,7 +2968,7 @@ reinstall the binary, then rerun the 076 drive.
 
 ### FAM-BUG-068 — Desktop installation can leave two tray owners active
 
-- **Status:** Open — mitigated 2026-09-22; durable installer guard still required.
+- **Status:** Fixed 2026-09-25.
 - **Found:** 2026-09-22, when `Open Dashboard` opened the legacy loopback web
   page after the Tauri desktop had been installed.
 - **Detail:** The independently supervised Tauri desktop owned its tray as
@@ -2979,6 +2979,11 @@ reinstall the binary, then rerun the 076 drive.
   `--no-default-features`, leaving the Tauri process as the sole tray owner.
   The desktop migration installer must make this invariant explicit so a later
   default-feature daemon replacement cannot recreate the duplicate menu.
+- **Fix:** `scripts/reinstall.sh` now builds the supervised daemon headless and
+  installs the Tauri desktop as the sole tray owner. `scripts/gate.sh` still
+  compiles the default-feature daemon/tray surface and additionally compiles
+  the production headless daemon. Contract tests pin both halves so neither
+  default-feature coverage nor the installed topology can silently regress.
 
 ### FAM-BUG-069 — Status pills inherit unreadable dark-mode foregrounds
 

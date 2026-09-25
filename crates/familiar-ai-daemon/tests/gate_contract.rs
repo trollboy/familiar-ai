@@ -231,7 +231,11 @@ fn documented_commands_do_not_hide_the_default_feature_set() {
             let body = fs::read_to_string(&path).unwrap_or_default();
             cargo_command_lines(&body)
                 .into_iter()
-                .filter(|line| line.contains("--no-default-features"))
+                .filter(|line| {
+                    line.contains("--no-default-features")
+                        && !(line.contains("-p familiar-ai-daemon")
+                            && line.contains("--bin familiar-ai-daemon"))
+                })
                 .map(|line| format!("{}: {line}", path.display()))
                 .collect::<Vec<_>>()
         })
@@ -239,20 +243,16 @@ fn documented_commands_do_not_hide_the_default_feature_set() {
 
     assert!(
         offenders.is_empty(),
-        "documented cargo commands must build the default feature set:\n{}",
+        "only the explicitly headless supervised daemon may disable default features:\n{}",
         offenders.join("\n")
     );
 }
 
 #[test]
-fn gate_container_and_host_install_resolve_the_same_default_features() {
-    let sources = [
-        ("gate", read("scripts/gate.sh")),
-        ("container", read("Dockerfile")),
-        ("host install", read("scripts/reinstall.sh")),
-    ];
+fn gate_and_container_verify_default_features_while_host_daemon_is_headless() {
+    let default_feature_sources = [("container", read("Dockerfile"))];
 
-    for (name, body) in sources {
+    for (name, body) in default_feature_sources {
         let builds_daemon = cargo_command_lines(&body)
             .into_iter()
             .any(|line| line.contains("cargo build") && line.contains("familiar-ai-daemon"));
@@ -262,6 +262,30 @@ fn gate_container_and_host_install_resolve_the_same_default_features() {
             "{name} must use Cargo's default feature set"
         );
     }
+
+    let gate = read("scripts/gate.sh");
+    assert!(
+        gate.contains("cargo build -p familiar-ai-daemon --bins"),
+        "the gate must build the daemon's default feature set"
+    );
+    assert!(
+        gate.contains(
+            "cargo build -p familiar-ai-daemon --no-default-features --bin familiar-ai-daemon"
+        ),
+        "the gate must also compile the installed headless topology"
+    );
+
+    let host_install = read("scripts/reinstall.sh");
+    assert!(
+        host_install.contains(
+            "cargo build --release -p familiar-ai-daemon --no-default-features --bin familiar-ai-daemon"
+        ),
+        "the supervised daemon must be headless because the desktop owns the tray"
+    );
+    assert!(
+        host_install.contains("cargo build --release -p familiar-ai-desktop"),
+        "the host installer must build the sole tray owner"
+    );
 }
 
 #[test]
@@ -277,7 +301,10 @@ fn verification_image_can_compile_every_default_workspace_member() {
     let gate = directives(&read("scripts/gate.sh"));
     assert!(
         gate.contains("cargo clippy --workspace --all-targets")
-            && gate.contains("cargo test --workspace"),
+            && gate.contains("cargo test --workspace")
+            && gate.contains(
+                "cargo build -p familiar-ai-daemon --no-default-features --bin familiar-ai-daemon"
+            ),
         "the gate must compile and test the whole default-feature workspace"
     );
     assert!(

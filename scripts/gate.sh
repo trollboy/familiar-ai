@@ -96,6 +96,9 @@ step() {
 
 step fmt    cargo fmt --all -- --check
 step build  cargo build -p familiar-ai-daemon --bins
+# Prove the production topology too: the supervised daemon is headless and
+# the Tauri desktop is the sole tray owner (FAM-BUG-068).
+step headless-daemon cargo build -p familiar-ai-daemon --no-default-features --bin familiar-ai-daemon
 step clippy cargo clippy --workspace --all-targets -- -D warnings
 step test   cargo test --workspace
 

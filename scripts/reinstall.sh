@@ -17,8 +17,14 @@ RESTART=1
 
 step() { printf '\n==> %s\n' "$*"; }
 
-step "building CLI and daemon"
-cargo build --release -p familiar-ai-daemon --bin familiar-ai --bin familiar-ai-daemon
+step "building CLI"
+cargo build --release -p familiar-ai-daemon --bin familiar-ai
+
+# The Tauri desktop is the sole tray owner.  Building the supervised daemon
+# headless is an intentional deployment topology, not a way to evade the
+# default-feature verification performed by scripts/gate.sh.
+step "building headless daemon (desktop owns the tray)"
+cargo build --release -p familiar-ai-daemon --no-default-features --bin familiar-ai-daemon
 
 step "building desktop"
 cargo build --release -p familiar-ai-desktop
