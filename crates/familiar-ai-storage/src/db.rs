@@ -31,7 +31,7 @@ impl Database {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
+             PRAGMA busy_timeout = 30000;",
         )
         .map_err(|e| FamiliarError::Database(e.to_string()))?;
         Ok(())

@@ -448,6 +448,26 @@ appears with no entry, or with a status a reader cannot classify.
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
 
+### FAM-BUG-102 — A clean review was thrown away by "database is locked" on the history write
+
+- **Status:** Open. Mitigated 2026-09-25 by raising `busy_timeout` from 5 s
+  to 30 s on every connection; stays open until the writer that held the
+  lock past five seconds is named. The daemon's reconcile-on-read scan over
+  a large ledger is the suspect, and it shares the file with every worker.
+- **Found:** 2026-09-25, PRD-103's re-drive through the daemon. Verification
+  passed, the independent reviewer ran under the fixed sandbox and returned
+  a clean disposition with three non-blocking findings, the checkpoint
+  reached `reviewed`, and the process then exited with `execution history
+  failed: database error: database is locked`. No integration happened; the
+  execution recorded `failed`.
+- **Detail:** WAL mode allows one writer at a time; a second writer waits
+  `busy_timeout` and then fails. Five seconds is shorter than a reconcile
+  over a hundred-PRD backlog on a busy disk. The failure landed on the last
+  write of a fifteen-minute review and discarded nothing durable, but it
+  turned a success into a red card and a manual re-drive.
+- **Expected fix:** name the long writer and bound its transaction; keep the
+  history write retrying past a transient lock rather than failing the run.
+
 ### FAM-BUG-101 — Under the control worker's sandbox the reviewer cannot build its own, so every daemon-launched review fails to launch
 
 - **Status:** Fixed (2026-09-25: the sandbox API carries a `DenialScope`;
