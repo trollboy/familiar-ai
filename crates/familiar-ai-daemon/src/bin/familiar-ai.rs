@@ -685,19 +685,46 @@ fn front_door_report() -> Result<String, String> {
     let discovered = FilesystemBacklogDiscovery
         .discover_with_layout(&repository, &layout)
         .map_err(|e| e.to_string())?;
-    let eligible_work_command = if discovered.is_empty() || validate_graph(&discovered).is_err() {
-        None
+    // PRD-103 (f1-front-door-misreports-broken-backlog): a backlog whose
+    // graph does not validate, or whose selection fails for a reason other
+    // than "nothing is eligible", is not the same state as an empty or
+    // fully-scheduled backlog. Collapsing both into `None` told an operator
+    // "nothing to do" for a repository that in fact has PRDs it cannot
+    // schedule -- exactly the case where they most need to be told
+    // something is wrong, not reassured. `familiar_ai_core::BacklogError::
+    // NoEligiblePrd` is the one selection error that IS a legitimate "no
+    // work right now" outcome (every PRD is completed, blocked, or waiting
+    // on a dependency), so it alone still folds to `None`.
+    let eligible_work: Result<Option<String>, String> = if discovered.is_empty() {
+        Ok(None)
+    } else if let Err(error) = validate_graph(&discovered) {
+        Err(error.to_string())
     } else {
         SqliteBacklogRepository::new(db.conn_mut())
             .reconcile_and_snapshot(&repository, &discovered)
             .map_err(|e| e.to_string())?;
         let store = SqliteBacklogRepository::new(db.conn_mut());
         let mut manager = BacklogManager::new(ProfiledFilesystemBacklogDiscovery { layout }, store);
-        manager
-            .next(&cwd)
-            .ok()
-            .map(|selected| format!("familiar-ai run {}", selected.path))
+        match manager.next(&cwd) {
+            Ok(selected) => Ok(Some(format!("familiar-ai run {}", selected.path))),
+            Err(familiar_ai_core::BacklogError::NoEligiblePrd(_)) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
     };
+
+    // A pending decision or a stopped session is still the right thing to
+    // surface even when the backlog is also broken -- neither depends on
+    // the backlog validating. Only when neither is present does a broken
+    // backlog need to be reported in place of "nothing to do".
+    if pending_decision_command.is_none() && stopped_session_command.is_none() {
+        if let Err(error) = &eligible_work {
+            return Ok(format!(
+                "repository: {}\nstate: backlog unschedulable\nerror: {error}\nnext: familiar-ai next\n",
+                repository.key
+            ));
+        }
+    }
+    let eligible_work_command = eligible_work.unwrap_or(None);
 
     let state = familiar_ai_daemon::cli::shared::resolve_front_door_state(
         pending_decision_command,
