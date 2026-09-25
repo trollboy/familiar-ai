@@ -448,6 +448,22 @@ appears with no entry, or with a status a reader cannot classify.
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
 
+### FAM-BUG-105 — A half-landed PRD reads as terminal, so resume refuses to finish it
+
+- **Status:** Fixed (2026-09-25: `terminal_prds` excludes any PRD that still
+  has an `in_progress` row; a completed archived twin beside a live claim is
+  a landing whose ledger never finished, and resume may finish it.)
+- **Found:** 2026-09-25, PRD-103's third finish attempt: `already completed
+  and integrated; its preserved worktree is historical evidence`, while the
+  claimed row was `in_progress`, the attempt unintegrated and the checkpoint
+  `approved`. The daemon's reconcile had created the completed twin for the
+  archived file after FAM-BUG-104's failed completion.
+- **Detail:** terminal meant "any completed row for this number". Archive
+  on integration (FAM-BUG-080) made a completed twin appear the moment the
+  file moved, before the claimed row completes, so a landing that fails
+  between the two steps could never be resumed.
+- **Expected fix:** as landed, proven by PRD-103's ledger reading completed.
+
 ### FAM-BUG-104 — A landed candidate could not complete its ledger row: resume used the manual force-complete path
 
 - **Status:** Fixed (2026-09-25: resume's landing completes the row with

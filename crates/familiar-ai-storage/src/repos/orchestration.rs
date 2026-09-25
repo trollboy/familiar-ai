@@ -306,7 +306,12 @@ impl<'a> OrchestrationRepository<'a> {
         let mut backlog = self
             .conn
             .prepare(
-                "SELECT prd_path FROM backlog_prds WHERE repository_key=?1 AND status='completed'",
+                // FAM-BUG-105: a PRD whose archived twin reads completed but
+                // whose claimed row is still in_progress is half-landed, not
+                // terminal; resume must be allowed to finish it.
+                "SELECT b.prd_path FROM backlog_prds b WHERE b.repository_key=?1 AND b.status='completed' \
+                 AND NOT EXISTS (SELECT 1 FROM backlog_prds o WHERE o.repository_key=b.repository_key \
+                   AND o.prd_number=b.prd_number AND o.status='in_progress')",
             )
             .map_err(db)?;
         for path in backlog
@@ -359,6 +364,48 @@ fn db(e: rusqlite::Error) -> FamiliarError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FAM-BUG-105: an archived twin reading completed does not make a PRD
+    /// terminal while the row it was claimed under is still in_progress;
+    /// that is a landing that never finished its ledger, and resume must be
+    /// allowed to finish it. A completed row with no live claim is terminal.
+    #[test]
+    fn a_prd_with_a_live_claim_is_not_terminal_whatever_its_twin_says() {
+        let db = crate::Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let insert = |path: &str, number: i64, status: &str| {
+            db.conn()
+                .execute(
+                    "INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) \
+                     VALUES('repo',?1,?2,'h',?3,'t','t','t','t')",
+                    rusqlite::params![path, number, status],
+                )
+                .unwrap();
+        };
+        insert("docs/prds/PRD-103.md", 103, "in_progress");
+        insert("docs/prds/done/PRD-103.md", 103, "completed");
+        insert("docs/prds/done/PRD-005.md", 5, "completed");
+        let terminal = OrchestrationRepository::new(db.conn())
+            .terminal_prds("repo")
+            .unwrap();
+        assert!(terminal.contains("PRD-5"), "{terminal:?}");
+        assert!(terminal.contains("PRD-005"), "{terminal:?}");
+        assert!(!terminal.contains("PRD-103"), "{terminal:?}");
+        assert!(!terminal.contains("PRD-0103"), "{terminal:?}");
+
+        // Once the claim completes, the PRD is terminal.
+        db.conn()
+            .execute(
+                "UPDATE backlog_prds SET status='completed' WHERE prd_path='docs/prds/PRD-103.md'",
+                [],
+            )
+            .unwrap();
+        let terminal = OrchestrationRepository::new(db.conn())
+            .terminal_prds("repo")
+            .unwrap();
+        assert!(terminal.contains("PRD-103"), "{terminal:?}");
+    }
+
     #[test]
     fn reservations_are_distinct_persistent_and_resolve_once() {
         let db = crate::Database::open_in_memory().unwrap();
