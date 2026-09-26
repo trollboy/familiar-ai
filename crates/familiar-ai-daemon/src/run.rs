@@ -1220,6 +1220,33 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context_and_timeo
     route_context: Option<RouteContext>,
     implementation_timeout_ms: Option<u64>,
 ) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
+    execute_with_config_tracked_from_preflighted_with_route_context_timeout_and_evidence(
+        current,
+        prd_path,
+        agents,
+        config,
+        paths,
+        prerequisites_preflighted,
+        route_context,
+        implementation_timeout_ms,
+        None,
+    )
+}
+
+/// Driver escalation variant. Evidence is prompt-only, never written into
+/// the candidate worktree, so scope and integration remain about the PRD.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_config_tracked_from_preflighted_with_route_context_timeout_and_evidence(
+    current: &Path,
+    prd_path: &Path,
+    agents: &AgentSet<'_>,
+    config: &Config,
+    paths: &AppPaths,
+    prerequisites_preflighted: bool,
+    route_context: Option<RouteContext>,
+    implementation_timeout_ms: Option<u64>,
+    escalation_evidence: Option<&str>,
+) -> (Result<RunWorkflowResult, RunError>, AttemptTrace) {
     let mut trace = AttemptTrace::default();
     let result = execute_tracked_inner(
         current,
@@ -1230,6 +1257,7 @@ pub fn execute_with_config_tracked_from_preflighted_with_route_context_and_timeo
         prerequisites_preflighted,
         route_context,
         implementation_timeout_ms,
+        escalation_evidence,
         false,
         None,
         None,
@@ -1262,6 +1290,7 @@ pub fn execute_reviewed_candidate(
         true,
         route_context,
         implementation_timeout_ms,
+        None,
         true,
         migration_version,
         Some(codex_session),
@@ -1606,6 +1635,7 @@ fn execute_tracked_inner(
     prerequisites_preflighted: bool,
     route_context: Option<RouteContext>,
     implementation_timeout_ms: Option<u64>,
+    escalation_evidence: Option<&str>,
     defer_completion: bool,
     migration_version: Option<u64>,
     codex_session: Option<&familiar_ai_agent::CodexExecutionSession>,
@@ -1729,6 +1759,11 @@ fn execute_tracked_inner(
     );
     let prompt_cache_key = familiar_ai_review::content_hash(stable_prefix.as_bytes());
     let mut prompt = render_prompt_with_prefix(&context, &stable_prefix);
+    if let Some(evidence) = escalation_evidence {
+        prompt.push_str("\n\n## Evidence from the failed cheaper rung\n\n");
+        prompt.push_str(evidence);
+        prompt.push('\n');
+    }
     if let Some(version) = migration_version {
         prompt.push_str(&format!(
             "\n## Reserved migration version\n\nThis attempt exclusively owns migration version {version:03}. Any authored storage migration MUST use that exact numeric filename prefix; do not choose or renumber a migration independently.\n"
@@ -2391,7 +2426,13 @@ fn finish_implementation(
     if !clean {
         let reason = review_retained_reason(&cycle);
         trace.retained_reason = Some(reason);
-        trace.retained_detail = cycle.stop_detail.clone();
+        trace.retained_detail = cycle.stop_detail.clone().or_else(|| {
+            serde_json::to_string(&serde_json::json!({
+                "findings": cycle.review_result.as_ref().map(|result| &result.findings),
+                "stop_reasons": cycle.stop_reasons,
+            }))
+            .ok()
+        });
         if let Some(checkpoint) = familiar_ai_storage::CheckpointRepository::new(db.conn())
             .get(&repository.key, &target.id.to_string())
             .map_err(|e| RunError::Storage(e.to_string()))?

@@ -560,10 +560,7 @@ impl Drop for ProgressGuard {
     }
 }
 
-use crate::run::{
-    execute_with_config_tracked_from_preflighted_with_route_context_and_timeout,
-    next_implementation_worker, resolved_worker_plan, AgentSet, RouteContext,
-};
+use crate::run::{next_implementation_worker, resolved_worker_plan, AgentSet, RouteContext};
 use familiar_ai_agent::WorkerStage;
 
 /// Why a driver session stopped. Closed set; persisted verbatim.
@@ -2493,7 +2490,9 @@ pub fn drive(
                         batch_stop = Some(DriveTermination::StorageFailure);
                         continue;
                     }
-                    if retained_reason == Some("verification_failed") {
+                    if let Some((escalation_reason_code, escalation_evidence)) =
+                        ladder_escalation_payload(retained_reason, retained_detail.as_deref())
+                    {
                         if let Some((stronger_id, stronger_entry)) = escalation_worker {
                             let estimated_cost = config
                                 .worker_registry
@@ -2546,7 +2545,7 @@ pub fn drive(
                                                 Some(&escalation_root.to_string_lossy()),
                                                 Some(escalation_tree.branch()),
                                                 Some(sequence),
-                                                Some("required_verification_failed"),
+                                                Some(escalation_reason_code),
                                             );
                                         match escalation_sequence {
                                             Ok(escalation_sequence) => {
@@ -2571,7 +2570,7 @@ pub fn drive(
                                                         as u64,
                                                 );
                                                 let (escalated, escalation_trace) =
-                                                execute_with_config_tracked_from_preflighted_with_route_context_and_timeout(
+                                                crate::run::execute_with_config_tracked_from_preflighted_with_route_context_timeout_and_evidence(
                                                     &escalation_root,
                                                     &escalation_root.join(target.path.as_str()),
                                                     agents,
@@ -2580,6 +2579,7 @@ pub fn drive(
                                                     true,
                                                     Some(route_context.clone()),
                                                     escalation_timeout_ms,
+                                                    Some(&escalation_evidence),
                                                 );
                                                 let escalation_duration = escalation_timer
                                                     .elapsed()
@@ -2786,9 +2786,7 @@ pub fn drive(
                                                 } else if escalated.is_ok() {
                                                     Some("integration_failed")
                                                 } else {
-                                                    escalation_trace
-                                                        .retained_reason
-                                                        .or(Some("unclassified_result"))
+                                                    Some("human_decision_required_after_ladder_exhausted")
                                                 };
                                                 let diagnostic = DriverRepository::new(db.conn())
                                                     .record_attempt_diagnostics(
@@ -3073,6 +3071,23 @@ fn component_warrant_requests(
         });
     }
     requests
+}
+
+fn ladder_escalation_payload(
+    retained_reason: Option<&str>,
+    retained_detail: Option<&str>,
+) -> Option<(&'static str, String)> {
+    let reason = retained_reason?;
+    let code = match reason {
+        "verification_failed" => "required_verification_failed",
+        "human_review_required" => "independent_review_blocked",
+        _ => return None,
+    };
+    let evidence = format!(
+        "escalated_from_reason={reason}\n{}",
+        retained_detail.unwrap_or("no additional durable detail was recorded")
+    );
+    Some((code, evidence))
 }
 
 fn escalation_admitted(
@@ -3407,6 +3422,116 @@ dddd\trefs/heads/main
             1,
             101
         ));
+    }
+
+    #[test]
+    fn ladder_escalates_once_with_evidence_spend_and_human_stop() {
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        let repository = DriverRepository::new(db.conn());
+        repository
+            .open_session("ladder", "/repo/.git", "{}")
+            .unwrap();
+        let cheap = repository
+            .record_attempt_started("ladder", "PRD-107", "docs/prds/PRD-107.md", None)
+            .unwrap();
+        repository
+            .record_attempt_finished_with_detail(
+                "ladder",
+                cheap,
+                "retained",
+                Some("verification_failed"),
+                Some("check=cargo-test exit=1 stderr=assertion failed"),
+                Some(40),
+                Some(10),
+            )
+            .unwrap();
+        let (reason, evidence) = ladder_escalation_payload(
+            Some("verification_failed"),
+            Some("check=cargo-test exit=1 stderr=assertion failed"),
+        )
+        .unwrap();
+        assert_eq!(reason, "required_verification_failed");
+        assert!(evidence.contains("cargo-test"));
+        let strong = repository
+            .record_escalated_attempt_started_with_sources(
+                "ladder",
+                "PRD-107",
+                "docs/prds/PRD-107.md",
+                None,
+                "global",
+                "global",
+                None,
+                None,
+                None,
+                Some(cheap),
+                Some(reason),
+            )
+            .unwrap();
+        repository
+            .record_attempt_finished_with_detail(
+                "ladder",
+                strong,
+                "retained",
+                Some("human_decision_required_after_ladder_exhausted"),
+                Some(&evidence),
+                Some(60),
+                Some(20),
+            )
+            .unwrap();
+
+        let attempts = repository.attempts("ladder").unwrap();
+        assert_eq!(
+            attempts.len(),
+            2,
+            "one cheap attempt plus exactly one escalation"
+        );
+        assert_eq!(attempts[1].escalated_from_sequence, Some(cheap));
+        assert_eq!(attempts[1].escalation_reason.as_deref(), Some(reason));
+        assert_eq!(
+            attempts
+                .iter()
+                .filter_map(|a| a.known_cost_microusd)
+                .sum::<u64>(),
+            100
+        );
+        let exact_warrant = DriveWarrant {
+            max_prds: 1,
+            max_cost_microusd: 100,
+            max_tokens: 30,
+            max_duration_ms: 0,
+            prd_allowlist: None,
+        };
+        assert!(escalation_admitted(&exact_warrant, 40, 10, 0, 60, 20, 0));
+        assert!(!escalation_admitted(
+            &DriveWarrant {
+                max_cost_microusd: 99,
+                ..exact_warrant
+            },
+            40,
+            10,
+            0,
+            60,
+            20,
+            0
+        ));
+        assert_eq!(
+            attempts[1].retained_reason.as_deref(),
+            Some("human_decision_required_after_ladder_exhausted")
+        );
+        assert!(attempts[1]
+            .retained_detail
+            .as_deref()
+            .unwrap()
+            .contains("assertion failed"));
+
+        let (review_reason, review_evidence) = ladder_escalation_payload(
+            Some("human_review_required"),
+            Some(r#"{"findings":[{"title":"unsafe"}]}"#),
+        )
+        .unwrap();
+        assert_eq!(review_reason, "independent_review_blocked");
+        assert!(review_evidence.contains("unsafe"));
     }
 
     #[test]
