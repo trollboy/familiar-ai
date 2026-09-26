@@ -34,6 +34,9 @@ pub use repos::delivery::{
     DeliveryAuthorityDecision, DeliveryDecisionRow, DeliveryEffect, DeliveryRepository,
     InternalEvidence,
 };
+pub use repos::delivery_ledger::{
+    DeliveryClaimFacts, DeliveryLedgerRepository, HostLedgerScope, LandingPath,
+};
 pub use repos::driver::{DriverAttempt, DriverRepository, DriverSession};
 pub use repos::execution_history::{
     ExecutionFinalization, ExecutionHistoryRepository, ExecutionRecord, ExecutionStart,

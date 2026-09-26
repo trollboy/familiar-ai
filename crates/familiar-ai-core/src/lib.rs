@@ -5,6 +5,7 @@ pub mod control_plane;
 pub mod error;
 pub mod git_env;
 pub mod lifecycle;
+pub mod metrics;
 pub mod models;
 pub mod onboarding;
 pub mod operator_ui;

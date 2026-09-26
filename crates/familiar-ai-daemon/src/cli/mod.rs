@@ -26,6 +26,7 @@ pub mod desktop;
 pub mod drive;
 pub mod gate;
 pub mod history;
+pub mod metrics;
 pub mod model_residency;
 pub mod next;
 pub mod onboard;

@@ -306,6 +306,23 @@ enum StewardshipNamespaceCommand {
         #[arg(long)]
         verbose: bool,
     },
+    /// Compute repository- and host-scoped delivery north-star metrics.
+    Metrics {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        repository_key: String,
+        #[arg(long)]
+        current_start: String,
+        #[arg(long)]
+        current_end: String,
+        #[arg(long)]
+        previous_start: String,
+        #[arg(long)]
+        previous_end: String,
+        #[arg(long = "required-host")]
+        required_hosts: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -887,6 +904,25 @@ fn dispatch(command: Command) -> ExitCode {
                 StewardshipNamespaceCommand::History { limit, verbose } => {
                     familiar_ai_daemon::cli::history::history(limit, verbose)
                 }
+                StewardshipNamespaceCommand::Metrics {
+                    host,
+                    repository_key,
+                    current_start,
+                    current_end,
+                    previous_start,
+                    previous_end,
+                    required_hosts,
+                } => familiar_ai_daemon::cli::metrics::command(
+                    familiar_ai_daemon::cli::metrics::MetricsRequest {
+                        host,
+                        repository_key,
+                        current_start,
+                        current_end,
+                        previous_start,
+                        previous_end,
+                        required_hosts,
+                    },
+                ),
             };
             match result {
                 Ok(()) => ExitCode::SUCCESS,

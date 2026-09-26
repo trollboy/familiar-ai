@@ -8,6 +8,7 @@ pub mod config_decision;
 pub mod control_plane;
 pub mod decision;
 pub mod delivery;
+pub mod delivery_ledger;
 pub mod driver;
 pub mod execution_history;
 pub mod file_summary;
