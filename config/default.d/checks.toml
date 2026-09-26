@@ -1,0 +1,17 @@
+# Define verification checks once, then reference them by name from an
+# `assignments.verification` list.
+# [checks.fmt]
+# argv = ["cargo", "fmt", "--all", "--", "--check"]
+# working_directory = "."
+# timeout_ms = 120000
+# required = true
+# path_prefixes = []
+# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }
+
+# [checks.tests]
+# argv = ["cargo", "test", "--workspace"]
+# working_directory = "."
+# timeout_ms = 600000
+# required = true
+# path_prefixes = []
+# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }

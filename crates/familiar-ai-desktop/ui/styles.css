@@ -9,4 +9,5 @@
 .with-browse{display:flex;gap:.4rem;align-items:center}
 .with-browse input{flex:1;min-width:0}
 .browse-dir{white-space:nowrap}
+.verification-editor>div{display:grid;gap:.4rem}.verification-order{width:100%;min-height:4.5rem;padding:.35rem;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:inherit}.verification-controls{display:flex;flex-wrap:wrap;gap:.35rem}.verification-picker{flex:1;min-width:10rem}
 #connection[data-state=reconnecting]::before{content:'↻ ';color:var(--warn)}

@@ -49,14 +49,9 @@ migration = "human_review"
 configuration = "human_review"
 test = "allow_when_expected"
 generated_artifact = "human_review"
-# [[review.verification]]
-# check_id = "tests"
-# argv = ["cargo", "test"]
-# working_directory = "."
-# timeout_ms = 300000
-# required = true
-# path_prefixes = ["crates/"]
-# environment = { PATH = "/usr/local/bin:/usr/bin:/bin" }
+# Legacy `[[review.verification]]` arrays remain accepted and are rewritten on
+# load. New check definitions live in checks.toml; their ordered assignment
+# lives in assignments.toml.
 # [review.implementation_agent]
 # adapter_id = "codex-cli"
 # agent_id = "implementation"

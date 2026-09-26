@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{DeliveryConfig, ExecutionContextConfig, ReviewConfig};
+use super::{
+    AssignmentsConfig, CheckOverrideConfig, DeliveryConfig, ExecutionContextConfig, ReviewConfig,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +39,10 @@ pub struct RepositoryConfig {
     /// from familiar.toml.
     #[serde(default)]
     pub bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignments: Option<AssignmentsConfig>,
+    #[serde(default)]
+    pub checks: BTreeMap<String, CheckOverrideConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +90,8 @@ impl Default for RepositoryConfig {
             execution_context: None,
             delivery: None,
             bindings: BTreeMap::new(),
+            assignments: None,
+            checks: BTreeMap::new(),
         }
     }
 }

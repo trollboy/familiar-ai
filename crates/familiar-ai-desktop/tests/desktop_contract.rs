@@ -153,3 +153,19 @@ fn daemon_loss_has_distinct_disconnected_and_reconnecting_states() {
     assert!(javascript.contains("connected('disconnected',String(e))"));
     assert!(css.contains("#connection[data-state=reconnecting]"));
 }
+
+#[test]
+fn named_verification_checks_have_ordered_picker_controls() {
+    let javascript = include_str!("../ui/app.js");
+    let css = include_str!("../ui/styles.css");
+    for control in [">Add<", ">Remove<", ">Move up<", ">Move down<"] {
+        assert!(javascript.contains(control), "missing {control}");
+    }
+    assert!(javascript.contains("verification_checks"));
+    assert!(javascript.contains("Effective ordered verification checks"));
+    assert!(javascript.contains("<em>${esc(f.origin)}</em>"));
+    assert!(javascript.contains("wireVerificationLists"));
+    assert!(!javascript.contains("review.verification.N"));
+    assert!(css.contains(".verification-controls"));
+    assert!(css.contains(".verification-order"));
+}

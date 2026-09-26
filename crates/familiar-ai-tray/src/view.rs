@@ -1580,6 +1580,20 @@ fn apply_adapter_rules(sections: &mut Vec<ConfigSection>) {
     sections.retain(|s| !s.fields.is_empty());
 }
 
+fn is_legacy_verification_path(path: &[String]) -> bool {
+    matches!(path, [review, verification, _, ..] if review == "review" && verification == "verification")
+}
+
+fn label_named_check_sections(sections: &mut [ConfigSection]) {
+    for section in sections {
+        if let Some(name) = section.title.strip_prefix("checks.") {
+            section.title = format!("Checks · {name}");
+        } else if section.title == "assignments" {
+            section.title = "Verification".into();
+        }
+    }
+}
+
 /// The global settings form: everything except the per-repository tables.
 ///
 /// `repositories` is excluded deliberately. Those values belong to one project
@@ -1589,10 +1603,14 @@ fn apply_adapter_rules(sections: &mut Vec<ConfigSection>) {
 pub fn build_config_form(document: &Value) -> Vec<ConfigSection> {
     let fields = flatten_fields(document, &[])
         .into_iter()
-        .filter(|f| f.path.first().map(String::as_str) != Some("repositories"))
+        .filter(|f| {
+            f.path.first().map(String::as_str) != Some("repositories")
+                && !is_legacy_verification_path(&f.path)
+        })
         .collect();
     let mut sections = into_sections(fields, 0);
     apply_adapter_rules(&mut sections);
+    label_named_check_sections(&mut sections);
     sections
 }
 
@@ -1614,9 +1632,11 @@ pub fn build_project_config_form(
     let global: Vec<ConfigField> = flatten_fields(document, &[])
         .into_iter()
         .filter(|f| {
-            f.path
-                .first()
-                .is_some_and(|table| PROJECT_OVERRIDABLE_TABLES.contains(&table.as_str()))
+            !is_legacy_verification_path(&f.path)
+                && f.path.first().is_some_and(|table| {
+                    PROJECT_OVERRIDABLE_TABLES.contains(&table.as_str())
+                        || matches!(table.as_str(), "assignments" | "checks")
+                })
         })
         .collect();
     let overrides = document
@@ -1624,7 +1644,10 @@ pub fn build_project_config_form(
         .and_then(|r| r.get(repo))
         .cloned()
         .unwrap_or(Value::Null);
-    let overridden = flatten_fields(&overrides, &[]);
+    let overridden: Vec<ConfigField> = flatten_fields(&overrides, &[])
+        .into_iter()
+        .filter(|field| !is_legacy_verification_path(&field.path))
+        .collect();
 
     let prefix = vec!["repositories".to_string(), repo.to_string()];
     let mut fields: Vec<ConfigField> = Vec::new();
@@ -1672,6 +1695,7 @@ pub fn build_project_config_form(
     }
     let mut sections = into_sections(fields, prefix.len());
     apply_adapter_rules(&mut sections);
+    label_named_check_sections(&mut sections);
     sections
 }
 
@@ -2789,6 +2813,101 @@ mod tests {
             .iter()
             .flat_map(|s| &s.fields)
             .all(|f| f.origin == FieldOrigin::Global));
+    }
+
+    #[test]
+    fn named_checks_replace_anonymous_legacy_sections_on_global_form() {
+        let document = json!({
+            "checks": {"fmt": {"argv": ["cargo", "fmt"], "required": true}},
+            "assignments": {"verification": ["fmt"]},
+            "review": {"verification": [{"check_id": "legacy", "argv": ["false"]}]},
+        });
+        let sections = build_config_form(&document);
+        let titles: Vec<_> = sections
+            .iter()
+            .map(|section| section.title.as_str())
+            .collect();
+        assert!(titles.contains(&"Checks · fmt"), "{titles:?}");
+        assert!(titles.contains(&"Verification"), "{titles:?}");
+        assert!(!titles
+            .iter()
+            .any(|title| title.starts_with("review.verification")));
+    }
+
+    #[test]
+    fn named_checks_project_assignment_is_inherited_with_an_effective_path() {
+        let document = json!({
+            "checks": {"fmt": {"argv": ["cargo", "fmt"], "required": true}},
+            "assignments": {"verification": ["fmt"]},
+            "repositories": {"/p/one": {}},
+        });
+        let sections = build_project_config_form(&document, "/p/one", None);
+        let field = sections
+            .iter()
+            .find(|section| section.title == "Verification")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|field| field.name == "verification")
+            .unwrap();
+        assert_eq!(field.origin, FieldOrigin::Inherited);
+        assert_eq!(field.value, "fmt");
+        assert_eq!(
+            field.path,
+            ["repositories", "/p/one", "assignments", "verification"]
+        );
+    }
+
+    #[test]
+    fn named_checks_project_assignment_preserves_override_order() {
+        let document = json!({
+            "checks": {
+                "fmt": {"argv": ["cargo", "fmt"]},
+                "test": {"argv": ["cargo", "test"]},
+            },
+            "assignments": {"verification": ["fmt", "test"]},
+            "repositories": {"/p/one": {"assignments": {"verification": ["test", "fmt"]}}},
+        });
+        let sections = build_project_config_form(&document, "/p/one", None);
+        let field = sections
+            .iter()
+            .find(|section| section.title == "Verification")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|field| field.name == "verification")
+            .unwrap();
+        assert_eq!(field.origin, FieldOrigin::Overridden);
+        assert_eq!(field.value, "test, fmt");
+    }
+
+    #[test]
+    fn named_checks_project_fields_show_mixed_origins_without_legacy_sections() {
+        let document = json!({
+            "checks": {"fmt": {"argv": ["cargo", "fmt"], "required": true, "timeout_ms": 10}},
+            "assignments": {"verification": ["fmt"]},
+            "review": {"verification": [{"check_id": "legacy", "argv": ["false"]}]},
+            "repositories": {"/p/one": {"checks": {"fmt": {"required": false}}}},
+        });
+        let sections = build_project_config_form(&document, "/p/one", None);
+        let check = sections
+            .iter()
+            .find(|section| section.title == "Checks · fmt")
+            .unwrap();
+        let origin = |name: &str| {
+            check
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap()
+                .origin
+        };
+        assert_eq!(origin("required"), FieldOrigin::Overridden);
+        assert_eq!(origin("argv"), FieldOrigin::Inherited);
+        assert_eq!(origin("timeout_ms"), FieldOrigin::Inherited);
+        assert!(!sections
+            .iter()
+            .any(|section| section.title.starts_with("review.verification")));
     }
 
     #[test]

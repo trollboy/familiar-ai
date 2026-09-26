@@ -11,6 +11,7 @@ use crate::FamiliarError;
 mod accounting;
 mod agent_runtime;
 mod artifacts;
+mod checks;
 mod compression;
 mod context_service;
 mod daemon;
@@ -35,6 +36,7 @@ mod watcher;
 pub use accounting::*;
 pub use agent_runtime::*;
 pub use artifacts::*;
+pub use checks::*;
 pub use compression::*;
 pub use context_service::*;
 pub use daemon::*;
@@ -76,6 +78,11 @@ pub struct Config {
     /// diagnostic descriptors only; credential bytes never enter config.
     #[serde(default)]
     pub auth_profiles: BTreeMap<String, AuthDescriptor>,
+    /// Named verification definitions and their global ordered assignment.
+    #[serde(default)]
+    pub checks: BTreeMap<String, CheckConfig>,
+    #[serde(default)]
+    pub assignments: AssignmentsConfig,
     #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
@@ -194,7 +201,112 @@ fn reject_stale_env() -> crate::Result<()> {
     }
 }
 
+fn resolve_checks(
+    definitions: &BTreeMap<String, CheckConfig>,
+    names: &[String],
+    overrides: &BTreeMap<String, CheckOverrideConfig>,
+) -> crate::Result<Vec<ReviewVerificationConfig>> {
+    for name in overrides.keys() {
+        if !definitions.contains_key(name) {
+            return Err(FamiliarError::Config(format!(
+                "repository check override names unknown check '{name}'"
+            )));
+        }
+    }
+    names
+        .iter()
+        .map(|name| {
+            let definition = definitions.get(name).ok_or_else(|| {
+                FamiliarError::Config(format!(
+                    "verification assignment names unknown check '{name}'"
+                ))
+            })?;
+            if definition.argv.is_empty() {
+                return Err(FamiliarError::Config(format!(
+                    "verification check '{name}' requires a non-empty argv"
+                )));
+            }
+            if definition.timeout_ms == 0 {
+                return Err(FamiliarError::Config(format!(
+                    "verification check '{name}' requires a positive timeout_ms"
+                )));
+            }
+            Ok(definition.resolve(name, overrides.get(name)))
+        })
+        .collect()
+}
+
 impl Config {
+    fn normalize_verification_checks(&mut self) -> crate::Result<()> {
+        fn register(
+            checks: &mut BTreeMap<String, CheckConfig>,
+            legacy: &[ReviewVerificationConfig],
+        ) -> crate::Result<Vec<String>> {
+            let mut names = Vec::with_capacity(legacy.len());
+            for value in legacy {
+                let name = value.check_id.trim();
+                if name.is_empty() {
+                    return Err(FamiliarError::Config(
+                        "legacy review.verification check_id must be non-empty".into(),
+                    ));
+                }
+                let definition = CheckConfig::from_legacy(value);
+                if let Some(existing) = checks.get(name) {
+                    if existing != &definition {
+                        return Err(FamiliarError::Config(format!(
+                            "verification check '{name}' has conflicting legacy definitions"
+                        )));
+                    }
+                } else {
+                    tracing::info!(check = name, "rewrote legacy review.verification entry");
+                    checks.insert(name.to_owned(), definition);
+                }
+                names.push(name.to_owned());
+            }
+            Ok(names)
+        }
+
+        let legacy_global = register(&mut self.checks, &self.review.verification)?;
+        if self.assignments.verification.is_empty() && !legacy_global.is_empty() {
+            self.assignments.verification = legacy_global;
+        }
+        for entry in self.repositories.values_mut() {
+            if let Some(review) = &entry.review {
+                let names = register(&mut self.checks, &review.verification)?;
+                if entry.assignments.is_none() && !names.is_empty() {
+                    entry.assignments = Some(AssignmentsConfig {
+                        verification: names,
+                    });
+                }
+            }
+        }
+        for (name, definition) in &self.checks {
+            if name.trim().is_empty() || definition.argv.is_empty() || definition.timeout_ms == 0 {
+                return Err(FamiliarError::Config(format!(
+                    "verification check '{name}' requires a non-empty name and argv and a positive timeout_ms"
+                )));
+            }
+        }
+        self.review.verification = resolve_checks(
+            &self.checks,
+            &self.assignments.verification,
+            &BTreeMap::new(),
+        )?;
+        for entry in self.repositories.values_mut() {
+            let names = entry
+                .assignments
+                .as_ref()
+                .map(|value| value.verification.as_slice())
+                .unwrap_or(&self.assignments.verification);
+            let resolved = resolve_checks(&self.checks, names, &entry.checks)?;
+            if entry.review.is_some() || entry.assignments.is_some() || !entry.checks.is_empty() {
+                let review = entry.review.get_or_insert_with(|| self.review.clone());
+                review.verification = resolved;
+            }
+        }
+        Ok(())
+    }
+
     /// Load the repository's machine-default fragments in lexical order.
     ///
     /// `config/default.d` is the authoring surface: features own one file and
@@ -658,9 +770,10 @@ impl Config {
 
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
 
-        let config: Self = figment
+        let mut config: Self = figment
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
+        config.normalize_verification_checks()?;
         config.validate()?;
         Ok(config)
     }
@@ -681,9 +794,10 @@ impl Config {
         figment = figment.merge(Env::prefixed(ENV_PREFIX).split("__"));
         figment = figment.merge(overrides);
 
-        let config: Self = figment
+        let mut config: Self = figment
             .extract()
             .map_err(|e| FamiliarError::Config(e.to_string()))?;
+        config.normalize_verification_checks()?;
         config.validate_repositories()?;
         config.validate_providers()?;
         config.validate_execution()?;

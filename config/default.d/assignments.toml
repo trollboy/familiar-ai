@@ -1,0 +1,4 @@
+# Checks execute in this global order. A repository-level
+# `assignments.verification` list replaces this list wholesale.
+# [assignments]
+# verification = ["fmt", "clippy", "tests"]
