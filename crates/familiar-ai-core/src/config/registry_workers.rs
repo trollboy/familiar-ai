@@ -747,7 +747,7 @@ impl RegistryWorkerConfig {
             // both the runtime and the registered set.
             _ => AgentAdapterKind::RawAgentLoop,
         });
-        let model = if self.model == "__legacy_cli_default__" {
+        let model = if self.model == LEGACY_CLI_DEFAULT_MODEL {
             None
         } else {
             match adapter {
@@ -1003,6 +1003,11 @@ impl Default for WorkerRegistryConfig {
 /// Facts observed by a composition root when no worker has been declared.
 /// Keeping selection pure prevents configuration defaults from silently
 /// depending on the test runner's PATH or credentials.
+/// The model label a legacy or host-default CLI worker carries when the
+/// operator named none: the registry needs a non-empty label, the CLI must
+/// receive no `--model` at all. Every reader compares against this constant.
+pub const LEGACY_CLI_DEFAULT_MODEL: &str = "__legacy_cli_default__";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostWorkerFacts {
     pub openai_api_key: bool,
@@ -1054,19 +1059,33 @@ impl HostWorkerFacts {
             worker.runtime_config = Some(OllamaRuntimeConfig {
                 host: Some(endpoint.clone()),
             });
+            // FAM-BUG-110: a `local`-provider worker must carry its resource
+            // profile (4e5b026) or dispatch refuses it by name; the host
+            // default is exactly the shape that rule exists to complete.
+            worker.local = Some(LocalWorkerConfig {
+                runtime_kind: LocalRuntimeKind::Ollama,
+                endpoint: LocalEndpointConfig {
+                    base_url: endpoint.clone(),
+                    tls: false,
+                },
+                resources: Default::default(),
+            });
             return Ok(("host-ollama".into(), worker));
         }
         if self.codex_cli {
-            return Ok((
-                "host-codex-cli".into(),
-                base("openai", "__legacy_cli_default__", "codex"),
-            ));
+            // FAM-BUG-110: the CLI defaults were built without an adapter or
+            // executable and the registry refused them, so a host with only
+            // the Codex CLI on PATH could not run at all.
+            let mut worker = base("openai", LEGACY_CLI_DEFAULT_MODEL, "codex");
+            worker.adapter = Some(AgentAdapterKind::Codex);
+            worker.executable = Some("codex".into());
+            return Ok(("host-codex-cli".into(), worker));
         }
         if self.claude_cli {
-            return Ok((
-                "host-claude-cli".into(),
-                base("anthropic", "__legacy_cli_default__", "claude-code"),
-            ));
+            let mut worker = base("anthropic", LEGACY_CLI_DEFAULT_MODEL, "claude-code");
+            worker.adapter = Some(AgentAdapterKind::ClaudeCode);
+            worker.executable = Some("claude".into());
+            return Ok(("host-claude-cli".into(), worker));
         }
         Err("no reachable worker found; configure one of: an OPENAI_API_KEY or ANTHROPIC_API_KEY, a reachable local Ollama endpoint, or a claude/codex CLI on PATH".into())
     }
@@ -1084,7 +1103,7 @@ impl WorkerRegistryConfig {
             model: entry
                 .model
                 .clone()
-                .unwrap_or_else(|| "__legacy_cli_default__".to_owned()),
+                .unwrap_or_else(|| LEGACY_CLI_DEFAULT_MODEL.to_owned()),
             runtime: Some(entry.adapter.as_str().to_owned()),
             model_artifact: None,
             auth_profile: None,
@@ -1538,6 +1557,39 @@ mod raw_runtime_dispatch_tests {
 #[cfg(test)]
 mod local_worker_tests {
     use super::*;
+
+    /// FAM-BUG-110: every host-worker default must be a worker the registry
+    /// accepts and dispatch can run: CLIs carry adapter and executable, the
+    /// Ollama default carries its local resource profile.
+    #[test]
+    fn host_worker_defaults_are_dispatchable_as_built() {
+        let codex = HostWorkerFacts {
+            codex_cli: true,
+            ..Default::default()
+        };
+        let (id, worker) = codex.selected_worker().unwrap();
+        assert_eq!(id, "host-codex-cli");
+        assert_eq!(worker.adapter, Some(AgentAdapterKind::Codex));
+        assert_eq!(worker.executable.as_deref(), Some("codex"));
+        assert_eq!(worker.runtime_id().unwrap(), "codex");
+
+        let claude = HostWorkerFacts {
+            claude_cli: true,
+            ..Default::default()
+        };
+        let (_, worker) = claude.selected_worker().unwrap();
+        assert_eq!(worker.adapter, Some(AgentAdapterKind::ClaudeCode));
+        assert_eq!(worker.executable.as_deref(), Some("claude"));
+
+        let ollama = HostWorkerFacts {
+            ollama_endpoint: Some("http://10.0.0.12:11434".into()),
+            ..Default::default()
+        };
+        let (_, worker) = ollama.selected_worker().unwrap();
+        assert_eq!(worker.runtime_id().unwrap(), "ollama");
+        let local = worker.local.expect("local profile present");
+        assert_eq!(local.endpoint.base_url, "http://10.0.0.12:11434");
+    }
 
     #[test]
     fn endpoint_trust_classifies_loopback_lan_and_remote() {

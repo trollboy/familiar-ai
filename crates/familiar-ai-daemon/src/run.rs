@@ -785,7 +785,11 @@ fn worker_descriptor(
             .unwrap_or_else(|_| format!("invalid/{id}")),
         runtime_id: worker.runtime_id().unwrap_or(entry.adapter.as_str()).into(),
         provider: worker.provider.clone(),
-        model: entry.model.unwrap_or_default(),
+        // FAM-BUG-110: the CLI defaults carry the `__legacy_cli_default__`
+        // placeholder, which the agent-entry view maps to "no explicit
+        // model"; the descriptor still needs a non-empty label or the
+        // registry refuses the worker outright.
+        model: entry.model.unwrap_or_else(|| worker.model.clone()),
         executable: worker
             .executable
             .clone()
@@ -4702,6 +4706,24 @@ mod tests {
         }
     }
 
+    /// The run inserts its execution-history row before implementation, and
+    /// since 9389ee9 the review stage appends usage observations that
+    /// reference it. Tests that call `run_review` directly must start that
+    /// row too, or the observation fails its foreign key.
+    fn start_history_row(db: &Database, context: &ExecutionContext, execution_id: &str) {
+        ExecutionHistoryRepository::new(db.conn())
+            .insert_running(&ExecutionStart {
+                execution_id: execution_id.to_owned(),
+                started_at: Utc::now().to_rfc3339(),
+                repository: slash(&context.repository.repository),
+                worktree: slash(&context.repository.worktree),
+                git_commit: context.repository.git_commit.clone(),
+                prd_path: context.prd.path.clone(),
+                unavailable_fields: Default::default(),
+            })
+            .unwrap();
+    }
+
     #[test]
     fn split_agents_route_review_and_remediation_to_the_right_role() {
         let (_temp, db, context, config, paths, baseline, agent, finalization, snapshot) =
@@ -4716,6 +4738,7 @@ mod tests {
             review_role: true,
             calls: Mutex::new(0),
         };
+        start_history_row(&db, &context, "split");
         let cycle = run_review(ReviewRunInput {
             db: &db,
             context: &context,
@@ -4777,6 +4800,7 @@ mod tests {
             &baseline,
         )
         .unwrap();
+        start_history_row(&db, &context, "expansion");
         let cycle = run_review(ReviewRunInput {
             db: &db,
             context: &context,
@@ -5454,7 +5478,7 @@ mod tests {
     /// must still resolve — against the conventional loopback endpoint —
     /// instead of failing with "requires a worker_registry local endpoint".
     #[test]
-    fn legacy_ollama_worker_with_no_local_block_defaults_to_the_loopback_endpoint() {
+    fn legacy_ollama_worker_with_no_local_block_is_refused_by_name() {
         let mut config = Config::default();
         config.agent_runtime.enabled = true;
         let worker = raw_worker("ollama", "local", None);
@@ -5463,7 +5487,11 @@ mod tests {
             "this test only covers the pre-PRD-100 shape"
         );
         let temp = tempfile::tempdir().unwrap();
-        let ctx = build_raw_worker_context(
+        // Since 4e5b026 a `local`-provider worker needs its `[local]`
+        // resource profile whatever its runtime; the pre-PRD-100 shape is
+        // refused by name rather than defaulted, and the message says what
+        // to add.
+        let error = match build_raw_worker_context(
             &config,
             &worker,
             WorkerStage::Implementation,
@@ -5474,12 +5502,14 @@ mod tests {
             "proj",
             temp.path(),
             sample_prd_markdown(),
-        )
-        .expect("a pre-PRD-100 ollama worker with no [local] block must still resolve");
-        let endpoint = ctx
-            .local_endpoint
-            .expect("ollama must default to the conventional loopback endpoint");
-        assert_eq!(endpoint.base_url, "http://127.0.0.1:11434");
+        ) {
+            Ok(_) => panic!("a local-provider worker without [local] must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("[worker_registry.workers.legacy-ollama.local]"),
+            "{error}"
+        );
     }
 
     /// `unsloth` has no pre-PRD-100 dispatchable shape to preserve, so it
@@ -5490,7 +5520,7 @@ mod tests {
         config.agent_runtime.enabled = true;
         let worker = raw_worker("unsloth", "local", None);
         let temp = tempfile::tempdir().unwrap();
-        let ctx = build_raw_worker_context(
+        let error = match build_raw_worker_context(
             &config,
             &worker,
             WorkerStage::Implementation,
@@ -5501,9 +5531,14 @@ mod tests {
             "proj",
             temp.path(),
             sample_prd_markdown(),
-        )
-        .unwrap();
-        assert!(ctx.local_endpoint.is_none());
+        ) {
+            Ok(_) => panic!("a local-provider worker without [local] must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("[worker_registry.workers.legacy-unsloth.local]"),
+            "{error}"
+        );
     }
 
     #[test]

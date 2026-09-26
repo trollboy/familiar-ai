@@ -241,6 +241,7 @@ impl Config {
         fn register(
             checks: &mut BTreeMap<String, CheckConfig>,
             legacy: &[ReviewVerificationConfig],
+            scope: Option<&str>,
         ) -> crate::Result<Vec<String>> {
             let mut names = Vec::with_capacity(legacy.len());
             for value in legacy {
@@ -251,28 +252,53 @@ impl Config {
                     ));
                 }
                 let definition = CheckConfig::from_legacy(value);
-                if let Some(existing) = checks.get(name) {
-                    if existing != &definition {
-                        return Err(FamiliarError::Config(format!(
-                            "verification check '{name}' has conflicting legacy definitions"
-                        )));
+                match checks.get(name) {
+                    Some(existing) if existing == &definition => names.push(name.to_owned()),
+                    Some(_) => {
+                        // FAM-BUG-108: a repository's legacy array legitimately
+                        // reuses an id such as `lint` for a different command
+                        // (a different repository, a different toolchain).
+                        // That is a repository-scoped check, not a conflict;
+                        // only two differing definitions in the same scope are.
+                        let Some(scope) = scope else {
+                            return Err(FamiliarError::Config(format!(
+                                "verification check '{name}' has conflicting legacy definitions"
+                            )));
+                        };
+                        let scoped = format!("{name}@{scope}");
+                        if let Some(existing) = checks.get(&scoped) {
+                            if existing != &definition {
+                                return Err(FamiliarError::Config(format!(
+                                    "verification check '{name}' has conflicting legacy definitions in {scope}"
+                                )));
+                            }
+                        } else {
+                            tracing::info!(
+                                check = name,
+                                scope,
+                                "rewrote repository-scoped legacy review.verification entry"
+                            );
+                            checks.insert(scoped.clone(), definition);
+                        }
+                        names.push(scoped);
                     }
-                } else {
-                    tracing::info!(check = name, "rewrote legacy review.verification entry");
-                    checks.insert(name.to_owned(), definition);
+                    None => {
+                        tracing::info!(check = name, "rewrote legacy review.verification entry");
+                        checks.insert(name.to_owned(), definition);
+                        names.push(name.to_owned());
+                    }
                 }
-                names.push(name.to_owned());
             }
             Ok(names)
         }
 
-        let legacy_global = register(&mut self.checks, &self.review.verification)?;
+        let legacy_global = register(&mut self.checks, &self.review.verification, None)?;
         if self.assignments.verification.is_empty() && !legacy_global.is_empty() {
             self.assignments.verification = legacy_global;
         }
-        for entry in self.repositories.values_mut() {
+        for (repository_key, entry) in self.repositories.iter_mut() {
             if let Some(review) = &entry.review {
-                let names = register(&mut self.checks, &review.verification)?;
+                let names = register(&mut self.checks, &review.verification, Some(repository_key))?;
                 if entry.assignments.is_none() && !names.is_empty() {
                     entry.assignments = Some(AssignmentsConfig {
                         verification: names,

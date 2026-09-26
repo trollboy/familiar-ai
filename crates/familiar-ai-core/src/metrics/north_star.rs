@@ -152,12 +152,12 @@ pub struct DeliveryClaim {
     pub total_cost_executions: u64,
 }
 
-/// Claims are embedded as one JSON object after `familiar-delivery-claim:`.
+/// Claims are embedded as one JSON object after `familiar-ai-delivery-claim:`.
 pub fn claims(document: &str) -> Result<Vec<DeliveryClaim>, String> {
     document
         .lines()
         .filter_map(|line| {
-            line.split_once("familiar-delivery-claim:")
+            line.split_once("familiar-ai-delivery-claim:")
                 .map(|(_, json)| json.trim())
         })
         .map(|json| serde_json::from_str(json).map_err(|e| format!("invalid delivery claim: {e}")))
@@ -172,8 +172,8 @@ pub struct ExecutionOutcomeClosure {
 }
 
 pub fn validate_execution_outcome_closure(value: &ExecutionOutcomeClosure) -> Result<(), String> {
-    if value.query.as_deref().is_none_or(str::is_empty)
-        || value.recorded_result.as_deref().is_none_or(str::is_empty)
+    if value.query.as_deref().map_or(true, str::is_empty)
+        || value.recorded_result.as_deref().map_or(true, str::is_empty)
     {
         Err(format!("{} closure requires the execution-outcome query and recorded result; narrative evidence is insufficient", value.bug))
     } else {

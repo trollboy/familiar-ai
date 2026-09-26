@@ -399,6 +399,7 @@ const DECLARED_LEAVES: &[&str] = &[
     "config model enable",
     "config model disable",
     "config model list",
+    "config model cost-basis",
     "config artifact register",
     "config artifact register-alias",
     "config artifact list",
@@ -422,6 +423,7 @@ const DECLARED_LEAVES: &[&str] = &[
     // -- stewardship ----------------------------------------------------
     "stewardship substance",
     "stewardship backlog",
+    "stewardship metrics",
     "stewardship sessions",
     "stewardship attempts",
     "stewardship checkpoints",
@@ -442,6 +444,7 @@ const DECLARED_LEAVES: &[&str] = &[
     "plan onboard approve",
     "plan onboard validate",
     "plan onboard fixture",
+    "plan onboard worker-config",
     "plan backlog metadata-check",
     "plan backlog bootstrap status",
     "plan backlog bootstrap rollback",

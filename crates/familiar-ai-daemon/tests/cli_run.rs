@@ -11,6 +11,21 @@ use tempfile::tempdir;
 
 static CLI_RUN: Mutex<()> = Mutex::new(());
 
+/// A configuration that names the codex CLI on PATH for both roles. Since
+/// b3c69a3 a run with no `[agents]` and no registry materialises a
+/// host-discovered worker instead, which is a different feature from the one
+/// these tests cover: the codex CLI's streaming through `run`.
+fn codex_cli_config(root: &std::path::Path) -> std::path::PathBuf {
+    let dir = root.join("xdg-config");
+    fs::create_dir_all(dir.join("familiar-ai")).unwrap();
+    fs::write(
+        dir.join("familiar-ai/config.toml"),
+        "[agents.implementation]\nadapter = \"codex\"\nexecutable = \"codex\"\n\n[agents.reviewer]\nadapter = \"codex\"\nexecutable = \"codex\"\nmodel = \"reviewer\"\n",
+    )
+    .unwrap();
+    dir
+}
+
 fn fixture_repository(root: &std::path::Path) -> std::path::PathBuf {
     let repository = root.join("repository");
     fs::create_dir_all(repository.join("docs/prds")).unwrap();
@@ -60,13 +75,16 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .env("HOME", temp.path())
         .env("XDG_RUNTIME_DIR", temp.path().join("runtime"))
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
+        // The host-worker default (b3c69a3) prefers an API key or OLLAMA_HOST
+        // over a CLI on PATH; these tests are about the codex CLI on PATH and
+        // must not inherit the developer's keys.
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OLLAMA_HOST")
         .env("FAKE_CODEX_ARGS", &args)
         .env("FAKE_CODEX_PROMPT", &capture)
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
-        .env(
-            "XDG_CONFIG_HOME",
-            std::env::temp_dir().join("familiar-ai-tests-no-config"),
-        )
+        .env("XDG_CONFIG_HOME", codex_cli_config(temp.path()))
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
@@ -115,10 +133,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .args(["history", "--limit", "1", "--verbose"])
         .env("HOME", temp.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
-        .env(
-            "XDG_CONFIG_HOME",
-            std::env::temp_dir().join("familiar-ai-tests-no-config"),
-        )
+        .env("XDG_CONFIG_HOME", codex_cli_config(temp.path()))
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
@@ -134,10 +149,7 @@ fn run_feeds_fake_codex_streams_output_and_returns_its_status() {
         .arg("usage")
         .env("HOME", temp.path())
         .env("FAMILIAR_AI_DATABASE__PATH", &database)
-        .env(
-            "XDG_CONFIG_HOME",
-            std::env::temp_dir().join("familiar-ai-tests-no-config"),
-        )
+        .env("XDG_CONFIG_HOME", codex_cli_config(temp.path()))
         .env(
             "XDG_RUNTIME_DIR",
             database.parent().unwrap().join("xdg-runtime"),
@@ -172,6 +184,12 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
         .args(["run", "docs/prds/PRD-001.md"])
         .env("HOME", temp.path())
         .env("PATH", format!("{}:/bin:/usr/bin", temp.path().display()))
+        // The host-worker default (b3c69a3) prefers an API key or OLLAMA_HOST
+        // over a CLI on PATH; these tests are about the codex CLI on PATH and
+        // must not inherit the developer's keys.
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OLLAMA_HOST")
         .env("XDG_RUNTIME_DIR", temp.path().join("xdg-runtime"))
         .env(
             "FAMILIAR_AI_DATABASE__PATH",

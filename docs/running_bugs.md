@@ -451,6 +451,64 @@ appears with no entry, or with a status a reader cannot classify.
   and no attempt derives Implementing regardless of the execution's state.
 - **Expected fix:** as landed.
 
+### FAM-BUG-110 — The host-discovered worker default cannot run: no adapter or executable on the CLI defaults, no local profile on the Ollama default, and a placeholder model that would reach `--model`
+
+- **Status:** Fixed (2026-09-26: the codex and claude defaults carry their
+  adapter and executable, the Ollama default carries a `[local]` profile
+  built from `OLLAMA_HOST`, the registry descriptor falls back to the
+  worker's model label so the registry accepts the worker, and the CLI
+  factories treat `LEGACY_CLI_DEFAULT_MODEL` as "no `--model`". A unit test
+  over the three fact shapes pins all of it. The two `cli_run` streaming
+  tests declare the codex adapter in a config of their own and strip
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `OLLAMA_HOST`, since the host
+  default prefers a key in the environment over a CLI on PATH.)
+- **Found:** 2026-09-26 on this box's gate after the overnight merge. With
+  no `[agents]` and no registry, `familiar-ai run` now materialises a
+  host-discovered worker (b3c69a3). In the streaming tests it first picked
+  the developer's `OPENAI_API_KEY` and died in the raw loop; with the keys
+  stripped it built a codex worker the registry refused as "worker
+  identity, adapter, provider, model, and executable must be non-empty".
+- **Detail:** `HostWorkerFacts::selected_worker` built CLI workers with
+  `adapter: None` and `executable: None`, and an Ollama worker with
+  `local: None` although 4e5b026 made the profile mandatory; the descriptor
+  mapped the placeholder model to empty. A machine with only the Codex CLI
+  on PATH could not run any PRD on that tree.
+- **Expected fix:** as landed.
+
+### FAM-BUG-109 — Drive preflight verifies the live checkout, uncommitted edits included
+
+- **Status:** Open
+- **Found:** 2026-09-26, PRD-107's first run. Drive logged `checkout
+  HEAD=7c9d764 dirty_files=3` and went on; preflight's `format` and
+  `tests-green-crates` then ran in the repository root and failed on
+  uncommitted edits an operator was making at that moment, at zero cost but
+  with the session dead before it claimed anything.
+- **Detail:** the verification checks run in the checkout, not against the
+  integration revision the session will branch from. Anything an operator
+  or another session has in the working tree is verified as if it were the
+  candidate. The warning is right; proceeding is not.
+- **Expected fix:** preflight verifies the integration revision in a clean
+  worktree, or refuses to start on a dirty checkout and says which files.
+
+### FAM-BUG-108 — The named-checks rewrite refused any config whose repository redefines a global check id, and the daemon would not start
+
+- **Status:** Fixed (2026-09-26: a repository's legacy `review.verification`
+  entry that differs from a global one of the same id is registered under a
+  repository-scoped key and resolves back to the plain id for that
+  repository's runs; two differing definitions in the same scope are still a
+  conflict. Pinned by a load test with a global and a repository `lint`.)
+- **Found:** 2026-09-26, first reinstall after pulling the overnight
+  tree: `configuration error: verification check 'lint' has conflicting
+  legacy definitions`, the daemon in `failed`, and the desktop showing no
+  repositories. This box's config has a global `lint` for familiar-ai and a
+  different `lint` for spectra.
+- **Detail:** `normalize_verification_checks` folded every repository's
+  legacy array into one global `checks` map keyed by id. Per-repository
+  overrides with the same id and a different command are the normal case
+  for a multi-repository installation, and PRD-111's own text names them as
+  different checks, not conflicts.
+- **Expected fix:** as landed.
+
 ### FAM-BUG-107 — Re-landing an already-merged candidate reports the current HEAD as its integration commit
 
 - **Status:** Fixed (2026-09-25: `land_candidate` reports the first commit

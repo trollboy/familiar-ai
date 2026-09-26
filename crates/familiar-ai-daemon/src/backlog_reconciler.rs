@@ -662,11 +662,14 @@ mod tests {
     fn read_fallback_repairs_changes_missed_during_watcher_downtime_and_is_bounded() {
         let repo = temp_repo();
         let db = open_db();
+        // A one-second fallback interval: the "still within the interval"
+        // assertion below used to sit 20 ms after the reconcile, which a
+        // scheduler stall under a concurrent build breaks (FAM-BUG-096 class).
         let reconciler = BacklogReconciler::new(
             db.clone(),
             config_for(repo.path()),
             Duration::from_millis(1),
-            Duration::from_millis(20),
+            Duration::from_millis(1_000),
         );
         let dispatcher = Arc::new(OperatorDispatcher::new(Arc::new(NoopSource), 1));
         reconciler.set_event_sink(dispatcher.clone());
@@ -692,7 +695,7 @@ mod tests {
         );
 
         // Once the interval has elapsed, the next read repairs the gap.
-        std::thread::sleep(Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(1_200));
         reconciler.reconcile_if_stale(repo.path());
         let entries =
             list_backlog_entries(db.lock().unwrap().conn(), &identity.key, None, None, 10).unwrap();

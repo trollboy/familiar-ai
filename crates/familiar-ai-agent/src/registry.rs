@@ -164,7 +164,11 @@ impl AdapterFactory for ClaudeCodeFactory {
     ) -> Result<Box<dyn CodingAgent>, String> {
         Ok(Box::new(ClaudeCodeAgent::new(ClaudeCodeSettings {
             executable: worker.executable.clone(),
-            model: (!worker.model.is_empty()).then(|| worker.model.clone()),
+            // FAM-BUG-110: the registry label for "no explicit model" must not
+            // reach the CLI as `--model`.
+            model: (!worker.model.is_empty()
+                && worker.model != familiar_ai_core::config::LEGACY_CLI_DEFAULT_MODEL)
+                .then(|| worker.model.clone()),
             effort: worker.effort.clone(),
             permission_mode: worker.permission_mode.clone(),
             max_budget_microusd: None,

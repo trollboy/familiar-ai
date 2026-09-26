@@ -58,7 +58,9 @@ impl CheckConfig {
         override_: Option<&CheckOverrideConfig>,
     ) -> ReviewVerificationConfig {
         ReviewVerificationConfig {
-            check_id: name.to_owned(),
+            // A repository-scoped key (`lint@/path/to/repo`, FAM-BUG-108)
+            // resolves to the plain id: within one run there is one `lint`.
+            check_id: name.split('@').next().unwrap_or(name).to_owned(),
             argv: self.argv.clone(),
             working_directory: override_
                 .and_then(|value| value.working_directory.clone())

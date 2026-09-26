@@ -5,7 +5,7 @@ from prose or Git history. Every claim in the README, roadmap, or an
 after-action report must place one JSON record beside the prose:
 
 ```text
-familiar-delivery-claim: {"repository_key":"/repo/.git","hosts":["linux-host"],"window_start":"2026-09-01T00:00:00Z","window_end":"2026-10-01T00:00:00Z","accepted_prds":1,"unattended_prds":1,"measured_cost_executions":1,"total_cost_executions":1}
+familiar-ai-delivery-claim: {"repository_key":"/repo/.git","hosts":["linux-host"],"window_start":"2026-09-01T00:00:00Z","window_end":"2026-10-01T00:00:00Z","accepted_prds":1,"unattended_prds":1,"measured_cost_executions":1,"total_cost_executions":1}
 ```
 
 The check requires the repository, a bounded half-open window, and the complete

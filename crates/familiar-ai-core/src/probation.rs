@@ -91,7 +91,7 @@ pub fn score(
         && failure.is_some_and(|v| v <= policy.maximum_failure_basis_points)
         && policy
             .maximum_cost_per_accepted_prd_microusd
-            .is_none_or(|maximum| {
+            .map_or(true, |maximum| {
                 cost_per_accepted_prd
                     .zip(cost_unit.as_deref())
                     .is_some_and(|(cost, unit)| match unit {

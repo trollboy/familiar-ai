@@ -87,7 +87,7 @@ pub fn run(agents: &AgentSet<'_>, config: &Config, repository: &Path) -> Preflig
                         let runtime_id = worker.runtime_id().unwrap_or("invalid-runtime");
                         let validation = if matches!(runtime_id, "codex" | "claude-code") {
                             crate::run::build_agent_or_deferred(&worker.as_agent_entry(), true)
-                                .map(|agent| Some(agent))
+                                .map(Some)
                         } else {
                             crate::run::preflight_raw_worker(
                                 config,
@@ -897,7 +897,7 @@ mod tests {
         absent_cli.provider = "openai".into();
         absent_cli.runtime = Some("codex".into());
         absent_cli.local = None;
-        absent_cli.executable = Some("familiar-test-definitely-missing-codex".into());
+        absent_cli.executable = Some("familiar-ai-test-definitely-missing-codex".into());
         config
             .worker_registry
             .as_mut()

@@ -97,7 +97,7 @@ fn refuses_project_scope_when_a_declared_host_ledger_is_missing() {
 #[test]
 fn stale_documented_claim_is_caught_after_ledger_changes() {
     let db = fixture();
-    let claim = r#"familiar-delivery-claim: {"repository_key":"familiar.git","hosts":["linux"],"window_start":"2026-09-01","window_end":"2026-10-01","accepted_prds":1,"unattended_prds":1,"measured_cost_executions":1,"total_cost_executions":1}"#;
+    let claim = r#"familiar-ai-delivery-claim: {"repository_key":"familiar.git","hosts":["linux"],"window_start":"2026-09-01","window_end":"2026-10-01","accepted_prds":1,"unattended_prds":1,"measured_cost_executions":1,"total_cost_executions":1}"#;
     assert_eq!(check_document_claims(&db, "linux", claim).unwrap(), 1);
     db.conn()
         .execute(
