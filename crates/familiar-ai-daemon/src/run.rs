@@ -1780,8 +1780,8 @@ fn execute_tracked_inner(
     // Contradictory agent configuration must fail closed before any claim,
     // regardless of which caller constructed the agents.
     let implementation_entry = resolved_agent_entries(config).map_err(RunError::Config)?.0;
-    let mut implementation_probation_worker: Option<(String, String)> = None;
-    let mut remediation_probation_worker: Option<(String, String)> = None;
+    let mut implementation_probation_worker: Option<ProbationWorker> = None;
+    let mut remediation_probation_worker: Option<ProbationWorker> = None;
     if let Some(worker_registry) = &config.worker_registry {
         let (_, _, records) =
             resolved_worker_plan(config, &route_context).map_err(RunError::Config)?;
@@ -1857,7 +1857,7 @@ fn execute_tracked_inner(
                 record.stage,
                 WorkerStage::Implementation | WorkerStage::Remediation
             ) {
-                let policy = worker_probation_policy();
+                let policy = worker_probation_policy(config, &record.selected_worker);
                 let probation = familiar_ai_storage::ProbationRepository::new(db.conn());
                 probation
                     .record_policy(&policy)
@@ -1890,10 +1890,11 @@ fn execute_tracked_inner(
                         config.review.enabled,
                     )
                     .map_err(|e| RunError::Config(e.to_string()))?;
-                let selected = Some((
-                    record.selected_spec_identity.clone(),
-                    record.selected_empirical_version.clone(),
-                ));
+                let selected = Some(ProbationWorker {
+                    spec: record.selected_spec_identity.clone(),
+                    version: record.selected_empirical_version.clone(),
+                    policy,
+                });
                 match record.stage {
                     WorkerStage::Implementation => implementation_probation_worker = selected,
                     WorkerStage::Remediation => remediation_probation_worker = selected,
@@ -2277,8 +2278,8 @@ fn finish_implementation(
     defer_completion: bool,
     codex_session: Option<&familiar_ai_agent::CodexExecutionSession>,
     trace: &mut AttemptTrace,
-    implementation_probation_worker: Option<&(String, String)>,
-    remediation_probation_worker: Option<&(String, String)>,
+    implementation_probation_worker: Option<&ProbationWorker>,
+    remediation_probation_worker: Option<&ProbationWorker>,
 ) -> Result<RunWorkflowResult, RunError> {
     if !config.review.enabled {
         persist_probation_outcome(
@@ -2507,7 +2508,46 @@ fn finish_implementation(
     })
 }
 
-fn worker_probation_policy() -> familiar_ai_core::probation::ProbationPolicy {
+#[derive(Debug, Clone)]
+struct ProbationWorker {
+    spec: String,
+    version: String,
+    policy: familiar_ai_core::probation::ProbationPolicy,
+}
+
+fn worker_probation_policy(
+    config: &Config,
+    worker_id: &str,
+) -> familiar_ai_core::probation::ProbationPolicy {
+    let ladder = config
+        .worker_registry
+        .as_ref()
+        .and_then(|registry| registry.routing.ladder.as_ref())
+        .and_then(|ladder| ladder.probation.as_ref())
+        .filter(|probation| probation.workers.iter().any(|worker| worker == worker_id));
+    let mut policy = default_worker_probation_policy();
+    if let Some(ladder) = ladder {
+        policy.version = format!(
+            "prd-107-ladder-v1-a{}-r{}-m{}-f{}-c{}-e{}",
+            ladder.minimum_accepted_prds,
+            ladder.minimum_review_pass_basis_points,
+            ladder.maximum_remediation_basis_points,
+            ladder.maximum_failure_basis_points,
+            ladder.maximum_cost_per_accepted_prd_microusd,
+            ladder.maximum_expected_files,
+        );
+        policy.minimum_accepted_prds = ladder.minimum_accepted_prds;
+        policy.minimum_review_pass_basis_points = ladder.minimum_review_pass_basis_points;
+        policy.maximum_remediation_basis_points = ladder.maximum_remediation_basis_points;
+        policy.maximum_failure_basis_points = ladder.maximum_failure_basis_points;
+        policy.maximum_cost_per_accepted_prd_microusd =
+            Some(ladder.maximum_cost_per_accepted_prd_microusd);
+        policy.probation_max_expected_files = ladder.maximum_expected_files;
+    }
+    policy
+}
+
+fn default_worker_probation_policy() -> familiar_ai_core::probation::ProbationPolicy {
     familiar_ai_core::probation::ProbationPolicy {
         policy_id: "default-worker-probation".into(),
         version: "prd-032-v1".into(),
@@ -2515,6 +2555,7 @@ fn worker_probation_policy() -> familiar_ai_core::probation::ProbationPolicy {
         minimum_review_pass_basis_points: 9_000,
         maximum_remediation_basis_points: 3_334,
         maximum_failure_basis_points: 1_000,
+        maximum_cost_per_accepted_prd_microusd: None,
         probation_max_expected_files: 2,
         require_independent_review: true,
     }
@@ -2523,7 +2564,7 @@ fn worker_probation_policy() -> familiar_ai_core::probation::ProbationPolicy {
 #[allow(clippy::too_many_arguments)]
 fn persist_probation_outcome<T: serde::Serialize>(
     db: &Database,
-    worker: Option<&(String, String)>,
+    worker: Option<&ProbationWorker>,
     stage: &str,
     execution_id: &str,
     latency_ms: u64,
@@ -2534,9 +2575,11 @@ fn persist_probation_outcome<T: serde::Serialize>(
     failed: bool,
     evidence: &T,
 ) -> Result<(), RunError> {
-    let Some((spec, version)) = worker else {
+    let Some(worker) = worker else {
         return Ok(());
     };
+    let spec = &worker.spec;
+    let version = &worker.version;
     let repository = familiar_ai_storage::ProbationRepository::new(db.conn());
     let evidence_json =
         serde_json::to_string(evidence).map_err(|error| RunError::Storage(error.to_string()))?;
@@ -2563,7 +2606,7 @@ fn persist_probation_outcome<T: serde::Serialize>(
             &format!("{execution_id}:{stage}:probation-score"),
             spec,
             version,
-            &worker_probation_policy(),
+            &worker.policy,
         )
         .map_err(|error| RunError::Storage(error.to_string()))?;
     Ok(())
@@ -5094,7 +5137,11 @@ mod tests {
                 "{}",
             )
             .unwrap();
-        let worker = ("spec".to_owned(), "version".to_owned());
+        let worker = ProbationWorker {
+            spec: "spec".into(),
+            version: "version".into(),
+            policy: default_worker_probation_policy(),
+        };
         for execution in ["success-1", "success-2", "success-3"] {
             ExecutionHistoryRepository::new(db.conn())
                 .insert_running(&ExecutionStart {
@@ -5127,7 +5174,7 @@ mod tests {
             .authorize(
                 "spec",
                 "version",
-                &worker_probation_policy(),
+                &default_worker_probation_policy(),
                 99,
                 true,
                 false,
@@ -5163,7 +5210,7 @@ mod tests {
             .authorize(
                 "spec",
                 "version",
-                &worker_probation_policy(),
+                &default_worker_probation_policy(),
                 99,
                 true,
                 false,
@@ -5178,6 +5225,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(observations, 4);
+        let events = db
+            .conn()
+            .prepare("SELECT standing,reason FROM worker_standing_events WHERE source='policy' ORDER BY occurred_at,event_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(events.iter().any(|(standing, evidence)| {
+            standing == "promoted"
+                && evidence.contains("review_pass_basis_points")
+                && evidence.contains("cost_per_accepted_prd")
+        }));
+        assert_eq!(events.last().unwrap().0, "probation");
+        assert!(events
+            .last()
+            .unwrap()
+            .1
+            .contains("promotion_eligible\":false"));
     }
 
     #[test]
@@ -5206,8 +5272,16 @@ mod tests {
                 unavailable_fields: BTreeMap::new(),
             })
             .unwrap();
-        let implementation = ("implementation-spec".to_owned(), "version".to_owned());
-        let remediation = ("remediation-spec".to_owned(), "version".to_owned());
+        let implementation = ProbationWorker {
+            spec: "implementation-spec".into(),
+            version: "version".into(),
+            policy: default_worker_probation_policy(),
+        };
+        let remediation = ProbationWorker {
+            spec: "remediation-spec".into(),
+            version: "version".into(),
+            policy: default_worker_probation_policy(),
+        };
         persist_probation_outcome(
             &db,
             Some(&implementation),

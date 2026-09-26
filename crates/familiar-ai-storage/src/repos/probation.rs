@@ -128,6 +128,9 @@ impl<'a> ProbationRepository<'a> {
         } else {
             WorkerStanding::Probation
         };
+        if current.as_deref() == Some(standing.as_str()) {
+            return Ok(result);
+        }
         self.set_standing(
             event_id,
             spec,
@@ -136,10 +139,15 @@ impl<'a> ProbationRepository<'a> {
             "policy",
             Some(score_id),
             "deterministic-policy",
-            &format!(
-                "{}@{} promotion_eligible={}",
-                policy.policy_id, policy.version, result.promotion_eligible
-            ),
+            &serde_json::json!({
+                "policy_id": policy.policy_id,
+                "policy_version": policy.version,
+                "promotion_eligible": result.promotion_eligible,
+                "review_pass_basis_points": result.review_pass_basis_points,
+                "cost_per_accepted_prd": result.cost_per_accepted_prd,
+                "cost_unit": result.cost_unit,
+            })
+            .to_string(),
         )?;
         Ok(result)
     }
@@ -261,6 +269,7 @@ mod tests {
             minimum_review_pass_basis_points: 10_000,
             maximum_remediation_basis_points: 0,
             maximum_failure_basis_points: 0,
+            maximum_cost_per_accepted_prd_microusd: None,
             probation_max_expected_files: 2,
             require_independent_review: true,
         }

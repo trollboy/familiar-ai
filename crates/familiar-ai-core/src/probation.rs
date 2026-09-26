@@ -28,6 +28,8 @@ pub struct ProbationPolicy {
     pub minimum_review_pass_basis_points: u32,
     pub maximum_remediation_basis_points: u32,
     pub maximum_failure_basis_points: u32,
+    #[serde(default)]
+    pub maximum_cost_per_accepted_prd_microusd: Option<u64>,
     pub probation_max_expected_files: u64,
     pub require_independent_review: bool,
 }
@@ -86,7 +88,18 @@ pub fn score(
         && metrics.accepted_prds >= policy.minimum_accepted_prds
         && review.is_some_and(|v| v >= policy.minimum_review_pass_basis_points)
         && remediation.is_some_and(|v| v <= policy.maximum_remediation_basis_points)
-        && failure.is_some_and(|v| v <= policy.maximum_failure_basis_points);
+        && failure.is_some_and(|v| v <= policy.maximum_failure_basis_points)
+        && policy
+            .maximum_cost_per_accepted_prd_microusd
+            .is_none_or(|maximum| {
+                cost_per_accepted_prd
+                    .zip(cost_unit.as_deref())
+                    .is_some_and(|(cost, unit)| match unit {
+                        "nanoUSD" => cost <= maximum.saturating_mul(1_000),
+                        "microUSD" => cost <= maximum,
+                        _ => false,
+                    })
+            });
     EmpiricalScore {
         review_pass_basis_points: review,
         remediation_basis_points: remediation,
@@ -114,6 +127,7 @@ mod tests {
             minimum_review_pass_basis_points: 10_000,
             maximum_remediation_basis_points: 0,
             maximum_failure_basis_points: 0,
+            maximum_cost_per_accepted_prd_microusd: None,
             probation_max_expected_files: 1,
             require_independent_review: true,
         };
@@ -130,5 +144,55 @@ mod tests {
         );
         assert!(!result.promotion_eligible);
         assert_eq!(result.cost_per_accepted_prd, None);
+    }
+
+    #[test]
+    fn review_rate_and_cost_per_accepted_prd_drive_probation_transitions() {
+        let policy = ProbationPolicy {
+            policy_id: "local-ladder".into(),
+            version: "1".into(),
+            minimum_accepted_prds: 2,
+            minimum_review_pass_basis_points: 9_000,
+            maximum_remediation_basis_points: 0,
+            maximum_failure_basis_points: 0,
+            maximum_cost_per_accepted_prd_microusd: Some(50),
+            probation_max_expected_files: 2,
+            require_independent_review: true,
+        };
+        let promoted = score(
+            &policy,
+            &EmpiricalMetrics {
+                completed_prds: 2,
+                accepted_prds: 2,
+                review_passes: 2,
+                review_attempts: 2,
+                cost_amount: Some(80_000),
+                cost_unit: Some("nanoUSD".into()),
+                cost_authority: Some("vendor-reported".into()),
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(promoted.promotion_eligible);
+        assert_eq!(promoted.cost_per_accepted_prd, Some(40_000));
+
+        let demoted = score(
+            &policy,
+            &EmpiricalMetrics {
+                completed_prds: 3,
+                accepted_prds: 3,
+                review_passes: 2,
+                review_attempts: 3,
+                failed_prds: 1,
+                cost_amount: Some(180_000),
+                cost_unit: Some("nanoUSD".into()),
+                cost_authority: Some("vendor-reported".into()),
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(!demoted.promotion_eligible);
+        assert_eq!(demoted.review_pass_basis_points, Some(6_666));
+        assert_eq!(demoted.cost_per_accepted_prd, Some(60_000));
     }
 }

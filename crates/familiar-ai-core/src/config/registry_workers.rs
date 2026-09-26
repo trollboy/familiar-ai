@@ -826,6 +826,7 @@ pub struct LadderProbationConfig {
     pub minimum_review_pass_basis_points: u32,
     pub maximum_remediation_basis_points: u32,
     pub maximum_failure_basis_points: u32,
+    pub maximum_cost_per_accepted_prd_microusd: u64,
     pub maximum_expected_files: u64,
 }
 
@@ -1296,6 +1297,7 @@ impl WorkerRegistryConfig {
                 }
                 if probation.minimum_accepted_prds == 0
                     || probation.maximum_expected_files == 0
+                    || probation.maximum_cost_per_accepted_prd_microusd == 0
                     || probation.minimum_review_pass_basis_points > 10_000
                     || probation.maximum_remediation_basis_points > 10_000
                     || probation.maximum_failure_basis_points > 10_000
@@ -1303,9 +1305,14 @@ impl WorkerRegistryConfig {
                     return Err("worker_registry.routing.ladder.probation requires positive sample/scope bounds and basis-point thresholds <= 10000".into());
                 }
                 for id in &probation.workers {
-                    if !self.workers.contains_key(id) {
+                    let Some(worker) = self.workers.get(id) else {
                         return Err(format!(
                             "worker_registry.routing.ladder.probation names unknown worker '{id}'"
+                        ));
+                    };
+                    if worker.provider != LOCAL_PROVIDER || worker.local.is_none() {
+                        return Err(format!(
+                            "worker_registry.routing.ladder.probation worker '{id}' must be a local worker"
                         ));
                     }
                 }
@@ -1747,6 +1754,7 @@ mod local_worker_tests {
                     minimum_review_pass_basis_points: 9_000,
                     maximum_remediation_basis_points: 3_334,
                     maximum_failure_basis_points: 1_000,
+                    maximum_cost_per_accepted_prd_microusd: 50,
                     maximum_expected_files: 2,
                 }),
             },
