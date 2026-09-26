@@ -558,43 +558,77 @@ pub fn resolved_worker_plan(
                 }
             })
     };
-    let ladder_selection = if routing.implementation_pin.is_none() {
+    // PRD-107: a declared ladder is consulted per job class, never overriding
+    // an explicit pin. With no ladder declared this always returns `None`,
+    // so absent-ladder routing stays byte-identical to the historical
+    // rule/pin/cost selector.
+    let ladder_rung = |class: familiar_ai_core::config::LadderJobClass, pin: &Option<String>| {
+        if pin.is_some() {
+            return None;
+        }
         routing.ladder.as_ref().and_then(|ladder| {
             ladder.select_rung(
-                familiar_ai_core::config::LadderJobClass::Implementation,
+                class,
                 &route_context.risk_classes,
                 &configured.workers,
                 &configured.cost_bases,
             )
         })
-    } else {
-        None
     };
+
+    let implementation_selection = ladder_rung(
+        familiar_ai_core::config::LadderJobClass::Implementation,
+        &routing.implementation_pin,
+    );
     let implementation_pin = routing.implementation_pin.clone().or_else(|| {
-        ladder_selection
+        implementation_selection
             .as_ref()
             .map(|selection| selection.worker.clone())
     });
     let mut implementation = select(WorkerStage::Implementation, &implementation_pin, None)?;
-    if let Some(selection) = ladder_selection {
+    if let Some(selection) = implementation_selection {
         implementation.rule = format!("ladder:{}", selection.reason);
     }
     let implementation_worker = registry.get(&implementation.selected_worker).unwrap();
     let mut records = vec![implementation.clone()];
-    records.push(select(
-        WorkerStage::Remediation,
+
+    let remediation_selection = ladder_rung(
+        familiar_ai_core::config::LadderJobClass::Remediation,
         &routing.remediation_pin,
-        None,
-    )?);
+    );
+    let remediation_pin = routing.remediation_pin.clone().or_else(|| {
+        remediation_selection
+            .as_ref()
+            .map(|selection| selection.worker.clone())
+    });
+    let mut remediation = select(WorkerStage::Remediation, &remediation_pin, None)?;
+    if let Some(selection) = remediation_selection {
+        remediation.rule = format!("ladder:{}", selection.reason);
+    }
+    records.push(remediation);
+
     let review = if config.review.enabled {
-        Some(select(
-            WorkerStage::Review,
+        let review_selection = ladder_rung(
+            familiar_ai_core::config::LadderJobClass::Review,
             &routing.review_pin,
+        );
+        let review_pin = routing.review_pin.clone().or_else(|| {
+            review_selection
+                .as_ref()
+                .map(|selection| selection.worker.clone())
+        });
+        let mut review = select(
+            WorkerStage::Review,
+            &review_pin,
             Some((
                 implementation_worker.provider.clone(),
                 implementation_worker.model.clone(),
             )),
-        )?)
+        )?;
+        if let Some(selection) = review_selection {
+            review.rule = format!("ladder:{}", selection.reason);
+        }
+        Some(review)
     } else {
         None
     };
@@ -5149,6 +5183,60 @@ mod tests {
             acceptance_criteria("## Acceptance criteria\n1. Numbered criterion\n"),
             vec!["Numbered criterion".to_owned()]
         );
+    }
+
+    /// PRD-107 acceptance: a local rung named in
+    /// `worker_registry.routing.ladder.probation.workers` is scored against
+    /// that declared policy, not the PRD-032 default — and a worker the
+    /// probation block does not name keeps the default untouched.
+    #[test]
+    fn worker_probation_policy_uses_the_declared_ladder_policy_only_for_named_workers() {
+        let mut config = Config::default();
+        config.worker_registry = Some(familiar_ai_core::config::WorkerRegistryConfig {
+            workers: BTreeMap::new(),
+            capability_profiles: BTreeMap::new(),
+            routing: familiar_ai_core::config::WorkerRoutingConfig {
+                ladder: Some(familiar_ai_core::config::WorkerLadderConfig {
+                    implementation: vec!["local-ollama".into()],
+                    remediation: Vec::new(),
+                    review: Vec::new(),
+                    narrow_task: Vec::new(),
+                    risk_floors: BTreeMap::new(),
+                    maximum_cheap_fraction_basis_points: 0,
+                    probation: Some(familiar_ai_core::config::LadderProbationConfig {
+                        workers: vec!["local-ollama".into()],
+                        minimum_accepted_prds: 5,
+                        minimum_review_pass_basis_points: 9_500,
+                        maximum_remediation_basis_points: 1_500,
+                        maximum_failure_basis_points: 500,
+                        maximum_cost_per_accepted_prd_microusd: 100_000,
+                        maximum_expected_files: 6,
+                    }),
+                }),
+                ..Default::default()
+            },
+            cost_bases: BTreeMap::new(),
+            cost_coverage_floor_percent: 80,
+        });
+
+        let local_policy = worker_probation_policy(&config, "local-ollama");
+        assert_eq!(local_policy.minimum_accepted_prds, 5);
+        assert_eq!(local_policy.minimum_review_pass_basis_points, 9_500);
+        assert_eq!(local_policy.maximum_remediation_basis_points, 1_500);
+        assert_eq!(local_policy.maximum_failure_basis_points, 500);
+        assert_eq!(
+            local_policy.maximum_cost_per_accepted_prd_microusd,
+            Some(100_000)
+        );
+        assert_eq!(local_policy.probation_max_expected_files, 6);
+        assert!(
+            local_policy.version.starts_with("prd-107-ladder-v1"),
+            "{}",
+            local_policy.version
+        );
+
+        let unnamed_policy = worker_probation_policy(&config, "claude-api");
+        assert_eq!(unnamed_policy, default_worker_probation_policy());
     }
 
     #[test]
