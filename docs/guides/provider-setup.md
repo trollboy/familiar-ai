@@ -90,10 +90,24 @@ discovery with nested model IDs (FAM-BUG-002 fix). Caveats:
 
 ## Routing reality check
 
-- With several workers enabled, **routing is effectively lexicographic
-  until PRD-032 lands** (FAM-BUG-007): unenriched workers default to
-  cost 0, "unknown" ties with "free," and the first ID wins. Do not read
-  model diversity into routing records yet.
+- Without `worker_registry.routing.ladder`, routing retains the historical
+  configured rules, pins, and lowest-cost/id tiebreak. Enable cheap-first
+  routing with that single ladder table and list each job class's workers in
+  cheapest-first order. Every worker still needs a PRD-086 cost basis.
+- `risk_floors` prevents a declared risk class from using rungs below the
+  named worker. `maximum_cheap_fraction_basis_points` skips a cheap rung when
+  it costs too large a fraction of the next rung, avoiding an unprofitable
+  extra attempt.
+- A failed cheap attempt escalates once with its verification or review
+  evidence and still consumes its cost/token reservation. Failure on the next
+  rung stops for a human decision; Familiar does not climb indefinitely.
+- Local rungs may start in probation. Promotion and demotion use recorded
+  review-pass, remediation, failure, and known cost-per-accepted-PRD evidence,
+  within the configured low-risk and expected-file bounds. Unknown cost never
+  promotes a worker.
+- `familiar-ai report` prints the durable rung path, active ladder rule,
+  escalation reason, and unknown-safe cost per accepted PRD. No ladder section
+  is printed for sessions that did not use one.
 - The first `model enable` against a legacy `[agents]` configuration is
   refused before writing (FAM-BUG-006 guard). The audited lossless
   migration command is PRD-075.

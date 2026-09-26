@@ -3,6 +3,25 @@
 # review_pin = "claude-review"
 # max_stage_cost_microusd = 0
 # required_context_tokens = 0
+#
+# Cheap-first routing is enabled by declaring a ladder. With no ladder, the
+# historical router is byte-for-byte unchanged. Rungs are cheapest first.
+# [worker_registry.routing.ladder]
+# implementation = ["local-ollama", "codex-primary"]
+# remediation = ["local-ollama", "codex-primary"]
+# review = ["claude-review"]
+# narrow_task = ["local-ollama", "codex-primary"]
+# maximum_cheap_fraction_basis_points = 5000
+# [worker_registry.routing.ladder.risk_floors]
+# security = "codex-primary"
+# [worker_registry.routing.ladder.probation]
+# workers = ["local-ollama"]
+# minimum_accepted_prds = 5
+# minimum_review_pass_basis_points = 9000
+# maximum_remediation_basis_points = 2000
+# maximum_failure_basis_points = 1000
+# maximum_cost_per_accepted_prd_microusd = 100000
+# maximum_expected_files = 6
 # [worker_registry.workers.codex-primary]
 # runtime = "codex" # execution mechanism; legacy `adapter` migrates deterministically
 # provider = "openai"
