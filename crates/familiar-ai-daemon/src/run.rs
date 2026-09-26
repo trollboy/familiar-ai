@@ -558,11 +558,27 @@ pub fn resolved_worker_plan(
                 }
             })
     };
-    let implementation = select(
-        WorkerStage::Implementation,
-        &routing.implementation_pin,
-        None,
-    )?;
+    let ladder_selection = if routing.implementation_pin.is_none() {
+        routing.ladder.as_ref().and_then(|ladder| {
+            ladder.select_rung(
+                familiar_ai_core::config::LadderJobClass::Implementation,
+                &route_context.risk_classes,
+                &configured.workers,
+                &configured.cost_bases,
+            )
+        })
+    } else {
+        None
+    };
+    let implementation_pin = routing.implementation_pin.clone().or_else(|| {
+        ladder_selection
+            .as_ref()
+            .map(|selection| selection.worker.clone())
+    });
+    let mut implementation = select(WorkerStage::Implementation, &implementation_pin, None)?;
+    if let Some(selection) = ladder_selection {
+        implementation.rule = format!("ladder:{}", selection.reason);
+    }
     let implementation_worker = registry.get(&implementation.selected_worker).unwrap();
     let mut records = vec![implementation.clone()];
     records.push(select(
@@ -5555,6 +5571,63 @@ estimated_cost_microusd = 1
             implementation_provider, review_provider,
             "implementer and reviewer must record distinct provider identities"
         );
+
+        let legacy_record = records
+            .iter()
+            .find(|record| record.stage == WorkerStage::Implementation)
+            .unwrap();
+        assert_eq!(legacy_record.selected_worker, "local-ollama");
+        assert_eq!(legacy_record.rule, "lowest-cost-then-id");
+
+        // One optional key changes only implementation admission: the same
+        // cheap capable worker is selected, now with durable ladder reason.
+        config.worker_registry.as_mut().unwrap().routing.ladder =
+            Some(familiar_ai_core::config::WorkerLadderConfig {
+                implementation: vec!["local-ollama".into(), "claude-api".into()],
+                remediation: Vec::new(),
+                review: Vec::new(),
+                narrow_task: Vec::new(),
+                risk_floors: BTreeMap::new(),
+                maximum_cheap_fraction_basis_points: 5_000,
+                probation: None,
+            });
+        let (_, _, ladder_records) =
+            resolved_worker_plan(&config, &RouteContext::default()).unwrap();
+        let ladder_record = ladder_records
+            .iter()
+            .find(|record| record.stage == WorkerStage::Implementation)
+            .unwrap();
+        assert_eq!(ladder_record.selected_worker, "local-ollama");
+        assert_eq!(ladder_record.rule, "ladder:cheapest-capable-rung");
+
+        let db = Database::open_in_memory().unwrap();
+        db.run_migrations().unwrap();
+        familiar_ai_storage::WorkerSelectionRepository::new(db.conn())
+            .record(
+                &familiar_ai_storage::repos::worker_selection::WorkerSelectionRecord {
+                    selection_id: "ladder-selection",
+                    execution_id: Some("ladder-execution"),
+                    stage: "implementation",
+                    rule: &ladder_record.rule,
+                    selected_identity: &ladder_record.selected_spec_identity,
+                    selected_empirical_version: &ladder_record.selected_empirical_version,
+                    candidates_json: "[]",
+                    risk_classes_json: "[]",
+                    expected_file_count: 0,
+                    cost_decision_reason: Some("cost-ranked-and-lost"),
+                },
+            )
+            .unwrap();
+        let stored: (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT rule,cost_decision_reason FROM worker_selections WHERE selection_id='ladder-selection'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, "ladder:cheapest-capable-rung");
+        assert_eq!(stored.1, "cost-ranked-and-lost");
     }
 
     /// An unregistered runtime is refused by name, naming the registered
