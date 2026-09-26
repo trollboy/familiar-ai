@@ -7,7 +7,7 @@
 //! database state yields byte-identical output, so only stored timestamps are
 //! rendered: never "now", never elapsed-since.
 
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use familiar_ai_review::ScopeDecision;
 use familiar_ai_storage::{
@@ -15,6 +15,7 @@ use familiar_ai_storage::{
     ExecutionHistoryRepository, OrchestrationRepository, ReviewRepository,
 };
 use familiar_ai_storage::{DriverRepository, DriverSession};
+use rusqlite::OptionalExtension;
 
 /// Attempts listed per section before the remainder is summarized.
 const MAX_LISTED_ATTEMPTS: usize = 20;
@@ -88,6 +89,7 @@ pub fn render_with_cost_floor(
         .partition(|attempt| attempt.outcome.as_deref() == Some("completed"));
     render_built(db, &mut out, &built);
     render_escalations(&mut out, &attempts);
+    render_ladder(db, &mut out, &attempts)?;
     render_stopped(db, &mut out, &stopped);
     render_authority(db, &mut out, &session.session_id)?;
     render_recovery(db, &mut out, &session.repository_key)?;
@@ -134,11 +136,10 @@ fn render_cost_coverage(
     let coverage = AccountingRepository::new(db.conn())
         .session_cost_coverage(session_id)
         .map_err(storage)?;
-    let percent = if coverage.executions == 0 {
-        0
-    } else {
-        coverage.measured_executions.saturating_mul(100) / coverage.executions
-    };
+    if coverage.executions == 0 {
+        return Ok(());
+    }
+    let percent = coverage.measured_executions.saturating_mul(100) / coverage.executions;
     let _ = writeln!(
         out,
         "\nCOST COVERAGE\n  measured={}/{} ({}%)",
@@ -255,6 +256,98 @@ fn render_escalations(out: &mut String, attempts: &[DriverAttempt]) {
         );
     }
     render_omitted(out, escalations.len(), MAX_LISTED_ATTEMPTS);
+}
+
+fn render_ladder(
+    db: &Database,
+    out: &mut String,
+    attempts: &[DriverAttempt],
+) -> Result<(), ReportError> {
+    let mut by_prd: BTreeMap<&str, Vec<(&DriverAttempt, String, String)>> = BTreeMap::new();
+    for attempt in attempts {
+        let Some(execution_id) = attempt.execution_id.as_deref() else {
+            continue;
+        };
+        let selection = db
+            .conn()
+            .query_row(
+                "SELECT selection.rule, COALESCE(spec.worker_alias, selection.selected_identity) \
+                 FROM worker_selections selection \
+                 LEFT JOIN worker_specs spec \
+                   ON spec.spec_identity = selection.selected_spec_identity \
+                 WHERE selection.execution_id = ?1 AND selection.stage = 'implementation' \
+                 ORDER BY selection.recorded_at DESC LIMIT 1",
+                [execution_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        if let Some((rule, worker)) = selection {
+            by_prd
+                .entry(&attempt.prd_id)
+                .or_default()
+                .push((attempt, rule, worker));
+        }
+    }
+    by_prd.retain(|_, rows| {
+        rows.iter().any(|(_, rule, _)| rule.starts_with("ladder:"))
+            || rows
+                .iter()
+                .any(|(attempt, _, _)| attempt.escalated_from_sequence.is_some())
+    });
+    if by_prd.is_empty() {
+        return Ok(());
+    }
+
+    let accepted = by_prd
+        .values()
+        .filter(|rows| {
+            rows.iter()
+                .any(|(attempt, _, _)| attempt.outcome.as_deref() == Some("completed"))
+        })
+        .count();
+    let costs = by_prd
+        .values()
+        .flat_map(|rows| {
+            rows.iter()
+                .map(|(attempt, _, _)| attempt.known_cost_microusd)
+        })
+        .collect::<Vec<_>>();
+    let cost_per_accepted = if accepted == 0 || costs.iter().any(Option::is_none) {
+        "unknown".to_string()
+    } else {
+        format!(
+            "{} micro-USD",
+            costs.into_iter().flatten().sum::<u64>() / accepted as u64
+        )
+    };
+
+    let _ = writeln!(out, "\nLADDER ({})", by_prd.len());
+    let _ = writeln!(
+        out,
+        "  configuration=worker_registry.routing.ladder cost_per_accepted_prd={cost_per_accepted}"
+    );
+    for (prd_id, rows) in by_prd {
+        let path = rows
+            .iter()
+            .map(|(_, _, worker)| worker.as_str())
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        let active_rule = rows
+            .iter()
+            .find_map(|(_, rule, _)| rule.strip_prefix("ladder:"))
+            .unwrap_or("unknown");
+        let escalation = rows
+            .iter()
+            .rev()
+            .find_map(|(attempt, _, _)| attempt.escalation_reason.as_deref())
+            .unwrap_or("none");
+        let _ = writeln!(
+            out,
+            "  {prd_id}: {path} active_rule={active_rule} escalation={escalation}"
+        );
+    }
+    Ok(())
 }
 
 fn render_authority(db: &Database, out: &mut String, session_id: &str) -> Result<(), ReportError> {
@@ -910,6 +1003,132 @@ mod tests {
             ended = session.ended_at.unwrap(),
         );
         assert_eq!(render(&db, None, 0).unwrap(), expected);
+    }
+
+    #[test]
+    fn ladder_report_uses_durable_rung_escalation_and_cost_rows() {
+        let db = database();
+        let repository = seed(&db, "drive-ladder", r#"{"max_prds":1}"#);
+        let specs = familiar_ai_storage::WorkerSpecRepository::new(db.conn());
+        specs
+            .record_spec(
+                "local-spec",
+                "local-v1",
+                "local",
+                "local",
+                "ollama",
+                "qwen",
+                None,
+                None,
+                "implementer",
+                "{}",
+            )
+            .unwrap();
+        specs
+            .record_spec(
+                "strong-spec",
+                "strong-v1",
+                "strong",
+                "anthropic",
+                "claude-code",
+                "sonnet",
+                None,
+                None,
+                "implementer",
+                "{}",
+            )
+            .unwrap();
+
+        let cheap = repository
+            .record_attempt_started(
+                "drive-ladder",
+                "PRD-107",
+                "docs/prds/PRD-107.md",
+                Some("exec-cheap"),
+            )
+            .unwrap();
+        repository
+            .record_attempt_finished(
+                "drive-ladder",
+                cheap,
+                "retained",
+                Some("verification_failed"),
+                Some(40),
+                Some(10),
+            )
+            .unwrap();
+        let strong = repository
+            .record_escalated_attempt_started_with_sources(
+                "drive-ladder",
+                "PRD-107",
+                "docs/prds/PRD-107.md",
+                Some("exec-strong"),
+                "global",
+                "global",
+                None,
+                None,
+                None,
+                Some(cheap),
+                Some("required_verification_failed"),
+            )
+            .unwrap();
+        repository
+            .record_attempt_finished(
+                "drive-ladder",
+                strong,
+                "completed",
+                None,
+                Some(60),
+                Some(20),
+            )
+            .unwrap();
+        repository
+            .finish_session("drive-ladder", "backlog_empty")
+            .unwrap();
+
+        let selections = familiar_ai_storage::WorkerSelectionRepository::new(db.conn());
+        for (selection_id, execution_id, rule, spec, version) in [
+            (
+                "select-cheap",
+                "exec-cheap",
+                "ladder:cheapest-profitable-rung",
+                "local-spec",
+                "local-v1",
+            ),
+            (
+                "select-strong",
+                "exec-strong",
+                "explicit-pin",
+                "strong-spec",
+                "strong-v1",
+            ),
+        ] {
+            selections
+                .record(
+                    &familiar_ai_storage::repos::worker_selection::WorkerSelectionRecord {
+                        selection_id,
+                        execution_id: Some(execution_id),
+                        stage: "implementation",
+                        rule,
+                        selected_identity: spec,
+                        selected_empirical_version: version,
+                        candidates_json: "[]",
+                        risk_classes_json: "[]",
+                        expected_file_count: 1,
+                        cost_decision_reason: Some("cost-ranked-and-lost"),
+                    },
+                )
+                .unwrap();
+        }
+
+        let report = render(&db, Some("drive-ladder"), 0).unwrap();
+        assert!(report.contains("LADDER (1)"));
+        assert!(report.contains(
+            "configuration=worker_registry.routing.ladder cost_per_accepted_prd=100 micro-USD"
+        ));
+        assert!(report.contains(
+            "PRD-107: local -> strong active_rule=cheapest-profitable-rung escalation=required_verification_failed"
+        ));
     }
 
     #[test]
