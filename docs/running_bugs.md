@@ -53,6 +53,40 @@ morning before it.
   former's shape while every ladder and reservation predicate requires the
   latter's.
 
+### FAM-BUG-117 — The local rung asked Ollama for `ollama/<model>` and got 404
+
+- **Status:** Fixed 2026-09-27 (`as_agent_entry` leaves a PRD-063 local
+  worker's model bare; the `ollama/` prefix is applied only to the
+  Codex-harness adapter path, which is the only code that strips it; unit
+  test pins both shapes).
+- **Found:** 2026-09-27, session `drive-00001790475375719037-0000498701-000000`,
+  the first attempt to get past reservation on the local rung. Ollama's log
+  shows one `POST /v1/chat/completions` answered 404; the loop reported
+  `ProviderFailure { taxonomy: NonRetryable }` and the attempt retained as
+  `malformed_output` at zero cost. `curl` with `ollama/qwen2.5:7b` reproduces
+  the 404; the bare name answers 200.
+- **Detail:** `run.rs` copies the routed worker's `as_agent_entry().model`
+  into `review.implementation_agent.model` and hands that to the execution
+  request; `as_agent_entry` prefixed every Ollama worker for
+  `codex --oss --local-provider ollama`, a convention the raw loop never
+  reverses.
+
+### FAM-BUG-118 — A cheap-rung provider failure ends the session instead of escalating
+
+- **Status:** Open
+- **Found:** 2026-09-27, same session. The local rung failed before any
+  work (FAM-BUG-117); the session terminated `budget_prds_exhausted
+  attempted=1 completed=0` with `ESCALATIONS (0)`. The hosted rung was
+  configured and idle.
+- **Detail:** PRD-107 escalates on a synthesized check failure or blocking
+  review findings. A provider failure, a reservation refusal or any other
+  zero-cost stop on the cheap rung is none of those, so the ladder's whole
+  promise, "try cheap, fall back once", is not kept for exactly the failures
+  a cheap local rung is most likely to produce.
+- **Expected fix:** any terminal failure of a cheap-rung attempt that
+  produced no candidate escalates once with its reason as evidence; the
+  hosted attempt's cost still counts against the PRD ceiling.
+
 ### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
 
 - **Status:** Open

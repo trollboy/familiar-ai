@@ -751,7 +751,15 @@ impl RegistryWorkerConfig {
             None
         } else {
             match adapter {
-                AgentAdapterKind::Ollama if !self.model.starts_with("ollama/") => {
+                // The `ollama/` prefix is the Codex-harness convention
+                // (`codex --oss --local-provider ollama --model <bare>`), and
+                // only that adapter strips it back off. A PRD-063 local
+                // worker runs through Familiar's own loop, which sends the
+                // name straight to the endpoint; Ollama answers a prefixed
+                // name with 404 "model not found" (FAM-BUG-117).
+                AgentAdapterKind::Ollama
+                    if self.local.is_none() && !self.model.starts_with("ollama/") =>
+                {
                     Some(format!("ollama/{}", self.model))
                 }
                 _ => Some(self.model.clone()),
@@ -1644,6 +1652,27 @@ mod local_worker_tests {
             routing: WorkerRoutingConfig::default(),
             ..Default::default()
         }
+    }
+
+    /// FAM-BUG-117: a PRD-063 local worker's agent entry names the model
+    /// exactly as the endpoint knows it; the Codex-harness prefix applies only
+    /// to the adapter path that strips it again.
+    #[test]
+    fn local_ollama_worker_entry_keeps_the_bare_model_name() {
+        let mut worker = local_worker("ollama", "ollama", None, None);
+        worker.model = "qwen2.5:7b".into();
+        assert_eq!(
+            worker.as_agent_entry().model.as_deref(),
+            Some("ollama/qwen2.5:7b"),
+            "the Codex-harness path keeps its prefix"
+        );
+        worker.provider = LOCAL_PROVIDER.into();
+        worker.local = Some(loopback_local(LocalRuntimeKind::Ollama));
+        assert_eq!(
+            worker.as_agent_entry().model.as_deref(),
+            Some("qwen2.5:7b"),
+            "the local runtime sends the bare name to the endpoint"
+        );
     }
 
     fn loopback_local(kind: LocalRuntimeKind) -> LocalWorkerConfig {
