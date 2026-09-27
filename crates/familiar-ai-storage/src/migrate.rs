@@ -126,7 +126,7 @@ mod tests {
         let db = crate::Database::open_in_memory().unwrap();
         let first = db.run_migrations().unwrap();
         let second = db.run_migrations().unwrap();
-        assert_eq!(first, 61);
+        assert_eq!(first, 62);
         assert_eq!(second, 0);
     }
 
@@ -148,9 +148,54 @@ mod tests {
             vec![
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
                 24, 25, 26, 27, 28, 29, 30, 31, 32, 39, 40, 41, 42, 43, 44, 45, 47, 49, 51, 52, 53,
-                54, 55, 56, 57, 58, 61, 62, 63, 64, 65, 66, 68, 69, 70, 71, 72, 73
+                54, 55, 56, 57, 58, 61, 62, 63, 64, 65, 66, 68, 69, 70, 71, 72, 73, 74
             ]
         );
+    }
+
+    /// FAM-BUG-111: migration 074 widens execution_history's outcome set
+    /// for the raw-model loop's budget outcomes without detaching the nine
+    /// tables that reference it.
+    #[test]
+    fn migration_074_admits_budget_outcomes_and_keeps_child_foreign_keys_attached() {
+        let db = test_db();
+        let conn = db.conn();
+        let insert = |id: &str, outcome: &str| {
+            conn.execute(
+                "INSERT INTO execution_history (execution_id, started_at, agent, outcome, repository, worktree, prd_path, unavailable_fields) \
+                 VALUES (?1, '2026-09-27T00:00:00Z', 'ollama', ?2, '/repo/.git', '/repo', 'docs/prds/PRD-110.md', '{}')",
+                params![id, outcome],
+            )
+        };
+        insert("exec-stopped", "budget_stopped").unwrap();
+        insert("exec-refused", "budget_refused").unwrap();
+        assert!(insert("exec-bogus", "not_an_outcome").is_err());
+
+        let children: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%REFERENCES execution_history%'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(children.len() >= 9, "{children:?}");
+        for child in &children {
+            let parents: Vec<String> = conn
+                .prepare(&format!("PRAGMA foreign_key_list({child})"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(2))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(
+                parents.iter().any(|table| table == "execution_history"),
+                "{child} no longer references execution_history: {parents:?}"
+            );
+        }
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
     }
 
     #[test]
@@ -243,7 +288,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 18);
+        assert_eq!(db.run_migrations().unwrap(), 19);
         let selection_schema: String = db
             .conn()
             .query_row(
@@ -296,7 +341,7 @@ mod tests {
             [&spec],
         ).unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 20);
+        assert_eq!(db.run_migrations().unwrap(), 21);
         let artifact_id = format!("sha256:{}", "a".repeat(64));
         let migrated: (String, String) = db
             .conn()
@@ -364,7 +409,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 59);
+        assert_eq!(db.run_migrations().unwrap(), 60);
         let unchanged: (i64, String, String) = db
             .conn()
             .query_row(
@@ -420,7 +465,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 55);
+        assert_eq!(db.run_migrations().unwrap(), 56);
         let project: (String, String) = db
             .conn()
             .query_row(
@@ -451,7 +496,7 @@ mod tests {
                 .unwrap();
         }
         db.conn().execute("INSERT INTO backlog_prds(repository_key,prd_path,prd_number,content_hash,status,discovered_at,last_seen_at,created_at,updated_at) VALUES('repo','docs/prds/PRD-009.md',9,'hash','pending','before','before','before','before')",[]).unwrap();
-        assert_eq!(db.run_migrations().unwrap(), 54);
+        assert_eq!(db.run_migrations().unwrap(), 55);
         let preserved: String = db
             .conn()
             .query_row("SELECT status FROM backlog_prds", [], |r| r.get(0))
@@ -485,7 +530,7 @@ mod tests {
         db.conn().execute("INSERT INTO backlog_status_events(event_id,repository_key,prd_path,old_status,new_status,actor,changed_at) VALUES(3,'repo','docs/prds/PRD-009.md','pending','completed','human:alice','before')",[]).unwrap();
         db.conn().execute("INSERT INTO backlog_recovery_events(status_event_id,action,reason) VALUES(3,'manual_complete_override','accepted outside normal review')",[]).unwrap();
 
-        assert_eq!(db.run_migrations().unwrap(), 51);
+        assert_eq!(db.run_migrations().unwrap(), 52);
 
         let rows: Vec<(i64, String, String)> = {
             let mut stmt = db

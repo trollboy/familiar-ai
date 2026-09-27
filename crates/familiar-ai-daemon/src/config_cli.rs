@@ -1396,16 +1396,41 @@ fn model_enable(
         "claude" => AgentAdapterKind::ClaudeCode,
         _ => AgentAdapterKind::Codex,
     };
+    // FAM-BUG-112: an Ollama model runs through Familiar's own loop as a
+    // PRD-063 local worker. The registry's ladder probation and the local
+    // reservation both key on that shape (`provider = "local"` plus a
+    // `[local]` profile with a declared capacity); emitting the bare adapter
+    // shape produced a worker the validator refused and the reservation
+    // would have turned away as unknown capacity.
+    let (provider_label, local) = if adapter == AgentAdapterKind::Ollama {
+        (
+            familiar_ai_core::config::LOCAL_PROVIDER.to_owned(),
+            Some(familiar_ai_core::config::LocalWorkerConfig {
+                runtime_kind: familiar_ai_core::config::LocalRuntimeKind::Ollama,
+                endpoint: familiar_ai_core::config::LocalEndpointConfig {
+                    base_url: format!("http://{}", provider.host),
+                    tls: false,
+                },
+                resources: familiar_ai_core::config::LocalResourceProfileConfig {
+                    concurrent_inference_slots: Some(1),
+                    model_loading_slots: Some(1),
+                    ..Default::default()
+                },
+            }),
+        )
+    } else {
+        (provider_name.to_owned(), None)
+    };
     let worker = RegistryWorkerConfig {
         adapter: Some(adapter),
-        provider: provider_name.into(),
+        provider: provider_label,
         model: model.into(),
         runtime: Some(adapter.as_str().into()),
         model_artifact: None,
         auth_profile: None,
         capability_profile: None,
         runtime_config: None,
-        local: None,
+        local,
         executable: None,
         capabilities: parsed,
         fresh_process_isolation: true,
@@ -1455,10 +1480,30 @@ fn model_enable(
                 // silently forget this table.
                 AgentAdapterKind::RawAgentLoop => "raw-agent-loop",
             });
-            table["provider"] = value(provider_name);
+            // FAM-BUG-112: persist the shape that was validated above, not
+            // a hand-built subset of it.
+            table["provider"] = value(worker.provider.as_str());
             table["model"] = value(model);
+            table["runtime"] = value(adapter.as_str());
             table["capabilities"] = array_value(capabilities);
             table["fresh_process_isolation"] = value(true);
+            if let Some(local) = &worker.local {
+                let mut local_table = Table::new();
+                local_table["runtime_kind"] = value(local.runtime_kind.as_str());
+                let mut endpoint = Table::new();
+                endpoint["base_url"] = value(local.endpoint.base_url.as_str());
+                endpoint["tls"] = value(local.endpoint.tls);
+                local_table.insert("endpoint", Item::Table(endpoint));
+                let mut resources = Table::new();
+                if let Some(slots) = local.resources.concurrent_inference_slots {
+                    resources["concurrent_inference_slots"] = value(slots as i64);
+                }
+                if let Some(slots) = local.resources.model_loading_slots {
+                    resources["model_loading_slots"] = value(slots as i64);
+                }
+                local_table.insert("resources", Item::Table(resources));
+                table.insert("local", Item::Table(local_table));
+            }
             workers.insert(address, Item::Table(table));
             Ok(())
         },
@@ -1988,7 +2033,10 @@ pub fn probe_with_store(
     let credential = check_auth_with_store(auth, store)?;
     #[cfg(test)]
     match host {
-        "fixture-success:1" => return Ok(vec!["llama2".into(), "qwen3".into()]),
+        // `127.0.0.1:1` is the loopback twin of `fixture-success:1`: the
+        // local-worker shape FAM-BUG-112 emits is only valid without an
+        // auth profile on a loopback endpoint.
+        "fixture-success:1" | "127.0.0.1:1" => return Ok(vec!["llama2".into(), "qwen3".into()]),
         "fixture-fail:1" => return Err("host unreachable".into()),
         _ => {}
     }
@@ -2383,7 +2431,7 @@ mod tests {
                 name: "ollama".into(),
                 kind: "inference".into(),
                 mode: None,
-                host: Some("fixture-success:1".into()),
+                host: Some("127.0.0.1:1".into()),
                 auth: None,
                 via: None,
                 recipe: None,
@@ -2402,11 +2450,21 @@ mod tests {
         )
         .unwrap();
         let config = load_config(&context).unwrap();
-        assert!(config
+        let worker = config
             .worker_registry
             .unwrap()
             .workers
-            .contains_key("ollama/qwen3"));
+            .remove("ollama/qwen3")
+            .expect("enabled worker is registered under provider/model");
+        // FAM-BUG-112: the PRD-063 local shape, as the ladder's probation
+        // validator and the local reservation require.
+        assert_eq!(worker.provider, familiar_ai_core::config::LOCAL_PROVIDER);
+        assert_eq!(worker.runtime.as_deref(), Some("ollama"));
+        let local = worker
+            .local
+            .expect("ollama worker carries a [local] profile");
+        assert_eq!(local.endpoint.base_url, "http://127.0.0.1:1");
+        assert_eq!(local.resources.concurrent_inference_slots, Some(1));
         execute_with_context(
             ConfigAction::ModelDisable {
                 model: "ollama/qwen3".into(),
@@ -2419,6 +2477,45 @@ mod tests {
         assert!(!config
             .worker_registry
             .as_ref()
+            .is_some_and(|registry| registry.workers.contains_key("ollama/qwen3")));
+    }
+
+    /// FAM-BUG-112: the local shape carries the registry's own contract; a
+    /// non-loopback Ollama endpoint with no auth is refused by name rather
+    /// than written as a worker nothing can run.
+    #[test]
+    fn non_loopback_ollama_without_auth_is_refused_at_enable() {
+        let (_directory, context) = context();
+        execute_with_context(
+            ConfigAction::ProviderAdd {
+                name: "ollama".into(),
+                kind: "inference".into(),
+                mode: None,
+                host: Some("fixture-success:1".into()),
+                auth: None,
+                via: None,
+                recipe: None,
+                actor: Some("human:test".into()),
+            },
+            &context,
+        )
+        .unwrap();
+        let error = execute_with_context(
+            ConfigAction::ModelEnable {
+                model: "ollama/qwen3".into(),
+                capabilities: vec!["implementation".into()],
+                actor: Some("human:test".into()),
+            },
+            &context,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("non-loopback local endpoints require auth_profile"),
+            "{error}"
+        );
+        let config = load_config(&context).unwrap();
+        assert!(!config
+            .worker_registry
             .is_some_and(|registry| registry.workers.contains_key("ollama/qwen3")));
     }
 

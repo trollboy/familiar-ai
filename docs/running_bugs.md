@@ -12,6 +12,105 @@ entries were off-format, and "how many are open" had a different answer
 depending on how it was asked. `bug_log_contract.rs` fails the build if an id
 appears with no entry, or with a status a reader cannot classify.
 
+## 2026-09-27 — the first cheap-first ladder run
+
+The PRD-107 branch landed and the live config was migrated to a worker
+registry with a local Ollama rung. The first `drive` under the ladder routed
+PRD-110's first attempt to the local rung (correct) and then died in
+bookkeeping. Everything below fell out of that one run and the disk-full
+morning before it.
+
+### FAM-BUG-111 — execution_history rejects the raw loop's budget outcomes
+
+- **Status:** Fixed 2026-09-27 (migration 074 widens the CHECK to
+  `budget_stopped` and `budget_refused`; it recreates the table under its own
+  name with foreign-key enforcement deferred so the nine child tables keep
+  their references; regression tests in `migrate.rs` and
+  `execution_history.rs`; verified against a copy of the live database).
+- **Found:** 2026-09-27, session `drive-00001790473246770971-0000298159-000000`.
+  Attempt 1 of PRD-110 on `ollama/qwen2.5:7b` ended
+  `history_finalize_failed ... CHECK constraint failed: outcome IN (...)`.
+- **Detail:** the raw-model loop returns `BudgetStopped` when its budget
+  reservation is refused and the run gate returns `budget_refused` for an
+  unenforceable cost ceiling; `session_rollup.rs` has counted both names since
+  PRD-064, but `execution_history.outcome` still carried migration 013's list.
+  The finalize error replaced the real reason, so the report said
+  `history_failed` and nothing about budgets.
+
+### FAM-BUG-112 — `config model enable ollama/<model>` emits a worker the ladder refuses
+
+- **Status:** Fixed 2026-09-27 (an Ollama model is written in the PRD-063
+  local shape: `provider = "local"`, `[local]` profile with the provider's
+  endpoint and `concurrent_inference_slots = 1`; `provider add --host` guide
+  corrected to `host:port`; test updated).
+- **Found:** 2026-09-27 while enabling the local rung. The audited command
+  produced `adapter = "ollama", provider = "ollama"` with no `[local]` block;
+  `worker_registry.routing.ladder.probation` then refused the worker as "must
+  be a local worker", and the guide's own `--host http://127.0.0.1:11434`
+  was rejected as malformed.
+- **Detail:** the two Ollama paths in the codebase (Codex-harness adapter
+  and PRD-063 local runtime) share a name; the enable command emitted the
+  former's shape while every ladder and reservation predicate requires the
+  latter's.
+
+### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
+
+- **Status:** Open
+- **Found:** 2026-09-27 morning. `/var/lib` hit 100 percent; the Docker
+  preflight for PRD-107 failed with `No space left on device` inside the
+  container. `~/.local/state/familiar-ai/worktrees` held 156 GB across seven
+  attempts whose PRDs were all in `done/`, each carrying its own cargo target.
+- **Detail:** `worktree.rs` only re-labels ownership sidecars on recovery;
+  nothing removes a worktree once its attempt is `completed`,
+  `verification_failed`, or otherwise terminal. A week of drive sessions
+  filled the pool and turned a code failure into a disk failure with a
+  misleading error.
+- **Expected fix:** reap the worktree (and its target) when an attempt
+  reaches a terminal phase and its branch carries no commits beyond main, or
+  on a bounded age; keep the branch and the sidecar.
+
+### FAM-BUG-114 — The dashboard's attempt state disagrees with the ledger
+
+- **Status:** Open
+- **Found:** 2026-09-27. The dependency Gantt showed PRD-110 as
+  `stopped after implemented` with `Ledger: in_progress`, while
+  `driver_attempts` had no row for PRD-110 at all: its 2026-09-24 run edited
+  the live checkout and its work was committed as `wip` in main.
+- **Detail:** the card reads backlog state (`backlog_prds`) and a checkpoint
+  phase, not the driver ledger; when the two diverge the operator sees a
+  confident label with no row behind it.
+- **Expected fix:** the card names its source, or shows the divergence the
+  way `stewardship.rs` already computes it for FAM-BUG-099.
+
+### FAM-BUG-115 — A desktop single-instance collision exits 0, so the tray stays down
+
+- **Status:** Open
+- **Found:** 2026-09-27 after `scripts/reinstall.sh`. A stray
+  `familiar-ai-desktop --version` process from a probe held the single
+  instance; the supervised desktop started, handed off to it, and exited 0.
+  systemd's `Restart=on-failure` treated that as success, and the tray stayed
+  absent until the stray was killed and the unit restarted by hand.
+- **Detail:** `tauri_plugin_single_instance` makes a second launch a
+  successful no-op. Under a supervisor that is the one exit code that
+  guarantees no retry. "No tray icon" is a failure case by the owner's rule.
+- **Expected fix:** the supervised launch treats "another instance owns the
+  tray" as a failure (non-zero exit) or the unit uses `Restart=always` with a
+  backoff.
+
+### FAM-BUG-116 — An unknown-capacity refusal never reaches the report
+
+- **Status:** Open
+- **Found:** 2026-09-27, same session as FAM-BUG-111. The local worker had
+  no `[local.resources]` block, so `acquire_with_unknown_capacity_policy`
+  refused the reservation before any model call. The only trace was a
+  `tracing::warn!` inside the drive process and a `budget_stopped` outcome;
+  the report could not say why the cheap rung produced nothing.
+- **Detail:** the refusal is correct (undeclared capacity is unknown, not
+  assumed). Its legibility is not: a refusal that costs the whole rung must
+  appear as the attempt's retained detail, naming the missing profile field.
+- **Expected fix:** carry the reservation refusal text into
+  `retained_detail` and the session report's escalation reason.
+
 ## 2026-09-22 — queue audit and the PR #19 landing
 
 ### FAM-BUG-070 — Raw implementations were recorded twice in the usage ledger

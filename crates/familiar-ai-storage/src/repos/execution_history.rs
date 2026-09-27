@@ -318,6 +318,24 @@ mod tests {
         );
     }
 
+    /// FAM-BUG-111: the raw-model loop's budget outcomes are storable.
+    #[test]
+    fn budget_outcomes_from_the_raw_loop_finalize() {
+        for outcome in ["budget_stopped", "budget_refused"] {
+            let (db, start) = repository();
+            let repo = ExecutionHistoryRepository::new(db.conn());
+            repo.insert_running(&start).unwrap();
+            let finalization = ExecutionFinalization {
+                ended_at: "2026-09-27T00:00:01Z".into(),
+                duration_ms: 1,
+                outcome: outcome.into(),
+                ..Default::default()
+            };
+            repo.finalize(&start.execution_id, &finalization)
+                .unwrap_or_else(|error| panic!("{outcome}: {error}"));
+        }
+    }
+
     #[test]
     fn recent_order_has_stable_tie_breaker() {
         let (db, mut start) = repository();

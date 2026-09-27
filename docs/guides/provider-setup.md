@@ -52,12 +52,19 @@ Caveats:
 ## Local Ollama
 
 ```sh
-familiar-ai config provider add ollama --kind inference --host http://127.0.0.1:11434
+familiar-ai config provider add ollama --kind inference --host 127.0.0.1:11434
 familiar-ai config model enable ollama/<model> --capabilities review,narrow-task
 ```
 
 Caveats:
 
+- `--host` is `host:port`, no scheme (FAM-BUG-112: the URL form this guide
+  used to show is refused as malformed).
+- The enabled worker is written in the PRD-063 local shape (`provider =
+  "local"`, a `[local]` profile with `concurrent_inference_slots = 1`), which
+  is what `worker_registry.routing.ladder.probation` and the local hardware
+  reservation require. Raise the declared slots only if the endpoint really
+  serves concurrent requests.
 - Discovery uses `/api/tags` through the standard HTTP client (chunked
   responses fine since FAM-BUG-005's fix).
 - **Codex-driven review requires Ollama ≥ 0.13.4** (FAM-BUG-013): with an
