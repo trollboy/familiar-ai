@@ -87,6 +87,32 @@ morning before it.
   produced no candidate escalates once with its reason as evidence; the
   hosted attempt's cost still counts against the PRD ceiling.
 
+### FAM-BUG-119 — A provider failure held the local rung's only inference slot forever
+
+- **Status:** Fixed 2026-09-27 for the definitive-answer case
+  (`resolution_for_stop_reason` releases the hardware reservation on a
+  non-retryable provider failure, where a live endpoint answered with an
+  error; a timeout, a disappearance or an ambiguous failure still holds, and
+  that hold remains permanent because nothing in the daemon produces
+  owner-liveness evidence — the open half). The slot leaked by attempt 2 on this box has to be
+  released by hand; the repair statement is in the session notes.
+- **Found:** 2026-09-27, attempt 3 of PRD-110 under the ladder: refused
+  before any request, reported as "reached its enforced budget ceiling",
+  zero cost, no Ollama traffic. `resource_pools` showed
+  `local:ollama:qwen2.5:7b:inference-slots capacity=1 available=0` with
+  attempt 2's `local-agent` reservation still `held` after its 404.
+- **Detail:** `HoldUnknown` was written for crash or disappearance, where
+  capacity may still be in use. A provider failure is the endpoint
+  answering; the request is over. And the recovery path the hold relies on
+  (`ReservationRepository::recover` with `OwnerLiveness::ProvablyDead`) has
+  no producer outside tests, so any held hardware reservation is a permanent
+  pool leak. On a one-slot local pool that means one failure retires the
+  cheap rung until an operator edits the database.
+- **Expected fix (open half):** a liveness producer that recovers held
+  hardware reservations whose owner execution has finished (its
+  `execution_history` row has `ended_at`), run at daemon start and after
+  each attempt; and the refusal text surfaced in the report (FAM-BUG-116).
+
 ### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
 
 - **Status:** Open

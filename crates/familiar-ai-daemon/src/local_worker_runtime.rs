@@ -30,7 +30,7 @@
 
 use chrono::{DateTime, Utc};
 
-use familiar_ai_agent::raw_runtime::{RunOutcome, StopReason};
+use familiar_ai_agent::raw_runtime::{ProviderFailureTaxonomy, RunOutcome, StopReason};
 use familiar_ai_core::config::LocalResourceProfileConfig;
 use familiar_ai_core::{
     GrantMode, ReservationOwnerIdentity, ResourceRequest, ResourceType, UnknownConsumptionPolicy,
@@ -307,10 +307,21 @@ pub fn resolution_for_stop_reason(stop_reason: StopReason) -> ReservationResolut
         | StopReason::FatalToolRefusal
         | StopReason::InvalidStructuredOutput => ReservationResolution::CommitObserved,
         StopReason::Cancelled => ReservationResolution::ReleaseUnused,
-        // Timeout and provider failure both cover crash/disappearance: the
-        // endpoint may have partially consumed capacity with no way to
-        // observe how much, so the honest resolution holds rather than
-        // guesses either extreme.
+        // A non-retryable provider failure is a definitive answer from a
+        // live endpoint (Ollama's 404 in FAM-BUG-119): the request that
+        // occupied the slot is over and nothing is computing on it. Holding
+        // here leaked the one-slot local pool for good, because nothing in
+        // the daemon produces the liveness evidence that would recover a
+        // held reservation. The budget reservation's unknown-consumption
+        // hold in `finish` is a separate, per-attempt pool and is unchanged.
+        StopReason::ProviderFailure {
+            taxonomy: ProviderFailureTaxonomy::NonRetryable,
+        } => ReservationResolution::ReleaseUnused,
+        // Timeout, disappearance and ambiguous provider failures are the
+        // genuinely uncertain cases: the endpoint may still be computing on
+        // this slot, so the honest resolution holds rather than guesses.
+        // With no liveness producer that hold is still permanent
+        // (FAM-BUG-119's open half).
         StopReason::Timeout | StopReason::ProviderFailure { .. } => {
             ReservationResolution::HoldUnknown
         }
@@ -759,8 +770,11 @@ mod tests {
         );
     }
 
+    /// FAM-BUG-119: a provider failure is an answer from the endpoint; the
+    /// slot is released so the next attempt on a one-slot pool is not
+    /// refused forever.
     #[test]
-    fn crash_or_disappearance_holds_the_reservation_never_releases_unknown_consumption() {
+    fn provider_failure_releases_the_slot_for_the_next_claimant() {
         let mut db = database();
         let mut repo = ReservationRepository::new(db.conn_mut());
         repo.define_pool(
@@ -784,8 +798,51 @@ mod tests {
             &mut repo,
             &grant.reservation_id,
             StopReason::ProviderFailure {
-                taxonomy: familiar_ai_agent::raw_runtime::ProviderFailureTaxonomy::Retryable,
+                taxonomy: familiar_ai_agent::raw_runtime::ProviderFailureTaxonomy::NonRetryable,
             },
+            vec![],
+            "test",
+        )
+        .unwrap();
+        assert!(
+            result.is_none(),
+            "a provider failure releases, it does not settle"
+        );
+        let again = acquire_with_unknown_capacity_policy(
+            &mut repo,
+            &owner("b"),
+            &requests,
+            UnknownCapacityPolicy::Refuse,
+        )
+        .unwrap();
+        assert!(matches!(again, AcquireOutcome::Granted(_)));
+    }
+
+    #[test]
+    fn timeout_holds_the_reservation_never_releases_unknown_consumption() {
+        let mut db = database();
+        let mut repo = ReservationRepository::new(db.conn_mut());
+        repo.define_pool(
+            "local:ollama:llama3:inference-slots",
+            &ResourceType::InferenceSlots,
+            1,
+            false,
+        )
+        .unwrap();
+        let requests = execution_resource_requests("local:ollama:llama3", None, None, false);
+        let AcquireOutcome::Granted(grant) = acquire_with_unknown_capacity_policy(
+            &mut repo,
+            &owner("a"),
+            &requests,
+            UnknownCapacityPolicy::Refuse,
+        )
+        .unwrap() else {
+            panic!("expected grant");
+        };
+        let result = resolve_reservation(
+            &mut repo,
+            &grant.reservation_id,
+            StopReason::Timeout,
             vec![],
             "test",
         )
