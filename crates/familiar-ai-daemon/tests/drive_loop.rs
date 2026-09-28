@@ -69,6 +69,13 @@ struct ConcurrencyAgent {
     active: AtomicUsize,
     peak: AtomicUsize,
     preflights: AtomicUsize,
+    /// How many executions must be in flight together before one returns.
+    /// A fixed 150 ms hold measured timing luck: under the gate's load the
+    /// second job's worktree setup outlasted the first job's hold and the
+    /// peak read 1 (FAM-BUG-096 class). A rendezvous measures the driver's
+    /// actual parallelism; a serial driver fails it honestly after the
+    /// deadline instead of by chance.
+    rendezvous: usize,
 }
 
 struct PanickingAgent;
@@ -116,6 +123,14 @@ impl CodingAgent for ConcurrencyAgent {
     ) -> Result<ExecutionResult, AgentExecutionError> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while self.active.load(Ordering::SeqCst) < self.rendezvous
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.peak
+            .fetch_max(self.active.load(Ordering::SeqCst), Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(150));
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(ExecutionResult {
@@ -553,6 +568,7 @@ fn independent_scopes_execute_with_bounded_parallelism() {
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
         preflights: AtomicUsize::new(0),
+        rendezvous: 2,
     };
     let agents = AgentSet {
         implementation: &agent,
