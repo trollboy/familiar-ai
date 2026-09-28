@@ -491,7 +491,11 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(matches!(result, Err(AgentExecutionError::Timeout { .. })));
-        assert!(started.elapsed().as_secs() < 2);
+        // Same margin as the claude_code twin: the bound proves the kill
+        // fired long before the fake's 10 s sleep, not scheduler punctuality.
+        // A 2-second margin is the FAM-BUG-096 flake shape under the gate's
+        // full-workspace load.
+        assert!(started.elapsed().as_secs() < 8);
     }
 
     #[cfg(unix)]
