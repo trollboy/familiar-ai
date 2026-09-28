@@ -134,6 +134,24 @@ morning before it.
   `ops desktop status` reports "unit never started since boot" as a
   failure rather than `Result=success`.
 
+### FAM-BUG-121 — The Configure Local LLM model field is free text, so a model that is not served stays saved
+
+- **Status:** Fixed 2026-09-28 (the field is a `<select>` over the
+  discovered models when discovery returned any, with a saved value the
+  endpoint does not serve shown and flagged rather than hidden; a plain
+  text input remains only when nothing was discovered; pinned by
+  `desktop_contract.rs`).
+- **Found:** 2026-09-28 by the owner. The panel showed `qwen2.5:3b` with
+  "3 discovered model(s)" beside it and refused to save because the endpoint
+  serves 0.5b, 1.5b and 7b. The owner's question: "shouldn't model be a
+  drop down?"
+- **Detail:** the control was `<input list="models">` with a `<datalist>`.
+  WebKitGTK renders that as a bare text box with no affordance, so it read
+  as free text and behaved as free text: any string could be saved, and a
+  model removed from Ollama stayed in `inference.text.builtin_model` until
+  the next save tripped validation. PRD-110's fifth criterion asks the same
+  of the worker model pickers; this entry covers only the inference panel.
+
 ### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
 
 - **Status:** Open

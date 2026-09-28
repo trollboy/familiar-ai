@@ -169,3 +169,17 @@ fn named_verification_checks_have_ordered_picker_controls() {
     assert!(css.contains(".verification-controls"));
     assert!(css.contains(".verification-order"));
 }
+
+/// FAM-BUG-121: the inference model is chosen from what discovery served,
+/// not typed. A `datalist` rendered as a bare text box in WebKitGTK and let
+/// a model Ollama no longer had stay saved; a real `<select>` offers exactly
+/// the discovered names, flags a saved value the endpoint does not serve,
+/// and falls back to free text only when discovery returned nothing.
+#[test]
+fn inference_model_is_a_select_over_discovered_models() {
+    let javascript = include_str!("../ui/app.js");
+    assert!(javascript.contains("<select id=\"model\">"));
+    assert!(javascript.contains("(saved, not served)"));
+    assert!(javascript.contains("no models discovered; type one"));
+    assert!(!javascript.contains("<datalist id=\"models\">"));
+}
