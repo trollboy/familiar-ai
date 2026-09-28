@@ -621,6 +621,10 @@ mod tests {
     use super::*;
     #[test]
     fn refuses_live_owner_and_recovers_stale_owner() {
+        // `acquire` consults DELEGATION_ENV; the delegate tests set it. Every
+        // test that acquires must hold the env lock or it can be admitted
+        // as a delegate mid-flight (flaked the gate 2026-09-28).
+        let _guard = env_lock().lock().unwrap();
         let t = tempfile::tempdir().unwrap();
         let first = WorkerLock::acquire(t.path()).unwrap();
         assert!(WorkerLock::acquire(t.path()).is_err());
@@ -700,6 +704,10 @@ mod tests {
 
     #[test]
     fn claim_contains_non_pid_identity() {
+        // `acquire` consults DELEGATION_ENV; the delegate tests set it. Every
+        // test that acquires must hold the env lock or it can be admitted
+        // as a delegate mid-flight (flaked the gate 2026-09-28).
+        let _guard = env_lock().lock().unwrap();
         let t = tempfile::tempdir().unwrap();
         let lock = WorkerLock::acquire(t.path()).unwrap();
         assert_eq!(lock.claim.owner_nonce.len(), 64);
@@ -708,6 +716,10 @@ mod tests {
 
     #[test]
     fn inspection_distinguishes_absent_live_and_stale() {
+        // `acquire` consults DELEGATION_ENV; the delegate tests set it. Every
+        // test that acquires must hold the env lock or it can be admitted
+        // as a delegate mid-flight (flaked the gate 2026-09-28).
+        let _guard = env_lock().lock().unwrap();
         let t = tempfile::tempdir().unwrap();
         assert_eq!(WorkerLock::inspect(t.path()).unwrap(), ClaimState::Absent);
         let lock = WorkerLock::acquire(t.path()).unwrap();
@@ -726,6 +738,10 @@ mod tests {
 
     #[test]
     fn simultaneous_fallback_claims_have_exactly_one_winner() {
+        // `acquire` consults DELEGATION_ENV; the delegate tests set it. Every
+        // test that acquires must hold the env lock or it can be admitted
+        // as a delegate mid-flight (flaked the gate 2026-09-28).
+        let _guard = env_lock().lock().unwrap();
         // FAM-BUG-027 regression: repeated so the pre-fix torn-read window
         // (a concurrent claimant reading a half-written claim, "recovering"
         // it, and becoming a second owner) is statistically visible. With
