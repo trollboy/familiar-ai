@@ -33,6 +33,13 @@ set -euo pipefail
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE
 
+# Git writes the refs being pushed to this hook's stdin and then closes it. A
+# hook that execs or exits without reading them races that write: when the
+# hook wins, git takes SIGPIPE (exit 141) *after* a green gate, prints
+# nothing, and the push never reaches the remote (FAM-BUG-122: three pushes
+# in two days). Drain it first; the gate verifies HEAD, not the ref list.
+cat > /dev/null
+
 # Probe for the capability, not the name. An installed binary predating the
 # gate command exists on PATH and cannot run it, and a hook that trusts the
 # name blocks the push with an argument-parsing error instead of verifying

@@ -152,6 +152,25 @@ morning before it.
   the next save tripped validation. PRD-110's fifth criterion asks the same
   of the worker model pickers; this entry covers only the inference panel.
 
+### FAM-BUG-122 — A green gate, then the push silently never happens (git exit 141)
+
+- **Status:** Fixed 2026-09-28 (`scripts/hooks/pre-push` drains stdin
+  before exec'ing the gate; `gate run --hook` drains a non-terminal stdin
+  too, for a binary installed as the hook directly).
+- **Found:** three times between 2026-09-27 01:40 and 2026-09-28 05:15 EDT:
+  the pre-push gate ran its full seven minutes, printed `gate: passed` and
+  `recorded commit=… gate=green`, and origin was unchanged. With the exit
+  code captured, `git push` returned 141 — SIGPIPE — with no message. The
+  other pushes in the same window landed normally.
+- **Detail:** git writes the list of refs being pushed to the hook's stdin
+  after spawning it. Nothing in the hook or the gate read that list, and the
+  hook `exec`s straight into the gate, so whether git's write met an open
+  or a closed pipe was a race. When the hook won, git died on the write and
+  the transport step never ran; the recorded verdict was honest and the
+  push was gone. An operator reading the log saw a pass and a stale remote.
+- **Detail:** this is also why the first two pushes on 2026-09-27 needed a
+  third attempt each, which was misread at the time as a hook-runtime kill.
+
 ### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
 
 - **Status:** Open

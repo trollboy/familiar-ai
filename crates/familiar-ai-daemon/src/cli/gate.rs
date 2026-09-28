@@ -164,6 +164,17 @@ pub fn gate(command: GateCommand) -> Result<(), String> {
     match command {
         GateCommand::Run { hook } => {
             if hook {
+                // FAM-BUG-122: git writes the pushed refs to the hook's stdin
+                // and takes SIGPIPE if the hook never reads them. The script
+                // drains first; this covers a binary installed as the hook
+                // directly. Never block on a terminal.
+                {
+                    use std::io::IsTerminal;
+                    let stdin = std::io::stdin();
+                    if !stdin.is_terminal() {
+                        let _ = std::io::copy(&mut stdin.lock(), &mut std::io::sink());
+                    }
+                }
                 let paths = AppPaths::resolve().map_err(|e| e.to_string())?;
                 let current = std::env::current_dir().map_err(|e| e.to_string())?;
                 let config = effective_repository_config(&paths, &current)?;
