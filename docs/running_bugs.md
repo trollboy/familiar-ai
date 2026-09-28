@@ -154,9 +154,10 @@ morning before it.
 
 ### FAM-BUG-122 — A green gate, then the push silently never happens (git exit 141)
 
-- **Status:** Fixed 2026-09-28 (`scripts/hooks/pre-push` drains stdin
-  before exec'ing the gate; `gate run --hook` drains a non-terminal stdin
-  too, for a binary installed as the hook directly).
+- **Status:** Closed 2026-09-28 — misdiagnosed. The stdin drain is correct
+  hygiene and stays, but the very next push after it died the same way
+  (gate green, exit 141, remote unchanged). The cause is the idle SSH
+  session, FAM-BUG-124.
 - **Found:** three times between 2026-09-27 01:40 and 2026-09-28 05:15 EDT:
   the pre-push gate ran its full seven minutes, printed `gate: passed` and
   `recorded commit=… gate=green`, and origin was unchanged. With the exit
@@ -188,6 +189,25 @@ morning before it.
   exist first. Between the PID file and that thread, SIGTERM took the
   default action and the process died unclean with its PID file left
   behind. Under load the window is wide enough to hit.
+
+### FAM-BUG-124 — A long pre-push gate outlives the push's SSH session; git dies with SIGPIPE after a green verdict
+
+- **Status:** Fixed 2026-09-28 (`gate run --hook` returns at once when the
+  clean tree's HEAD already carries a green verdict, so the supported
+  sequence is `familiar-ai ops gate run`, then `git push`, and the hook
+  holds the connection for milliseconds; the GitHub host block on this box
+  also gained `ServerAliveInterval 30`).
+- **Found:** four pushes on 2026-09-27/28 with `gate: passed`,
+  `recorded … gate=green`, `git_push_exit=141`, and `main...origin/main
+  [ahead N]` afterwards. Gate durations: the one that landed took 5m16s;
+  the three that died took 7m23s, 6m53s and 6m16s.
+- **Detail:** `git push` connects and reads the remote's refs before it
+  runs `pre-push` (the hook receives the remote shas on stdin), and only
+  sends the pack afterwards. The connection sits idle for the whole gate.
+  Past roughly six minutes something on the path dropped it; git's write
+  of the pack then hit a dead ssh, SIGPIPE, exit 141, no message. Every
+  recorded verdict was honest; every "landed" claim made from the gate's
+  output alone was not.
 
 ### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
 

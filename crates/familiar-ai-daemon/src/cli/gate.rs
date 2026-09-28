@@ -189,6 +189,32 @@ pub fn gate(command: GateCommand) -> Result<(), String> {
                     );
                     return Ok(());
                 }
+                // FAM-BUG-124: git opens the push's SSH session and reads the
+                // remote refs *before* this hook runs, then holds that session
+                // idle for as long as the gate takes. A six-to-seven-minute
+                // gate outlived the idle session three times in one day and
+                // git died with SIGPIPE (exit 141) after printing a green
+                // verdict; nothing reached the remote. A commit this clean tree
+                // has already verified green needs no second run here: the
+                // verdict is per commit sha, and `gate run` first, then push,
+                // keeps the connection short.
+                let commit = resolve_commit(None)?;
+                if !working_tree_is_dirty()? {
+                    let db = open_db()?;
+                    if let Some(record) = GateVerdictRepository::new(&db)
+                        .for_commit(&commit)
+                        .map_err(|e| e.to_string())?
+                    {
+                        if verdict_of(Some(&record)).is_pass() {
+                            println!(
+                                "gate: {commit} already recorded green at {}; not re-running \
+                                 for this push",
+                                record.recorded_at
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
             }
             let commit = resolve_commit(None)?;
             let repo = std::env::current_dir().map_err(|e| e.to_string())?;
