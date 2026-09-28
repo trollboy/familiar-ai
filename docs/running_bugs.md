@@ -113,6 +113,27 @@ morning before it.
   `execution_history` row has `ended_at`), run at daemon start and after
   each attempt; and the refusal text surfaced in the report (FAM-BUG-116).
 
+### FAM-BUG-120 — The desktop never autostarts after a reboot under XFCE
+
+- **Status:** Open
+- **Found:** 2026-09-28 05:00 EDT. The box rebooted 2026-09-27 19:29 EDT.
+  The daemon came back with the user manager; the desktop unit stayed
+  `inactive` with no start attempt for fourteen hours while an X session
+  (`xfce4-session`, `DISPLAY=:0` in the user manager's environment) was
+  live the whole time. `systemctl --user start` brought it up at once.
+- **Detail:** the generated unit is `WantedBy=graphical-session.target`.
+  Under XFCE with lightdm that target is never activated for the user
+  manager (`systemctl --user is-active graphical-session.target` reads
+  `inactive` with the session running), so the wanted-by hook never fires.
+  Just before the reboot the same unit had hit its start limit on
+  `Failed to initialize GTK` (the session was ending), which is the
+  FAM-BUG-115 shape again: the tray's absence was recorded, not fixed.
+- **Expected fix:** the supervisor binds the desktop to something the
+  session actually reaches (`default.target` with a condition on
+  `DISPLAY`, or an XDG autostart entry that starts the unit), and
+  `ops desktop status` reports "unit never started since boot" as a
+  failure rather than `Result=success`.
+
 ### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
 
 - **Status:** Open
