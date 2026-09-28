@@ -612,6 +612,13 @@ mod tests {
             });
         }
 
+        // Wait for the reconciliation, not for a clock (FAM-BUG-096 class),
+        // then hold several debounce windows to prove no second one follows.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while dispatcher.observe(0, 10).unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the burst was never reconciled");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         tokio::time::sleep(Duration::from_millis(400)).await;
         let events = dispatcher.observe(0, 10).unwrap();
         assert_eq!(
@@ -736,17 +743,32 @@ mod tests {
         .await
         .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
         drop(tx);
         let _ = drain.await;
 
+        // The debounce fires on a timer and the reconcile runs on a blocking
+        // thread that resolves identity through git; a fixed 300 ms read
+        // failed one run in five on an idle box and more under the gate's
+        // load (FAM-BUG-096 class). Wait for the outcome, not for a clock.
         let identity = FilesystemBacklogDiscovery.resolve(repo.path()).unwrap();
-        let entries =
-            list_backlog_entries(db.lock().unwrap().conn(), &identity.key, None, None, 10).unwrap();
-        let done = entries
-            .iter()
-            .find(|e| e.prd_path == "docs/prds/done/PRD-001.md")
-            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let done = loop {
+            let entries =
+                list_backlog_entries(db.lock().unwrap().conn(), &identity.key, None, None, 10)
+                    .unwrap();
+            if let Some(done) = entries
+                .iter()
+                .find(|e| e.prd_path == "docs/prds/done/PRD-001.md")
+                .cloned()
+            {
+                break done;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the observed rename was never reconciled: {entries:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
         assert_eq!(done.status, "completed");
     }
 }
