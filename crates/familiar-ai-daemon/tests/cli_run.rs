@@ -171,7 +171,7 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
     let repository = fixture_repository(temp.path());
     fs::write(
         &fake,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-cli 1.2.3\\n'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"visible early\"}}'\nsleep 2\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-cli 1.2.3\\n'; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"visible early\"}}'\nsleep 6\nexit 0\n",
     )
     .unwrap();
     let mut permissions = fs::metadata(&fake).unwrap().permissions();
@@ -203,6 +203,16 @@ fn structured_output_is_forwarded_before_fake_codex_exits() {
         .read_line(&mut line)
         .unwrap();
     assert_eq!(line, "visible early\n");
-    assert!(started.elapsed().as_millis() < 1_500);
+    // The proof is that the line reached us while the fake was still inside
+    // its `sleep 6`, i.e. before the run could have completed. A wall-clock
+    // bound from `spawn` measured the CLI's own startup (migrations, registry
+    // resolution) instead, and failed two runs in three on an idle box
+    // (FAM-BUG-096 class).
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the run had already exited when the first line was read, so the output \
+         was not forwarded early ({} ms after spawn)",
+        started.elapsed().as_millis()
+    );
     assert!(!child.wait().unwrap().success());
 }
