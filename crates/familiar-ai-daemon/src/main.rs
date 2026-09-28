@@ -605,20 +605,14 @@ async fn run_headless() -> familiar_ai_core::Result<()> {
 
 #[cfg(feature = "tray")]
 fn main() -> ExitCode {
-    let (state, _log_guard) = match bootstrap() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fatal: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    if !state.config.tray.enabled {
-        // Tray disabled in config — run headless on a tokio runtime
-        return run_with_tray_feature_but_disabled(state);
-    }
-
-    // Tray enabled: run tokio in a worker thread, tray on main thread
+    // Register termination handling BEFORE bootstrap writes the PID file:
+    // that file is how a supervisor learns it may signal us, and until the
+    // handler exists SIGTERM kills us outright. The headless build has had
+    // this order since FAM-BUG-050; the tray build registered inside the
+    // daemon thread it spawned after bootstrap, so a SIGTERM that arrived
+    // between the PID file and that thread took the default action
+    // (FAM-BUG-123). Registration needs a runtime context, so the runtime is
+    // built first and the tray thread receives the registered signals.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -629,6 +623,31 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let termination = {
+        let _enter = runtime.enter();
+        match TerminationSignals::register() {
+            Ok(termination) => termination,
+            Err(e) => {
+                eprintln!("fatal: failed to register termination signals: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    let (state, _log_guard) = match bootstrap() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fatal: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !state.config.tray.enabled {
+        // Tray disabled in config — run headless on the same runtime
+        return run_with_tray_feature_but_disabled(state, runtime, termination);
+    }
+
+    // Tray enabled: run tokio in a worker thread, tray on main thread
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let (command_tx, command_rx) = mpsc::channel::<DaemonCommand>(64);
@@ -642,12 +661,9 @@ fn main() -> ExitCode {
     let runtime_for_daemon = runtime.clone();
     let daemon_handle = std::thread::spawn(move || {
         runtime_for_daemon.block_on(async move {
-            // Tray build: bootstrap ran on the main thread before any runtime
-            // existed, so registration happens here, first thing on the
-            // daemon runtime — the narrow window is inherent to that build
-            // shape and is documented in FAM-BUG-050.
-            let mut termination =
-                TerminationSignals::register().expect("register termination signals");
+            // Registered by `main` before bootstrap wrote the PID file
+            // (FAM-BUG-123).
+            let mut termination = termination;
             daemon_run(
                 &state_for_daemon,
                 &mut termination,
@@ -727,24 +743,17 @@ fn dashboard_target(
 }
 
 #[cfg(feature = "tray")]
-fn run_with_tray_feature_but_disabled(state: DaemonState) -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("fatal: failed to build tokio runtime: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
+fn run_with_tray_feature_but_disabled(
+    state: DaemonState,
+    runtime: Arc<tokio::runtime::Runtime>,
+    termination: TerminationSignals,
+) -> ExitCode {
     runtime.block_on(async {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_command_tx, command_rx) = mpsc::channel::<DaemonCommand>(64);
-        // Same registration window as the tray path above: bootstrap ran on
-        // the main thread before any runtime existed (FAM-BUG-050).
-        let mut termination = TerminationSignals::register().expect("register termination signals");
+        // Registered by `main` before bootstrap wrote the PID file
+        // (FAM-BUG-123); the window the old comment described is closed.
+        let mut termination = termination;
         daemon_run(
             &state,
             &mut termination,

@@ -171,6 +171,24 @@ morning before it.
 - **Detail:** this is also why the first two pushes on 2026-09-27 needed a
   third attempt each, which was misread at the time as a hook-runtime kill.
 
+### FAM-BUG-123 — The tray build writes its PID file before it can survive SIGTERM
+
+- **Status:** Fixed 2026-09-28 (the tray `main` builds the runtime, registers
+  termination signals inside it, and only then runs bootstrap; the
+  tray-disabled path receives the same pre-registered signals).
+- **Found:** 2026-09-28 on the pre-push gate: `tray_build_exits_on_sigterm`
+  failed with `daemon exited with error: signal: 15 (SIGTERM)`, and one run
+  in three to six locally. The test, like a supervisor, waits for the PID
+  file and then signals.
+- **Detail:** FAM-BUG-050's fourth layer was fixed for the headless build by
+  registering the handler before `bootstrap()` writes the PID file. The tray
+  build kept the original order and a comment calling the window "inherent
+  to that build shape": `bootstrap()` first, then a runtime, then a spawned
+  thread that registered the handler. It was not inherent; the runtime can
+  exist first. Between the PID file and that thread, SIGTERM took the
+  default action and the process died unclean with its PID file left
+  behind. Under load the window is wide enough to hit.
+
 ### FAM-BUG-113 — Worktrees of terminal attempts are never reaped
 
 - **Status:** Open
